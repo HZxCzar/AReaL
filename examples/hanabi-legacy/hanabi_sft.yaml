@@ -1,0 +1,95 @@
+experiment_name: hanabi-sft
+trial_name: trial0
+
+allocation_mode: d8p1t1
+cluster:
+  fileroot: /storage/openpsi/experiments
+  n_nodes: 1
+  n_gpus_per_node: 8
+  name_resolve:
+    type: nfs
+    nfs_record_root: /storage/openpsi/name_resolve
+seed: 1
+total_train_epochs: 1
+tokenizer_path: ${model.path}
+
+model:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: /storage/openpsi/models/Qwen__Qwen2.5-7B-Instruct
+  init_from_scratch: false
+  gradient_checkpointing: false
+  dtype: bfloat16
+  mb_spec:
+    max_tokens_per_mb: 8192
+  optimizer:
+    type: adam
+    lr: 2e-5
+    weight_decay: 0.05
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1e-5
+    lr_scheduler_type: cosine
+    min_lr_ratio: 0.6
+    gradient_clipping: 1.0
+  backend: fsdp
+
+train_dataset:
+  batch_size: 16
+  shuffle: true
+  pin_memory: true
+  num_workers: 4
+  path: /storage/openpsi/users/xmy/inclusionAI/AReaL/data/hanabi_sft.jsonl
+  type: sft
+
+valid_dataset:
+  batch_size: 16
+  shuffle: true
+  pin_memory: true
+  num_workers: 4
+  path: /storage/openpsi/users/xmy/inclusionAI/AReaL/data/hanabi_sft.jsonl
+  type: sft
+
+# Utilities
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: 100
+  freq_secs: 7200
+
+recover:
+  mode: disabled
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: 3600
+
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 3
+  freq_secs: null
+
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: online
+
+launcher:
+  inference_server_cpus_per_gpu: 4
+  inference_server_mem_per_gpu: 32768
+  trainer_cpus_per_gpu: 4
+  trainer_mem_per_gpu: 32768
+  slurm:
+    mount: /storage:/storage
+    trainer_image: /storage/openpsi/images/sglang-v0.4.9.post2-cu126-v2.sif
+    inference_server_image: /storage/openpsi/images/sglang-v0.4.9.post2-cu126-v2.sif
+  trainer_env_vars: WANDB_API_KEY=local-667d8d7f101dad4eb9597d718d0c68f40e3792f9,WANDB_BASE_URL=http://8.150.1.98:8080
