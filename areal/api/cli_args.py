@@ -727,6 +727,13 @@ class PPOActorConfig(TrainEngineConfig):
         },
     )
 
+    sft_reg: float = field(
+        default=0.0,
+        metadata={
+            "help": "Scale factor for SFT loss when mixing PPO and SFT batches."
+        },
+    )
+
     # Logging Agent Trajectories
     log_agent_stats: bool = field(
         default=False,

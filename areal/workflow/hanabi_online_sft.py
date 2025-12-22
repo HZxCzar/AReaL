@@ -7,7 +7,6 @@ from typing import Optional
 
 import aiofiles
 import torch
-from tensordict import TensorDict
 
 from areal.api.workflow_api import RolloutWorkflow
 from areal.utils.data import concat_padded_tensors

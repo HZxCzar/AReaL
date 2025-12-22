@@ -13,7 +13,6 @@ import aiofiles.os
 import aiohttp
 import colorama
 import torch
-from tensordict import TensorDict
 from transformers import PreTrainedTokenizerFast
 
 from areal.api.cli_args import GenerationHyperparameters
@@ -381,29 +380,28 @@ class HanabiWorkflow(RolloutWorkflow):
         )
 
     @staticmethod
-    def _response_to_tensordict(resp: ModelResponse, *, sft_ppo_mask: int = 0) -> TensorDict:
+    def _response_to_tensordict(
+        resp: ModelResponse, *, sft_ppo_mask: int = 0
+    ) -> dict[str, torch.Tensor]:
         full_ids = resp.input_tokens + resp.output_tokens
-        return TensorDict(
-            {
-                "input_ids": torch.tensor(full_ids, dtype=torch.long).unsqueeze(0),
-                "logprobs": torch.tensor(
-                    [0.0] * resp.input_len + resp.output_logprobs,
-                    dtype=torch.float32,
-                ).unsqueeze(0),
-                "loss_mask": torch.tensor(
-                    [0] * resp.input_len + [1] * resp.output_len,
-                    dtype=torch.long,
-                ).unsqueeze(0),
-                "versions": torch.tensor(
-                    [-1] * resp.input_len + resp.output_versions,
-                    dtype=torch.long,
-                ).unsqueeze(0),
-                "rewards": torch.zeros(1, dtype=torch.float32),
-                "attention_mask": torch.ones(len(full_ids), dtype=torch.bool).unsqueeze(0),
-                "sft_ppo_mask": torch.tensor([sft_ppo_mask], dtype=torch.long),
-            },
-            batch_size=[1],
-        )
+        return {
+            "input_ids": torch.tensor(full_ids, dtype=torch.long).unsqueeze(0),
+            "logprobs": torch.tensor(
+                [0.0] * resp.input_len + resp.output_logprobs,
+                dtype=torch.float32,
+            ).unsqueeze(0),
+            "loss_mask": torch.tensor(
+                [0] * resp.input_len + [1] * resp.output_len,
+                dtype=torch.long,
+            ).unsqueeze(0),
+            "versions": torch.tensor(
+                [-1] * resp.input_len + resp.output_versions,
+                dtype=torch.long,
+            ).unsqueeze(0),
+            "rewards": torch.zeros(1, dtype=torch.float32),
+            "attention_mask": torch.ones(len(full_ids), dtype=torch.bool).unsqueeze(0),
+            "sft_ppo_mask": torch.tensor([sft_ppo_mask], dtype=torch.long),
+        }
 
     @staticmethod
     def _parse_action_from_completion(text: str) -> str:
@@ -790,18 +788,15 @@ class HanabiWorkflow(RolloutWorkflow):
             t_env_step_total += time.perf_counter() - t0
 
             t0 = time.perf_counter()
-            res = TensorDict(
-                {
-                    "input_ids": seq.unsqueeze(0),
-                    "logprobs": logprobs.unsqueeze(0),
-                    "loss_mask": loss_mask.unsqueeze(0),
-                    "versions": versions.unsqueeze(0),
-                    "rewards": torch.tensor([0.0], dtype=torch.float32),
-                    "attention_mask": torch.ones(len(full_ids), dtype=torch.bool).unsqueeze(0),
-                    "sft_ppo_mask": torch.tensor([0], dtype=torch.long),
-                },
-                batch_size=[1],
-            )
+            res = {
+                "input_ids": seq.unsqueeze(0),
+                "logprobs": logprobs.unsqueeze(0),
+                "loss_mask": loss_mask.unsqueeze(0),
+                "versions": versions.unsqueeze(0),
+                "rewards": torch.tensor([0.0], dtype=torch.float32),
+                "attention_mask": torch.ones(len(full_ids), dtype=torch.bool).unsqueeze(0),
+                "sft_ppo_mask": torch.tensor([0], dtype=torch.long),
+            }
             t_pack_tensors_total += time.perf_counter() - t0
 
             results.append(res)
@@ -847,20 +842,17 @@ class HanabiWorkflow(RolloutWorkflow):
                         1
                     ] * (len(full_ids) - len(prompt_ids))
                     t0 = time.perf_counter()
-                    sft_res = TensorDict(
-                        {
-                            "input_ids": torch.tensor(full_ids).unsqueeze(0),
-                            "loss_mask": torch.tensor(loss_mask).unsqueeze(0),
-                            "logprobs": torch.zeros(1, len(full_ids)),
-                            "versions": torch.zeros(1, len(full_ids), dtype=torch.long),
-                            "attention_mask": torch.ones(
-                                len(full_ids), dtype=torch.bool
-                            ).unsqueeze(0),
-                            "rewards": torch.zeros(1),
-                            "sft_ppo_mask": torch.tensor([1], dtype=torch.long),
-                        },
-                        batch_size=[1],
-                    )
+                    sft_res = {
+                        "input_ids": torch.tensor(full_ids).unsqueeze(0),
+                        "loss_mask": torch.tensor(loss_mask).unsqueeze(0),
+                        "logprobs": torch.zeros(1, len(full_ids)),
+                        "versions": torch.zeros(1, len(full_ids), dtype=torch.long),
+                        "attention_mask": torch.ones(
+                            len(full_ids), dtype=torch.bool
+                        ).unsqueeze(0),
+                        "rewards": torch.zeros(1),
+                        "sft_ppo_mask": torch.tensor([1], dtype=torch.long),
+                    }
                     results.append(sft_res)
                     t_pack_tensors_total += time.perf_counter() - t0
 
