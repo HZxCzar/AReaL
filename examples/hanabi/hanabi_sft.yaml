@@ -7,14 +7,14 @@ total_train_epochs: 1
 tokenizer_path: ${model.path}
 
 cluster:
-  n_nodes: 1
+  n_nodes: 2
   n_gpus_per_node: 8
-  fileroot: /tmp/areal/experiments
+  fileroot: /storage/openpsi/experiments
   name_resolve:
     type: nfs
-    nfs_record_root: /tmp/areal/name_resolve
+    nfs_record_root: /storage/openpsi/experiments
 
-allocation_mode: d8p1t1
+allocation_mode: d16p1t2
 
 model:
   experiment_name: ${experiment_name}
@@ -36,17 +36,17 @@ model:
     gradient_clipping: 1.0
 
 train_dataset:
-  batch_size: 16
+  batch_size: 32
   pin_memory: true
   num_workers: 4
-  path: /storage/openpsi/users/xmy/inclusionAI/AReaL/data/hanabi_sft.jsonl
+  path: /storage/openpsi/data/hanabi-sft/Qwen3_data_Qwen2.5_template_small.jsonl
   type: sft
 
 valid_dataset:
-  batch_size: 16
+  batch_size: 32
   pin_memory: true
   num_workers: 4
-  path: /storage/openpsi/users/xmy/inclusionAI/AReaL/data/hanabi_sft.jsonl
+  path: /storage/openpsi/data/hanabi-sft/Qwen3_data_Qwen2.5_template_small.jsonl
   type: sft
 
 # Utilities
@@ -87,3 +87,8 @@ launcher:
   inference_server_mem_per_gpu: 32768
   trainer_cpus_per_gpu: 4
   trainer_mem_per_gpu: 32768
+  slurm:
+    mount: /storage:/storage
+    trainer_image: /storage/openpsi/images/areal-latest.sif
+    inference_server_image: /storage/openpsi/images/areal-latest.sif
+  trainer_env_vars: WANDB_API_KEY=local-667d8d7f101dad4eb9597d718d0c68f40e3792f9,WANDB_BASE_URL=http://8.150.1.98:8080

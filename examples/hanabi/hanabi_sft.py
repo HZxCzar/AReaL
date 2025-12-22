@@ -32,3 +32,30 @@ def main(args):
 
 if __name__ == "__main__":
     main(sys.argv[1:])
+
+"""
+vim ../AReaL-Lite/examples/lite/configs/gsm8k_grpo.yaml
+
+sudo srun --mpi=pmi2 --ntasks=1 --gres=gpu:8 \
+    --cpus-per-task=10 --mem=1500G --pty --job-name=xmy-teac-werewolf\
+    singularity shell --nv --no-home --writable-tmpfs \
+    --bind /storage:/storage /storage/openpsi/images/sglang-v0.4.9.post2-cu126-v2.sif
+
+cd /storage/openpsi/users/xmy/inclusionAI/AReaL
+pip install -e . --no-deps
+export HF_ENDPOINT="https://hf-mirror.com"
+export WANDB_API_KEY=local-667d8d7f101dad4eb9597d718d0c68f40e3792f9
+export WANDB_BASE_URL=http://8.150.1.98:8080
+
+python -m areal.launcher.slurm examples/lite/hanabi_sft.py \
+    --config examples/lite/configs/hanabi_sft.yaml \
+    stats_logger.wandb.mode=online \
+    experiment_name=xmy-hanabi-sft-2 \
+    trial_name=sft-7b-4-nodes-new
+
+python -m areal.launcher.slurm examples/lite/gsm8k_sft.py \
+    --config examples/lite/configs/gsm8k_sft.yaml \
+    stats_logger.wandb.mode=online \
+    experiment_name=xmy-hanabi-sft-1 \
+    trial_name=gsm8k_trial
+"""

@@ -1,8 +1,12 @@
-from datasets import Split, load_dataset
-from datasets.distributed import split_dataset_by_node
+from datasets import load_dataset
 
 
-def get_werewolf_rl_dataset(path, split, rank, world_size):
+def get_werewolf_rl_dataset(
+    path: str,
+    split: str,
+    tokenizer=None,
+    max_length: int | None = None,
+):
     """
     Load werewolf prompts for RL training.
 
@@ -16,7 +20,6 @@ def get_werewolf_rl_dataset(path, split, rank, world_size):
       }
     """
     dataset = load_dataset("json", data_files=path, split=split)
-    dataset = split_dataset_by_node(dataset, rank=rank, world_size=world_size)
 
     def process(sample):
         message = [{"role": "user", "content": sample["prompt"]}]
@@ -25,5 +28,17 @@ def get_werewolf_rl_dataset(path, split, rank, world_size):
             res["query_id"] = sample["id"]
         return res
 
-    dataset = dataset.map(process).remove_columns([col for col in dataset.column_names if col not in ["messages", "query_id"]])
+    dataset = dataset.map(process).remove_columns(
+        [col for col in dataset.column_names if col not in ["messages", "query_id"]]
+    )
+
+    if max_length is not None:
+
+        def filter_length(sample):
+            content = sample["messages"][0]["content"]
+            tokens = tokenizer.encode(content) if tokenizer is not None else []
+            return len(tokens) <= max_length
+
+        dataset = dataset.filter(filter_length)
+
     return dataset
