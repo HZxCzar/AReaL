@@ -7,7 +7,7 @@ total_train_epochs: 1
 tokenizer_path: ${model.path}
 
 cluster:
-  n_nodes: 2
+  n_nodes: 4
   n_gpus_per_node: 8
   fileroot: /storage/openpsi/experiments
   name_resolve:

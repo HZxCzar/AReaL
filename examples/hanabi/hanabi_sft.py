@@ -47,15 +47,9 @@ export HF_ENDPOINT="https://hf-mirror.com"
 export WANDB_API_KEY=local-667d8d7f101dad4eb9597d718d0c68f40e3792f9
 export WANDB_BASE_URL=http://8.150.1.98:8080
 
-python -m areal.launcher.slurm examples/lite/hanabi_sft.py \
-    --config examples/lite/configs/hanabi_sft.yaml \
+python -m areal.launcher.slurm examples/hanabi/hanabi_sft.py \
+    --config examples/hanabi/hanabi_sft.yaml \
     stats_logger.wandb.mode=online \
     experiment_name=xmy-hanabi-sft-2 \
     trial_name=sft-7b-4-nodes-new
-
-python -m areal.launcher.slurm examples/lite/gsm8k_sft.py \
-    --config examples/lite/configs/gsm8k_sft.yaml \
-    stats_logger.wandb.mode=online \
-    experiment_name=xmy-hanabi-sft-1 \
-    trial_name=gsm8k_trial
 """

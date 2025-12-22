@@ -126,8 +126,8 @@ python -m areal.launcher.slurm examples/hanabi/hanabi_grpo.py \
     experiment_name=xmy-hanabi-sppo-3 \
     trial_name=ppo-3b-noteacher-2
 
-python -m areal.launcher.slurm examples/lite/hanabi_grpo.py \
-    --config examples/lite/configs/hanabi_gather_data.yaml \
+python -m areal.launcher.slurm examples/hanabi/hanabi_grpo.py \
+    --config examples/hanabi/hanabi_gather_data.yaml \
     stats_logger.wandb.mode=disabled \
     experiment_name=xmy-hanabi-gather-data \
     trial_name=Qwen3-32b-large-3
