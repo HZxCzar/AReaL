@@ -129,7 +129,7 @@ class HanabiWorkflow(RolloutWorkflow):
         self,
         gconfig: GenerationHyperparameters,
         tokenizer: PreTrainedTokenizerFast,
-        max_turns: int = 60,
+        max_turns: int = 150,
         turn_discount: float = 1.0,
         dump_dir: str | None = None,
         env_kwargs: dict | None = None,
@@ -433,6 +433,8 @@ class HanabiWorkflow(RolloutWorkflow):
         episode_steps: list[dict] = []
         episode_uuid = uuid.uuid4().hex
 
+        prev_thought: str = ""
+
         agent_result_indices: list[int] = []
         step_rewards: list[float] = []
         success_count = 0
@@ -459,9 +461,10 @@ class HanabiWorkflow(RolloutWorkflow):
             # ========== 1) Agent self-generates 3 questions ==========
             qgen_prompt = (
                 f"{obs}\n"
-                "Generate exactly three concise questions about the current Hanabi state that will help you and your "
-                "teammate decide the best cooperative move. Focus on concrete, answerable questions derived from "
-                "public information. Output strictly in this format:\nQ1: ...\nQ2: ...\nQ3: ...\n"
+                "Generate exactly three concise, high-value questions about this Hanabi turn.\n"
+                "Questions may target different angles: safety of plays, information-token economy, and partner intent.\n"
+                "Questions must be grounded in the visible state and recent events.\n"
+                "Output strictly in this format:\nQ1: ...\nQ2: ...\nQ3: ...\n"
             )
 
             t0 = time.perf_counter()
@@ -469,10 +472,11 @@ class HanabiWorkflow(RolloutWorkflow):
                 [{"role": "user", "content": qgen_prompt}],
                 tokenize=True,
                 add_generation_prompt=True,
+                enable_thinking=False,
             )
             t_tokenize_total += time.perf_counter() - t0
 
-            qgen_cfg = self.gconfig.new(n_samples=1, max_new_tokens=512)
+            qgen_cfg = self.gconfig.new(n_samples=1, max_new_tokens=2048)
             qgen_resp: ModelResponse | None = None
             if self.student_api_key:
                 t0 = time.perf_counter()
@@ -498,7 +502,8 @@ class HanabiWorkflow(RolloutWorkflow):
                 qgen_resp = await engine.agenerate(req)
                 t_qgen_total += time.perf_counter() - t0
                 qgen_text = self.tokenizer.decode(
-                    qgen_resp.output_tokens, skip_special_tokens=True
+                    qgen_resp.output_tokens,
+                    skip_special_tokens=True
                 )
 
             if self.use_question_tokens and qgen_resp is not None:
@@ -517,19 +522,22 @@ class HanabiWorkflow(RolloutWorkflow):
             # ========== 2) Agent and teacher answer 3 questions ==========
             agent_answer_tasks = []
             agent_answer_inputs: list[list[int]] = []
-            agent_answer_cfg = self.gconfig.new(n_samples=1, max_new_tokens=256)
+            agent_question_prompts: list[str] = []
+            agent_answer_cfg = self.gconfig.new(n_samples=1, max_new_tokens=2048)
             for qi, q in enumerate(self_questions):
                 aprompt = (
                     f"{obs}\n"
                     f"Previous summary: {prev_summary}\n"
                     f"You asked: {q}\n"
-                    "Answer the question concisely and grounded in the visible information."
+                    "Answer concisely using public clues, discard history and visible hands; avoid speculation beyond standard Hanabi reasoning."
                 )
+                agent_question_prompts.append(aprompt)
                 t0 = time.perf_counter()
                 a_ids = self.tokenizer.apply_chat_template(
                     [{"role": "user", "content": aprompt}],
                     tokenize=True,
                     add_generation_prompt=True,
+                    enable_thinking=False,
                 )
                 t_tokenize_total += time.perf_counter() - t0
                 agent_answer_inputs.append(a_ids)
@@ -558,13 +566,14 @@ class HanabiWorkflow(RolloutWorkflow):
             teacher_answer_tasks = []
             teacher_answer_inputs: list[list[int]] = []
             teacher_prompts: list[str] = []
-            teacher_answer_cfg = self.gconfig.new(n_samples=1, max_new_tokens=256)
+            teacher_answer_cfg = self.gconfig.new(n_samples=1, max_new_tokens=2048)
             if self.teacher_rollout or self.teacher_api_key:
                 teacher_tokenizer = self.teacher_tokenizer or self.tokenizer
                 for qi, q in enumerate(self_questions):
                     taprompt = (
                         f"{teacher_obs}\n"
                         f"Student summary: {prev_summary}\n"
+                        f"Student last thought: {prev_thought or 'None provided.'}\n"
                         f"Student question: {q}\n"
                         "Answer concisely using all privileged information, including hidden hands."
                     )
@@ -575,6 +584,7 @@ class HanabiWorkflow(RolloutWorkflow):
                             [{"role": "user", "content": taprompt}],
                             tokenize=True,
                             add_generation_prompt=True,
+                            enable_thinking=False,
                         )
                         t_tokenize_total += time.perf_counter() - t0
                         teacher_answer_tasks.append(
@@ -595,6 +605,7 @@ class HanabiWorkflow(RolloutWorkflow):
                             [{"role": "user", "content": taprompt}],
                             tokenize=True,
                             add_generation_prompt=True,
+                            enable_thinking=False,
                         )
                         t_tokenize_total += time.perf_counter() - t0
                         teacher_answer_inputs.append(ta_ids)
@@ -618,8 +629,10 @@ class HanabiWorkflow(RolloutWorkflow):
             else:
                 agent_answer_resps = await asyncio.gather(*agent_answer_tasks)
                 agent_answers = [
-                    self.tokenizer.decode(r.output_tokens, skip_special_tokens=True)
-                    for r in agent_answer_resps
+                    self.tokenizer.decode(
+                        r.output_tokens, 
+                        skip_special_tokens=True
+                    ) for r in agent_answer_resps
                 ]
             t_agent_answer_total += time.perf_counter() - t0
 
@@ -647,7 +660,8 @@ class HanabiWorkflow(RolloutWorkflow):
                     teacher_resps = list(raw_teacher_resps)
                     teacher_answers = [
                         teacher_tokenizer.decode(
-                            r.output_tokens, skip_special_tokens=True
+                            r.output_tokens,
+                            skip_special_tokens=True
                         )
                         for r in teacher_resps
                     ]
@@ -655,9 +669,23 @@ class HanabiWorkflow(RolloutWorkflow):
 
             if self.use_question_tokens and teacher_resps:
                 t0 = time.perf_counter()
-                for t_resp in teacher_resps:
+                for qi, t_ans in enumerate(teacher_answers):
+                    student_prompt = (
+                        agent_question_prompts[qi]
+                        if qi < len(agent_question_prompts)
+                        else teacher_prompts[qi]
+                        if qi < len(teacher_prompts)
+                        else ""
+                    )
+                    prompt_ids = self.tokenizer.apply_chat_template(
+                        [{"role": "user", "content": student_prompt}],
+                        tokenize=True,
+                        add_generation_prompt=True,
+                        enable_thinking=False,
+                    )
+                    resp = self._build_api_response(prompt_ids, t_ans, self.tokenizer)
                     results.append(
-                        self._response_to_tensordict(t_resp, sft_ppo_mask=1)
+                        self._response_to_tensordict(resp, sft_ppo_mask=1)
                     )
                 t_pack_tensors_total += time.perf_counter() - t0
 
@@ -692,8 +720,11 @@ class HanabiWorkflow(RolloutWorkflow):
             # ========== 3) Agent generates action ==========
             t0 = time.perf_counter()
             action_prompt = (
-                f"{obs}\nPrevious summary: {prev_summary}\n\n"
-                f"Your self-questions and answers:\n{qa_block}\n\n{guide}"
+                f"{obs}\n"
+                f"Previous turn summary: {prev_summary}\n"
+                f"Recent thought: {prev_thought or 'None yet.'}\n\n"
+                f"Your self-questions and answers:\n{qa_block}\n"
+                f"Use the information above to prose a single action.\n {guide}"
             )
             action_ids = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": action_prompt}],
@@ -702,7 +733,7 @@ class HanabiWorkflow(RolloutWorkflow):
             )
             t_action_build_total += time.perf_counter() - t0
 
-            action_cfg = self.gconfig.new(n_samples=1)
+            action_cfg = self.gconfig.new(n_samples=1, max_new_tokens=4096)
             req = ModelRequest(
                 rid=f"{rid}-act-{turn}",
                 input_ids=action_ids,
@@ -728,8 +759,9 @@ class HanabiWorkflow(RolloutWorkflow):
                 t_action_gen_total += time.perf_counter() - t0
                 t0 = time.perf_counter()
                 completion_str = self.tokenizer.decode(
-                    resp.output_tokens, skip_special_tokens=True
-                )
+                    resp.output_tokens,
+                    # skip_special_tokens=True
+                ).replace("<|im_end|>", "")
                 t_action_decode_total += time.perf_counter() - t0
 
             if self.student_api_key:
@@ -750,8 +782,6 @@ class HanabiWorkflow(RolloutWorkflow):
                 [-1] * resp.input_len + resp.output_versions,
                 dtype=torch.long,
             )
-
-            prompt_str = self.tokenizer.decode(action_ids, skip_special_tokens=True)
 
             t0 = time.perf_counter()
             next_obs, next_guide, _env_reward, done, _, info = await env.step(
@@ -780,33 +810,38 @@ class HanabiWorkflow(RolloutWorkflow):
             parsed_action = self._parse_action_from_completion(completion_str)
             event_msg = info.get("event", "").lower()
             env_step_reward = _env_reward
-            # env_step_reward = 0.0
             step_reward = env_step_reward
-            if parsed_action.startswith("play "):
-                if "successfully played" in event_msg:
-                    step_reward += 1.0
-                    success_count += 1
-                elif "misplayed" in event_msg:
-                    misplay_occurred = True
+            if parsed_action.startswith("play ") and "successfully played" in event_msg:
+                success_count += 1
+            if parsed_action.startswith("play ") and "misplayed" in event_msg:
+                misplay_occurred = True
 
             step_rewards.append(step_reward)
             agent_seq_len = len(full_ids)
 
             if (self.teacher_rollout or self.teacher_api_key) and teacher_answers and self.sft_reg > 0.0:
-                teacher_tokenizer = self.teacher_tokenizer or self.tokenizer
-                for taprompt, t_ans in zip(teacher_prompts, teacher_answers):
-                    prompt_ids = teacher_tokenizer.apply_chat_template(
-                        [{"role": "user", "content": taprompt}],
+                for qi, t_ans in enumerate(teacher_answers):
+                    student_prompt = (
+                        agent_question_prompts[qi]
+                        if qi < len(agent_question_prompts)
+                        else teacher_prompts[qi]
+                        if qi < len(teacher_prompts)
+                        else ""
+                    )
+                    prompt_ids = self.tokenizer.apply_chat_template(
+                        [{"role": "user", "content": student_prompt}],
                         tokenize=True,
                         add_generation_prompt=True,
+                        enable_thinking=False,
                     )
-                    full_ids = teacher_tokenizer.apply_chat_template(
+                    full_ids = self.tokenizer.apply_chat_template(
                         [
-                            {"role": "user", "content": taprompt},
+                            {"role": "user", "content": student_prompt},
                             {"role": "assistant", "content": t_ans},
                         ],
                         tokenize=True,
                         add_generation_prompt=False,
+                        enable_thinking=False,
                     )
                     loss_mask = [0] * len(prompt_ids) + [
                         1
@@ -829,36 +864,47 @@ class HanabiWorkflow(RolloutWorkflow):
                     results.append(sft_res)
                     t_pack_tensors_total += time.perf_counter() - t0
 
-            prompt_strs.append(prompt_str)
+            prompt_strs.append(action_prompt)
             completions_strs.append(completion_str)
             rewards.append(step_reward)
             seqlens.append(agent_seq_len)
             traj_len[0] += resp.input_len
             traj_len[1] += resp.output_len
 
+            import re
+
+            t = re.findall(r"<think>(.*?)</think>", completion_str, re.DOTALL)
+            thought = t[-1].strip() if t else ""
+            m = re.findall(r"<answer>(.*?)</answer>", completion_str, re.DOTALL)
+            action_txt = m[-1].strip().lower() if m else ""
+
             # ========== 5) Agent produces summary ==========
             if self.use_summary:
-                import re
-
-                t = re.findall(r"<think>(.*?)</think>", completion_str, re.DOTALL)
-                thought = t[-1].strip() if t else ""
-                m = re.findall(r"<answer>(.*?)</answer>", completion_str, re.DOTALL)
-                action_txt = m[-1].strip().lower() if m else ""
                 summary_prompt = (
-                    f"{obs}\nYour last action: {action_txt}.\n"
-                    "Provide a concise summary of the Hanabi game state from your perspective to guide future turns."
+                    f"{obs}\n"
+                    # Structured summary update required
+
+                    f"Previous summary: {prev_summary}"
+                    f"Latest thought: {thought or 'None yet.'}\n"
+                    f"Last action: {action_txt or 'Invalid action'}.\n" 
+                    "Provide a summary of the Hanabi game state to guide yourself in the future turns. You may include:\n"
+                    "1. Public state recap (score, tokens, decks, fireworks, discards);\n"
+                    "2. Inferred info about your own hand (safe/risky/unknown);\n"
+                    "3. Teammate intentions and hint priorities;\n"
+                    "4. Next-step focus for upcoming turns."
                 )
                 t0 = time.perf_counter()
                 summary_ids = self.tokenizer.apply_chat_template(
                     [{"role": "user", "content": summary_prompt}],
                     tokenize=True,
                     add_generation_prompt=True,
+                    enable_thinking=False,
                 )
                 t_tokenize_total += time.perf_counter() - t0
                 summary_req = ModelRequest(
                     rid=f"{rid}-sum-{turn}",
                     input_ids=summary_ids,
-                    gconfig=self.gconfig.new(n_samples=1, max_new_tokens=256),
+                    gconfig=self.gconfig.new(n_samples=1, max_new_tokens=2048),
                     tokenizer=self.tokenizer,
                 )
                 summary_cfg = summary_req.gconfig
@@ -879,7 +925,8 @@ class HanabiWorkflow(RolloutWorkflow):
                     summary_resp = await engine.agenerate(summary_req)
                     t_summary_total += time.perf_counter() - t0
                     agent_summary = self.tokenizer.decode(
-                        summary_resp.output_tokens, skip_special_tokens=True
+                        summary_resp.output_tokens, 
+                        skip_special_tokens=True
                     )
                 summaries[current_player].append(agent_summary)
 
@@ -904,8 +951,11 @@ class HanabiWorkflow(RolloutWorkflow):
                             {"question": self_questions[i], "answer": agent_answers[i]}
                             for i in range(len(agent_answers))
                         ],
+                        "thought": thought
                     }
                 )
+
+            prev_thought = thought
 
             if teacher_answers:
                 teacher_logs.append(
@@ -934,8 +984,12 @@ class HanabiWorkflow(RolloutWorkflow):
                 "player": current_player,
                 "observation": obs,
                 "guide": guide,
+                "qgen_prompt": qgen_prompt,
+                "qgen_response": qgen_text,
                 "previous_summary": prev_summary,
                 "qa_pairs": qa_pairs,
+                "agent_question_prompts": agent_question_prompts,
+                "teacher_prompts": teacher_prompts,
                 "action_prompt": action_prompt,
                 "action_completion": completion_str,
                 "parsed_action": parsed_action,
@@ -943,6 +997,8 @@ class HanabiWorkflow(RolloutWorkflow):
                 "env_info": env_info,
                 "env_reward": env_step_reward,
                 "adjusted_reward": step_reward,
+                "agent_answers": agent_answers,
+                "teacher_answers": teacher_answers,
                 "agent_summary": agent_summary,
                 "summary_prompt": summary_prompt,
                 "thought": thought,
@@ -959,12 +1015,6 @@ class HanabiWorkflow(RolloutWorkflow):
             teacher_obs = info.get("teacher_observation", obs)
 
             if done or turn == self.max_turns - 1:
-                total_reward = float(success_count) * (self.misplay_penalty_factor if misplay_occurred else 1.0)
-                logger.info(
-                    "Hanabi trajectory finished after %s turns with total reward %.2f.",
-                    turns_done,
-                    total_reward,
-                )
                 break
         
         running_return = 0.0 # calculate return
@@ -973,14 +1023,13 @@ class HanabiWorkflow(RolloutWorkflow):
             running_return += r
             returns.append(running_return)
         returns.reverse()
-        final_total_reward = running_return
-        
-        if misplay_occurred:
-            returns = [r * self.misplay_penalty_factor for r in returns]
-            final_total_reward = final_total_reward * self.misplay_penalty_factor
+        final_total_reward = running_return 
 
+        prev_idx = 0
         for idx, ret in zip(agent_result_indices, returns):
-            results[idx]["rewards"] = torch.tensor([ret], dtype=torch.float32)
+            for i in range(prev_idx, idx + 1):
+                results[i]["rewards"] = torch.tensor([ret], dtype=torch.float32)
+            prev_idx = idx + 1
 
         for step_log, ret in zip(episode_steps, returns):
             step_log["discounted_return"] = ret
@@ -995,6 +1044,14 @@ class HanabiWorkflow(RolloutWorkflow):
                 stats = env.get_stats()
             except Exception:
                 logger.error("Failed to collect stats from Hanabi environment.")
+
+        logger.info(
+            "Hanabi trajectory finished after %s turns with score %s and total reward %.2f. Abs reward: %.2f",
+            turns_done,
+            stats.get("score", 0),
+            total_reward,
+            sum(abs(r) for r in step_rewards),
+        )
 
         avg_div = max(1, turns_done)
         logging_vals = [
@@ -1041,6 +1098,7 @@ class HanabiWorkflow(RolloutWorkflow):
             "final_score": stats.get("score", 0),
             "stats": _sanitize_for_json(stats),
             "returns": returns,
+            "step_rewards": step_rewards,
             "success_count": success_count,
             "misplay_occurred": misplay_occurred,
             "qa_events": len(qa_logs),
@@ -1111,8 +1169,9 @@ class HanabiWorkflow(RolloutWorkflow):
                             **episode_info,
                             "model_version": version,
                         },
+                        "step_rewards": episode_info.get("step_rewards", []),
                         "timestamp": time.time(),
                     }
-                    await f.write(json.dumps(_sanitize_for_json(record)) + "\n")
+                    await f.write(json.dumps(_sanitize_for_json(record), indent = 2) + "\n")
 
         return concat_padded_tensors(results)

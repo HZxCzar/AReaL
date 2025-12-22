@@ -62,20 +62,41 @@ class HanabiEnv(EnvironmentService):
         self.last_event: str = ""
         self.answer_format_record: List[float] = [70.0, 70.0]
         self.firework_score_multiplier: float = 1.0
-        self.reward_scale: float = 0.2
         self.trajectory: List[str] = []
 
         self.rules = (
-            "You are playing Hanabi, a cooperative card game. Work with your teammates to build five fireworks "
-            "stacks (red, yellow, green, blue, white) in order from 1 to 5. You see only other players' hands. "
-            "You may play a card, discard a card, or spend an information token to hint a teammate about the "
-            "color or rank of all matching cards in their hand. Invalid plays cost a fuse token. When fuse tokens "
-            "are depleted, the team loses. Completing all five stacks yields the maximum score of 25."
+            "You are playing Hanabi, a fully cooperative, turn-based card game.\n"
+            "Goal: Build 5 color stacks (red (R), yellow (Y), green (G), blue (B), white (W)) strictly in rank order from 1 to 5.\n"
+            "There are 50 cards in total, each color has 3 rank1 cards, 2 rank2–4 cards, and 1 rank5 card.\n"
+            "Maximum score is 25; partial stacks score their highest completed rank.\n\n"
+
+            "Information model:\n"
+            "- You see all public state: current stacks, discard pile, remaining deck size, "
+            "information tokens, fuse tokens, and the full hands of all OTHER players.\n"
+            "- You NEVER see your own cards.\n"
+            "- You have plausible knowledge of your own cards based on previously provided hints and public information.\n"
+
+            "Actions:\n"
+            "1) Play a card: succeeds only if it is the next required rank of its color (e.g. Red Stack should go from R1 -> R2 -> R3 -> R4 -> R5); "
+            "otherwise a fuse token is lost and the card is discarded.\nCompleting a stack to rank 5 grants +1 information token if any are missing.\n"
+            "2) Discard a card: removes it, draws a new card if available, "
+            "and restores +1 information token (up to the maximum).\n"
+            "3) Give a hint: spend 1 information token to name EXACTLY ONE color OR rank "
+            "to a single teammate; the hint must mark ALL and ONLY matching cards in their hand.\n"
+            "The game starts with 8 information tokens. If none remains, you can not give a hint.\n\n"
+
+            "Additional rules:\n"
+            "- Misplays permanently remove that copy from the game.\n"
+            "- When the deck empties, each player (including the one who drew last) gets exactly one final turn.\n"
+            "- If all fuse tokens are lost, the score becomes 0 and the game ends immediately.\n"
+            "- If an illegal action is proposed, you will skip this turn."
         )
+
         self.guide = (
-            "Decide your next move. Format your response exactly as \"<think>your reasoning</think> <answer>action</answer>\". "
-            "Valid actions are: {actions}. Use 1-indexed positions for cards in your own hand."
+            "Plan a cooperative move that fits both the public information and long-term plan.\n"
+            "Valid actions are: {actions}.\n"
         )
+        self.format_req = "Format your response exactly as \"<think>your reasoning</think> <answer>your chosen action</answer>\".\n"
 
     # ------------------------------------------------------------------
     # Setup helpers
@@ -124,7 +145,6 @@ class HanabiEnv(EnvironmentService):
         self.last_event = "Game start."
         self.answer_format_record = [70.0, 70.0]
         self.firework_score_multiplier: float = 1.0
-        self.reward_scale: float = 0.2
         self.trajectory = []
 
         self._deal_initial_hands()
@@ -181,34 +201,46 @@ class HanabiEnv(EnvironmentService):
         if self.repeat_rules:
             obs_parts.append(self.rules)
         obs_parts.append(
-            (
-                f"You are {player}. Score: {score}. Information tokens: {self.info_tokens}/{self.max_info_tokens}. "
-                f"Fuse tokens: {self.fuse_tokens}/{self.max_fuse_tokens}. Deck: {len(self.deck)} cards remaining."
+            "\n".join(
+                [
+                    "=== Public Status ===",
+                    f"Player: {player}",
+                    f"Score: {score} | Info tokens: {self.info_tokens}/{self.max_info_tokens} | Fuse tokens: {self.fuse_tokens}/{self.max_fuse_tokens}",
+                    f"Deck remaining: {len(self.deck)}",
+                    f"Fireworks: {self._format_fireworks()} | Discards: {self._format_discard()}",
+                    f"Recent event: {self.last_event}",
+                ]
             )
         )
-        obs_parts.append(f"Current fireworks: {self._format_fireworks()}. Discard pile: {self._format_discard()}.")
-        if self.last_event:
-            obs_parts.append(f"Recent event: {self.last_event}")
-        obs_parts.append(self._visible_hands(player))
-        return " ".join(obs_parts)
+        obs_parts.append("\n=== Visible Hands & Self Knowledge ===\n" + self._visible_hands(player))
+        return "\n".join(obs_parts)
 
     def _build_teacher_observation(self, player: str) -> str:
         score = sum(self.fireworks.values()) * self.firework_score_multiplier
         teacher_info = [
             "You are a privileged Hanabi observer with perfect information.",
-            f"Current active player: {player}.",
-            f"Score: {score}. Information tokens: {self.info_tokens}/{self.max_info_tokens}.",
-            f"Fuse tokens: {self.fuse_tokens}/{self.max_fuse_tokens}. Deck remaining: {len(self.deck)}.",
-            f"Fireworks: {self._format_fireworks()}. Discard pile: {self._format_discard()}.",
-            f"All hands: {self._full_hands()}.",
+            "=== Turn Context ===",
+            f"Active player: {player}",
+            f"Score: {score}",
+            f"Info tokens: {self.info_tokens}/{self.max_info_tokens} | Fuse tokens: {self.fuse_tokens}/{self.max_fuse_tokens}",
+            f"Deck remaining: {len(self.deck)}",
+            "=== Board ===",
+            f"Fireworks: {self._format_fireworks()}",
+            f"Discards: {self._format_discard()}",
+            "=== Hands ===",
+            f"All hands: {self._full_hands()}",
         ]
         if self.last_event:
             teacher_info.append(f"Most recent event: {self.last_event}")
-        return " ".join(teacher_info)
+        return "\n".join(teacher_info)
 
     def _build_guide(self, player: str) -> str:
         actions = ", ".join(self._get_valid_actions(player))
-        return self.guide.format(actions=actions)
+        guide = self.guide.format(actions=actions)
+        if self.fuse_tokens <= 1:
+            guide += f"You only have {self.fuse_tokens} fuse tokens left. Plan your next move carefully, since losing all fuse tokens will end the game with score 0.\n"
+        guide += self.format_req
+        return guide
 
     def _snapshot_state(self, prefix: str) -> str:
         return (
@@ -384,23 +416,24 @@ class HanabiEnv(EnvironmentService):
         self._consume_format_reward(text)
         player = self.agent_player
         parsed_action = self._parse_action(text)
-        reward = 0.0
         msg = ""
+        prev_score = sum(self.fireworks.values()) * self.firework_score_multiplier
+        # reward = 0.0
 
         logger.debug("%s submits action text: %s", player, text)
 
         if parsed_action.startswith("play "):
             idx = self._resolve_card_identifier(player, parsed_action[len("play "):])
             if idx is None:
-                msg = "Could not identify card to play."
-                reward = -0.2
+                msg = "You gave an unidentifiable play command."
+                # reward = -0.2
             else:
                 msg, reward = self._apply_play(player, idx)
         elif parsed_action.startswith("discard "):
             idx = self._resolve_card_identifier(player, parsed_action[len("discard "):])
             if idx is None:
-                msg = "Could not identify card to discard."
-                reward = -0.2
+                msg = "You gave an unidentifiable discard command."
+                # reward = -0.2
             else:
                 msg, reward = self._apply_discard(player, idx)
         elif parsed_action.startswith("hint "):
@@ -411,11 +444,11 @@ class HanabiEnv(EnvironmentService):
                 value = " ".join(parts[3:])
                 msg, reward = self._apply_hint(player, target, hint_type, value)
             else:
-                msg = "Incomplete hint command."
-                reward = -0.2
+                msg = "You gave an incomplete hint command."
+                # reward = -0.2
         else:
-            msg = "Invalid or empty action. Respond using <answer>play/discard/hint ...</answer>."
-            reward = -0.2
+            msg = "You preformed and invalid or empty action."
+            # reward = -0.2
 
         self.turn_count += 1
         self.last_event = msg
@@ -427,6 +460,11 @@ class HanabiEnv(EnvironmentService):
                 self.final_turns_remaining -= 1
                 if self.final_turns_remaining <= 0:
                     done = True
+
+        if self.fuse_tokens <= 0:
+            # Losing the final fuse immediately ends the game and resets the reward
+            self.fireworks = {c: 0 for c in COLORS}
+            done = True
 
         if not done:
             self._advance_player()
@@ -444,7 +482,8 @@ class HanabiEnv(EnvironmentService):
             "deck_remaining": len(self.deck),
             "teacher_observation": self._build_teacher_observation(self.agent_player) if not done else obs,
         }
-        reward = reward * self.reward_scale
+        current_score = info["score"]
+        reward = current_score - prev_score
 
         return obs, guide, reward, done, False, info
 
@@ -455,8 +494,13 @@ class HanabiEnv(EnvironmentService):
             outcome = "Fuse tokens depleted. The team loses."
         elif self.final_turns_remaining is not None and self.final_turns_remaining <= 0:
             outcome = "Deck exhausted. Final round finished."
-        return (
-            f"{outcome} Final score: {score * self.firework_score_multiplier}. Fireworks: {self._format_fireworks()}. Discard pile: {self._format_discard()}."
+        return "\n".join(
+            [
+                f"{outcome}",
+                f"Final score: {score * self.firework_score_multiplier}",
+                f"Fireworks: {self._format_fireworks()}",
+                f"Discard pile: {self._format_discard()}",
+            ]
         )
 
     def _check_termination(self) -> bool:

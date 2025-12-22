@@ -167,8 +167,8 @@ export WANDB_BASE_URL=http://8.150.1.98:8080
 python -m areal.launcher.slurm examples/lite/hanabi_sft.py \
     --config examples/lite/configs/hanabi_sft.yaml \
     stats_logger.wandb.mode=online \
-    experiment_name=xmy-hanabi-sft-1 \
-    trial_name=sft-7b-2
+    experiment_name=xmy-hanabi-sft-2 \
+    trial_name=sft-7b-2-cards
 
 python -m areal.launcher.slurm examples/lite/gsm8k_sft.py \
     --config examples/lite/configs/gsm8k_sft.yaml \
