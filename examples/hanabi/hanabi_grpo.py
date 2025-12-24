@@ -121,10 +121,10 @@ export WANDB_API_KEY=local-667d8d7f101dad4eb9597d718d0c68f40e3792f9
 export WANDB_BASE_URL=http://8.150.1.98:8080
 
 python -m areal.launcher.slurm examples/hanabi/hanabi_grpo.py \
-    --config examples/hanabi/hanabi_grpo.yaml \
+    --config examples/hanabi/hanabi_grpo_eval.yaml \
     stats_logger.wandb.mode=online \
-    experiment_name=xmy-hanabi-sppo-3 \
-    trial_name=ppo-3b-noteacher-2
+    experiment_name=xmy-hanabi-sft-2 \
+    trial_name=eval-base-7b
 
 python -m areal.launcher.slurm examples/hanabi/hanabi_grpo.py \
     --config examples/hanabi/hanabi_gather_data.yaml \

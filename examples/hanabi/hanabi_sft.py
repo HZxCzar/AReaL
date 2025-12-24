@@ -51,5 +51,5 @@ python -m areal.launcher.slurm examples/hanabi/hanabi_sft.py \
     --config examples/hanabi/hanabi_sft.yaml \
     stats_logger.wandb.mode=online \
     experiment_name=xmy-hanabi-sft-2 \
-    trial_name=sft-7b-4-nodes-new
+    trial_name=sft-qwen3-4b-4-nodes
 """

@@ -19,12 +19,12 @@ allocation_mode: d16p1t2
 model:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: /storage/openpsi/models/Qwen__Qwen2.5-7B-Instruct
+  path: /storage/openpsi/models/Qwen__Qwen3-4B
   init_from_scratch: false
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 8192
+    max_tokens_per_mb: 32768
   optimizer:
     type: adam
     lr: 2e-5
@@ -39,14 +39,14 @@ train_dataset:
   batch_size: 32
   pin_memory: true
   num_workers: 4
-  path: /storage/openpsi/data/hanabi-sft/Qwen3_data_Qwen2.5_template_small.jsonl
+  path: /storage/openpsi/data/hanabi-sft/Qwen3_data_Qwen3_template_small.jsonl
   type: sft
 
 valid_dataset:
   batch_size: 32
   pin_memory: true
   num_workers: 4
-  path: /storage/openpsi/data/hanabi-sft/Qwen3_data_Qwen2.5_template_small.jsonl
+  path: /storage/openpsi/data/hanabi-sft/Qwen3_data_Qwen3_template_small.jsonl
   type: sft
 
 # Utilities
@@ -84,9 +84,9 @@ stats_logger:
 
 launcher:
   inference_server_cpus_per_gpu: 4
-  inference_server_mem_per_gpu: 32768
+  inference_server_mem_per_gpu: 65536
   trainer_cpus_per_gpu: 4
-  trainer_mem_per_gpu: 32768
+  trainer_mem_per_gpu: 65536
   slurm:
     mount: /storage:/storage
     trainer_image: /storage/openpsi/images/areal-latest.sif
