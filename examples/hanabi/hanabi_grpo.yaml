@@ -34,7 +34,7 @@ rollout:
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 4
-  enable_rollout_tracing: false
+  enable_rollout_tracing: true
 
 # Generation hyperparameters
 # In Hanabi rollouts, keep max_new_tokens high to capture multi-turn dialogs.
@@ -43,7 +43,7 @@ gconfig:
   min_new_tokens: 0
   max_new_tokens: 2048
   greedy: false
-  temperature: 0.8
+  temperature: 1.0
 
 actor:
   experiment_name: ${experiment_name}
@@ -54,14 +54,16 @@ actor:
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 10240
+    max_tokens_per_mb: 32768
   optimizer:
     type: adam
     lr: 5e-6
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1e-8
+    lr_scheduler_type: constant
     gradient_clipping: 1.0
-    lr_scheduler_type: cosine
-    min_lr_ratio: 0.6
-    warmup_steps_proportion: 0
+    warmup_steps_proportion: 0.001
   group_size: ${gconfig.n_samples}
   eps_clip: 0.4
   temperature: ${gconfig.temperature}
@@ -72,6 +74,9 @@ actor:
   recompute_logprob: true
   use_decoupled_loss: true
   behav_imp_weight_cap: 5.0
+  adv_norm:
+    mean_level: batch
+    std_level: batch
   sft_reg: 1.0
   max_new_tokens: ${gconfig.max_new_tokens}
 
@@ -83,7 +88,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 10240
+    max_tokens_per_mb: 32768
   optimizer: null
 
 # SGLang

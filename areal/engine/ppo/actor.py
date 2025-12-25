@@ -656,23 +656,28 @@ def sft_loss_fn(
 ):
     """Cross-entropy loss for SFT data."""
     loss_mask = input_data["loss_mask"].bool()
+    if loss_mask.ndim > 1:
+        loss_mask = loss_mask.reshape(-1)
+    logprobs = logprobs.reshape(-1)
+    loss_mask = torch.roll(loss_mask, shifts=-1, dims=-1)
     logprobs = torch.where(loss_mask, logprobs, 0.0)
     loss = -logprobs.sum() / loss_mask.count_nonzero()
 
-    stats_tracker.denominator(
-        n_tokens=torch.ones_like(loss_mask, dtype=torch.bool, device=logprobs.device),
-        n_valid_tokens=loss_mask,
-    )
-    stats_tracker.stat(
-        new_logp=logprobs.detach(),
-        sft_loss=-logprobs.detach(),
-        denominator="n_valid_tokens",
+    valid_logprobs = logprobs[loss_mask]
+    mean_logp = valid_logprobs.mean() if valid_logprobs.numel() > 0 else torch.tensor(0.0)
+    stats_tracker.scalar(
+        sft_loss=loss.item(),
+        sft_mean_logp=mean_logp.item(),
+        sft_tokens=int(loss_mask.count_nonzero()),
     )
     if vocab_min_logits is not None and vocab_max_logits is not None:
-        stats_tracker.stat(
-            vocab_min_logits=vocab_min_logits,
-            vocab_max_logits=vocab_max_logits,
-            denominator="n_tokens",
+        if vocab_min_logits.ndim > 1:
+            vocab_min_logits = vocab_min_logits.reshape(-1)
+        if vocab_max_logits.ndim > 1:
+            vocab_max_logits = vocab_max_logits.reshape(-1)
+        stats_tracker.scalar(
+            sft_vocab_min_logits=float(vocab_min_logits.mean().item()),
+            sft_vocab_max_logits=float(vocab_max_logits.max().item()),
         )
     return loss * sft_reg
     

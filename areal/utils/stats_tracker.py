@@ -134,6 +134,8 @@ class DistributedStatsTracker:
                 if denorm not in self.stats or not self.stats[denorm]:
                     raise ValueError(f"Denominator `{denorm}` does not exist")
                 for x, y in zip(self.stats[denorm], self.stats[full_key] + [value]):
+                    if type(x) is float:
+                        logger.warning(f"self.stats[denorm] is {self.stats[denorm]}, y comes from {self.stats[full_key] + [value]}")
                     assert x.shape == y.shape, (x.shape, y.shape)
                 self.denominators[full_key] = denorm
 
