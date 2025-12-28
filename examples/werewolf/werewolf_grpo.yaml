@@ -16,6 +16,11 @@ teacher_server_addrs: ""
 teacher_tokenizer_path: ""
 teacher_api_key: ""
 teacher_api_model: ""
+num_villagers: 2
+num_werewolves: 3
+num_witches: 1
+num_foreseers: 1
+num_hunters: 1
 max_turns: 90
 turn_discount: 1.0
 env_kwargs: null
