@@ -152,7 +152,7 @@ class WerewolfWorkflow(RolloutWorkflow):
         self.max_turns = max_turns
         self.turn_discount = turn_discount
         self.dump_dir = dump_dir
-        self.env_kwargs = env_kwargs
+        self.env_kwargs = env_kwargs or {}
         self.role = role
         self.opp_rollout = opp_rollout
         self.opp_tokenizer = opp_tokenizer
@@ -397,10 +397,7 @@ class WerewolfWorkflow(RolloutWorkflow):
         )
 
     async def _run_one_episode(self, engine: InferenceEngine, data, rid):
-        if self.env_kwargs:
-            env = WerewolfEnv(**self.env_kwargs)
-        else:
-            env = WerewolfEnv()
+        env = WerewolfEnv(**self.env_kwargs)
         obs, guide, _ = await env.sreset()
 
         results = []  # Final return tensor

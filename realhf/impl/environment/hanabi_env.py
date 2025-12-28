@@ -27,6 +27,56 @@ class Card:
 class HanabiEnv(EnvironmentService):
     """A light-weight text environment for the cooperative card game Hanabi."""
 
+    @staticmethod
+    def _build_color_maps(colors: list[str]) -> tuple[Dict[str, str], Dict[str, str]]:
+        mapping: Dict[str, str] = {}
+        used_letters: set[str] = set()
+        for idx, color in enumerate(colors):
+            base_letter = (color[:1] or str(idx)).upper()
+            letter = base_letter
+            suffix = 1
+            while letter in used_letters:
+                suffix += 1
+                letter = f"{base_letter}{suffix}"
+            mapping[color] = letter
+            used_letters.add(letter)
+        return mapping, {v: k for k, v in mapping.items()}
+
+    def _build_rules_text(self) -> str:
+        color_desc = ", ".join(
+            f"{color} ({self.color_to_letter[color]})" for color in self.colors
+        )
+        rank_desc = ", ".join(
+            f"rank {rank} × {count} per color"
+            for rank, count in sorted(self.rank_counts.items())
+        )
+        return (
+            "You are playing Hanabi, a fully cooperative, turn-based card game.\n"
+            f"Goal: Build {len(self.colors)} color stacks ({color_desc}) strictly in rank order from 1 to {self.max_rank}.\n"
+            f"There are {self.deck_size} cards in total; each color has {rank_desc}.\n"
+            f"Maximum score is {self.target_score}; partial stacks score their highest completed rank.\n\n"
+            "Information model:\n"
+            "- You see all public state: current stacks, discard pile, remaining deck size, "
+            "information tokens, fuse tokens, and the full hands of all OTHER players.\n"
+            "- You NEVER see your own cards.\n"
+            "- You have plausible knowledge of your own cards based on previously provided hints and public information.\n\n"
+            "Actions:\n"
+            "1) Play a card: succeeds only if it is the next required rank of its color; "
+            "otherwise a fuse token is lost and the card is discarded. "
+            f"Completing a stack to rank {self.max_rank} grants +1 information token if any are missing.\n"
+            "2) Discard a card: removes it, draws a new card if available, "
+            "and restores +1 information token (up to the maximum).\n"
+            "3) Give a hint: spend 1 information token to name EXACTLY ONE color OR rank "
+            "to a single teammate; the hint must mark ALL and ONLY matching cards in their hand.\n"
+            f"The game starts with {self.max_info_tokens} information tokens and {self.max_fuse_tokens} fuse tokens. "
+            "If no information tokens remain, you cannot give a hint.\n\n"
+            "Additional rules:\n"
+            "- Misplays permanently remove that copy from the game.\n"
+            "- When the deck empties, each player (including the one who drew last) gets exactly one final turn.\n"
+            "- If all fuse tokens are lost, the score becomes 0 and the game ends immediately.\n"
+            "- If an illegal action is proposed, you will skip this turn."
+        )
+
     def __init__(
         self,
         num_players: int = 2,
@@ -34,11 +84,30 @@ class HanabiEnv(EnvironmentService):
         repeat_rules: bool = True,
         max_info_tokens: int = 8,
         max_fuse_tokens: int = 3,
+        colors: Optional[list[str]] = None,
+        rank_counts: Optional[dict[int, int]] = None,
     ):
         if num_players < 2:
             raise ValueError("Hanabi requires at least two players.")
         if hand_size is None:
             hand_size = 5 if num_players <= 3 else 4
+
+        self.colors = [str(c).lower() for c in (colors or COLORS)]
+        if not self.colors:
+            raise ValueError("Hanabi requires at least one color.")
+        raw_rank_counts = rank_counts or RANK_COUNTS
+        self.rank_counts = {int(k): int(v) for k, v in raw_rank_counts.items()}
+        if not self.rank_counts:
+            raise ValueError("Hanabi requires at least one rank count.")
+        self.color_to_letter, self.letter_to_color = self._build_color_maps(self.colors)
+        # Update module-level globals so Card.short and other helpers stay consistent.
+        globals()["COLORS"] = self.colors
+        globals()["COLOR_TO_LETTER"] = self.color_to_letter
+        globals()["LETTER_TO_COLOR"] = self.letter_to_color
+        globals()["RANK_COUNTS"] = self.rank_counts
+        self.max_rank = max(self.rank_counts)
+        self.deck_size = sum(self.rank_counts.values()) * len(self.colors)
+        self.target_score = len(self.colors) * self.max_rank
 
         self.num_players = num_players
         self.hand_size = hand_size
@@ -51,7 +120,7 @@ class HanabiEnv(EnvironmentService):
         self.hands: Dict[str, List[Card]] = {}
         self.knowledge: Dict[str, List[Dict[str, Optional[str | int]]]] = {}
         self.discard_pile: List[Card] = []
-        self.fireworks: Dict[str, int] = {c: 0 for c in COLORS}
+        self.fireworks: Dict[str, int] = {c: 0 for c in self.colors}
         self.info_tokens = self.max_info_tokens
         self.fuse_tokens = self.max_fuse_tokens
         self.final_turns_remaining: Optional[int] = None
@@ -64,33 +133,7 @@ class HanabiEnv(EnvironmentService):
         self.firework_score_multiplier: float = 1.0
         self.trajectory: List[str] = []
 
-        self.rules = (
-            "You are playing Hanabi, a fully cooperative, turn-based card game.\n"
-            "Goal: Build 5 color stacks (red (R), yellow (Y), green (G), blue (B), white (W)) strictly in rank order from 1 to 5.\n"
-            "There are 50 cards in total, each color has 3 rank1 cards, 2 rank2–4 cards, and 1 rank5 card.\n"
-            "Maximum score is 25; partial stacks score their highest completed rank.\n\n"
-
-            "Information model:\n"
-            "- You see all public state: current stacks, discard pile, remaining deck size, "
-            "information tokens, fuse tokens, and the full hands of all OTHER players.\n"
-            "- You NEVER see your own cards.\n"
-            "- You have plausible knowledge of your own cards based on previously provided hints and public information.\n"
-
-            "Actions:\n"
-            "1) Play a card: succeeds only if it is the next required rank of its color (e.g. Red Stack should go from R1 -> R2 -> R3 -> R4 -> R5); "
-            "otherwise a fuse token is lost and the card is discarded.\nCompleting a stack to rank 5 grants +1 information token if any are missing.\n"
-            "2) Discard a card: removes it, draws a new card if available, "
-            "and restores +1 information token (up to the maximum).\n"
-            "3) Give a hint: spend 1 information token to name EXACTLY ONE color OR rank "
-            "to a single teammate; the hint must mark ALL and ONLY matching cards in their hand.\n"
-            "The game starts with 8 information tokens. If none remains, you can not give a hint.\n\n"
-
-            "Additional rules:\n"
-            "- Misplays permanently remove that copy from the game.\n"
-            "- When the deck empties, each player (including the one who drew last) gets exactly one final turn.\n"
-            "- If all fuse tokens are lost, the score becomes 0 and the game ends immediately.\n"
-            "- If an illegal action is proposed, you will skip this turn."
-        )
+        self.rules = self._build_rules_text()
 
         self.guide = (
             "Plan a cooperative move that fits both the public information and long-term plan.\n"
@@ -102,8 +145,8 @@ class HanabiEnv(EnvironmentService):
     # Setup helpers
     def _build_deck(self) -> List[Card]:
         deck: List[Card] = []
-        for color in COLORS:
-            for rank, count in RANK_COUNTS.items():
+        for color in self.colors:
+            for rank, count in self.rank_counts.items():
                 deck.extend(Card(color, rank) for _ in range(count))
         random.shuffle(deck)
         return deck
@@ -136,7 +179,7 @@ class HanabiEnv(EnvironmentService):
 
         self.deck = self._build_deck()
         self.discard_pile = []
-        self.fireworks = {c: 0 for c in COLORS}
+        self.fireworks = {c: 0 for c in self.colors}
         self.info_tokens = self.max_info_tokens
         self.fuse_tokens = self.max_fuse_tokens
         self.final_turns_remaining = None
@@ -333,10 +376,10 @@ class HanabiEnv(EnvironmentService):
             self.fireworks[card.color] = card.rank
             reward = 3.0
             msg = f"{player} successfully played {card.short()} onto the {card.color} stack."
-            if card.rank == 5 and self.info_tokens < self.max_info_tokens:
+            if card.rank == self.max_rank and self.info_tokens < self.max_info_tokens:
                 self.info_tokens += 1
                 msg += " Completed stack grants an information token."
-            if sum(self.fireworks.values()) == 25:
+            if sum(self.fireworks.values()) == self.target_score:
                 msg += " All stacks complete!"
         else:
             self.discard_pile.append(card)
@@ -378,7 +421,7 @@ class HanabiEnv(EnvironmentService):
             color = value.lower()
             if color in LETTER_TO_COLOR:
                 color = LETTER_TO_COLOR[color]
-            if color not in COLORS:
+            if color not in self.colors:
                 return "Unknown color for hint.", -0.2
             for idx, card in enumerate(self.hands[target]):
                 if card.color == color:
@@ -388,9 +431,9 @@ class HanabiEnv(EnvironmentService):
             try:
                 rank = int(value)
             except ValueError:
-                return "Rank hint must be a number between 1 and 5.", -0.2
-            if rank not in RANK_COUNTS:
-                return "Rank hint must be in [1, 5].", -0.2
+                return f"Rank hint must be a number between 1 and {self.max_rank}.", -0.2
+            if rank not in self.rank_counts:
+                return f"Rank hint must be in [1, {self.max_rank}].", -0.2
             for idx, card in enumerate(self.hands[target]):
                 if card.rank == rank:
                     self.knowledge[target][idx]["rank"] = rank
@@ -463,7 +506,7 @@ class HanabiEnv(EnvironmentService):
 
         if self.fuse_tokens <= 0:
             # Losing the final fuse immediately ends the game and resets the reward
-            self.fireworks = {c: 0 for c in COLORS}
+            self.fireworks = {c: 0 for c in self.colors}
             done = True
 
         if not done:
@@ -489,7 +532,7 @@ class HanabiEnv(EnvironmentService):
 
     def _terminal_observation(self) -> str:
         score = sum(self.fireworks.values())
-        outcome = "All fireworks completed!" if score == 25 else "Game over."
+        outcome = "All fireworks completed!" if score == self.target_score else "Game over."
         if self.fuse_tokens <= 0:
             outcome = "Fuse tokens depleted. The team loses."
         elif self.final_turns_remaining is not None and self.final_turns_remaining <= 0:
@@ -506,7 +549,7 @@ class HanabiEnv(EnvironmentService):
     def _check_termination(self) -> bool:
         if self.fuse_tokens <= 0:
             return True
-        if all(level == 5 for level in self.fireworks.values()):
+        if all(level == self.max_rank for level in self.fireworks.values()):
             return True
         # If all players have empty hands and deck empty
         if not self.deck and all(len(hand) == 0 for hand in self.hands.values()):

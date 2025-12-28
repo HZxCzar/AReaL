@@ -22,6 +22,11 @@ class WerewolfGRPOConfig(GRPOConfig):
     teacher_tokenizer_path: str = ""
     teacher_api_key: str = ""
     teacher_api_model: str = ""
+    num_villagers: int = 2
+    num_werewolves: int = 3
+    num_witches: int = 1
+    num_foreseers: int = 1
+    num_hunters: int = 1
     env_kwargs: dict | None = None
     max_turns: int = 70
     turn_discount: float = 1.0
@@ -96,6 +101,17 @@ def main(args):
                     train_data_parallel_size=trainer.allocation_mode.train.dp_size,
                 )
 
+            env_kwargs = dict(config.env_kwargs or {})
+            env_kwargs.update(
+                {
+                    "num_villagers": config.num_villagers,
+                    "num_werewolves": config.num_werewolves,
+                    "num_witches": config.num_witches,
+                    "num_foreseers": config.num_foreseers,
+                    "num_hunters": config.num_hunters,
+                }
+            )
+
             workflow = WerewolfWorkflow(
                 gconfig=config.gconfig,
                 tokenizer=trainer.tokenizer,
@@ -111,7 +127,7 @@ def main(args):
                 opp_api_model=config.opp_api_model,
                 teacher_api_key=config.teacher_api_key,
                 teacher_api_model=config.teacher_api_model,
-                env_kwargs=config.env_kwargs,
+                env_kwargs=env_kwargs,
                 max_turns=config.max_turns,
                 turn_discount=config.turn_discount,
             )

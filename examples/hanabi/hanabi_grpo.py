@@ -21,6 +21,10 @@ class HanabiGRPOConfig(GRPOConfig):
     student_api_model: str = ""
     misplay_penalty_factor: float = 0.1
     use_question_tokens: bool = False
+    num_colors: int | None = None
+    rank_counts: dict | None = None
+    max_fuse_tokens: int | None = None
+    max_info_tokens: int | None = None
     env_kwargs: dict | None = None
 
 
@@ -79,6 +83,16 @@ def main(args):
                     train_data_parallel_size=trainer.allocation_mode.train.dp_size,
                 )
 
+            env_kwargs = dict(config.env_kwargs or {})
+            if config.num_colors is not None:
+                env_kwargs["num_colors"] = config.num_colors
+            if config.rank_counts is not None:
+                env_kwargs["rank_counts"] = config.rank_counts
+            if config.max_fuse_tokens is not None:
+                env_kwargs["max_fuse_tokens"] = config.max_fuse_tokens
+            if config.max_info_tokens is not None:
+                env_kwargs["max_info_tokens"] = config.max_info_tokens
+
             workflow = HanabiWorkflow(
                 gconfig=config.gconfig,
                 tokenizer=trainer.tokenizer,
@@ -91,7 +105,7 @@ def main(args):
                 student_api_model=config.student_api_model,
                 teacher_api_key=config.teacher_api_key,
                 teacher_api_model=config.teacher_api_model,
-                env_kwargs=config.env_kwargs,
+                env_kwargs=env_kwargs,
                 sft_reg=config.actor.sft_reg,
                 misplay_penalty_factor=config.misplay_penalty_factor,
                 use_question_tokens=config.use_question_tokens,

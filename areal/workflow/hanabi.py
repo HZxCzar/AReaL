@@ -26,6 +26,52 @@ from realhf.impl.environment.hanabi_env import HanabiEnv
 
 
 logger = logging.getLogger("Hanabi workflow")
+DEFAULT_HANABI_COLORS = list(hanabi_env.COLORS)
+DEFAULT_HANABI_RANK_COUNTS = dict(hanabi_env.RANK_COUNTS)
+
+
+def _parse_rank_counts(raw_counts: dict | None) -> dict[int, int] | None:
+    if not raw_counts:
+        return None
+    parsed: dict[int, int] = {}
+    for key, value in raw_counts.items():
+        if value is None:
+            continue
+        try:
+            rank = int(key)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Rank keys must be integers, got {key!r}.") from exc
+        parsed[rank] = int(value)
+    return parsed or None
+
+
+def _resolve_colors(raw_colors: list[str] | None, num_colors: int | None) -> list[str]:
+    colors: list[str] = (
+        [str(c).lower() for c in raw_colors if str(c).strip()] if raw_colors else DEFAULT_HANABI_COLORS
+    )
+    if num_colors is not None:
+        if num_colors <= 0:
+            raise ValueError("Number of colors must be positive.")
+        colors = colors[:num_colors]
+    if not colors:
+        raise ValueError("At least one color is required for Hanabi.")
+    return colors
+
+
+def _build_color_letter_map(colors: list[str]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    used_letters: set[str] = set()
+    for idx, color in enumerate(colors):
+        base_letter = (color[:1] or str(idx)).upper()
+        letter = base_letter
+        suffix = 1
+        while letter in used_letters:
+            suffix += 1
+            letter = f"{base_letter}{suffix}"
+        mapping[color] = letter
+        used_letters.add(letter)
+    return mapping
+
 
 def _sanitize_for_json(value):
     """Recursively convert objects to JSON-serializable structures."""
@@ -147,7 +193,26 @@ class HanabiWorkflow(RolloutWorkflow):
         self.max_turns = max_turns
         self.turn_discount = turn_discount
         self.dump_dir = dump_dir
-        self.env_kwargs = env_kwargs or {}
+        raw_env_kwargs = env_kwargs or {}
+        self._hanabi_rank_counts = _parse_rank_counts(raw_env_kwargs.get("rank_counts"))
+        self._hanabi_colors = _resolve_colors(
+            raw_env_kwargs.get("colors"), raw_env_kwargs.get("num_colors")
+        )
+        self.env_kwargs = {
+            key: raw_env_kwargs[key]
+            for key in (
+                "num_players",
+                "hand_size",
+                "repeat_rules",
+                "max_info_tokens",
+                "max_fuse_tokens",
+            )
+            if key in raw_env_kwargs and raw_env_kwargs[key] is not None
+        }
+        if self._hanabi_rank_counts is not None:
+            self.env_kwargs["rank_counts"] = self._hanabi_rank_counts
+        if self._hanabi_colors:
+            self.env_kwargs["colors"] = self._hanabi_colors
         self.misplay_penalty_factor = misplay_penalty_factor
         self.sft_reg = sft_reg
         self.student_api_key = (student_api_key or "").strip()
@@ -364,6 +429,18 @@ class HanabiWorkflow(RolloutWorkflow):
         message = choices[0].get("message", {})
         return message.get("content", "")
 
+    def _configure_hanabi_env(self) -> None:
+        hanabi_env.COLORS = self._hanabi_colors
+        hanabi_env.COLOR_TO_LETTER = _build_color_letter_map(self._hanabi_colors)
+        hanabi_env.LETTER_TO_COLOR = {
+            v: k for k, v in hanabi_env.COLOR_TO_LETTER.items()
+        }
+        hanabi_env.RANK_COUNTS = self._hanabi_rank_counts or DEFAULT_HANABI_RANK_COUNTS
+
+    def _build_env(self) -> HanabiEnv:
+        self._configure_hanabi_env()
+        return HanabiEnv(**self.env_kwargs)
+
     def _build_api_response(
         self,
         input_ids: list[int],
@@ -414,7 +491,7 @@ class HanabiWorkflow(RolloutWorkflow):
         return ""
 
     async def _run_one_episode(self, engine: InferenceEngine, data, rid):
-        env = HanabiEnv(**self.env_kwargs)
+        env = self._build_env()
         obs, guide, info = await env.sreset()
         teacher_obs = info.get("teacher_observation", obs)
 
