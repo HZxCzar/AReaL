@@ -64,34 +64,46 @@ class WerewolfEnv(EnvironmentService):
         self.repeat_rules = repeat_rules
         self.trajectory: List[str] = []
         self.rules = (
-            "You are playing the werewolf game."
-            "Roles in the game are villager, witch, foreseer, werewolf, and hunter. "
-            "Werewolves kill at night. The witch can heal or poison once each every game. "
-            "The foreseer checks one role each night. The hunter shoots one player "
-            "when killed. Players vote during the day to eliminate one suspect. "
-            "Villagers win if all werewolves die; werewolves win if they kill "
-            "everyone else."
+            "You are playing the Werewolf social deduction game.\n\n"
+            "Objectives:\n"
+            "- Villagers team: eliminate all werewolves.\n"
+            "- Werewolves team: eliminate everyone else.\n\n"
+            "Roles and abilities:\n"
+            "- Villager: ordinary town member with no special power.\n"
+            "- Werewolf: works with fellow werewolves to kill one target each night.\n"
+            "- Witch: may heal one attacked player once per game and poison one player once per game.\n"
+            "- Foreseer: checks exactly one player’s role each night.\n"
+            "- Hunter: when killed, immediately shoots one player.\n\n"
+            "Gameplay phases:\n"
+            "- Night: werewolves choose a target; foreseer inspects; witch may heal/poison.\n"
+            "- Discussion (morning): all living players discuss what happened.\n"
+            "- Day vote: everyone votes to eliminate one suspect. If a player dies and is the hunter, the hunter shoots before the next phase.\n\n"
+            # "Victory conditions:\n"
+            # "- Villagers win when every werewolf is dead.\n"
+            # "- Werewolves win when they outnumber or equal all other living players.\n"
         )
         self.role_prompts = {
-            "villager": "You are a villager. Find out the werewolves and vote them out.",
-            "werewolf": "You are a werewolf. Work with the other werewolves to kill the rest.",
-            "witch": "You are the witch. You may heal or poison during the night. You can do each action only once in a single game.",
-            "foreseer": "You are the foreseer. Each night you can check one player's role.",
-            "hunter": "You are the hunter. When killed, you may shoot one player.",
+            "villager": "Role: Villager.\nGoal: identify and vote out all werewolves.\nUse discussion to share evidence and suspicions.\n",
+            "werewolf": "Role: Werewolf.\nGoal: coordinate with other werewolves to eliminate non-werewolves.\nDeceive during discussion; avoid revealing your identity.\n",
+            "witch": "Role: Witch.\nGoal: help the village by using two limited abilities once each per game:\n- Heal: save the werewolves' night target.\n- Poison: eliminate one chosen player.\nDecide carefully when to spend each action.\n",
+            "foreseer": "Role: Foreseer.\nGoal: check one player’s role each night and use that knowledge to guide voting.\nKeep results in memory; reveal strategically during discussion.\n",
+            "hunter": "Role: Hunter.\nGoal: aid the village. When you die, you must shoot exactly one player immediately.\nChoose the shot based on the latest information.\n",
         }
+        self._base_role_prompts = dict(self.role_prompts)
         self.guide = (
-            "Decide your action for this round. Perform one action only."
-            "Your valid actions are: {actions}."
-            "Format your response exactly as: "
-            "\"<think>your reasoning</think> <answer>your chosen action</answer>\""
-            # " Example: <think>I am a werewolf. I suspect player0 is a villager, I shall kill him to win.</think> <answer>kill player0</answer>"
+            "Decide exactly ONE action for this phase.\n"
+            "Valid actions right now: {actions}\n"
+            "Respond using the strict format:\n"
+            "<think>your reasoning</think> <answer>your chosen action</answer>\n"
+            # "Keep the action concise and actionable (e.g., \"kill player2\", \"vote player3\", \"heal player1\").\n"
         )
         self.guide_discussion = (
-            "Decide what you want to say to all other players for this round. Limit your discussion to within 40 words."
-            "If you are a werewolf, think of a strategy to deceive others."
-            # " Example: <think>I am a werewolf. I suspect player0 is a villager, I shall kill him to win.</think> <answer>kill player0</answer>"
-            "If you are a villager, share information and try to find out the werewolves. Format your response eactly as:"
-            "\"<think>your reasoning</think> <answer>what you want to say</answer>\" Do not say anything else."
+            "Speak to all players during the discussion phase (limit to ~40 words).\n"
+            "- If you are a werewolf: craft a deceptive narrative.\n"
+            "- If you are a villager-side role: share evidence, deductions, or requests for information.\n"
+            "Use the strict format:\n"
+            "<think>your reasoning</think> <answer>what you want to say</answer>\n"
+            # "Do not include extra text before or after these tags.\n"
         )
         # Stats for RL training
         self.stats: Dict[str, int] = {
@@ -128,7 +140,10 @@ class WerewolfEnv(EnvironmentService):
             logutil(f"Initialized a player {name} with role {role}.")
         
         werewolves_list = [name for name in self.roles if self.role_type[name] == "werewolf"]
-        self.role_prompts["werewolf"] += f"The werewolves of this round are: {', '.join(werewolves_list)}."
+        self.role_prompts["werewolf"] = (
+            self._base_role_prompts["werewolf"]
+            + f"The werewolves of this round are: {', '.join(werewolves_list)}.\n"
+        )
 
     async def reset(self, seed=None, options=None):
         if seed is not None:
@@ -174,8 +189,11 @@ class WerewolfEnv(EnvironmentService):
         guide = self.guide.format(actions=', '.join(self._get_valid_actions()))
         role_prompt = self.role_prompts.get(self.agent_role, "")
         obs = (
-            f"{self.rules} You are the {self.agent_player} ({self.agent_role}). {role_prompt}"
-            f" Game start. Night {self.round}. Alive players: {', '.join(self.roles)}."
+            f"{self.rules}\n"
+            f"Your identity: {self.agent_player} ({self.agent_role}).\n"
+            f"{role_prompt}"
+            f"Game start – Night {self.round}.\n"
+            f"Alive players: {', '.join(self.roles)}.\n"
         )
         setup_info = ", ".join([f"{p}: {self.role_type[p]}" for p in self.roles])
         self.trajectory.append(f"Initial setup -> {setup_info}")
@@ -226,8 +244,11 @@ class WerewolfEnv(EnvironmentService):
         guide = self.guide.format(actions=', '.join(self._get_valid_actions()))
         role_prompt = self.role_prompts.get(self.agent_role, "")
         obs = (
-            f"{self.rules} You are the {self.agent_player} ({self.agent_role}). {role_prompt}"
-            f" Game start. Night {self.round}. Alive players: {', '.join(self.roles)}."
+            f"{self.rules}\n"
+            f"Your identity: {self.agent_player} ({self.agent_role}).\n"
+            f"{role_prompt}"
+            f"Game start – Night {self.round}.\n"
+            f"Alive players: {', '.join(self.roles)}.\n"
         )
         setup_info = ", ".join([f"{p}: {self.role_type[p]}" for p in self.roles])
         self.trajectory.append(f"Initial setup -> {setup_info}")
