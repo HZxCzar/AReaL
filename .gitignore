@@ -1,6 +1,7 @@
 # Legacy codes
 .legacy/
 .data/
+data/
 .idea/
 
 

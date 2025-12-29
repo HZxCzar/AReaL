@@ -63,6 +63,60 @@ HANABI_LOGGING_KEYS = [
     "avgt_tokenize",
 ]
 
+WEREWOLF_LOGGING_KEYS = [
+    "traj_steps",
+    "traj_len",
+    "traj_input_len",
+    "traj_output_len",
+    "vill_rewards",
+    "were_rewards",
+    "vill_wins",
+    "were_wins",
+    "werewolf_kills",
+    "werewolf_correct_kills",
+    "villager_correct_votes",
+    "villager_wrong_votes",
+    "witch_heals",
+    "witch_correct_heals",
+    "witch_poisons",
+    "witch_correct_poisons",
+    "hunter_shots",
+    "hunter_correct_shots",
+    "format_reward_scale",
+    "avgt_qgen",
+    "avgt_agent_ans",
+    "avgt_teacher_ans",
+    "avgt_action",
+    "avgt_summary",
+]
+
+
+def _log_rollout_stats(
+    batch: dict[str, Any], logging_keys: list[str], *, scope: str | None = None
+) -> None:
+    if "logging" not in batch:
+        return
+    vals = batch["logging"].float().cpu()
+    mask = vals[:, 0] > 0
+    if not mask.any():
+        return
+
+    filtered = vals[mask]
+    avg = filtered.mean(0).tolist()
+    mins = filtered.min(0).values.tolist()
+    maxs = filtered.max(0).values.tolist()
+
+    extra = dict(zip(logging_keys, avg))
+    for key, min_val, max_val in zip(logging_keys, mins, maxs):
+        extra[f"{key}/min"] = min_val
+        extra[f"{key}/max"] = max_val
+
+    if scope is not None:
+        with stats_tracker.scope(scope):
+            stats_tracker.scalar(**extra)
+    else:
+        stats_tracker.scalar(**extra)
+
 
 class PPOTrainer:
     def __init__(
@@ -539,23 +593,7 @@ class PPOTrainer:
 
 class HanabiTrainer(PPOTrainer):
     def _log_hanabi_rollout_stats(self, batch: dict[str, Any]) -> None:
-        if "logging" not in batch:
-            return
-        vals = batch["logging"].float().cpu()
-        mask = vals[:, 0] > 0
-        if not mask.any():
-            return
-
-        filtered = vals[mask]
-        avg = filtered.mean(0).tolist()
-        mins = filtered.min(0).values.tolist()
-        maxs = filtered.max(0).values.tolist()
-
-        extra = dict(zip(HANABI_LOGGING_KEYS, avg))
-        for key, min_val, max_val in zip(HANABI_LOGGING_KEYS, mins, maxs):
-            extra[f"{key}/min"] = min_val
-            extra[f"{key}/max"] = max_val
-        stats_tracker.scalar(**extra)
+        _log_rollout_stats(batch, HANABI_LOGGING_KEYS, scope="hanabi_rollout")
 
     def train(
         self,
@@ -667,6 +705,205 @@ class HanabiTrainer(PPOTrainer):
                 self.actor.step_lr_scheduler()
                 log_gpu_stats("ppo update")
                 self._log_hanabi_rollout_stats(batch)
+
+            if self.critic is not None:
+                with (
+                    stats_tracker.record_timing("critic_train_step"),
+                    perf_tracer.trace_scope(
+                        "train.critic_ppo_update",
+                        category=Category.COMPUTE,
+                        args={"global_step": global_step},
+                    ),
+                ):
+                    self.critic.ppo_update(batch)
+                    self.critic.step_lr_scheduler()
+                    log_gpu_stats("ppo critic update")
+
+            # pause inference for updating weights, save, and evaluation
+            self.rollout.pause()
+
+            with (
+                stats_tracker.record_timing("update_weights"),
+                perf_tracer.trace_scope(
+                    "train.update_weights",
+                    category=Category.COMM,
+                    args={"global_step": global_step},
+                ),
+            ):
+                self.actor.update_weights(self.weight_update_meta)
+
+                self.actor.set_version(global_step + 1)
+                if self.critic is not None:
+                    self.critic.set_version(global_step + 1)
+                self.rollout.set_version(global_step + 1)
+                self.eval_rollout.set_version(global_step + 1)
+
+            with (
+                stats_tracker.record_timing("save"),
+                perf_tracer.trace_scope(
+                    "train.save",
+                    category=Category.IO,
+                    args={"global_step": global_step},
+                ),
+            ):
+                self._save_hf(epoch=epoch, epoch_step=step, global_step=global_step)
+
+            with (
+                stats_tracker.record_timing("checkpoint_for_recover"),
+                perf_tracer.trace_scope(
+                    "train.checkpoint",
+                    category=Category.IO,
+                    args={"global_step": global_step},
+                ),
+            ):
+                self._save_recover_checkpoint(
+                    epoch=epoch, epoch_step=step, global_step=global_step
+                )
+
+            with (
+                stats_tracker.record_timing("eval"),
+                perf_tracer.trace_scope(
+                    "train.eval",
+                    category=Category.COMPUTE,
+                    args={"global_step": global_step},
+                ),
+            ):
+                self._evaluate(
+                    eval_workflow=eval_workflow,
+                    epoch=epoch,
+                    epoch_step=step,
+                    global_step=global_step,
+                )
+
+            with perf_tracer.trace_scope(
+                "train.log_stats",
+                category=Category.INSTR,
+                args={"global_step": global_step},
+            ):
+                self._export_and_commit_stats(
+                    epoch=epoch, epoch_step=step, global_step=global_step
+                )
+
+            # Resume rollout
+            self.rollout.resume()
+
+            perf_tracer.save(step=global_step)
+
+
+class WerewolfTrainer(PPOTrainer):
+    def _log_werewolf_rollout_stats(self, batch: dict[str, Any]) -> None:
+        _log_rollout_stats(batch, WEREWOLF_LOGGING_KEYS, scope="werewolf_rollout")
+
+    def train(
+        self,
+        workflow: RolloutWorkflow,
+        eval_workflow: RolloutWorkflow | None = None,
+        dynamic_filter_fn: Callable[[dict[str, Any]], bool] | str | None = None,
+        total_epochs: int | None = None,
+        granularity: int | None = None,
+    ):
+        config = self.config
+        start_step = (
+            self.recover_info.last_step_info.next().global_step
+            if self.recover_info is not None
+            else 0
+        )
+
+        if total_epochs is None:
+            total_epochs = config.total_train_epochs
+        if total_epochs <= 0:
+            raise ValueError(f"Total epochs must be positive: {total_epochs}")
+        steps_per_epoch = len(self.train_dataloader)
+        max_steps = total_epochs * steps_per_epoch
+
+        for global_step in range(start_step, max_steps):
+            if (
+                config.total_train_steps is not None
+                and global_step >= config.total_train_steps
+            ):
+                break
+            epoch = global_step // steps_per_epoch
+            step = global_step % steps_per_epoch
+
+            with (
+                stats_tracker.record_timing("rollout"),
+                perf_tracer.trace_scope(
+                    "train.rollout",
+                    category=Category.COMPUTE,
+                    args={
+                        "global_step": global_step,
+                        "epoch_step": step,
+                    },
+                ),
+            ):
+                batch = self.actor.prepare_batch(
+                    self.train_dataloader,
+                    granularity=granularity or self.config.actor.group_size,
+                    workflow=workflow,
+                    should_accept_fn=dynamic_filter_fn,
+                )
+
+            if self.critic is not None:
+                with (
+                    stats_tracker.record_timing("critic_values"),
+                    perf_tracer.trace_scope(
+                        "train.compute_values",
+                        category=Category.COMPUTE,
+                        args={"global_step": global_step},
+                    ),
+                ):
+                    values = self.critic.compute_values(batch)
+                    batch["values"] = values
+                    log_gpu_stats("critic values")
+
+            if config.actor.recompute_logprob or config.actor.use_decoupled_loss:
+                with (
+                    stats_tracker.record_timing("recompute_logp"),
+                    perf_tracer.trace_scope(
+                        "train.recompute_logp",
+                        category=Category.COMPUTE,
+                        args={"global_step": global_step},
+                    ),
+                ):
+                    logp = self.actor.compute_logp(batch)
+                    batch["prox_logp"] = logp
+                    log_gpu_stats("recompute logp")
+
+            if self.ref is not None:
+                with (
+                    stats_tracker.record_timing("ref_logp"),
+                    perf_tracer.trace_scope(
+                        "train.ref_logp",
+                        category=Category.COMPUTE,
+                        args={"global_step": global_step},
+                    ),
+                ):
+                    batch["ref_logp"] = self.ref.compute_logp(batch)
+                    log_gpu_stats("ref logp")
+
+            with (
+                stats_tracker.record_timing("compute_advantage"),
+                perf_tracer.trace_scope(
+                    "train.compute_advantage",
+                    category=Category.COMPUTE,
+                    args={"global_step": global_step},
+                ),
+            ):
+                self.actor.compute_advantages(batch)
+                log_gpu_stats("compute advantages")
+
+            with (
+                stats_tracker.record_timing("train_step"),
+                perf_tracer.trace_scope(
+                    "train.ppo_update",
+                    category=Category.COMPUTE,
+                    args={"global_step": global_step},
+                ),
+            ):
+                self.actor.ppo_update(batch)
+                self.actor.step_lr_scheduler()
+                log_gpu_stats("ppo update")
+                self._log_werewolf_rollout_stats(batch)
 
             if self.critic is not None:
                 with (
