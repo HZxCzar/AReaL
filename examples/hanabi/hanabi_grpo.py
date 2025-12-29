@@ -22,7 +22,7 @@ class HanabiGRPOConfig(GRPOConfig):
     misplay_penalty_factor: float = 0.1
     use_question_tokens: bool = False
     env_kwargs: dict | None = None
-
+    teacher_obs_kwargs: dict | None = None
 
 def _parse_server_addrs(addrs: str) -> list[str] | None:
     if not addrs:

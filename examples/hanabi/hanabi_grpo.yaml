@@ -17,6 +17,9 @@ misplay_penalty_factor: 1.0
 use_question_tokens: true
 env_kwargs: 
   scenario: full
+teacher_obs_kwargs:
+  use_global_obs: true
+  use_individual_thoughts: true
 
 cluster:
   n_nodes: 2

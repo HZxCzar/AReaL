@@ -28,6 +28,10 @@ from realhf.impl.environment.hanabi_env import HanabiEnv
 logger = logging.getLogger("Hanabi workflow")
 DEFAULT_HANABI_COLORS = list(hanabi_env.COLORS)
 DEFAULT_HANABI_RANK_COUNTS = dict(hanabi_env.RANK_COUNTS)
+DEFAULT_TEACHER_OBSERVATION_KWARGS = dict(
+    use_individual_thoughts = True,
+    use_global_obs = True,
+)
 
 
 def _parse_rank_counts(raw_counts: dict | None) -> dict[int, int] | None:
@@ -187,6 +191,7 @@ class HanabiWorkflow(RolloutWorkflow):
         sft_reg: float = 0.0,
         misplay_penalty_factor: float = 0.1,
         use_question_tokens: bool = False,
+        teacher_obs_kwargs: dict | None = None
     ):
         self.gconfig = gconfig
         self.tokenizer = tokenizer
@@ -199,6 +204,10 @@ class HanabiWorkflow(RolloutWorkflow):
             raw_env_kwargs.get("colors"), raw_env_kwargs.get("num_colors")
         )
         self.env_kwargs = raw_env_kwargs
+        self.teacher_obs_kwargs = teacher_obs_kwargs or dict()
+        for k, v in DEFAULT_TEACHER_OBSERVATION_KWARGS.items():
+            if k not in self.teacher_obs_kwargs:
+                self.teacher_obs_kwargs[k] = v
         self.misplay_penalty_factor = misplay_penalty_factor
         self.sft_reg = sft_reg
         self.student_api_key = (student_api_key or "").strip()
@@ -631,16 +640,23 @@ class HanabiWorkflow(RolloutWorkflow):
             teacher_answer_tasks = []
             teacher_answer_inputs: list[list[int]] = []
             teacher_prompts: list[str] = []
-            teacher_answer_cfg = self.gconfig.new(n_samples=1, max_new_tokens=2048)
+            teacher_answer_cfg = self.gconfig.new(n_samples=1, max_new_tokens=8192)
             if self.teacher_rollout or self.teacher_api_key:
                 teacher_tokenizer = self.teacher_tokenizer or self.tokenizer
                 for qi, q in enumerate(self_questions):
+                    _teacher_obs = teacher_obs
+                    _players_thoughts = "=== Players' Inner Thoughts ===\n\n" + "\n\n\n".join([f"Inner thought of {p}:\n```\n{summaries[p][-1]}\n```" for p in summaries.keys() if len(summaries[p]) > 0])
+                    if not self.teacher_obs_kwargs["use_global_obs"]:
+                        _teacher_obs = obs
+                        _players_thoughts = ""
+                    elif not self.teacher_obs_kwargs["use_individual_thoughts"]:
+                        _teacher_obs = teacher_obs
+                        _player_thoughts = ""
                     taprompt = (
-                        f"{teacher_obs}\n"
-                        f"Student summary: {prev_summary}\n"
-                        f"Student last thought: {prev_thought or 'None provided.'}\n"
-                        f"Student question: {q}\n"
-                        "Answer concisely using all privileged information, including hidden hands."
+                        f"{_teacher_obs}\n\n"
+                        f"{_players_thoughts}\n\n"
+                        f"# Question to be Answered\nQuestion: {q}\n"
+                        "Answer concisely using all privileged information, including hidden hands and players' inner thoughts, from the perspective of the current active player."
                     )
                     teacher_prompts.append(taprompt)
                     if self.teacher_api_key:
@@ -727,7 +743,7 @@ class HanabiWorkflow(RolloutWorkflow):
                         teacher_tokenizer.decode(
                             r.output_tokens,
                             skip_special_tokens=True
-                        )
+                        ).split("</think>")[-1]
                         for r in teacher_resps
                     ]
                 t_teacher_answer_total += time.perf_counter() - t0
@@ -738,10 +754,11 @@ class HanabiWorkflow(RolloutWorkflow):
                     student_prompt = (
                         agent_question_prompts[qi]
                         if qi < len(agent_question_prompts)
-                        else teacher_prompts[qi]
+                        else "" # teacher_prompts[qi]
                         if qi < len(teacher_prompts)
                         else ""
                     )
+                    assert len(student_prompt) > 0
                     prompt_ids = self.tokenizer.apply_chat_template(
                         [{"role": "user", "content": student_prompt}],
                         tokenize=True,
@@ -882,49 +899,6 @@ class HanabiWorkflow(RolloutWorkflow):
             step_rewards.append(step_reward)
             agent_seq_len = len(full_ids)
 
-            '''
-            if (self.teacher_rollout or self.teacher_api_key) and teacher_answers and self.sft_reg > 0.0:
-                for qi, t_ans in enumerate(teacher_answers):
-                    student_prompt = (
-                        agent_question_prompts[qi]
-                        if qi < len(agent_question_prompts)
-                        else teacher_prompts[qi]
-                        if qi < len(teacher_prompts)
-                        else ""
-                    )
-                    prompt_ids = self.tokenizer.apply_chat_template(
-                        [{"role": "user", "content": student_prompt}],
-                        tokenize=True,
-                        add_generation_prompt=True,
-                        enable_thinking=False,
-                    )
-                    full_ids = self.tokenizer.apply_chat_template(
-                        [
-                            {"role": "user", "content": student_prompt},
-                            {"role": "assistant", "content": t_ans},
-                        ],
-                        tokenize=True,
-                        add_generation_prompt=False,
-                        enable_thinking=False,
-                    )
-                    loss_mask = [0] * len(prompt_ids) + [
-                        1
-                    ] * (len(full_ids) - len(prompt_ids))
-                    t0 = time.perf_counter()
-                    sft_res = {
-                        "input_ids": torch.tensor(full_ids).unsqueeze(0),
-                        "loss_mask": torch.tensor(loss_mask).unsqueeze(0),
-                        "logprobs": torch.zeros(1, len(full_ids)),
-                        "versions": torch.zeros(1, len(full_ids), dtype=torch.long),
-                        "attention_mask": torch.ones(
-                            len(full_ids), dtype=torch.bool
-                        ).unsqueeze(0),
-                        "rewards": torch.zeros(1),
-                        "sft_ppo_mask": torch.tensor([1], dtype=torch.long),
-                    }
-                    results.append(sft_res)
-                    t_pack_tensors_total += time.perf_counter() - t0
-            '''
 
             prompt_strs.append(action_prompt)
             completions_strs.append(completion_str)
@@ -949,7 +923,7 @@ class HanabiWorkflow(RolloutWorkflow):
                     f"Previous summary: {prev_summary}"
                     f"Latest thought: {thought or 'None yet.'}\n"
                     f"Last action: {action_txt or 'Invalid action'}.\n" 
-                    "Provide a summary of the Hanabi game state to guide yourself in the future turns. You may include:\n"
+                    f"Provide a summary of the Hanabi game state for guiding the future turns from the perspective of the current active player {current_player}. You may include:\n"
                     "1. Public state recap (score, tokens, decks, fireworks, discards);\n"
                     "2. Inferred info about your own hand (safe/risky/unknown);\n"
                     "3. Teammate intentions and hint priorities;\n"
