@@ -624,6 +624,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                 [{"role": "user", "content": qgen_prompt}],
                 tokenize=True,
                 add_generation_prompt=True,
+                enable_thinking=False,
             )
             t_tokenize_total += time.perf_counter() - t0
             
@@ -721,6 +722,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                     [{"role": "user", "content": aprompt}],
                     tokenize=True,
                     add_generation_prompt=True,
+                    enable_thinking=False,
                 )
                 t_tokenize_total += time.perf_counter() - t0
                 agent_answer_inputs.append(a_ids)
@@ -790,6 +792,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                         [{"role": "user", "content": taprompt}],
                         tokenize=True,
                         add_generation_prompt=True,
+                        enable_thinking=False,
                     )
                     t_tokenize_total += time.perf_counter() - t0
 
@@ -906,6 +909,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                 [{"role": "user", "content": action_prompt}],
                 tokenize=True,
                 add_generation_prompt=True,
+                enable_thinking=True
             )
             t_action_build_total += time.perf_counter() - t0
             t_tokenize_total += 0.0  # (already included in build section)
@@ -1024,6 +1028,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                         [{"role": "user", "content": aprompt}],
                         tokenize=True,
                         add_generation_prompt=True,
+                        enable_thining=False,
                     )
                     # Build synthetic response from student prompt + teacher answer
                     resp = self._build_api_response(prompt_ids, t_ans, self.tokenizer)
@@ -1049,6 +1054,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                     [{"role": "user", "content": summary_prompt}],
                     tokenize=True,
                     add_generation_prompt=True,
+                    enable_thinking=False,
                 )
                 summary_req = ModelRequest(
                     rid=f"{rid}-s-{turn}",
