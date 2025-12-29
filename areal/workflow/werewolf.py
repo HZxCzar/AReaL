@@ -893,7 +893,7 @@ class WerewolfWorkflow(RolloutWorkflow):
             else:
                 action_prompt = (
                     f"{obs}\n\n"
-                    "You are playing as the active player. YYou must propose one concrete action for this Werewolf turn.\n\n"
+                    "You are playing as the active player. You must propose one concrete action for this Werewolf turn.\n\n"
                     "Your self-questions and answers:\n"
                     f"{qa_block}\n\n"
                     # "Required output format:\n"
