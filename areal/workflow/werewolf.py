@@ -25,6 +25,11 @@ from realhf.impl.environment.werewolf_env import WerewolfEnv
 
 logger = logging.getLogger("Werewolf workflow")
 
+DEFAULT_TEACHER_OBSERVATION_KWARGS = dict(
+    use_individual_thoughts=True,
+    use_global_obs=True,
+)
+
 
 def _sanitize_for_json(obj):
     if isinstance(obj, (str, int, float, bool)) or obj is None:
@@ -129,7 +134,7 @@ class WerewolfWorkflow(RolloutWorkflow):
     these questions to provide data.
     """
     def __init__(
-        self, 
+        self,
         gconfig: GenerationHyperparameters,
         tokenizer: PreTrainedTokenizerFast,
         max_turns: int = 70,
@@ -146,6 +151,7 @@ class WerewolfWorkflow(RolloutWorkflow):
         teacher_api_key: str | None = None,
         teacher_api_model: str | None = None,
         questions: list[str] | None = None,  # kept for backward-compat but unused now
+        teacher_obs_kwargs: dict | None = None,
     ):
         self.gconfig = gconfig
         self.tokenizer = tokenizer
@@ -153,6 +159,10 @@ class WerewolfWorkflow(RolloutWorkflow):
         self.turn_discount = turn_discount
         self.dump_dir = dump_dir
         self.env_kwargs = env_kwargs or {}
+        self.teacher_obs_kwargs = teacher_obs_kwargs or dict()
+        for k, v in DEFAULT_TEACHER_OBSERVATION_KWARGS.items():
+            if k not in self.teacher_obs_kwargs:
+                self.teacher_obs_kwargs[k] = v
         self.role = role
         self.opp_rollout = opp_rollout
         self.opp_tokenizer = opp_tokenizer
@@ -483,6 +493,41 @@ class WerewolfWorkflow(RolloutWorkflow):
         )
         return prompt
 
+    
+    def _build_agent_answer_prompt(
+        self,
+        obs: str,
+        prev_summary: str,
+        question: str,
+    ) -> str:
+        """Build prompt for agent to answer their own investigative question.
+
+        Args:
+            obs: Current observation
+            prev_summary: Previous summary for context
+            question: The question to answer
+
+        Returns:
+            Formatted prompt string for agent answer generation
+        """
+        prompt = (
+            "You are answering your own investigative question to guide your decision-making in Werewolf. You are now playing as the current active player.\n\n"
+            "Context:\n"
+            f"{obs}\n"
+            f"Summary at last decision-making time of the active player:\n```\n{prev_summary}\n```\n\n"
+            "Question:\n"
+            f"{question}\n\n"
+            "Instructions:\n"
+            "- Provide a thoughtful, evidence-based answer grounded in the current game state\n"
+            "- Use theory-of-mind reasoning: consider what other players know, believe, and might be trying to accomplish\n"
+            "- Make inferences from observable behavior, voting patterns, statements, and claims\n"
+            "- Be concrete and specific, citing evidence when possible\n"
+            "- Keep your answer concise and actionable (within 5 sentences)\n\n"
+            "Provide your answer:"
+        )
+        return prompt
+
+
     @staticmethod
     def _response_to_tensordict(
         resp: ModelResponse, *, sft_ppo_mask: int = 0, agent_idx: int = -1
@@ -665,17 +710,10 @@ class WerewolfWorkflow(RolloutWorkflow):
             agent_answer_prompts: list[str] = []  # Store prompts for SFT data generation
             agent_answer_cfg = self.gconfig.new(n_samples=1, max_new_tokens=2048)
             for qi, q in enumerate(self_questions):
-                aprompt = (
-                    "You are answering your own investigative question for this Werewolf turn.\n\n"
-                    "Context:\n"
-                    f"{obs}\n"
-                    f"Previous summary: {prev_summary}\n\n"
-                    "Question:\n"
-                    f"{q}\n\n"
-                    "Instructions:\n"
-                    "- Give a concise, concrete answer grounded in the current game state.\n"
-                    "- Avoid role-playing fluff; focus on facts and deductions.\n"
-                    "- Keep the answer concise, within 5 sentences."
+                aprompt = self._build_agent_answer_prompt(
+                    obs=obs,
+                    prev_summary=prev_summary,
+                    question=q,
                 )
                 agent_answer_prompts.append(aprompt)  # Store for later use in SFT data
                 t0 = time.perf_counter()
@@ -718,6 +756,7 @@ class WerewolfWorkflow(RolloutWorkflow):
 
             # Teacher answers using privileged observation from environment
             teacher_answers: list[str] = []
+            _teacher_obs_used = obs  # Default to student observation
             if (not use_opp_generation) and (self.teacher_rollout or self.teacher_api_key):
                 teacher_answer_tasks = []
                 teacher_answer_cfg = self.gconfig.new(n_samples=1, max_new_tokens=2048)
@@ -725,18 +764,21 @@ class WerewolfWorkflow(RolloutWorkflow):
 
                 # Build agent thoughts section for privileged information
                 agent_thoughts_info = ""
-                if agent_thoughts:
+                if agent_thoughts and self.teacher_obs_kwargs["use_individual_thoughts"]:
                     agent_thoughts_info = "\n\n=== Players' Inner Thoughts (Privileged) ===\n"
                     for agent_key, thought in agent_thoughts.items():
                         if thought:  # Only include non-empty thoughts
                             agent_thoughts_info += f"{agent_key}: {thought}\n"
 
+                # Determine which observation to use based on configuration
+                _teacher_obs = teacher_obs if self.teacher_obs_kwargs["use_global_obs"] else obs
+                _teacher_obs_used = _teacher_obs  # Track what was actually used for logging
+
                 for qi, q in enumerate(self_questions):
                     # Use teacher observation from environment which includes all privileged information
                     taprompt = (
-                        f"{teacher_obs}"
+                        f"{_teacher_obs}"
                         f"{agent_thoughts_info}\n\n"
-                        f"Previous summary (student view): {prev_summary}\n\n"
                         f"Question to answer: {q}\n\n"
                         "Instructions:\n"
                         "- Use the privileged information above (including player roles, memories, and inner thoughts) to provide a helpful, concrete answer, from the perspective of the current active player.\n"
@@ -839,8 +881,8 @@ class WerewolfWorkflow(RolloutWorkflow):
             if self.use_summary:
                 action_prompt = (
                     f"{obs}\n"
-                    "You must propose one concrete action for this Werewolf turn.\n\n"
-                    f"Prior summary: {prev_summary}\n\n"
+                    "You are playing as the active player. You must propose one concrete action for this Werewolf turn.\n\n"
+                    f"Prior summary of the Game State (from the perspective of the active player): \n```\n{prev_summary}\n```\n\n"
                     "Your self-questions and answers:\n"
                     f"{qa_block}\n\n"
                     # "Required output format:\n"
@@ -851,7 +893,7 @@ class WerewolfWorkflow(RolloutWorkflow):
             else:
                 action_prompt = (
                     f"{obs}\n\n"
-                    "You must propose one concrete action for this Werewolf turn.\n\n"
+                    "You are playing as the active player. YYou must propose one concrete action for this Werewolf turn.\n\n"
                     "Your self-questions and answers:\n"
                     f"{qa_block}\n\n"
                     # "Required output format:\n"
@@ -999,9 +1041,9 @@ class WerewolfWorkflow(RolloutWorkflow):
                 m = re.findall(r"<answer>(.*?)</answer>", completion_str, re.DOTALL)
                 action_txt = m[-1].strip().lower() if m else ""
                 summary_prompt = (
-                    f"{obs} Your last action: {action_txt}. "
-                    f"You summarized the previous game states: {prev_summary}. Provide a brief summary of your thoughts and current game state, "
-                    "to guide your future planning and next action. Be concise and brief for this answer."
+                    f"{obs}\n\nYou are playing as the active player. You selected action: {action_txt}. "
+                    f"You summarized the previous game states: \n```\n{prev_summary}\n```\n\nProvide a brief summary of your thoughts and current game state, "
+                    "to guide your future planning and next action. Be concise and brief."
                 )
                 summary_ids = self.tokenizer.apply_chat_template(
                     [{"role": "user", "content": summary_prompt}],
@@ -1076,7 +1118,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                     "QAs": [
                         {
                             "question": self_questions[i],
-                            "privileged_info": teacher_obs,  # Use teacher observation from environment
+                            "privileged_info": _teacher_obs_used,  # Use the observation that was actually used
                             "answer": teacher_answers[i] if i < len(teacher_answers) else "",
                         }
                         for i in range(len(self_questions))
