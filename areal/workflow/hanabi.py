@@ -651,7 +651,7 @@ class HanabiWorkflow(RolloutWorkflow):
                         _players_thoughts = ""
                     elif not self.teacher_obs_kwargs["use_individual_thoughts"]:
                         _teacher_obs = teacher_obs
-                        _player_thoughts = ""
+                        _players_thoughts = ""
                     taprompt = (
                         f"{_teacher_obs}\n\n"
                         f"{_players_thoughts}\n\n"

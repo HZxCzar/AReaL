@@ -396,9 +396,122 @@ class WerewolfWorkflow(RolloutWorkflow):
             tokenizer=tokenizer,
         )
 
+    def _build_question_generation_prompt(
+        self,
+        obs: str,
+        prev_summary: str,
+        current_role: str,
+        phase: str,
+    ) -> str:
+        """Build phase-aware and role-specific question generation prompt.
+
+        Args:
+            obs: Current observation
+            prev_summary: Previous summary for context
+            current_role: Agent's current role (werewolf, villager, witch, etc.)
+            phase: Current game phase (night, discussion, day, hunter)
+
+        Returns:
+            Formatted prompt string for question generation
+        """
+        qa_target_role = "a werewolf" if current_role != "werewolf" else "biggest living threat"
+
+        # Build phase-aware and role-specific examples
+        example_questions = []
+
+        # Role-specific strategic questions
+        if current_role == "witch":
+            if phase == "night":
+                example_questions.append("Should I use my heal or poison ability this turn, and on which player?")
+            else:
+                example_questions.append("Based on recent events, who is most likely a werewolf?")
+        elif current_role == "foreseer":
+            if phase == "night":
+                example_questions.append("Which player should I check tonight to maximize information gain?")
+            else:
+                example_questions.append("How should I strategically reveal or use my investigation results?")
+        elif current_role == "hunter":
+            example_questions.append("If I die, which player should I shoot and why?")
+        elif current_role == "werewolf":
+            if phase == "night":
+                example_questions.append("Which non-werewolf player should we target to maximize our advantage?")
+            else:
+                example_questions.append("What narrative should I push to deflect suspicion from werewolves?")
+        else:  # villager
+            example_questions.append(f"Which player is {qa_target_role}, and what evidence supports this?")
+
+        # Phase-specific questions
+        if phase == "discussion":
+            example_questions.append("Whose statements during discussion seem inconsistent or suspicious?")
+            example_questions.append("What is each player's likely role based on their behavior and claims?")
+        elif phase == "day":
+            example_questions.append("Who should be voted out to maximize our team's winning chances?")
+            example_questions.append("Which players are most likely aligned with werewolves based on voting patterns?")
+        elif phase == "night":
+            if current_role == "werewolf":
+                example_questions.append("Which player poses the biggest threat to werewolves and should be eliminated?")
+            else:
+                example_questions.append("What actions should I take tonight to best help my team?")
+
+        # Ensure we have at least 3 examples, add generic ones if needed
+        if len(example_questions) < 3:
+            example_questions.append("What are the key threats or suspicious behaviors I should focus on?")
+        if len(example_questions) < 3:
+            example_questions.append("Which players are confirmed dead and what roles did they have?")
+
+        # Take first 3 examples
+        example_questions = example_questions[:3]
+        examples_text = "\n".join([f"Q{i+1}: {q}" for i, q in enumerate(example_questions)])
+
+        prompt = (
+            "You are playing Werewolf. Generate investigative questions for yourself.\n\n"
+            "Context:\n"
+            f"{obs}\n"
+            f"Previous summary (keep in mind, do not rewrite): {prev_summary}\n\n"
+            "Task:\n"
+            "- Produce exactly three investigative questions that help you make better decisions.\n"
+            "- Questions should probe player alignment, deception, threats, and strategic options.\n"
+            "- Questions can involve inference and theory-of-mind reasoning about what others know or believe.\n"
+            "- Focus on situationally relevant questions given your role and the current game phase.\n"
+            "- Do NOT make decisions or statements—only ask questions.\n\n"
+            "Good examples for your situation:\n"
+            f"{examples_text}\n\n"
+            "Output format (exactly):\n"
+            "Q1: ...\n"
+            "Q2: ...\n"
+            "Q3: ...\n"
+        )
+        return prompt
+
+    @staticmethod
+    def _response_to_tensordict(
+        resp: ModelResponse, *, sft_ppo_mask: int = 0, agent_idx: int = -1
+    ) -> dict[str, torch.Tensor]:
+        full_ids = resp.input_tokens + resp.output_tokens
+        return {
+            "input_ids": torch.tensor(full_ids, dtype=torch.long).unsqueeze(0),
+            "logprobs": torch.tensor(
+                [0.0] * resp.input_len + resp.output_logprobs,
+                dtype=torch.float32,
+            ).unsqueeze(0),
+            "loss_mask": torch.tensor(
+                [0] * resp.input_len + [1] * resp.output_len,
+                dtype=torch.long,
+            ).unsqueeze(0),
+            "versions": torch.tensor(
+                [-1] * resp.input_len + resp.output_versions,
+                dtype=torch.long,
+            ).unsqueeze(0),
+            "rewards": torch.zeros(1, dtype=torch.float32),
+            "attention_mask": torch.ones(len(full_ids), dtype=torch.bool).unsqueeze(0),
+            "sft_ppo_mask": torch.tensor([sft_ppo_mask], dtype=torch.long),
+            "agent_idx": torch.tensor([agent_idx], dtype=torch.long),
+        }
+
     async def _run_one_episode(self, engine: InferenceEngine, data, rid):
         env = WerewolfEnv(**self.env_kwargs)
-        obs, guide, _ = await env.sreset()
+        obs, guide, info = await env.sreset()
+        teacher_obs = info.get("teacher_observation", obs)
 
         results = []  # Final return tensor
         prompt_strs = []  # All prompts
@@ -413,6 +526,9 @@ class WerewolfWorkflow(RolloutWorkflow):
         qa_logs = []
         teacher_logs = []
         step_logs: list[dict] = []
+        agent_result_indices: list[int] = []  # Track which results correspond to agent actions
+        step_rewards: list[list[float]] = []  # Track rewards for each step: [villager_reward, werewolf_reward]
+        agent_roles: list[str] = []  # Track role of agent for each turn
         episode_info: dict = {
             "episode_id": rid,
             "format_reward_scale": None,
@@ -451,24 +567,11 @@ class WerewolfWorkflow(RolloutWorkflow):
             prev_summary = summaries[current_agent][-1] if summaries[current_agent] else "None yet."
 
             # ========== 1) Agent self-generates 3 questions ==========
-            qa_target_role = "a werewolf" if current_role != "werewolf" else "biggest living threat"
-            qgen_prompt = (
-                "You are playing Werewolf. Generate investigative questions for yourself.\n\n"
-                "Context:\n"
-                f"{obs}\n"
-                f"Previous summary (keep in mind, do not rewrite): {prev_summary}\n\n"
-                "Task:\n"
-                "- Produce exactly three short, factual questions you can answer from CURRENT public info.\n"
-                "- Focus on information that clarifies alignment, threats, and best next action.\n"
-                "- Do NOT make decisions or statements—only ask questions.\n\n"
-                "Good examples:\n"
-                f"Q1: Which player is the {qa_target_role}, and what public evidence supports this?\n"
-                "Q2: Who should be voted out next based on visible behavior, and why?\n"
-                "Q3: Which players are dead, and what roles are confirmed for them?\n\n"
-                "Output format (exactly):\n"
-                "Q1: ...\n"
-                "Q2: ...\n"
-                "Q3: ...\n"
+            qgen_prompt = self._build_question_generation_prompt(
+                obs=obs,
+                prev_summary=prev_summary,
+                current_role=current_role,
+                phase=env.phase,
             )
 
             t0 = time.perf_counter()
@@ -480,6 +583,7 @@ class WerewolfWorkflow(RolloutWorkflow):
             t_tokenize_total += time.perf_counter() - t0
             
             qgen_cfg = self.gconfig.new(n_samples=1, max_new_tokens=4096)
+            qgen_resp: ModelResponse | None = None
             if use_opp_generation and self.opp_api_key:
                 t0 = time.perf_counter()
                 qgen_text = await self._api_chat_completion(
@@ -519,17 +623,46 @@ class WerewolfWorkflow(RolloutWorkflow):
                 qgen_text = decode_tok.decode(qgen_resp.output_tokens, skip_special_tokens=True)
                 t_qgen_decode_total += time.perf_counter() - t0
 
+            # Add question generation to training data (only for student agent, not opponent)
+            if not use_opp_generation and qgen_resp is not None:
+                t0 = time.perf_counter()
+                player_idx = env.roles.index(current_agent) if current_agent in env.roles else -1
+                results.append(self._response_to_tensordict(qgen_resp, sft_ppo_mask=0, agent_idx=player_idx))
+                t_pack_tensors_total += time.perf_counter() - t0
+
             self_questions = _extract_three_questions(qgen_text)
             if not self_questions:
-                # Safety fallback
-                self_questions = [
-                    f"Which player do you think is the {qa_target_role} and why?",
-                    "What action should I take now to maximize team success?",
-                    f"Are there dead players yet? If so, what roles are they?",
-                ]
+                # Safety fallback - use role-aware questions
+                qa_target_role = "a werewolf" if current_role != "werewolf" else "biggest living threat"
+                if current_role == "werewolf":
+                    self_questions = [
+                        "Which non-werewolf player poses the biggest threat to us?",
+                        "What narrative should I push to deflect suspicion from werewolves?",
+                        "Which players are most likely to suspect werewolves?",
+                    ]
+                elif current_role == "witch":
+                    self_questions = [
+                        "Should I use my heal or poison ability now, and on whom?",
+                        "Based on recent events, who is most likely a werewolf?",
+                        "Which players have exhibited suspicious behavior?",
+                    ]
+                elif current_role == "foreseer":
+                    self_questions = [
+                        "Which player should I investigate to gain the most information?",
+                        "How should I use my investigation results strategically?",
+                        f"Which player is {qa_target_role}, and what evidence supports this?",
+                    ]
+                else:  # villager or hunter
+                    self_questions = [
+                        f"Which player do you think is {qa_target_role} and why?",
+                        "What action should I take now to maximize team success?",
+                        "Which players are confirmed dead and what roles did they have?",
+                    ]
 
             # ========== 2) Agent answers the 3 questions ==========
             agent_answer_tasks = []
+            agent_answer_inputs: list[list[int]] = []  # Store input_ids for later
+            agent_answer_prompts: list[str] = []  # Store prompts for SFT data generation
             agent_answer_cfg = self.gconfig.new(n_samples=1, max_new_tokens=2048)
             for qi, q in enumerate(self_questions):
                 aprompt = (
@@ -544,6 +677,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                     "- Avoid role-playing fluff; focus on facts and deductions.\n"
                     "- Keep the answer concise, within 5 sentences."
                 )
+                agent_answer_prompts.append(aprompt)  # Store for later use in SFT data
                 t0 = time.perf_counter()
                 a_ids = self.tokenizer.apply_chat_template(
                     [{"role": "user", "content": aprompt}],
@@ -551,6 +685,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                     add_generation_prompt=True,
                 )
                 t_tokenize_total += time.perf_counter() - t0
+                agent_answer_inputs.append(a_ids)
 
                 if use_opp_generation and self.opp_api_key:
                     agent_answer_tasks.append(
@@ -581,36 +716,32 @@ class WerewolfWorkflow(RolloutWorkflow):
                     )
                     agent_answer_tasks.append(engine.agenerate(a_req))
 
-            # Teacher also answers for data (with priviledged data)
-            priviledged_info = ""
-            alive_agents = env._alive_list()
-            alive_roles = env.role_type
-            for agt in alive_agents:
-                _role = alive_roles[agt]
-                if agt == current_agent:
-                    continue
-                last_thought = agent_thoughts.get(f"{agt} ({_role})", "")
-                if last_thought != "":
-                    if priviledged_info == "":
-                        priviledged_info = "As a priviledged player, you know for sure that: "
-                    priviledged_info += f" {agt} is a {_role}, he thought in the last round: {last_thought[:75]}"
-                else:
-                    priviledged_info += f" {agt} is a {_role}."
-            if priviledged_info != "":
-                priviledged_info += "You may use the information above to make deductions."
-
+            # Teacher answers using privileged observation from environment
             teacher_answers: list[str] = []
             if (not use_opp_generation) and (self.teacher_rollout or self.teacher_api_key):
                 teacher_answer_tasks = []
                 teacher_answer_cfg = self.gconfig.new(n_samples=1, max_new_tokens=2048)
                 teacher_tok = self.teacher_tokenizer or self.tokenizer
+
+                # Build agent thoughts section for privileged information
+                agent_thoughts_info = ""
+                if agent_thoughts:
+                    agent_thoughts_info = "\n\n=== Players' Inner Thoughts (Privileged) ===\n"
+                    for agent_key, thought in agent_thoughts.items():
+                        if thought:  # Only include non-empty thoughts
+                            agent_thoughts_info += f"{agent_key}: {thought}\n"
+
                 for qi, q in enumerate(self_questions):
+                    # Use teacher observation from environment which includes all privileged information
                     taprompt = (
-                        f"{obs}\n"
-                        f"you summarized the previous game states: {prev_summary}\n"
-                        f"{priviledged_info}\n\n"
-                        f"You asked yourself this question: {q}\n"
-                        "Answer the question concisely and concretely for this turn."
+                        f"{teacher_obs}"
+                        f"{agent_thoughts_info}\n\n"
+                        f"Previous summary (student view): {prev_summary}\n\n"
+                        f"Question to answer: {q}\n\n"
+                        "Instructions:\n"
+                        "- Use the privileged information above (including player roles, memories, and inner thoughts) to provide a helpful, concrete answer, from the perspective of the current active player.\n"
+                        "- Be concise and specific, grounded in the game state.\n"
+                        "- Keep to within 5 sentences."
                     )
                     t0 = time.perf_counter()
                     ta_ids = teacher_tok.apply_chat_template(
@@ -666,6 +797,8 @@ class WerewolfWorkflow(RolloutWorkflow):
                         t_teacher_answer_total += time.perf_counter() - t0
 
             # Only gather the agent's answer now
+            agent_answers: list[str]
+            agent_answer_resps: list[ModelResponse] = []
             if use_opp_generation and self.opp_api_key:
                 t0 = time.perf_counter()
                 agent_answers = await asyncio.gather(*agent_answer_tasks)
@@ -683,7 +816,18 @@ class WerewolfWorkflow(RolloutWorkflow):
                         self.tokenizer.decode(r.output_tokens, skip_special_tokens=True)
                         for r in agent_ans_resps
                     ]
+                agent_answer_resps = agent_ans_resps
                 t_agent_answer_total += time.perf_counter() - t0
+
+            # Add agent answers to training data (only for student agent, not opponent)
+            if not use_opp_generation and agent_answer_resps:
+                t0 = time.perf_counter()
+                player_idx = env.roles.index(current_agent) if current_agent in env.roles else -1
+                for a_resp in agent_answer_resps:
+                    results.append(
+                        self._response_to_tensordict(a_resp, sft_ppo_mask=0, agent_idx=player_idx)
+                    )
+                t_pack_tensors_total += time.perf_counter() - t0
 
             # ========== 3) Use agent's Q&A to guide action generation ==========
             qa_block = "\n".join([
@@ -780,10 +924,11 @@ class WerewolfWorkflow(RolloutWorkflow):
 
             # Get next env state
             t0 = time.perf_counter()
-            next_obs, next_guide, reward_list, done, _, _ = await env.step(
+            next_obs, next_guide, reward_list, done, _, info = await env.step(
                 (data.get("query_id", ""), [completion_str])
             )
             t_env_step_total += time.perf_counter() - t0
+            next_teacher_obs = info.get("teacher_observation", next_obs)
 
             format_reward_scale = (env.answer_format_record[0] / env.answer_format_record[1])
             reward_list = [rew * format_reward_scale for rew in reward_list]
@@ -799,6 +944,7 @@ class WerewolfWorkflow(RolloutWorkflow):
 
             # ========== 4) Build PPO training data ==========
             t0 = time.perf_counter()
+            player_idx = env.roles.index(current_agent) if current_agent in env.roles else -1
             res = {
                 "input_ids": torch.tensor(seq).unsqueeze(0),
                 "loss_mask": torch.tensor(loss_mask).unsqueeze(0),
@@ -807,8 +953,11 @@ class WerewolfWorkflow(RolloutWorkflow):
                 "attention_mask": torch.ones(len(seq), dtype=torch.bool).unsqueeze(0),
                 "rewards": torch.tensor([float(reward)]),
                 "sft_ppo_mask": torch.tensor([0], dtype=torch.long),
+                "agent_idx": torch.tensor([player_idx], dtype=torch.long),
             }
             results.append(res)
+            step_rewards.append(reward_list)  # Track both villager and werewolf rewards
+            agent_roles.append(current_role)  # Track agent role for this turn
             t_pack_tensors_total += time.perf_counter() - t0
 
             prompt_strs.append(prompt_str)
@@ -823,48 +972,23 @@ class WerewolfWorkflow(RolloutWorkflow):
             episode_info["were_reward_total"] = were_total
 
             # ========== 5) Build SFT training data ==========
-            if (self.teacher_rollout or self.teacher_api_key) and len(teacher_answers) > 0:
-                for qi, (q, t_ans) in enumerate(zip(self_questions, teacher_answers)):
-                    taprompt = (
-                        f"{obs}\n"
-                        "You are a priviledged player, please answer the given questions based on priviledged game information.\n\n"
-                        f"Previous summary (student view): {prev_summary}\n"
-                        f"Priviledged information: {priviledged_info}"
-                        "Question to answer:\n"
-                        f"{q}\n\n"
-                        "Instructions:\n"
-                        "- Provide a concise, concrete answer grounded in the observation and priviledged info.\n"
-                        "- Avoid long role-play; be direct and specific.\n"
-                        "- Keep to within 5 sentences."
-                    )
+            # Use student prompts (without privileged info) as input, teacher answers as target
+            if (self.teacher_rollout or self.teacher_api_key) and len(teacher_answers) > 0 and not use_opp_generation:
+                t0 = time.perf_counter()
+                player_idx = env.roles.index(current_agent) if current_agent in env.roles else -1
+                for qi, (aprompt, t_ans) in enumerate(zip(agent_answer_prompts, teacher_answers)):
+                    # Reuse the student prompt from step 2
                     prompt_ids = self.tokenizer.apply_chat_template(
-                        [{"role": "user", "content": taprompt}],
+                        [{"role": "user", "content": aprompt}],
                         tokenize=True,
                         add_generation_prompt=True,
                     )
-                    full_ids = self.tokenizer.apply_chat_template(
-                        [
-                            {"role": "user", "content": taprompt},
-                            {"role": "assistant", "content": t_ans},
-                        ],
-                        tokenize=True,
-                        add_generation_prompt=False,
+                    # Build synthetic response from student prompt + teacher answer
+                    resp = self._build_api_response(prompt_ids, t_ans, self.tokenizer)
+                    results.append(
+                        self._response_to_tensordict(resp, sft_ppo_mask=1, agent_idx=player_idx)
                     )
-                    loss_mask = [0] * len(prompt_ids) + [1] * (len(full_ids) - len(prompt_ids))
-                    t0 = time.perf_counter()
-                    sft_res = {
-                        "input_ids": torch.tensor(full_ids).unsqueeze(0),
-                        "loss_mask": torch.tensor(loss_mask).unsqueeze(0),
-                        "logprobs": torch.zeros(1, len(full_ids)),
-                        "versions": torch.zeros(1, len(full_ids), dtype=torch.long),
-                        "attention_mask": torch.ones(
-                            len(full_ids), dtype=torch.bool
-                        ).unsqueeze(0),
-                        "rewards": torch.zeros(1),
-                        "sft_ppo_mask": torch.tensor([1], dtype=torch.long),
-                    }
-                    results.append(sft_res)
-                    t_pack_tensors_total += time.perf_counter() - t0
+                t_pack_tensors_total += time.perf_counter() - t0
 
             # ========== 6) Agent summarization, log agent thinking and Q&As ==========
             t = re.findall(r"<think>(.*?)</think>", completion_str, re.DOTALL)
@@ -917,6 +1041,16 @@ class WerewolfWorkflow(RolloutWorkflow):
                     agent_summary = self.tokenizer.decode(summary_resps[0].output_tokens, skip_special_tokens=True)
                 summaries[current_agent].append(agent_summary)
 
+                # Add summary to training data (only for student agent, not opponent)
+                if not use_opp_generation:
+                    t0 = time.perf_counter()
+                    player_idx = env.roles.index(current_agent) if current_agent in env.roles else -1
+                    summary_resp = summary_resps[0]
+                    results.append(
+                        self._response_to_tensordict(summary_resp, sft_ppo_mask=0, agent_idx=player_idx)
+                    )
+                    t_pack_tensors_total += time.perf_counter() - t0
+
                 qa_logs.append(
                     {
                         "agent": current_agent,
@@ -942,7 +1076,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                     "QAs": [
                         {
                             "question": self_questions[i],
-                            "privileged_info": priviledged_info,
+                            "privileged_info": teacher_obs,  # Use teacher observation from environment
                             "answer": teacher_answers[i] if i < len(teacher_answers) else "",
                         }
                         for i in range(len(self_questions))
@@ -950,6 +1084,9 @@ class WerewolfWorkflow(RolloutWorkflow):
                 }
                 teacher_logs.append(teacher_entry)
                 teacher_summary = teacher_entry
+
+            # Track the final result index after all training data for this turn is added
+            agent_result_indices.append(len(results) - 1)
 
             step_logs.append(
                 {
@@ -984,6 +1121,49 @@ class WerewolfWorkflow(RolloutWorkflow):
                 break
             obs = next_obs
             guide = next_guide
+            teacher_obs = next_teacher_obs
+
+        # Calculate discounted returns separately for villagers and werewolves
+        running_return_villager = 0.0
+        running_return_werewolf = 0.0
+        returns_villager = []
+        returns_werewolf = []
+
+        # Calculate returns backward through time
+        for reward_pair in reversed(step_rewards):
+            running_return_villager += reward_pair[0]  # Villager reward
+            running_return_werewolf += reward_pair[1]  # Werewolf reward
+            returns_villager.append(running_return_villager)
+            returns_werewolf.append(running_return_werewolf)
+
+        returns_villager.reverse()
+        returns_werewolf.reverse()
+
+        # Assign returns to training examples based on agent role
+        prev_idx = 0
+        for turn_idx, (idx, role) in enumerate(zip(agent_result_indices, agent_roles)):
+            # Choose return based on agent's role
+            if role == "werewolf":
+                ret = returns_werewolf[turn_idx]
+            else:
+                ret = returns_villager[turn_idx]
+
+            # Assign return to all training examples from this turn
+            for i in range(prev_idx, idx + 1):
+                results[i]["rewards"] = torch.tensor([ret], dtype=torch.float32)
+            prev_idx = idx + 1
+
+        # Add discounted return to step logs (both returns for analysis)
+        for step_log, ret_vill, ret_were, role in zip(step_logs, returns_villager, returns_werewolf, agent_roles):
+            step_log["discounted_return_villager"] = ret_vill
+            step_log["discounted_return_werewolf"] = ret_were
+            step_log["discounted_return"] = ret_were if role == "werewolf" else ret_vill
+
+        # Update rewards and total_reward for logging
+        final_total_reward = running_return_villager + running_return_werewolf
+        rewards = [ret_were if role == "werewolf" else ret_vill
+                   for ret_vill, ret_were, role in zip(returns_villager, returns_werewolf, agent_roles)]
+        total_reward = final_total_reward
 
         # Stats logging
         stats = {}

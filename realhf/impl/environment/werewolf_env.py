@@ -252,7 +252,8 @@ class WerewolfEnv(EnvironmentService):
         )
         setup_info = ", ".join([f"{p}: {self.role_type[p]}" for p in self.roles])
         self.trajectory.append(f"Initial setup -> {setup_info}")
-        return obs, guide, {}
+        teacher_obs = self._build_teacher_observation(self.agent_player)
+        return obs, guide, {"teacher_observation": teacher_obs}
 
     def _format_reward(self, text: str) -> None:
         has_think = "<think>" in text and "</think>" in text
@@ -342,6 +343,57 @@ class WerewolfEnv(EnvironmentService):
 
     def _alive_list(self) -> List[str]:
         return [r for r in self.roles if self.alive[r]]
+
+    def _build_teacher_observation(self, player: str) -> str:
+        """Build privileged observation with global information for teacher model.
+
+        This includes:
+        - All player roles (privileged information)
+        - Current game state
+        - Phase information
+        - Player memories (observable history events for each player)
+        """
+        alive_list = self._alive_list()
+        role_info = ", ".join([f"{p}: {self.role_type[p]}" for p in self.roles])
+
+        teacher_info = [
+            "# Rules\n",
+            self.rules,
+            "\n# Privileged Information\n",
+            "You are a privileged Werewolf observer with perfect information about all player roles.",
+            "\n=== Turn Context ===",
+            f"Current active player: {player} ({self.role_type.get(player, 'unknown')})",
+            f"Phase: {self.phase}",
+            f"Round: {self.round}",
+            f"Alive players: {', '.join(alive_list)}",
+            "\n=== All Player Roles (Privileged) ===",
+            f"{role_info}",
+        ]
+
+        # Add player memories (observable history events)
+        if self.player_memory:
+            teacher_info.append("\n=== Player Memories (Observable History Events) ===")
+            for p in self.roles:
+                if self.player_memory.get(p):
+                    memories = "; ".join(self.player_memory[p])
+                    teacher_info.append(f"{p} ({self.role_type[p]}): {memories}")
+
+        # Add current phase info
+        if self.phase_info:
+            teacher_info.append(f"\n=== Recent Phase Information ===\n{self.phase_info}")
+
+        # Add witch ability status
+        if any(self.role_type[p] == "witch" for p in self.roles):
+            teacher_info.append(f"\n=== Witch Status ===")
+            teacher_info.append(f"Heal available: {self.witch_heal}, Poison available: {self.witch_poison}")
+
+        # Add current phase actions
+        if self.phase_actions:
+            teacher_info.append(f"\n=== Current Phase Actions ===")
+            for p, action in self.phase_actions.items():
+                teacher_info.append(f"{p}: {action}")
+
+        return "\n".join(teacher_info)
 
     def _phase_players(self, phase: str) -> List[str]:
         """Return the list of players who act in the given phase in turn order."""
@@ -549,8 +601,11 @@ class WerewolfEnv(EnvironmentService):
         if memory:
             obs += f" You remember: {memory}"
         obs += f" {info}"
-        
-        return obs, guide, reward, done, False, {}
+
+        teacher_obs = self._build_teacher_observation(self.agent_player) if not done else obs
+        info_dict = {"teacher_observation": teacher_obs}
+
+        return obs, guide, reward, done, False, info_dict
 
     def get_trajectory(self) -> List[str]:
         """Returns a copy of the trajectory history."""
