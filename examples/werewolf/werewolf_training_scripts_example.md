@@ -14,7 +14,10 @@ TRIAL_NAME=werewolf-rl-trial
 EXPERIMENT_NAME=werewolf-grpo
 
 # Werewolf game configuration
+SCENARIO=full  # "full" (2v3w1w1f1h) or "easy" (3v1w) or custom
 ROLE=villager  # or "werewolf" or "both"
+
+# If using custom scenario (scenario=null), specify role counts manually:
 NUM_VILLAGERS=2
 NUM_WEREWOLVES=3
 NUM_WITCHES=1
@@ -56,6 +59,26 @@ python -m areal.launcher.slurm examples/werewolf/werewolf_grpo.py \
     trial_name=${TRIAL_NAME} \
     actor.path=${SFT_MODEL_PATH} \
     teacher_server_addrs=${TEACHER_SERVER_ADDRS} \
+    scenario=${SCENARIO} \
+    role=${ROLE} \
+    max_turns=${MAX_TURNS} \
+    cluster.n_nodes=4 \
+    allocation_mode=sglang:d8p1t2+d4p2t2 \
+    ${TEACHER_OBS_KWARGS}
+```
+
+### Using Custom Role Configuration
+
+If you want to use custom role counts instead of predefined scenarios, set `scenario=null` and specify individual counts:
+
+```bash
+python -m areal.launcher.slurm examples/werewolf/werewolf_grpo.py \
+    --config examples/werewolf/werewolf_grpo.yaml \
+    experiment_name=${EXPERIMENT_NAME} \
+    trial_name=${TRIAL_NAME} \
+    actor.path=${SFT_MODEL_PATH} \
+    teacher_server_addrs=${TEACHER_SERVER_ADDRS} \
+    scenario=null \
     role=${ROLE} \
     num_villagers=${NUM_VILLAGERS} \
     num_werewolves=${NUM_WEREWOLVES} \
@@ -85,17 +108,36 @@ python -m areal.launcher.slurm examples/werewolf/werewolf_grpo.py \
     actor.path=${SFT_MODEL_PATH} \
     teacher_api_key=${OPENAI_API_KEY} \
     teacher_api_model=gpt-4o-2024-11-20 \
+    scenario=${SCENARIO} \
     role=${ROLE} \
-    num_villagers=${NUM_VILLAGERS} \
-    num_werewolves=${NUM_WEREWOLVES} \
-    num_witches=${NUM_WITCHES} \
-    num_foreseers=${NUM_FORESEERS} \
-    num_hunters=${NUM_HUNTERS} \
     max_turns=${MAX_TURNS} \
     cluster.n_nodes=2 \
     allocation_mode=sglang:d8p1t1+d8p1t1 \
     ${TEACHER_OBS_KWARGS}
 ```
+
+## Scenario Presets
+
+Two predefined scenarios are available:
+
+### Full Scenario (default)
+- **Configuration**: `scenario=full`
+- **Composition**: 2 villagers, 3 werewolves, 1 witch, 1 foreseer, 1 hunter
+- **Total players**: 8
+- **Complexity**: High - includes all special roles
+- **Best for**: Complex strategy learning and role-specific behavior
+
+### Easy Scenario
+- **Configuration**: `scenario=easy`
+- **Composition**: 3 villagers, 1 werewolf
+- **Total players**: 4
+- **Complexity**: Low - basic roles only
+- **Best for**: Quick training, debugging, initial experiments
+
+### Custom Scenario
+- **Configuration**: `scenario=null` + individual role counts
+- **Flexibility**: Full control over game composition
+- **Best for**: Ablation studies, specific experimental setups
 
 ## Configuration Options
 
@@ -120,17 +162,24 @@ teacher_obs_kwargs.use_global_obs=false teacher_obs_kwargs.use_individual_though
 - `role=werewolf`: Train only when playing as werewolf team
 - `role=both`: Train for both roles
 
-### Game Configuration
+### Scenario Configuration
 
-Adjust the game setup:
+Use predefined scenarios for quick setup:
 ```bash
-num_villagers=2        # Number of regular villagers
-num_werewolves=3       # Number of werewolves
-num_witches=1          # Number of witches (0 or 1)
-num_foreseers=1        # Number of foreseers (0 or 1)
-num_hunters=1          # Number of hunters (0 or 1)
-max_turns=90           # Maximum turns per game
-turn_discount=1.0      # Reward discount factor per turn
+scenario=full    # 2 villagers, 3 werewolves, 1 witch, 1 foreseer, 1 hunter
+scenario=easy    # 3 villagers, 1 werewolf (no special roles)
+```
+
+Or use custom role counts:
+```bash
+scenario=null              # Disable scenario presets
+num_villagers=2            # Number of regular villagers
+num_werewolves=3           # Number of werewolves
+num_witches=1              # Number of witches (0 or 1)
+num_foreseers=1            # Number of foreseers (0 or 1)
+num_hunters=1              # Number of hunters (0 or 1)
+max_turns=90               # Maximum turns per game
+turn_discount=1.0          # Reward discount factor per turn
 ```
 
 ## Opponent Configuration
@@ -166,6 +215,8 @@ ${cluster.fileroot}/logs/${experiment_name}/${trial_name}/generated/
 
 ## Example Complete Command
 
+Using the "full" scenario preset:
+
 ```bash
 python -m areal.launcher.slurm examples/werewolf/werewolf_grpo.py \
     --config examples/werewolf/werewolf_grpo.yaml \
@@ -173,16 +224,32 @@ python -m areal.launcher.slurm examples/werewolf/werewolf_grpo.py \
     trial_name=villager-3b-with-teacher \
     actor.path=/storage/openpsi/models/Qwen__Qwen2.5-3B-Instruct \
     teacher_server_addrs=10.0.0.1:30000,10.0.0.2:30000 \
+    scenario=full \
     role=villager \
-    num_villagers=2 \
-    num_werewolves=3 \
-    num_witches=1 \
-    num_foreseers=1 \
-    num_hunters=1 \
     max_turns=90 \
     turn_discount=1.0 \
     cluster.n_nodes=4 \
     allocation_mode=sglang:d8p1t2+d4p2t2 \
+    teacher_obs_kwargs.use_global_obs=true \
+    teacher_obs_kwargs.use_individual_thoughts=true \
+    stats_logger.wandb.mode=online
+```
+
+Using the "easy" scenario for quick experiments:
+
+```bash
+python -m areal.launcher.slurm examples/werewolf/werewolf_grpo.py \
+    --config examples/werewolf/werewolf_grpo.yaml \
+    experiment_name=my-werewolf-exp \
+    trial_name=easy-scenario-test \
+    actor.path=/storage/openpsi/models/Qwen__Qwen2.5-3B-Instruct \
+    teacher_api_key=${OPENAI_API_KEY} \
+    teacher_api_model=gpt-4o-2024-11-20 \
+    scenario=easy \
+    role=both \
+    max_turns=50 \
+    cluster.n_nodes=2 \
+    allocation_mode=sglang:d8p1t1+d8p1t1 \
     teacher_obs_kwargs.use_global_obs=true \
     teacher_obs_kwargs.use_individual_thoughts=true \
     stats_logger.wandb.mode=online

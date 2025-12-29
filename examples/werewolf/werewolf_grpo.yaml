@@ -8,6 +8,7 @@ tokenizer_path: ${actor.path}
 
 # Werewolf-specific options
 role: both
+scenario: full  # "full" (2v3w1w1f1h) or "easy" (3v1w)
 opp_server_addrs: ""
 opp_tokenizer_path: ""
 opp_api_key: ""

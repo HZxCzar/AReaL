@@ -22,6 +22,7 @@ class WerewolfGRPOConfig(GRPOConfig):
     teacher_tokenizer_path: str = ""
     teacher_api_key: str = ""
     teacher_api_model: str = ""
+    scenario: str | None = None  # "full" or "easy"
     num_villagers: int = 2
     num_werewolves: int = 3
     num_witches: int = 1
@@ -31,6 +32,26 @@ class WerewolfGRPOConfig(GRPOConfig):
     max_turns: int = 70
     turn_discount: float = 1.0
     teacher_obs_kwargs: dict | None = None
+
+
+def _apply_scenario(config: WerewolfGRPOConfig) -> None:
+    """Apply scenario presets to role numbers."""
+    if config.scenario == "full":
+        config.num_villagers = 2
+        config.num_werewolves = 3
+        config.num_witches = 1
+        config.num_foreseers = 1
+        config.num_hunters = 1
+    elif config.scenario == "easy":
+        config.num_villagers = 3
+        config.num_werewolves = 1
+        config.num_witches = 0
+        config.num_foreseers = 0
+        config.num_hunters = 0
+    elif config.scenario is None:
+        # Keep the existing role numbers from config
+        pass
+    # If scenario is not recognized, keep the existing role numbers
 
 
 def _parse_server_addrs(addrs: str) -> list[str] | None:
@@ -48,6 +69,10 @@ def _append_stop_tokens(tokenizer, stop_token_ids: list[int]) -> None:
 
 def main(args):
     config, _ = load_expr_config(args, WerewolfGRPOConfig)
+
+    # Apply scenario presets to role numbers
+    _apply_scenario(config)
+
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
 
     train_dataset = get_custom_dataset(
