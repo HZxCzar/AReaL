@@ -34,17 +34,117 @@ class HanabiEnv(EnvironmentService):
         repeat_rules: bool = True,
         max_info_tokens: int = 8,
         max_fuse_tokens: int = 3,
+        scenario: str = "full",
     ):
         if num_players < 2:
             raise ValueError("Hanabi requires at least two players.")
         if hand_size is None:
             hand_size = 5 if num_players <= 3 else 4
 
+        global COLORS
+        global RANK_COUNTS
+        if scenario == "full":
+            self.rules = (
+                "You are playing Hanabi, a fully cooperative, turn-based card game.\n"
+                "Goal: Build 5 color stacks (red (R), yellow (Y), green (G), blue (B), white (W)) strictly in rank order from 1 to 5.\n"
+                "There are 50 cards in total, each color has 3 rank1 cards, 2 rank2–4 cards, and 1 rank5 card.\n"
+                "Maximum score is 25; partial stacks score their highest completed rank.\n\n"
+
+                "Information model:\n"
+                "- You see all public state: current stacks, discard pile, remaining deck size, "
+                "information tokens, fuse tokens, and the full hands of all OTHER players.\n"
+                "- You NEVER see your own cards.\n"
+                "- You have plausible knowledge of your own cards based on previously provided hints and public information.\n"
+
+                "Actions:\n"
+                "1) Play a card: succeeds only if it is the next required rank of its color (e.g. Red Stack should go from R1 -> R2 -> R3 -> R4 -> R5); "
+                "otherwise a fuse token is lost and the card is discarded.\nCompleting a stack to rank 5 grants +1 information token if any are missing.\n"
+                "2) Discard a card: removes it, draws a new card if available, "
+                "and restores +1 information token (up to the maximum).\n"
+                "3) Give a hint: spend 1 information token to name EXACTLY ONE color OR rank "
+                "to a single teammate; the hint must mark ALL and ONLY matching cards in their hand.\n"
+                "The game starts with 8 information tokens. If none remains, you can not give a hint.\n\n"
+
+                "Additional rules:\n"
+                "- Misplays permanently remove that copy from the game.\n"
+                "- When the deck emptjies, each player (including the one who drew last) gets exactly one final turn.\n"
+                "- If all fuse tokens are lost, the score becomes 0 and the game ends immediately.\n"
+                "- If an illegal action is proposed, you will skip this turn."
+            )
+        elif scenario == "simple":
+            COLORS = COLORS[:3]
+            RANK_COUNTS = {1: 3, 2: 1}
+            hand_size = 5
+            max_info_tokens = 8
+            max_fuse_tokens = 3
+            self.rules = (
+                "You are playing Hanabi, a fully cooperative, turn-based card game.\n"
+                "Goal: Build 3 color stacks (red (R), yellow (Y), green (G)) strictly in rank order from 1 to 2.\n"
+                "There are 12 cards in total, each color has 3 rank1 cards and 1 rank2 card.\n"
+                "Maximum score is 6; partial stacks score their highest completed rank.\n\n"
+
+                "Information model:\n"
+                "- You see all public state: current stacks, discard pile, remaining deck size, "
+                "information tokens, fuse tokens, and the full hands of all OTHER players.\n"
+                "- You NEVER see your own cards.\n"
+                "- You have plausible knowledge of your own cards based on previously provided hints and public information.\n"
+
+                "Actions:\n"
+                "1) Play a card: succeeds only if it is the next required rank of its color (e.g. Red Stack should go from R1 -> R2); "
+                "otherwise a fuse token is lost and the card is discarded.\nCompleting a stack to rank 5 grants +1 information token if any are missing.\n"
+                "2) Discard a card: removes it, draws a new card if available, "
+                "and restores +1 information token (up to the maximum).\n"
+                "3) Give a hint: spend 1 information token to name EXACTLY ONE color OR rank "
+                "to a single teammate; the hint must mark ALL and ONLY matching cards in their hand.\n"
+                "The game starts with 8 information tokens. If none remains, you can not give a hint.\n\n"
+
+                "Additional rules:\n"
+                "- Misplays permanently remove that copy from the game.\n"
+                "- When the deck empties, each player (including the one who drew last) gets exactly one final turn.\n"
+                "- If all fuse tokens are lost, the score becomes 0 and the game ends immediately.\n"
+                "- If an illegal action is proposed, you will skip this turn."
+            )
+        elif scenario == "mini":
+            COLORS = COLORS[:2]
+            RANK_COUNTS = {1: 3, 2: 1}
+            hand_size = 3
+            max_info_tokens = 3
+            max_fuse_tokens = 3
+            self.rules = (
+                "You are playing Hanabi, a fully cooperative, turn-based card game.\n"
+                "Goal: Build 2 color stacks (red (R), yellow (Y)) strictly in rank order from 1 to 2.\n"
+                "There are 8 cards in total, each color has 3 rank1 cards and 1 rank2 card.\n"
+                "Maximum score is 4; partial stacks score their highest completed rank.\n\n"
+
+                "Information model:\n"
+                "- You see all public state: current stacks, discard pile, remaining deck size, "
+                "information tokens, fuse tokens, and the full hands of all OTHER players.\n"
+                "- You NEVER see your own cards.\n"
+                "- You have plausible knowledge of your own cards based on previously provided hints and public information.\n"
+
+                "Actions:\n"
+                "1) Play a card: succeeds only if it is the next required rank of its color (e.g. Red Stack should go from R1 -> R2); "
+                "otherwise a fuse token is lost and the card is discarded.\nCompleting a stack to rank 5 grants +1 information token if any are missing.\n"
+                "2) Discard a card: removes it, draws a new card if available, "
+                "and restores +1 information token (up to the maximum).\n"
+                "3) Give a hint: spend 1 information token to name EXACTLY ONE color OR rank "
+                "to a single teammate; the hint must mark ALL and ONLY matching cards in their hand.\n"
+                "The game starts with 3 information tokens. If none remains, you can not give a hint.\n\n"
+
+                "Additional rules:\n"
+                "- Misplays permanently remove that copy from the game.\n"
+                "- When the deck empties, each player (including the one who drew last) gets exactly one final turn.\n"
+                "- If all fuse tokens are lost, the score becomes 0 and the game ends immediately.\n"
+                "- If an illegal action is proposed, you will skip this turn."
+            )
+        print("[DEBUG] initialize environment: ", scenario, COLORS, RANK_COUNTS, flush=True)
+
         self.num_players = num_players
         self.hand_size = hand_size
         self.max_info_tokens = max_info_tokens
         self.max_fuse_tokens = max_fuse_tokens
         self.repeat_rules = repeat_rules
+        self.scenario = scenario
 
         self.players: List[str] = [f"player{i+1}" for i in range(num_players)]
         self.deck: List[Card] = []
@@ -64,33 +164,7 @@ class HanabiEnv(EnvironmentService):
         self.firework_score_multiplier: float = 1.0
         self.trajectory: List[str] = []
 
-        self.rules = (
-            "You are playing Hanabi, a fully cooperative, turn-based card game.\n"
-            "Goal: Build 5 color stacks (red (R), yellow (Y), green (G), blue (B), white (W)) strictly in rank order from 1 to 5.\n"
-            "There are 50 cards in total, each color has 3 rank1 cards, 2 rank2–4 cards, and 1 rank5 card.\n"
-            "Maximum score is 25; partial stacks score their highest completed rank.\n\n"
-
-            "Information model:\n"
-            "- You see all public state: current stacks, discard pile, remaining deck size, "
-            "information tokens, fuse tokens, and the full hands of all OTHER players.\n"
-            "- You NEVER see your own cards.\n"
-            "- You have plausible knowledge of your own cards based on previously provided hints and public information.\n"
-
-            "Actions:\n"
-            "1) Play a card: succeeds only if it is the next required rank of its color (e.g. Red Stack should go from R1 -> R2 -> R3 -> R4 -> R5); "
-            "otherwise a fuse token is lost and the card is discarded.\nCompleting a stack to rank 5 grants +1 information token if any are missing.\n"
-            "2) Discard a card: removes it, draws a new card if available, "
-            "and restores +1 information token (up to the maximum).\n"
-            "3) Give a hint: spend 1 information token to name EXACTLY ONE color OR rank "
-            "to a single teammate; the hint must mark ALL and ONLY matching cards in their hand.\n"
-            "The game starts with 8 information tokens. If none remains, you can not give a hint.\n\n"
-
-            "Additional rules:\n"
-            "- Misplays permanently remove that copy from the game.\n"
-            "- When the deck empties, each player (including the one who drew last) gets exactly one final turn.\n"
-            "- If all fuse tokens are lost, the score becomes 0 and the game ends immediately.\n"
-            "- If an illegal action is proposed, you will skip this turn."
-        )
+        
 
         self.guide = (
             "Plan a cooperative move that fits both the public information and long-term plan.\n"
@@ -102,6 +176,7 @@ class HanabiEnv(EnvironmentService):
     # Setup helpers
     def _build_deck(self) -> List[Card]:
         deck: List[Card] = []
+        print("[DEBUG] initialize deck: ", COLORS, RANK_COUNTS, flush=True)
         for color in COLORS:
             for rank, count in RANK_COUNTS.items():
                 deck.extend(Card(color, rank) for _ in range(count))
@@ -153,9 +228,10 @@ class HanabiEnv(EnvironmentService):
         obs = self._build_observation(self.agent_player)
         guide = self._build_guide(self.agent_player)
         teacher_obs = self._build_teacher_observation(self.agent_player)
+        state = self._build_state(self.agent_player)
         self.trajectory.append(self._snapshot_state("Initial setup"))
 
-        return obs, guide, {"teacher_observation": teacher_obs}
+        return obs, guide, {"teacher_observation": teacher_obs, "state": state}
 
     # ------------------------------------------------------------------
     # Observation helpers
@@ -218,6 +294,9 @@ class HanabiEnv(EnvironmentService):
     def _build_teacher_observation(self, player: str) -> str:
         score = sum(self.fireworks.values()) * self.firework_score_multiplier
         teacher_info = [
+            "# Rules\n",
+            self.rules,
+            "\n\n# Instruction\n",
             "You are a privileged Hanabi observer with perfect information.",
             "=== Turn Context ===",
             f"Active player: {player}",
@@ -233,6 +312,10 @@ class HanabiEnv(EnvironmentService):
         if self.last_event:
             teacher_info.append(f"Most recent event: {self.last_event}")
         return "\n".join(teacher_info)
+
+    def _build_state(self, player: str) -> str:
+        state = self._build_teacher_observation(player).replace("You are a privileged Hanabi observer with perfect information.", "Below is the global state at the current turn of Hanabi game.")
+        return state  
 
     def _build_guide(self, player: str) -> str:
         actions = ", ".join(self._get_valid_actions(player))
@@ -481,6 +564,7 @@ class HanabiEnv(EnvironmentService):
             "fuse_tokens": self.fuse_tokens,
             "deck_remaining": len(self.deck),
             "teacher_observation": self._build_teacher_observation(self.agent_player) if not done else obs,
+            "state": self._build_state(self.agent_player) if not done else obs,
         }
         current_score = info["score"]
         reward = current_score - prev_score

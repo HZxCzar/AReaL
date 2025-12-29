@@ -3,7 +3,7 @@ trial_name: trial0
 
 seed: 1
 enable_offload: false
-total_train_epochs: 1
+total_train_epochs: 10
 tokenizer_path: ${actor.path}
 
 # Hanabi-specific options
@@ -15,7 +15,8 @@ student_api_key: ""
 student_api_model: ""
 misplay_penalty_factor: 1.0
 use_question_tokens: true
-env_kwargs: null
+env_kwargs: 
+  scenario: full
 
 cluster:
   n_nodes: 2
@@ -57,7 +58,7 @@ actor:
     max_tokens_per_mb: 32768
   optimizer:
     type: adam
-    lr: 5e-6
+    lr: 1e-6
     beta1: 0.9
     beta2: 0.999
     eps: 1e-8
@@ -160,4 +161,4 @@ launcher:
     mount: /storage:/storage
     trainer_image: /storage/openpsi/images/areal-latest.sif
     inference_server_image: /storage/openpsi/images/areal-latest.sif
-  trainer_env_vars: WANDB_API_KEY=local-667d8d7f101dad4eb9597d718d0c68f40e3792f9,WANDB_BASE_URL=http://8.150.1.98:8080
+  trainer_env_vars: WANDB_API_KEY=local-19d536ca4642f84533e27f02eb8acbde59bceff2,WANDB_BASE_URL=http://8.150.1.98:8080

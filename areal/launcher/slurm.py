@@ -105,7 +105,7 @@ class SlurmLauncher:
         container_mounts: str | None = None,
         env_vars: dict | list[dict] | None = None,
         nodelist: str | None = None,
-        exclude: str | None = None,
+        exclude: str | None = "slurmd-29",
     ):
         """Submits and launch a job array with SBATCH.
         Note that a job array has one (unique) slurm name, and one (unique) slurm id.

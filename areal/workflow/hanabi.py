@@ -381,7 +381,7 @@ class HanabiWorkflow(RolloutWorkflow):
 
     @staticmethod
     def _response_to_tensordict(
-        resp: ModelResponse, *, sft_ppo_mask: int = 0
+        resp: ModelResponse, *, sft_ppo_mask: int = 0, agent_idx: int = -1
     ) -> dict[str, torch.Tensor]:
         full_ids = resp.input_tokens + resp.output_tokens
         return {
@@ -401,6 +401,8 @@ class HanabiWorkflow(RolloutWorkflow):
             "rewards": torch.zeros(1, dtype=torch.float32),
             "attention_mask": torch.ones(len(full_ids), dtype=torch.bool).unsqueeze(0),
             "sft_ppo_mask": torch.tensor([sft_ppo_mask], dtype=torch.long),
+            "agent_idx": torch.tensor([agent_idx], dtype=torch.long),
+            "step_indicator": torch.tensor([0], dtype=torch.int32),
         }
 
     @staticmethod
@@ -417,6 +419,7 @@ class HanabiWorkflow(RolloutWorkflow):
         env = HanabiEnv(**self.env_kwargs)
         obs, guide, info = await env.sreset()
         teacher_obs = info.get("teacher_observation", obs)
+        state = info.get("state", obs)
 
         results = []
         prompt_strs = []
@@ -454,6 +457,7 @@ class HanabiWorkflow(RolloutWorkflow):
         for turn in range(self.max_turns):
             turns_done += 1
             current_player = env.agent_player
+            player_idx = env.players.index(env.agent_player)
             prev_summary = summaries[current_player][-1] if summaries[current_player] else "None yet."
 
             # ========== 1) Agent self-generates 3 questions ==========
@@ -506,7 +510,7 @@ class HanabiWorkflow(RolloutWorkflow):
 
             if self.use_question_tokens and qgen_resp is not None:
                 t0 = time.perf_counter()
-                results.append(self._response_to_tensordict(qgen_resp, sft_ppo_mask=0))
+                results.append(self._response_to_tensordict(qgen_resp, sft_ppo_mask=0, agent_idx=player_idx))
                 t_pack_tensors_total += time.perf_counter() - t0
 
             self_questions = _extract_three_questions(qgen_text)
@@ -638,7 +642,7 @@ class HanabiWorkflow(RolloutWorkflow):
                 t0 = time.perf_counter()
                 for a_resp in agent_answer_resps:
                     results.append(
-                        self._response_to_tensordict(a_resp, sft_ppo_mask=1)
+                        self._response_to_tensordict(a_resp, sft_ppo_mask=0, agent_idx=player_idx)
                     )
                 t_pack_tensors_total += time.perf_counter() - t0
 
@@ -683,7 +687,7 @@ class HanabiWorkflow(RolloutWorkflow):
                     )
                     resp = self._build_api_response(prompt_ids, t_ans, self.tokenizer)
                     results.append(
-                        self._response_to_tensordict(resp, sft_ppo_mask=1)
+                        self._response_to_tensordict(resp, sft_ppo_mask=1, agent_idx=player_idx)
                     )
                 t_pack_tensors_total += time.perf_counter() - t0
 
@@ -796,11 +800,12 @@ class HanabiWorkflow(RolloutWorkflow):
                 "rewards": torch.tensor([0.0], dtype=torch.float32),
                 "attention_mask": torch.ones(len(full_ids), dtype=torch.bool).unsqueeze(0),
                 "sft_ppo_mask": torch.tensor([0], dtype=torch.long),
+                "agent_idx": torch.tensor([player_idx], dtype=torch.long),
+                "step_indicator": torch.tensor([0], dtype=torch.int32)
             }
             t_pack_tensors_total += time.perf_counter() - t0
 
             results.append(res)
-            agent_result_indices.append(len(results) - 1)
 
             parsed_action = self._parse_action_from_completion(completion_str)
             event_msg = info.get("event", "").lower()
@@ -814,6 +819,7 @@ class HanabiWorkflow(RolloutWorkflow):
             step_rewards.append(step_reward)
             agent_seq_len = len(full_ids)
 
+            '''
             if (self.teacher_rollout or self.teacher_api_key) and teacher_answers and self.sft_reg > 0.0:
                 for qi, t_ans in enumerate(teacher_answers):
                     student_prompt = (
@@ -855,6 +861,7 @@ class HanabiWorkflow(RolloutWorkflow):
                     }
                     results.append(sft_res)
                     t_pack_tensors_total += time.perf_counter() - t0
+            '''
 
             prompt_strs.append(action_prompt)
             completions_strs.append(completion_str)
@@ -920,6 +927,9 @@ class HanabiWorkflow(RolloutWorkflow):
                         summary_resp.output_tokens, 
                         skip_special_tokens=True
                     )
+                    results.append(
+                        self._response_to_tensordict(summary_resp, sft_ppo_mask=0, agent_idx=player_idx)
+                    )
                 summaries[current_player].append(agent_summary)
 
                 qa_logs.append(
@@ -965,12 +975,14 @@ class HanabiWorkflow(RolloutWorkflow):
                     }
                 )
 
+            agent_result_indices.append(len(results) - 1)
             env_info = { # Build SFT data
                 k: _sanitize_for_json(v)
                 for k, v in info.items()
                 if k not in {"teacher_observation"}
             }
             next_teacher_obs = info.get("teacher_observation", next_obs)
+            next_state = info.get("state", next_obs)
             step_log = {
                 "turn": turn,
                 "player": current_player,
@@ -1004,12 +1016,13 @@ class HanabiWorkflow(RolloutWorkflow):
 
             obs = next_obs # prepare obs for next turn
             guide = next_guide
+            state = next_state
             teacher_obs = info.get("teacher_observation", obs)
 
             if done or turn == self.max_turns - 1:
                 break
         
-        running_return = 0.0 # calculate return
+        running_return = 0.0 # cpalculate return
         returns = []
         for r in reversed(step_rewards):
             running_return += r
