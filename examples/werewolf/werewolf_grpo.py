@@ -30,6 +30,7 @@ class WerewolfGRPOConfig(GRPOConfig):
     env_kwargs: dict | None = None
     max_turns: int = 70
     turn_discount: float = 1.0
+    teacher_obs_kwargs: dict | None = None
 
 
 def _parse_server_addrs(addrs: str) -> list[str] | None:
@@ -130,6 +131,7 @@ def main(args):
                 env_kwargs=env_kwargs,
                 max_turns=config.max_turns,
                 turn_discount=config.turn_discount,
+                teacher_obs_kwargs=config.teacher_obs_kwargs,
             )
             trainer.train(workflow)
     finally:

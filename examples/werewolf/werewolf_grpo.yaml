@@ -16,6 +16,11 @@ teacher_server_addrs: ""
 teacher_tokenizer_path: ""
 teacher_api_key: ""
 teacher_api_model: ""
+# Teacher observation configuration (optional)
+# Controls what privileged information the teacher model sees
+teacher_obs_kwargs:
+  use_global_obs: true        # Use privileged observation with player roles (default: true)
+  use_individual_thoughts: true  # Include agent thoughts in teacher prompt (default: true)
 num_villagers: 2
 num_werewolves: 3
 num_witches: 1
