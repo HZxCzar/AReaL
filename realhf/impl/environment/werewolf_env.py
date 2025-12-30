@@ -492,7 +492,7 @@ class WerewolfEnv(EnvironmentService):
             content = actions.get(p, "nothing")
             if content.startswith("say "):
                 content = content[4:]
-            msg += f"{p} says: {content}."
+            msg += f"{p} says: {content}.\n"
         return msg
 
     async def _change_phase(self):
@@ -529,11 +529,11 @@ class WerewolfEnv(EnvironmentService):
                 # Check if hunter shall act
                 if self.await_hunter:
                     self.phase = "hunter"
-                    info += f"The hunter is dead. He shall choose a player to shoot. Current alive players: {', '.join(self._alive_list())}."
+                    info += f"The hunter is dead. He shall choose a player to shoot. "
                 else:
                     self.round += 1
                     self.phase = "night"
-                    info += f"Day ends. Night {self.round}. Current alive players: {', '.join(self._alive_list())}."
+                    info += f"Day ends. Night {self.round}. "
         elif self.phase == "hunter":
             shoot_act = actions.get(players[0], "") if players else ""
             if shoot_act.startswith("shoot "):
@@ -556,7 +556,7 @@ class WerewolfEnv(EnvironmentService):
             else:
                 self.phase = "night"
                 self.round += 1
-                info += f"Day ends. Night {self.round}. Current alive players: {', '.join(self._alive_list())}."
+                info += f"Day ends. Night {self.round}. "
         
         if done:
             logger.warning(f"Game successfully ends with winner {winner}!")
@@ -601,13 +601,14 @@ class WerewolfEnv(EnvironmentService):
         if len(self.phase_actions) >= len(self.phase_player_list):
             last_phase = self.phase
             info, extra_reward, done = await self._change_phase()
-            self.phase_info = f"In last {last_phase} phase: " + info + "\n"
+            info = f"In last {last_phase} phase: " + info + "\n"
+            self.phase_info = info
             self.trajectory.append(self.phase_info)
 
             reward = [reward[i] + extra_reward[i] for i in range(2)]
         else:
             self._next_agent()
-            info = f"{self.phase_info} It is now phase {self.phase} round {self.round}.\n"
+            info = f"{self.phase_info} It is now phase {self.phase} round {self.round}. Current alive players: {', '.join(self._alive_list())}\n"
 
             # Add observable information for previous players in the same turn
             previous_actions = []
@@ -731,7 +732,7 @@ class WerewolfEnv(EnvironmentService):
                 target = actions.get(p, "").split("check ")[1].strip()
                 if target in self.alive:
                     role = self.role_type.get(target)
-                    msg += f"Forseer checked the role of {target}."
+                    # msg += f"Forseer checked the role of {target}."
                     self._add_memory(p, f"You checked {target}, who is a {role}.")
 
         logutil(msg)

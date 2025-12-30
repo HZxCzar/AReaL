@@ -885,7 +885,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                 action_prompt = (
                     f"{obs}\n"
                     "You are playing as the active player. You must propose one concrete action for this Werewolf turn.\n\n"
-                    f"Prior summary of the Game State (from the perspective of the active player): \n```\n{prev_summary}\n```\n\n"
+                    f"Inner thought of the player at last decision-making step (from the perspective of the active player): \n```\n{prev_summary}\n```\n\n"
                     "Your self-questions and answers:\n"
                     f"{qa_block}\n\n"
                     # "Required output format:\n"
@@ -960,6 +960,10 @@ class WerewolfWorkflow(RolloutWorkflow):
                 t0 = time.perf_counter()
                 completion_str = self.tokenizer.decode(resp.output_tokens, skip_special_tokens=True)
                 t_action_decode_total += time.perf_counter() - t0
+            
+            action_response = completion_str
+            if "<answer>" in action_response and "</answer>" not in action_response:
+                action_response += "</answer>"
 
             seq = resp.input_tokens + resp.output_tokens
             logprobs = [0.0] * resp.input_len + resp.output_logprobs
@@ -971,7 +975,7 @@ class WerewolfWorkflow(RolloutWorkflow):
             # Get next env state
             t0 = time.perf_counter()
             next_obs, next_guide, reward_list, done, _, info = await env.step(
-                (data.get("query_id", ""), [completion_str])
+                (data.get("query_id", ""), [action_response])
             )
             t_env_step_total += time.perf_counter() - t0
             next_teacher_obs = info.get("teacher_observation", next_obs)
@@ -1038,12 +1042,12 @@ class WerewolfWorkflow(RolloutWorkflow):
                 t_pack_tensors_total += time.perf_counter() - t0
 
             # ========== 6) Agent summarization, log agent thinking and Q&As ==========
-            t = re.findall(r"<think>(.*?)</think>", completion_str, re.DOTALL)
+            t = re.findall(r"<think>(.*?)</think>", action_response, re.DOTALL)
             think_str = t[-1].strip().lower() if t else ""
             agent_thoughts[f"{current_agent} ({current_role})"] = think_str
             agent_summary = None
             if self.use_summary:
-                m = re.findall(r"<answer>(.*?)</answer>", completion_str, re.DOTALL)
+                m = re.findall(r"<answer>(.*?)</answer>", action_response, re.DOTALL)
                 action_txt = m[-1].strip().lower() if m else ""
                 summary_prompt = (
                     f"{obs}\n\nYou are playing as the active player. You selected action: {action_txt}. "
