@@ -611,16 +611,16 @@ class WerewolfEnv(EnvironmentService):
             reward = [reward[i] + extra_reward[i] for i in range(2)]
 
             _reason = "you are the first player that acts/speaks"
-                if self.phase == "night":
-                    if self.agent_role == "werewolf":
-                        _reason = "you are the first werewolf that acts"
-                    else:
-                        _reason = "it is the night phase"
-                elif self.phase == "day":
-                    _reason = "it is the day phase, player votes are taken independently."
-                elif self.phase == "hunter":
-                    _reason = "you are the only hunter that is able to move currently."
-                info +=  f"In this phase {self.phase} round {self.round}, you have not observed actions taken by or messages posted from other players yet because {_reason}"
+            if self.phase == "night":
+                if self.agent_role == "werewolf":
+                    _reason = "you are the first werewolf that acts"
+                else:
+                    _reason = "it is the night phase"
+            elif self.phase == "day":
+                _reason = "it is the day phase, player votes are taken independently."
+            elif self.phase == "hunter":
+                _reason = "you are the only hunter that is able to move currently."
+            info +=  f"In this phase {self.phase} round {self.round}, you have not observed actions taken by or messages posted from other players yet because {_reason}"
 
         else:
             self._next_agent()
