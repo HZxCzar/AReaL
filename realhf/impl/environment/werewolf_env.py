@@ -626,7 +626,7 @@ class WerewolfEnv(EnvironmentService):
                         player = self.phase_player_list[i]
                         if self.role_type[player] == "werewolf" and player in self.phase_actions:
                             action = self.phase_actions[player]
-                            previous_actions.append(f"{player} performed: {action}")
+                            previous_actions.append(f"{player}: {action}")
             elif self.phase == "discussion":
                 # In discussion phase: all players observe speech of previous players
                 for i in range(current_idx):

@@ -915,7 +915,7 @@ class WerewolfWorkflow(RolloutWorkflow):
             t_tokenize_total += 0.0  # (already included in build section)
 
             if use_opp_generation and self.opp_api_key:
-                action_cfg = self.gconfig.new(n_samples=1, max_new_tokens=4096)
+                action_cfg = self.gconfig.new(n_samples=1, max_new_tokens=8192)
                 t0 = time.perf_counter()
                 completion_str = await self._api_chat_completion(
                     action_prompt,
@@ -934,7 +934,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                 req = ModelRequest(
                     rid=rid,
                     input_ids=action_ids,
-                    gconfig=self.gconfig.new(n_samples=1, max_new_tokens=4096),
+                    gconfig=self.gconfig.new(n_samples=1, max_new_tokens=8192),
                     tokenizer=self.opp_tokenizer or self.tokenizer,
                 )
                 t0 = time.perf_counter()
@@ -951,7 +951,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                 req = ModelRequest(
                     rid=rid,
                     input_ids=action_ids,
-                    gconfig=self.gconfig.new(n_samples=1),
+                    gconfig=self.gconfig.new(n_samples=1, max_new_tokens=8192),
                     tokenizer=self.tokenizer,
                 )
                 t0 = time.perf_counter()
