@@ -887,7 +887,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                 for qi, t_ans in enumerate(teacher_answers):
                     _process_rewards.append(float("CORRECT" in t_ans))
                 _process_reward = sum(_process_rewards)
-            if not use_oppo_generation:
+            if not use_opp_generation:
                 process_rewards.append(_process_reward)
 
             # Add agent answers to training data (only for student agent, not opponent)
