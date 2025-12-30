@@ -643,13 +643,13 @@ class WerewolfEnv(EnvironmentService):
         else:
             guide = self.guide.format(actions=', '.join(self._get_valid_actions()))
         role_prompt = self.role_prompts.get(self.agent_role, "")
-        memory = "; ".join(self.player_memory.get(self.agent_player, []))
+        memory = "\n- ".join(self.player_memory.get(self.agent_player, []))
 
         obs = ""
         if self.repeat_rules:
             obs += f"{self.rules} You are {self.agent_player} ({self.agent_role}). {role_prompt}\n\n"
         if memory:
-            obs += f"You remember: {memory}\n\n"
+            obs += f"You remember:\n{memory}\n\n"
         obs += f"{info}\n\n"
 
         teacher_obs = self._build_teacher_observation(self.agent_player) if not done else obs
@@ -745,6 +745,7 @@ class WerewolfEnv(EnvironmentService):
     def _day_phase(self, actions: Dict[str, str], players: List[str]) -> str:
         msg = ""
         votes = []
+        vote_info = []
         for p in players:
             act = actions.get(p, "").lower()
             if act.startswith("vote "):
@@ -753,6 +754,7 @@ class WerewolfEnv(EnvironmentService):
                 choices = [x for x in players if x != p]
                 vote_target = random.choice(choices) if choices else p
             votes.append(vote_target)
+            vote_info.append(f"{p} voted for {vote_target}")
             if self.role_type.get(p) == "villager":
                 if self.role_type.get(vote_target) == "werewolf":
                     self.stats["villager_correct_votes"] += 1
@@ -768,7 +770,7 @@ class WerewolfEnv(EnvironmentService):
             msg += self._apply_kill(target, "voted out")
             for p in players:
                 if p != target:
-                    self._add_memory(p, f"{target} is voted out in day {self.round}. {target} is a {self.role_type.get(target)}. ")
+                    self._add_memory(p, f"In day {self.round}, {', '.join(vote_info)}. {target} is voted out in day {self.round}. {target} is a {self.role_type.get(target)}. ")
         else:
             msg += f"No player is voted out in day {self.round} since there are no valid votes."
 
