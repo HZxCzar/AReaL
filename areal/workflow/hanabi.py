@@ -191,7 +191,9 @@ class HanabiWorkflow(RolloutWorkflow):
         sft_reg: float = 0.0,
         misplay_penalty_factor: float = 0.1,
         use_question_tokens: bool = False,
-        teacher_obs_kwargs: dict | None = None
+        teacher_process_reward: bool = False,
+        teacher_obs_kwargs: dict | None = None,
+        process_reward_coef: float = 0.2,
     ):
         self.gconfig = gconfig
         self.tokenizer = tokenizer
@@ -210,6 +212,8 @@ class HanabiWorkflow(RolloutWorkflow):
                 self.teacher_obs_kwargs[k] = v
         self.misplay_penalty_factor = misplay_penalty_factor
         self.sft_reg = sft_reg
+        self.process_reward_coef = process_reward_coef
+        self.teacher_process_reward = teacher_process_reward
         self.student_api_key = (student_api_key or "").strip()
         self.teacher_api_key = (teacher_api_key or "").strip()
         self.student_api_provider = (
@@ -510,6 +514,7 @@ class HanabiWorkflow(RolloutWorkflow):
 
         agent_result_indices: list[int] = []
         step_rewards: list[float] = []
+        process_rewards: list[float] = []
         success_count = 0
         misplay_occurred = False
 
@@ -637,6 +642,33 @@ class HanabiWorkflow(RolloutWorkflow):
                     )
                     agent_answer_tasks.append(engine.agenerate(a_req))
 
+            t0 = time.perf_counter()
+            agent_answers: list[str]
+            agent_answer_resps: list[ModelResponse]
+            if self.student_api_key:
+                agent_answers = await asyncio.gather(*agent_answer_tasks)
+                agent_answer_resps = [
+                    self._build_api_response(ids, ans, self.tokenizer)
+                    for ids, ans in zip(agent_answer_inputs, agent_answers)
+                ]
+            else:
+                agent_answer_resps = await asyncio.gather(*agent_answer_tasks)
+                agent_answers = [
+                    self.tokenizer.decode(
+                        r.output_tokens, 
+                        skip_special_tokens=True
+                    ) for r in agent_answer_resps
+                ]
+            t_agent_answer_total += time.perf_counter() - t0
+
+            if self.use_question_tokens:
+                t0 = time.perf_counter()
+                for a_resp in agent_answer_resps:
+                    results.append(
+                        self._response_to_tensordict(a_resp, sft_ppo_mask=0, agent_idx=player_idx)
+                    )
+                t_pack_tensors_total += time.perf_counter() - t0
+
             teacher_answer_tasks = []
             teacher_answer_inputs: list[list[int]] = []
             teacher_prompts: list[str] = []
@@ -652,12 +684,25 @@ class HanabiWorkflow(RolloutWorkflow):
                     elif not self.teacher_obs_kwargs["use_individual_thoughts"]:
                         _teacher_obs = teacher_obs
                         _players_thoughts = ""
+
                     taprompt = (
                         f"{_teacher_obs}\n\n"
                         f"{_players_thoughts}\n\n"
                         f"# Question to be Answered\nQuestion: {q}\n"
                         "Answer concisely using all privileged information, including hidden hands and players' inner thoughts, from the perspective of the current active player."
                     )
+
+                    if self.teacher_process_reward:
+                            taprompt = (
+                            f"{_teacher_obs}\n\n"
+                            f"{_players_thoughts}\n\n"
+                            f"# Judge Question Answer Pair\nQuestion: {q}\nAnswer: {agent_answers[qi]}\n\n"
+                            "Judge whether the answer is correct to the question using all privileged information, including hidden hands and players' inner thoughts, from the perspective of the current active player.\n"
+                            "Reply with [CORRECT] if the answer is correct and [WRONG] is the answer is wrong.\n"
+                            "Format your output as:\n"
+                            "<analysis> your reasoning process </analysis>\n<result> correctness of the answer </result> "
+                        )
+                    
                     teacher_prompts.append(taprompt)
                     if self.teacher_api_key:
                         t0 = time.perf_counter()
@@ -698,33 +743,6 @@ class HanabiWorkflow(RolloutWorkflow):
                         )
                         teacher_answer_tasks.append(self.teacher_rollout.agenerate(ta_req))
 
-            t0 = time.perf_counter()
-            agent_answers: list[str]
-            agent_answer_resps: list[ModelResponse]
-            if self.student_api_key:
-                agent_answers = await asyncio.gather(*agent_answer_tasks)
-                agent_answer_resps = [
-                    self._build_api_response(ids, ans, self.tokenizer)
-                    for ids, ans in zip(agent_answer_inputs, agent_answers)
-                ]
-            else:
-                agent_answer_resps = await asyncio.gather(*agent_answer_tasks)
-                agent_answers = [
-                    self.tokenizer.decode(
-                        r.output_tokens, 
-                        skip_special_tokens=True
-                    ) for r in agent_answer_resps
-                ]
-            t_agent_answer_total += time.perf_counter() - t0
-
-            if self.use_question_tokens:
-                t0 = time.perf_counter()
-                for a_resp in agent_answer_resps:
-                    results.append(
-                        self._response_to_tensordict(a_resp, sft_ppo_mask=0, agent_idx=player_idx)
-                    )
-                t_pack_tensors_total += time.perf_counter() - t0
-
             teacher_answers: list[str] = []
             teacher_resps: list[ModelResponse] = []
             if teacher_answer_tasks:
@@ -748,7 +766,7 @@ class HanabiWorkflow(RolloutWorkflow):
                     ]
                 t_teacher_answer_total += time.perf_counter() - t0
 
-            if self.use_question_tokens and teacher_resps:
+            if self.use_question_tokens and teacher_resps and not self.teacher_process_reward:
                 t0 = time.perf_counter()
                 for qi, t_ans in enumerate(teacher_answers):
                     student_prompt = (
@@ -770,6 +788,12 @@ class HanabiWorkflow(RolloutWorkflow):
                         self._response_to_tensordict(resp, sft_ppo_mask=1, agent_idx=player_idx)
                     )
                 t_pack_tensors_total += time.perf_counter() - t0
+            
+            _process_reward = 0.0
+            if self.use_question_tokens and teacher_resps and self.teacher_process_reward:
+                for qi, t_ans in enumerate(teacher_answers):
+                    _process_reward += float("CORRECT" in t_ans)
+            process_rewards.append(_process_reward)
 
             summary_prompt: str | None = None
             agent_summary: str | None = None
@@ -1040,6 +1064,7 @@ class HanabiWorkflow(RolloutWorkflow):
                 "adjusted_reward": step_reward,
                 "agent_answers": agent_answers,
                 "teacher_answers": teacher_answers,
+                "process_reward": process_reward,
                 "agent_summary": agent_summary,
                 "summary_prompt": summary_prompt,
                 "thought": thought,
@@ -1059,6 +1084,8 @@ class HanabiWorkflow(RolloutWorkflow):
             if done or turn == self.max_turns - 1:
                 break
         
+        assert len(process_rewards) == len(agent_result_indices)
+
         running_return = 0.0 # cpalculate return
         returns = []
         for r in reversed(step_rewards):
@@ -1069,6 +1096,7 @@ class HanabiWorkflow(RolloutWorkflow):
 
         prev_idx = 0
         for idx, ret in zip(agent_result_indices, returns):
+            ret = ret + self.process_reward_coef * process_rewards[idx]
             for i in range(prev_idx, idx + 1):
                 results[i]["rewards"] = torch.tensor([ret], dtype=torch.float32)
             prev_idx = idx + 1
@@ -1102,6 +1130,7 @@ class HanabiWorkflow(RolloutWorkflow):
             traj_len[0],
             traj_len[1],
             total_reward,
+            sum(process_rewards) / len(process_rewards),
             stats.get("score", 0),
             stats.get("info_tokens", 0),
             stats.get("fuse_tokens", 0),
@@ -1144,6 +1173,7 @@ class HanabiWorkflow(RolloutWorkflow):
             "success_count": success_count,
             "misplay_occurred": misplay_occurred,
             "qa_events": len(qa_logs),
+            "process_rewards": process_rewards,
         }
 
         return (

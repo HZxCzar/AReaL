@@ -46,6 +46,7 @@ HANABI_LOGGING_KEYS = [
     "traj_input_len",
     "traj_output_len",
     "total_reward",
+    "process_rewards",
     "final_score",
     "info_tokens",
     "fuse_tokens",

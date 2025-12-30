@@ -23,6 +23,8 @@ class HanabiGRPOConfig(GRPOConfig):
     use_question_tokens: bool = False
     env_kwargs: dict | None = None
     teacher_obs_kwargs: dict | None = None
+    teacher_process_reward: bool = False
+    process_reward_coef: float = 0.2
 
 def _parse_server_addrs(addrs: str) -> list[str] | None:
     if not addrs:
@@ -97,6 +99,8 @@ def main(args):
                 sft_reg=config.actor.sft_reg,
                 misplay_penalty_factor=config.misplay_penalty_factor,
                 use_question_tokens=config.use_question_tokens,
+                teacher_process_reward=config.teacher_process_reward,
+                process_reward_coef=config.process_reward_coef,
             )
             trainer.train(workflow)
     finally:
