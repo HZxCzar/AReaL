@@ -601,12 +601,40 @@ class WerewolfEnv(EnvironmentService):
         if len(self.phase_actions) >= len(self.phase_player_list):
             last_phase = self.phase
             info, extra_reward, done = await self._change_phase()
-            self.phase_info = f"In last {last_phase} phase: " + info
+            self.phase_info = f"In last {last_phase} phase: " + info + "\n"
             self.trajectory.append(self.phase_info)
 
             reward = [reward[i] + extra_reward[i] for i in range(2)]
         else:
-            info = f"{self.phase_info} It is now phase {self.phase} round {self.round}."
+            info = f"{self.phase_info} It is now phase {self.phase} round {self.round}.\n"
+
+            # Add observable information for previous players in the same turn
+            previous_actions = []
+            current_idx = len(self.phase_actions)
+
+            if self.phase == "night":
+                # In night phase: werewolves observe actions of previous werewolves
+                if self.agent_role == "werewolf":
+                    for i in range(current_idx):
+                        player = self.phase_player_list[i]
+                        if self.role_type[player] == "werewolf" and player in self.phase_actions:
+                            action = self.phase_actions[player]
+                            previous_actions.append(f"{player} performed: {action}")
+            elif self.phase == "discussion":
+                # In discussion phase: all players observe speech of previous players
+                for i in range(current_idx):
+                    player = self.phase_player_list[i]
+                    if player in self.phase_actions:
+                        action = self.phase_actions[player]
+                        if action.startswith("say "):
+                            content = action[4:]  # Remove "say " prefix
+                        else:
+                            content = action
+                        previous_actions.append(f"{player} says: {content}")
+
+            if previous_actions:
+                info += f"In this phase {self.phase} round {self.round}, previous players actions are:\n```\n" + "\n".join(previous_actions) + "\n```\n"
+
             self._next_agent()
 
         if self.phase == "discussion":
@@ -618,10 +646,10 @@ class WerewolfEnv(EnvironmentService):
 
         obs = ""
         if self.repeat_rules:
-            obs += f"{self.rules} You are {self.agent_player} ({self.agent_role}). {role_prompt}"
+            obs += f"{self.rules} You are {self.agent_player} ({self.agent_role}). {role_prompt}\n\n"
         if memory:
-            obs += f" You remember: {memory}"
-        obs += f" {info}"
+            obs += f"You remember: {memory}\n\n"
+        obs += f"{info}\n\n"
 
         teacher_obs = self._build_teacher_observation(self.agent_player) if not done else obs
         info_dict = {"teacher_observation": teacher_obs}
