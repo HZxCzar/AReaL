@@ -457,7 +457,7 @@ class HanabiWorkflow(RolloutWorkflow):
 
     @staticmethod
     def _response_to_tensordict(
-        resp: ModelResponse, *, sft_ppo_mask: int = 0, agent_idx: int = -1
+        resp: ModelResponse, *, sft_ppo_mask: int = 0, agent_idx: int = -1, reward: float = 0.0
     ) -> dict[str, torch.Tensor]:
         full_ids = resp.input_tokens + resp.output_tokens
         return {
@@ -474,7 +474,7 @@ class HanabiWorkflow(RolloutWorkflow):
                 [-1] * resp.input_len + resp.output_versions,
                 dtype=torch.long,
             ).unsqueeze(0),
-            "rewards": torch.zeros(1, dtype=torch.float32),
+            "rewards": torch.tensor([reward], dtype=torch.float32),
             "attention_mask": torch.ones(len(full_ids), dtype=torch.bool).unsqueeze(0),
             "sft_ppo_mask": torch.tensor([sft_ppo_mask], dtype=torch.long),
             "agent_idx": torch.tensor([agent_idx], dtype=torch.long),
@@ -661,14 +661,6 @@ class HanabiWorkflow(RolloutWorkflow):
                 ]
             t_agent_answer_total += time.perf_counter() - t0
 
-            if self.use_question_tokens:
-                t0 = time.perf_counter()
-                for a_resp in agent_answer_resps:
-                    results.append(
-                        self._response_to_tensordict(a_resp, sft_ppo_mask=0, agent_idx=player_idx)
-                    )
-                t_pack_tensors_total += time.perf_counter() - t0
-
             teacher_answer_tasks = []
             teacher_answer_inputs: list[list[int]] = []
             teacher_prompts: list[str] = []
@@ -796,6 +788,17 @@ class HanabiWorkflow(RolloutWorkflow):
                     _process_rewards.append(float("CORRECT" in t_ans))
                 _process_reward = sum(_process_rewards)
             process_rewards.append(_process_reward)
+
+            if self.use_question_tokens:
+                t0 = time.perf_counter()
+                for qi, a_resp in enumerate(agent_answer_resps):
+                    _reward = 0.0
+                    if len(_process_rewards) > 0:
+                        _reward = _process_rewards[qi] - 1
+                    results.append(
+                        self._response_to_tensordict(a_resp, sft_ppo_mask=0, agent_idx=player_idx, reward=_reward)
+                    )
+                t_pack_tensors_total += time.perf_counter() - t0
 
             summary_prompt: str | None = None
             agent_summary: str | None = None
@@ -1098,9 +1101,8 @@ class HanabiWorkflow(RolloutWorkflow):
 
         prev_idx = 0
         for i, (idx, ret) in enumerate(zip(agent_result_indices, returns)):
-            ret = ret + self.process_reward_coef * process_rewards[i]
             for i in range(prev_idx, idx + 1):
-                results[i]["rewards"] = torch.tensor([ret], dtype=torch.float32)
+                results[i]["rewards"] = torch.tensor([ret], dtype=torch.float32) + results[i]["rewards"] * self.process_reward_coef
             prev_idx = idx + 1
 
         for step_log, ret in zip(episode_steps, returns):
