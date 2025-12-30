@@ -790,9 +790,11 @@ class HanabiWorkflow(RolloutWorkflow):
                 t_pack_tensors_total += time.perf_counter() - t0
             
             _process_reward = 0.0
+            _process_rewards = []
             if self.use_question_tokens and teacher_resps and self.teacher_process_reward:
                 for qi, t_ans in enumerate(teacher_answers):
-                    _process_reward += float("CORRECT" in t_ans)
+                    _process_rewards.append(float("CORRECT" in t_ans))
+                _process_reward = sum(_process_rewards)
             process_rewards.append(_process_reward)
 
             summary_prompt: str | None = None
@@ -1064,7 +1066,7 @@ class HanabiWorkflow(RolloutWorkflow):
                 "adjusted_reward": step_reward,
                 "agent_answers": agent_answers,
                 "teacher_answers": teacher_answers,
-                "process_reward": process_reward,
+                "process_reward": _process_rewards,
                 "agent_summary": agent_summary,
                 "summary_prompt": summary_prompt,
                 "thought": thought,
