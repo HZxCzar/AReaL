@@ -32,6 +32,8 @@ class WerewolfGRPOConfig(GRPOConfig):
     max_turns: int = 70
     turn_discount: float = 1.0
     teacher_obs_kwargs: dict | None = None
+    teacher_process_reward: bool = False
+    process_reward_coef: float = 0.2
 
 
 def _apply_scenario(config: WerewolfGRPOConfig) -> None:
@@ -157,6 +159,8 @@ def main(args):
                 max_turns=config.max_turns,
                 turn_discount=config.turn_discount,
                 teacher_obs_kwargs=config.teacher_obs_kwargs,
+                teacher_process_reward=config.teacher_process_reward,
+                process_reward_coef=config.process_reward_coef,
             )
             trainer.train(workflow)
     finally:

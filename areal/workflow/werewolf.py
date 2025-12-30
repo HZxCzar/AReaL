@@ -152,6 +152,8 @@ class WerewolfWorkflow(RolloutWorkflow):
         teacher_api_model: str | None = None,
         questions: list[str] | None = None,  # kept for backward-compat but unused now
         teacher_obs_kwargs: dict | None = None,
+        teacher_process_reward: bool = False,
+        process_reward_coef: float = 0.2,
     ):
         self.gconfig = gconfig
         self.tokenizer = tokenizer
@@ -167,6 +169,8 @@ class WerewolfWorkflow(RolloutWorkflow):
         self.opp_rollout = opp_rollout
         self.opp_tokenizer = opp_tokenizer
         self.use_teacher = True
+        self.process_reward_coef = process_reward_coef
+        self.teacher_process_reward = teacher_process_reward
         self.teacher_rollout = teacher_rollout
         self.teacher_tokenizer = teacher_tokenizer
         self.opp_api_key = (opp_api_key or "").strip()
@@ -530,7 +534,7 @@ class WerewolfWorkflow(RolloutWorkflow):
 
     @staticmethod
     def _response_to_tensordict(
-        resp: ModelResponse, *, sft_ppo_mask: int = 0, agent_idx: int = -1
+        resp: ModelResponse, *, sft_ppo_mask: int = 0, agent_idx: int = -1, reward=0
     ) -> dict[str, torch.Tensor]:
         full_ids = resp.input_tokens + resp.output_tokens
         return {
@@ -547,7 +551,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                 [-1] * resp.input_len + resp.output_versions,
                 dtype=torch.long,
             ).unsqueeze(0),
-            "rewards": torch.zeros(1, dtype=torch.float32),
+            "rewards": torch.tensor([reward], dtype=torch.float32),
             "attention_mask": torch.ones(len(full_ids), dtype=torch.bool).unsqueeze(0),
             "sft_ppo_mask": torch.tensor([sft_ppo_mask], dtype=torch.long),
             "agent_idx": torch.tensor([agent_idx], dtype=torch.long),
@@ -573,6 +577,7 @@ class WerewolfWorkflow(RolloutWorkflow):
         step_logs: list[dict] = []
         agent_result_indices: list[int] = []  # Track which results correspond to agent actions
         step_rewards: list[list[float]] = []  # Track rewards for each step: [villager_reward, werewolf_reward]
+        process_rewards: list[float] = []
         agent_roles: list[str] = []  # Track role of agent for each turn
         episode_info: dict = {
             "episode_id": rid,
@@ -756,6 +761,29 @@ class WerewolfWorkflow(RolloutWorkflow):
                     )
                     agent_answer_tasks.append(engine.agenerate(a_req))
 
+            # Only gather the agent's answer now
+            agent_answers: list[str]
+            agent_answer_resps: list[ModelResponse] = []
+            if use_opp_generation and self.opp_api_key:
+                t0 = time.perf_counter()
+                agent_answers = await asyncio.gather(*agent_answer_tasks)
+                t_agent_answer_total += time.perf_counter() - t0
+            else:
+                t0 = time.perf_counter()
+                agent_ans_resps = await asyncio.gather(*agent_answer_tasks)
+                if use_opp_generation and self.opp_tokenizer:
+                    agent_answers = [
+                        self.opp_tokenizer.decode(r.output_tokens, skip_special_tokens=True)
+                        for r in agent_ans_resps
+                    ]
+                else:
+                    agent_answers = [
+                        self.tokenizer.decode(r.output_tokens, skip_special_tokens=True)
+                        for r in agent_ans_resps
+                    ]
+                agent_answer_resps = agent_ans_resps
+                t_agent_answer_total += time.perf_counter() - t0
+
             # Teacher answers using privileged observation from environment
             teacher_answers: list[str] = []
             _teacher_obs_used = obs  # Default to student observation
@@ -787,6 +815,18 @@ class WerewolfWorkflow(RolloutWorkflow):
                         "- Be concise and specific, grounded in the game state.\n"
                         "- Keep to within 5 sentences."
                     )
+                    if self.teacher_process_reward:
+                        taprompt = (
+                            f"{_teacher_obs}"
+                            f"{agent_thoughts_info}\n\n"
+                            f"# Judge Question Answer Pair\n"
+                            f"Question: {q}\nAnswer: {agent_answers[qi]}\n"
+                            "Instructions:\n"
+                            "Judge whether the answer is correct to the question using all privileged information, (including player roles, memories, and inner thoughts).\n"
+                            "Reply with [CORRECT] if the answer is correct and [WRONG] is the answer is wrong.\n"
+                            "Format your output as:\n"
+                            "<analysis> your reasoning process </analysis>\n<result> correctness of the answer </result> "
+                        )
                     t0 = time.perf_counter()
                     ta_ids = teacher_tok.apply_chat_template(
                         [{"role": "user", "content": taprompt}],
@@ -841,36 +881,25 @@ class WerewolfWorkflow(RolloutWorkflow):
                             ]
                         t_teacher_answer_total += time.perf_counter() - t0
 
-            # Only gather the agent's answer now
-            agent_answers: list[str]
-            agent_answer_resps: list[ModelResponse] = []
-            if use_opp_generation and self.opp_api_key:
-                t0 = time.perf_counter()
-                agent_answers = await asyncio.gather(*agent_answer_tasks)
-                t_agent_answer_total += time.perf_counter() - t0
-            else:
-                t0 = time.perf_counter()
-                agent_ans_resps = await asyncio.gather(*agent_answer_tasks)
-                if use_opp_generation and self.opp_tokenizer:
-                    agent_answers = [
-                        self.opp_tokenizer.decode(r.output_tokens, skip_special_tokens=True)
-                        for r in agent_ans_resps
-                    ]
-                else:
-                    agent_answers = [
-                        self.tokenizer.decode(r.output_tokens, skip_special_tokens=True)
-                        for r in agent_ans_resps
-                    ]
-                agent_answer_resps = agent_ans_resps
-                t_agent_answer_total += time.perf_counter() - t0
+            _process_reward = 0.0
+            _process_rewards = []
+            if teacher_ans_resps and self.teacher_process_reward:
+                for qi, t_ans in enumerate(teacher_answers):
+                    _process_rewards.append(float("CORRECT" in t_ans))
+                _process_reward = sum(_process_rewards)
+            if not use_oppo_generation:
+                process_rewards.append(_process_reward)
 
             # Add agent answers to training data (only for student agent, not opponent)
             if not use_opp_generation and agent_answer_resps:
                 t0 = time.perf_counter()
                 player_idx = env.roles.index(current_agent) if current_agent in env.roles else -1
-                for a_resp in agent_answer_resps:
+                for qi, a_resp in enumerate(agent_answer_resps):
+                    _reward = 0.0
+                    if len(_process_rewards) > 0:
+                        _reward = _process_rewards[qi] - 1
                     results.append(
-                        self._response_to_tensordict(a_resp, sft_ppo_mask=0, agent_idx=player_idx)
+                        self._response_to_tensordict(a_resp, sft_ppo_mask=0, agent_idx=player_idx, reward=_reward)
                     )
                 t_pack_tensors_total += time.perf_counter() - t0
 
@@ -1023,7 +1052,7 @@ class WerewolfWorkflow(RolloutWorkflow):
 
             # ========== 5) Build SFT training data ==========
             # Use student prompts (without privileged info) as input, teacher answers as target
-            if (self.teacher_rollout or self.teacher_api_key) and len(teacher_answers) > 0 and not use_opp_generation:
+            if (self.teacher_rollout or self.teacher_api_key) and len(teacher_answers) > 0 and not use_opp_generation and not self.teacher_process_reward:
                 t0 = time.perf_counter()
                 player_idx = env.roles.index(current_agent) if current_agent in env.roles else -1
                 for qi, (aprompt, t_ans) in enumerate(zip(agent_answer_prompts, teacher_answers)):
@@ -1169,6 +1198,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                     "teacher_answers": teacher_answers,
                     "action_prompt": action_prompt,
                     "action_completion": completion_str,
+                    "process_rewards": _process_rewards,
                 }
             )
 
@@ -1206,7 +1236,7 @@ class WerewolfWorkflow(RolloutWorkflow):
 
             # Assign return to all training examples from this turn
             for i in range(prev_idx, idx + 1):
-                results[i]["rewards"] = torch.tensor([ret], dtype=torch.float32)
+                results[i]["rewards"] = torch.tensor([ret], dtype=torch.float32) + results[i]["rewards"] * self.process_reward_coef
             prev_idx = idx + 1
 
         # Add discounted return to step logs (both returns for analysis)
@@ -1260,6 +1290,7 @@ class WerewolfWorkflow(RolloutWorkflow):
             traj_len[1],                            # 3
             vill_total,                             # 4
             were_total,                             # 5
+            sum(process_rewards) / len(process_rewards),
             stats.get("vill_wins", 0),              # 6
             stats.get("were_wins", 0),              # 7
             stats.get("werewolf_kills", 0),         # 8

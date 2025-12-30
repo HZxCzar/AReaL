@@ -73,6 +73,7 @@ WEREWOLF_LOGGING_KEYS = [
     "were_rewards",
     "vill_wins",
     "were_wins",
+    "process_rewards",
     "werewolf_kills",
     "werewolf_correct_kills",
     "villager_correct_votes",
