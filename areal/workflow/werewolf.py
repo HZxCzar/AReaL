@@ -1051,8 +1051,8 @@ class WerewolfWorkflow(RolloutWorkflow):
                 action_txt = m[-1].strip().lower() if m else ""
                 summary_prompt = (
                     f"{obs}\n\nYou are playing as the active player. You selected action: {action_txt}. "
-                    f"You summarized the previous game states: \n```\n{prev_summary}\n```\n\nProvide a brief summary of your thoughts and current game state, "
-                    "to guide your future planning and next action. Be concise and brief."
+                    f"Your latest memory at last decision-making step: \n```\n{prev_summary}\n```\n\nProvide an updated memory covering the game states and notable information, "
+                    "to guide your future planning and next moves. Be concise and brief."
                 )
                 summary_ids = self.tokenizer.apply_chat_template(
                     [{"role": "user", "content": summary_prompt}],

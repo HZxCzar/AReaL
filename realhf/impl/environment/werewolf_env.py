@@ -229,6 +229,7 @@ class WerewolfEnv(EnvironmentService):
         self.turn_order = self.roles[:]
         self.phase_actions = {}
         self.phase_info = ""
+        self._player_phase_info_list = {p: [] for p in self.roles}
         self.hunter_player = None
         self.player_memory = {p: [] for p in self.roles}
         self.trajectory = []
@@ -353,7 +354,7 @@ class WerewolfEnv(EnvironmentService):
         msg = ""
         if target and self.alive.get(target, False):
             self.alive[target] = False
-            msg = f"{target} died."
+            msg = f"{target} died (Reason is '{reason}')."
             logutil(f"Player {target} is {reason}.")
 
             if self.role_type.get(target) == "hunter":
@@ -601,14 +602,18 @@ class WerewolfEnv(EnvironmentService):
         if len(self.phase_actions) >= len(self.phase_player_list):
             last_phase = self.phase
             info, extra_reward, done = await self._change_phase()
-            info = f"In last {last_phase} phase: " + info + "\n"
+            info = f"In last {last_phase} phase (round {self.round}): " + info + "\n"
+            for p in self.roles:
+                self._player_phase_info_list[p].append(info)
             self.phase_info = info
             self.trajectory.append(self.phase_info)
 
             reward = [reward[i] + extra_reward[i] for i in range(2)]
         else:
             self._next_agent()
-            info = f"{self.phase_info} It is now phase {self.phase} round {self.round}. Current alive players: {', '.join(self._alive_list())}\n"
+            phase_info = "\n\n".join(self._player_phase_info_list[self.agent_player])
+            self._player_phase_info_list[self.agent_player] = []
+            info = f"{phase_info} It is now phase {self.phase} round {self.round}. Current alive players: {', '.join(self._alive_list())}\n"
 
             # Add observable information for previous players in the same turn
             previous_actions = []
