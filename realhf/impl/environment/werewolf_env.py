@@ -543,6 +543,8 @@ class WerewolfEnv(EnvironmentService):
                 if self.alive.get(target, False) and self.role_type[target] == "werewolf":
                     self.stats["hunter_correct_shots"] += 1
                 info += self._apply_kill(target, "shot")
+                for _p in self.roles:
+                    self._add_memory(_p, f"Hunter {self.hunter_player} shot {target} when he dies at round {self.round}.")
             self.await_hunter = False
             winner = self._check_win()
             if winner:
@@ -716,11 +718,11 @@ class WerewolfEnv(EnvironmentService):
                 if self.role_type[p] == "werewolf" and actions.get(p, "").startswith("kill "):
                     target = actions.get(p, "").split("kill ")[1].strip()
                     if target == kill_target:
-                        self._add_memory(p, f"You killed {kill_target} on {self.phase} {self.round}.")
+                        self._add_memory(p, f"You killed {kill_target} on phase {self.phase} round {self.round}.")
                 elif self.role_type[p] == "werewolf":
-                    self._add_memory(p, f"{kill_target} is killed by another werewolf on {self.phase} {self.round}.")
+                    self._add_memory(p, f"{kill_target} is killed by another werewolf on phase {self.phase} round {self.round}.")
                 else:
-                    self._add_memory(p, f"{kill_target} is killed during the night on {self.phase} {self.round}.")
+                    self._add_memory(p, f"{kill_target} is killed during the night on phase {self.phase} round {self.round}.")
 
         for p in players:
             if self.role_type[p] == "witch":
@@ -735,7 +737,10 @@ class WerewolfEnv(EnvironmentService):
                         msg += self._apply_kill(target, "poisoned")
                         self.witch_poison = False # The witch can only poison once per game.
                         self.stats["witch_poisons"] += 1
-                        self._add_memory(p, f"You poisoned {target} on {self.phase} {self.round}.")
+                        self._add_memory(p, f"You poisoned {target} on phase {self.phase} round {self.round}.")
+                        for _p in players:
+                            if _p != p:
+                                self._add_memory(_p, f"{target} is posioned to death on phase {self.phase} round {self.round}")
                         if self.role_type[target] == "werewolf":
                             self.stats["witch_correct_poisons"] += 1
                 elif act.startswith("save ") and self.witch_heal:
@@ -746,11 +751,11 @@ class WerewolfEnv(EnvironmentService):
                         if not self.alive[heal_target]:
                             self.alive[heal_target] = True
                             msg += f"Witch used heal on {heal_target}."
-                            self._add_memory(p, f"You healed {heal_target} on {self.phase} {self.round}.")
+                            self._add_memory(p, f"You healed {heal_target} on phase {self.phase} round {self.round}.")
                             if self.role_type[heal_target] != "werewolf":
                                 self.stats["witch_correct_heals"] += 1
                         else:
-                            self._add_memory(p, f"You used heal potion on {heal_target} on {self.phase} {self.round}, to no effect.")
+                            self._add_memory(p, f"You used heal potion on {heal_target} on phase {self.phase} round {self.round}, to no effect.")
                             msg += "Witch used heal potion, to no effect."
 
         for p in players:
