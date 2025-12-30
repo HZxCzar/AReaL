@@ -75,7 +75,7 @@ class WerewolfEnv(EnvironmentService):
             "- Foreseer: checks exactly one player’s role each night.\n"
             "- Hunter: when killed, immediately shoots one player.\n\n"
             "Gameplay phases:\n"
-            "- Night: werewolves choose a target; foreseer inspects; witch may heal/poison.\n"
+            "- Night: werewolves select target one by one, target selected by the last werewolf would be killed; foreseer inspects; witch may heal/poison.\n"
             "- Discussion (morning): all living players discuss what happened.\n"
             "- Day vote: everyone votes to eliminate one suspect. If a player dies and is the hunter, the hunter shoots before the next phase.\n\n"
             # "Victory conditions:\n"
@@ -641,6 +641,18 @@ class WerewolfEnv(EnvironmentService):
 
             if previous_actions:
                 info += f"In this phase {self.phase} round {self.round}, previous players actions are:\n```\n" + "\n".join(previous_actions) + "\n```\n"
+            else:
+                _reason = "you are the first player that acts/speaks"
+                if self.phase == "night":
+                    if self.agent_role == "werewolf":
+                        _reason = "you are the first werewolf that acts"
+                    else:
+                        _reason = "it is the night phase"
+                elif self.phase == "day":
+                    _reason = "it is the day phase, player votes are taken independently."
+                elif self.phase == "hunter":
+                    _reason = "you are the only hunter that is able to move currently."
+                info +=  f"In this phase {self.phase} round {self.round}, you have not observed actions taken by or messages posted from other players yet because {_reason}"
 
 
         if self.phase == "discussion":

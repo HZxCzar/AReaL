@@ -609,7 +609,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                 ((current_role != "werewolf" and self.role == "werewolf") or (current_role == "werewolf" and self.role == "villager"))
                 and (self.opp_rollout or self.opp_api_key)
             )
-            prev_summary = summaries[current_agent][-1] if summaries[current_agent] else "None yet."
+            prev_summary = summaries[current_agent][-1] if summaries[current_agent] else "The player has not made actions or speaked yet."
 
             # ========== 1) Agent self-generates 3 questions ==========
             qgen_prompt = self._build_question_generation_prompt(
