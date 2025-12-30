@@ -768,7 +768,7 @@ class WerewolfEnv(EnvironmentService):
             msg += self._apply_kill(target, "voted out")
             for p in players:
                 if p != target:
-                    self._add_memory(p, f"{target} is voted out in day {self.round}.")
+                    self._add_memory(p, f"{target} is voted out in day {self.round}. {target} is a {self.role_type.get(target)}. ")
         else:
             msg += f"No player is voted out in day {self.round} since there are no valid votes."
 
