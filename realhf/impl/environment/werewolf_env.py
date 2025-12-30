@@ -529,11 +529,11 @@ class WerewolfEnv(EnvironmentService):
                 # Check if hunter shall act
                 if self.await_hunter:
                     self.phase = "hunter"
-                    info += "The hunter is dead. He shall choose a player to shoot."
+                    info += f"The hunter is dead. He shall choose a player to shoot. Current alive players: {', '.join(self._alive_list())}."
                 else:
                     self.round += 1
                     self.phase = "night"
-                    info += f"Day ends. Night {self.round}."
+                    info += f"Day ends. Night {self.round}. Current alive players: {', '.join(self._alive_list())}."
         elif self.phase == "hunter":
             shoot_act = actions.get(players[0], "") if players else ""
             if shoot_act.startswith("shoot "):
@@ -556,7 +556,7 @@ class WerewolfEnv(EnvironmentService):
             else:
                 self.phase = "night"
                 self.round += 1
-                info += f"Day ends. Night {self.round}."
+                info += f"Day ends. Night {self.round}. Current alive players: {', '.join(self._alive_list())}."
         
         if done:
             logger.warning(f"Game successfully ends with winner {winner}!")
@@ -606,6 +606,7 @@ class WerewolfEnv(EnvironmentService):
 
             reward = [reward[i] + extra_reward[i] for i in range(2)]
         else:
+            self._next_agent()
             info = f"{self.phase_info} It is now phase {self.phase} round {self.round}.\n"
 
             # Add observable information for previous players in the same turn
@@ -635,7 +636,6 @@ class WerewolfEnv(EnvironmentService):
             if previous_actions:
                 info += f"In this phase {self.phase} round {self.round}, previous players actions are:\n```\n" + "\n".join(previous_actions) + "\n```\n"
 
-            self._next_agent()
 
         if self.phase == "discussion":
             guide = self.guide_discussion
