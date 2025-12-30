@@ -1097,8 +1097,8 @@ class HanabiWorkflow(RolloutWorkflow):
         final_total_reward = running_return 
 
         prev_idx = 0
-        for idx, ret in zip(agent_result_indices, returns):
-            ret = ret + self.process_reward_coef * process_rewards[idx]
+        for i, (idx, ret) in enumerate(zip(agent_result_indices, returns)):
+            ret = ret + self.process_reward_coef * process_rewards[i]
             for i in range(prev_idx, idx + 1):
                 results[i]["rewards"] = torch.tensor([ret], dtype=torch.float32)
             prev_idx = idx + 1
