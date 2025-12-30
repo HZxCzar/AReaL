@@ -883,7 +883,7 @@ class WerewolfWorkflow(RolloutWorkflow):
 
             _process_reward = 0.0
             _process_rewards = []
-            if teacher_ans_resps and self.teacher_process_reward:
+            if teacher_answer_tasks and self.teacher_process_reward:
                 for qi, t_ans in enumerate(teacher_answers):
                     _process_rewards.append(float("CORRECT" in t_ans))
                 _process_reward = sum(_process_rewards)
