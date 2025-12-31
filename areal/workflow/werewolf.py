@@ -1023,18 +1023,19 @@ class WerewolfWorkflow(RolloutWorkflow):
 
             # ========== 4) Build PPO training data ==========
             t0 = time.perf_counter()
-            player_idx = env.roles.index(current_agent) if current_agent in env.roles else -1
-            res = {
-                "input_ids": torch.tensor(seq).unsqueeze(0),
-                "loss_mask": torch.tensor(loss_mask).unsqueeze(0),
-                "logprobs": torch.tensor(logprobs).unsqueeze(0),
-                "versions": torch.tensor(versions).unsqueeze(0),
-                "attention_mask": torch.ones(len(seq), dtype=torch.bool).unsqueeze(0),
-                "rewards": torch.tensor([float(reward)]),
-                "sft_ppo_mask": torch.tensor([0], dtype=torch.long),
-                "agent_idx": torch.tensor([player_idx], dtype=torch.long),
-            }
-            results.append(res)
+            if not use_opp_generation:
+                player_idx = env.roles.index(current_agent) if current_agent in env.roles else -1
+                res = {
+                    "input_ids": torch.tensor(seq).unsqueeze(0),
+                    "loss_mask": torch.tensor(loss_mask).unsqueeze(0),
+                    "logprobs": torch.tensor(logprobs).unsqueeze(0),
+                    "versions": torch.tensor(versions).unsqueeze(0),
+                    "attention_mask": torch.ones(len(seq), dtype=torch.bool).unsqueeze(0),
+                    "rewards": torch.tensor([0.0], dtype=torch.float32),
+                    "sft_ppo_mask": torch.tensor([0], dtype=torch.long),
+                    "agent_idx": torch.tensor([player_idx], dtype=torch.long),
+                }
+                results.append(res)
             step_rewards.append(reward_list)  # Track both villager and werewolf rewards
             agent_roles.append(current_role)  # Track agent role for this turn
             t_pack_tensors_total += time.perf_counter() - t0
@@ -1224,6 +1225,8 @@ class WerewolfWorkflow(RolloutWorkflow):
 
         returns_villager.reverse()
         returns_werewolf.reverse()
+
+        assert len(agent_result_indices) == len(agent_roles)
 
         # Assign returns to training examples based on agent role
         prev_idx = 0

@@ -521,10 +521,10 @@ class WerewolfEnv(EnvironmentService):
                 done = True
                 if winner == "werewolf":
                     self.stats["were_wins"] += 1
-                    reward[1] += 12.0
+                    reward[1] += 20.0
                 else:
                     self.stats["vill_wins"] += 1
-                    reward[0] += 12.0
+                    reward[0] += 20.0
                 info += f"Game over. {winner} win."
             else:
                 # Check if hunter shall act
@@ -551,10 +551,10 @@ class WerewolfEnv(EnvironmentService):
                 done = True
                 if winner == "werewolf":
                     self.stats["were_wins"] += 1
-                    reward[1] += 12.0
+                    reward[1] += 20.0
                 else:
                     self.stats["vill_wins"] += 1
-                    reward[0] += 12.0
+                    reward[0] += 20.0
                 info += f"Game over. {winner} win."
             else:
                 self.phase = "night"
@@ -580,7 +580,7 @@ class WerewolfEnv(EnvironmentService):
     async def step(self, action: Tuple[str, List[str]]):
         qid, acts = action
         text = acts[0] if isinstance(acts, list) and acts else ""
-        self._format_reward(text)
+        # self._format_reward(text)
         reward = [0, 0] # villagers, werewolves
         m = re.findall(r"<answer>(.*?)</answer>", text, re.DOTALL)
         ans = m[-1].strip().lower() if m else ""
