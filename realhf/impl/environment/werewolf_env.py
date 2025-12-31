@@ -610,6 +610,10 @@ class WerewolfEnv(EnvironmentService):
             self.phase_info = info
             self.trajectory.append(self.phase_info)
 
+            phase_info = "\n\n".join(self._player_phase_info_list[self.agent_player])
+            self._player_phase_info_list[self.agent_player] = []
+            info = phase_info
+
             reward = [reward[i] + extra_reward[i] for i in range(2)]
 
             _reason = "you are the first player that acts/speaks"
