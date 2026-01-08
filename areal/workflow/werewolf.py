@@ -270,6 +270,8 @@ class WerewolfWorkflow(RolloutWorkflow):
             # Rate-limit every attempt (initial + retries)
             await self.rate_limiter.acquire()
 
+            logger.info(f"Starting API generation attempt {attempt}.")
+
             try:
                 async with session.request(method, url, headers=headers, json=json) as resp:
                     # Successful JSON
@@ -391,8 +393,8 @@ class WerewolfWorkflow(RolloutWorkflow):
                 return ""
             message = choices[0].get("message", {})
             resp = message.get("content", "")
-            # if resp:
-            #     logger.debug(f"API call successful with resp: {resp}")
+            if resp:
+                logger.info(f"API call successful with resp: {resp}")
             return resp
 
     def _build_api_response(

@@ -7,12 +7,7 @@ total_train_epochs: 1
 tokenizer_path: ${actor.path}
 
 # Werewolf-specific options
-<<<<<<< Updated upstream
-role: both
-scenario: full  # "full" (2v3w1w1f1h) or "easy" (3v1w)
-=======
 role: villager
->>>>>>> Stashed changes
 opp_server_addrs: ""
 opp_tokenizer_path: ""
 opp_api_key: "sk-43dd5f664179406d92fec42a9364f8a5"
@@ -26,14 +21,15 @@ teacher_api_model: ""
 teacher_obs_kwargs:
   use_global_obs: true        # Use privileged observation with player roles (default: true)
   use_individual_thoughts: true  # Include agent thoughts in teacher prompt (default: true)
-num_villagers: 2
-num_werewolves: 3
-num_witches: 1
-num_foreseers: 1
-num_hunters: 1
+env_kwargs: null
+scenario: "full"  # "full" (2v3w1w1f1h) or "easy" (3v1w)
+# num_villagers: 2
+# num_werewolves: 3
+# num_witches: 1
+# num_foreseers: 1
+# num_hunters: 1
 max_turns: 90
 turn_discount: 1.0
-env_kwargs: null
 
 cluster:
   n_nodes: 2
@@ -42,8 +38,8 @@ cluster:
   name_resolve:
     type: nfs
     nfs_record_root: /storage/openpsi/experiments
-
 allocation_mode: sglang:d4p1t1+d4p1t1
+
 
 rollout:
   experiment_name: ${experiment_name}
