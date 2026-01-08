@@ -1,2 +1,3 @@
 import realhf.impl.environment.math_code_single_step_env
 import realhf.impl.environment.hanabi_env
+import realhf.impl.environment.kuhn_poker_env
