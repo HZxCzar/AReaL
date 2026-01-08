@@ -23,6 +23,7 @@ class HanabiGRPOConfig(GRPOConfig):
     use_question_tokens: bool = False
     env_kwargs: dict | None = None
     teacher_obs_kwargs: dict | None = None
+    action_obs_kwargs: dict | None = None
     teacher_process_reward: bool = False
     process_reward_coef: float = 0.2
 

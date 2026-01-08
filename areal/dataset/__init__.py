@@ -114,6 +114,16 @@ def _get_custom_dataset(
             max_length=max_length,
             **kwargs,
         )
+    elif ("werewolf" in path or "Werewolf" in path) and type == "sft":
+        from .legacy.hanabi import get_hanabi_sft_dataset
+
+        return get_hanabi_sft_dataset(
+            path=path,
+            split=split,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            **kwargs,
+        )
     elif ("hanabi" in path or "Hanabi" in path) and type == "rl":
         from .legacy.hanabi import get_hanabi_rl_dataset
 

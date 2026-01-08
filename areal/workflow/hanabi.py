@@ -32,6 +32,10 @@ DEFAULT_TEACHER_OBSERVATION_KWARGS = dict(
     use_individual_thoughts = True,
     use_global_obs = True,
 )
+DEFAULT_ACTION_OBSERVATION_KWARGS = dict(
+    use_qa = True,
+    use_summary = True,
+)
 
 
 def _parse_rank_counts(raw_counts: dict | None) -> dict[int, int] | None:
@@ -193,6 +197,7 @@ class HanabiWorkflow(RolloutWorkflow):
         use_question_tokens: bool = False,
         teacher_process_reward: bool = False,
         teacher_obs_kwargs: dict | None = None,
+        action_obs_kwargs: dict | None = None,
         process_reward_coef: float = 0.2,
     ):
         self.gconfig = gconfig
@@ -210,6 +215,10 @@ class HanabiWorkflow(RolloutWorkflow):
         for k, v in DEFAULT_TEACHER_OBSERVATION_KWARGS.items():
             if k not in self.teacher_obs_kwargs:
                 self.teacher_obs_kwargs[k] = v
+        self.action_obs_kwargs = action_obs_kwargs or dict()
+        for k, v in DEFAULT_ACTION_OBSERVATION_KWARGS.items():
+            if k not in self.action_obs_kwargs:
+                self.action_obs_kwargs[k] = v
         self.misplay_penalty_factor = misplay_penalty_factor
         self.sft_reg = sft_reg
         self.process_reward_coef = process_reward_coef
@@ -837,6 +846,10 @@ class HanabiWorkflow(RolloutWorkflow):
                 f"Your self-questions and answers:\n{qa_block}\n"
                 f"Use the information above to prose a single action.\n {guide}"
             )
+            if not self.action_obs_kwargs["use_qa"]:
+                action_prompt =  action_prompt.replace(f"Your self-questions and answers:\n{qa_block}\n", "")
+            if not self.action_obs_kwargs["use_summary"]:
+                action_prompt = action_prompt.replace(f"Previous turn summary: {prev_summary}\n", "")
             action_ids = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": action_prompt}],
                 tokenize=True,
