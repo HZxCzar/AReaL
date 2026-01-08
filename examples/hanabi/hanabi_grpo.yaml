@@ -11,8 +11,8 @@ teacher_server_addrs: ""
 teacher_tokenizer_path: ""
 teacher_api_key: ""
 teacher_api_model: ""
-student_api_key: ""
-student_api_model: ""
+student_api_key: "sk-43dd5f664179406d92fec42a9364f8a5"
+student_api_model: "gpt-5-2025-08-07"
 misplay_penalty_factor: 1.0
 use_question_tokens: true
 env_kwargs: 

@@ -191,6 +191,6 @@ export WANDB_BASE_URL=http://8.150.1.98:8080
 python -m areal.launcher.slurm examples/werewolf/werewolf_grpo.py \
     --config examples/werewolf/werewolf_grpo.yaml \
     stats_logger.wandb.mode=online \
-    experiment_name=xmy-werewolf-grpo \
-    trial_name=test-3b
+    experiment_name=xmy-werewolf-eval \
+    trial_name=qwen3-8b-prm2.5-vs-gpt-5-step1
 """
