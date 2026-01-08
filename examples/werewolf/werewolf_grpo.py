@@ -192,5 +192,5 @@ python -m areal.launcher.slurm examples/werewolf/werewolf_grpo.py \
     --config examples/werewolf/werewolf_grpo.yaml \
     stats_logger.wandb.mode=online \
     experiment_name=xmy-werewolf-eval \
-    trial_name=qwen3-8b-prm2.5-vs-gpt-5-step1
+    trial_name=qwen3-8b-prm2.5-vs-gpt-5-step51
 """

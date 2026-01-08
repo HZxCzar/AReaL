@@ -144,9 +144,8 @@ sudo srun --mpi=pmi2 --ntasks=1 --gres=gpu:8 \
     singularity shell --nv --no-home --writable-tmpfs \
     --bind /storage:/storage /storage/openpsi/images/areal-latest.sif
 
-export UV_DEFAULT_INDEX="https://artifacts.antgroup-inc.cn/simple/"
-cd /storage/openpsi/users/xmy/inclusionAI/AReaL-New
-pip install uv && uv pip install -e .[all]
+cd /storage/openpsi/users/<your name>/inclusionAI/AReaL
+pip install open_spiel
 
 python -m areal.launcher.local examples/kuhn_poker/kuhn_poker_grpo.py \
     --config examples/kuhn_poker/kuhn_poker_grpo.yaml \
