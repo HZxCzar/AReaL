@@ -75,8 +75,8 @@ class WerewolfEnv(EnvironmentService):
             "- Foreseer: checks exactly one player’s role each night.\n"
             "- Hunter: when killed, immediately shoots one player.\n\n"
             "Gameplay phases:\n"
-            "- Night: werewolves choose a target; foreseer inspects; witch may heal/poison.\n"
-            "- Discussion (morning): all living players discuss what happened.\n"
+            "- Night: werewolves select target one by one, target selected by the last werewolf would be killed; foreseer inspects; witch may heal/poison.\n"
+            "- Discussion (morning): all living players discuss what happened. Players speaks one by one in the order of player id.\n"
             "- Day vote: everyone votes to eliminate one suspect. If a player dies and is the hunter, the hunter shoots before the next phase.\n\n"
             # "Victory conditions:\n"
             # "- Villagers win when every werewolf is dead.\n"
@@ -98,12 +98,33 @@ class WerewolfEnv(EnvironmentService):
             # "Keep the action concise and actionable (e.g., \"kill player2\", \"vote player3\", \"heal player1\").\n"
         )
         self.guide_discussion = (
-            "Speak to all players during the discussion phase (limit to ~40 words).\n"
-            "- If you are a werewolf: craft a deceptive narrative.\n"
-            "- If you are a villager-side role: share evidence, deductions, or requests for information.\n"
-            "Use the strict format:\n"
-            "<think>your reasoning</think> <answer>what you want to say</answer>\n"
-            # "Do not include extra text before or after these tags.\n"
+            "Participate in the discussion phase by speaking to all players.\n\n"
+            "Strategic considerations for all roles:\n"
+            "- Build or challenge narratives about player alignments and suspicious behavior\n"
+            "- Ask strategic questions to probe other players' knowledge, claims, or reasoning\n"
+            "- Analyze voting patterns, defensive reactions, and who is pushing which narratives\n"
+            "- Consider information asymmetry: what you know vs. what others claim to know\n"
+            "- Time your information reveals carefully - early claims establish credibility but invite scrutiny\n\n"
+            "Villager-side strategies:\n"
+            "- Share concrete observations and deductions based on actions and statements\n"
+            "- Coordinate voting by building consensus around strongest suspects\n"
+            "- Request information from claimed special roles and evaluate their credibility\n"
+            "- Identify and challenge suspicious patterns: who defends whom, who avoids suspicion\n"
+            "- For special roles: weigh strategic value of revealing your information vs. staying hidden\n\n"
+            "Werewolf strategies (diverse tactics):\n"
+            "1. Blend and deflect: Act like a confused villager, question others without being aggressive\n"
+            "2. False claiming: Claim a special role (foreseer/witch) early with fake results to gain trust\n"
+            "3. Bus a teammate: Accusse a werewolf teammate to establish credibility, then shift suspicion later\n"
+            "4. Chaos sowing: Create competing narratives and confusion about who to trust\n"
+            "5. Bandwagoning: Join popular suspicions but subtly redirect toward wrong targets\n"
+            "6. Counter-accusing: When accused, deflect by aggressively pushing suspicion on the accuser\n"
+            "7. Information distortion: Misrepresent timing, voting patterns, or statements to frame villagers\n"
+            "8. Trust building: Support correct eliminations of non-threats while protecting key werewolves\n"
+            "9. Role-blocking: If someone claims a role, claim the same role to create confusion\n"
+            "10. Strategic silence: Stay quiet early, then appear as a 'trustworthy quiet player' later\n\n"
+            "Your statement should be strategic and substantive (aim for 30-80 words).\n"
+            "Use the format:\n"
+            "<think>your strategic reasoning and chosen approach</think> <answer>what you say to all players</answer>\n"
         )
         # Stats for RL training
         self.stats: Dict[str, int] = {
@@ -208,6 +229,7 @@ class WerewolfEnv(EnvironmentService):
         self.turn_order = self.roles[:]
         self.phase_actions = {}
         self.phase_info = ""
+        self._player_phase_info_list = {p: [] for p in self.roles}
         self.hunter_player = None
         self.player_memory = {p: [] for p in self.roles}
         self.trajectory = []
@@ -252,7 +274,8 @@ class WerewolfEnv(EnvironmentService):
         )
         setup_info = ", ".join([f"{p}: {self.role_type[p]}" for p in self.roles])
         self.trajectory.append(f"Initial setup -> {setup_info}")
-        return obs, guide, {}
+        teacher_obs = self._build_teacher_observation(self.agent_player)
+        return obs, guide, {"teacher_observation": teacher_obs}
 
     def _format_reward(self, text: str) -> None:
         has_think = "<think>" in text and "</think>" in text
@@ -331,7 +354,7 @@ class WerewolfEnv(EnvironmentService):
         msg = ""
         if target and self.alive.get(target, False):
             self.alive[target] = False
-            msg = f"{target} died."
+            msg = f"{target} died (Reason is '{reason}')."
             logutil(f"Player {target} is {reason}.")
 
             if self.role_type.get(target) == "hunter":
@@ -342,6 +365,57 @@ class WerewolfEnv(EnvironmentService):
 
     def _alive_list(self) -> List[str]:
         return [r for r in self.roles if self.alive[r]]
+
+    def _build_teacher_observation(self, player: str) -> str:
+        """Build privileged observation with global information for teacher model.
+
+        This includes:
+        - All player roles (privileged information)
+        - Current game state
+        - Phase information
+        - Player memories (observable history events for each player)
+        """
+        alive_list = self._alive_list()
+        role_info = ", ".join([f"{p}: {self.role_type[p]}" for p in self.roles])
+
+        teacher_info = [
+            "# Rules\n",
+            self.rules,
+            "\n# Privileged Information\n",
+            "You are a privileged Werewolf observer with perfect information about all player roles.",
+            "\n=== Turn Context ===",
+            f"Current active player: {player} ({self.role_type.get(player, 'unknown')})",
+            f"Phase: {self.phase}",
+            f"Round: {self.round}",
+            f"Alive players: {', '.join(alive_list)}",
+            "\n=== All Player Roles (Privileged) ===",
+            f"{role_info}",
+        ]
+
+        # Add player memories (observable history events)
+        if self.player_memory:
+            teacher_info.append("\n=== Player Memories (Observable History Events) ===")
+            for p in self.roles:
+                if self.player_memory.get(p):
+                    memories = "; ".join(self.player_memory[p])
+                    teacher_info.append(f"{p} ({self.role_type[p]}): {memories}")
+
+        # Add current phase info
+        if self.phase_info:
+            teacher_info.append(f"\n=== Recent Phase Information ===\n{self.phase_info}")
+
+        # Add witch ability status
+        if any(self.role_type[p] == "witch" for p in self.roles):
+            teacher_info.append(f"\n=== Witch Status ===")
+            teacher_info.append(f"Heal available: {self.witch_heal}, Poison available: {self.witch_poison}")
+
+        # Add current phase actions
+        if self.phase_actions:
+            teacher_info.append(f"\n=== Current Phase Actions ===")
+            for p, action in self.phase_actions.items():
+                teacher_info.append(f"{p}: {action}")
+
+        return "\n".join(teacher_info)
 
     def _phase_players(self, phase: str) -> List[str]:
         """Return the list of players who act in the given phase in turn order."""
@@ -419,7 +493,7 @@ class WerewolfEnv(EnvironmentService):
             content = actions.get(p, "nothing")
             if content.startswith("say "):
                 content = content[4:]
-            msg += f"{p} says: {content}."
+            msg += f"{p} says: {content}.\n"
         return msg
 
     async def _change_phase(self):
@@ -447,20 +521,20 @@ class WerewolfEnv(EnvironmentService):
                 done = True
                 if winner == "werewolf":
                     self.stats["were_wins"] += 1
-                    reward[1] += 12.0
+                    reward[1] += 20.0
                 else:
                     self.stats["vill_wins"] += 1
-                    reward[0] += 12.0
+                    reward[0] += 20.0
                 info += f"Game over. {winner} win."
             else:
                 # Check if hunter shall act
                 if self.await_hunter:
                     self.phase = "hunter"
-                    info += "The hunter is dead. He shall choose a player to shoot."
+                    info += f"The hunter is dead. He shall choose a player to shoot. "
                 else:
                     self.round += 1
                     self.phase = "night"
-                    info += f"Day ends. Night {self.round}."
+                    info += f"Day ends. Night {self.round}. "
         elif self.phase == "hunter":
             shoot_act = actions.get(players[0], "") if players else ""
             if shoot_act.startswith("shoot "):
@@ -469,21 +543,23 @@ class WerewolfEnv(EnvironmentService):
                 if self.alive.get(target, False) and self.role_type[target] == "werewolf":
                     self.stats["hunter_correct_shots"] += 1
                 info += self._apply_kill(target, "shot")
+                for _p in self.roles:
+                    self._add_memory(_p, f"Hunter {self.hunter_player} shot {target} when he dies at round {self.round}.")
             self.await_hunter = False
             winner = self._check_win()
             if winner:
                 done = True
                 if winner == "werewolf":
                     self.stats["were_wins"] += 1
-                    reward[1] += 12.0
+                    reward[1] += 20.0
                 else:
                     self.stats["vill_wins"] += 1
-                    reward[0] += 12.0
+                    reward[0] += 20.0
                 info += f"Game over. {winner} win."
             else:
                 self.phase = "night"
                 self.round += 1
-                info += f"Day ends. Night {self.round}."
+                info += f"Day ends. Night {self.round}. "
         
         if done:
             logger.warning(f"Game successfully ends with winner {winner}!")
@@ -504,7 +580,7 @@ class WerewolfEnv(EnvironmentService):
     async def step(self, action: Tuple[str, List[str]]):
         qid, acts = action
         text = acts[0] if isinstance(acts, list) and acts else ""
-        self._format_reward(text)
+        # self._format_reward(text)
         reward = [0, 0] # villagers, werewolves
         m = re.findall(r"<answer>(.*?)</answer>", text, re.DOTALL)
         ans = m[-1].strip().lower() if m else ""
@@ -528,29 +604,94 @@ class WerewolfEnv(EnvironmentService):
         if len(self.phase_actions) >= len(self.phase_player_list):
             last_phase = self.phase
             info, extra_reward, done = await self._change_phase()
-            self.phase_info = f"In last {last_phase} phase: " + info
+            info = f"In last {last_phase} phase (round {self.round}): " + info + "\n"
+            for p in self.roles:
+                self._player_phase_info_list[p].append(info)
+            self.phase_info = info
             self.trajectory.append(self.phase_info)
 
+            phase_info = "\n\n".join(self._player_phase_info_list[self.agent_player])
+            self._player_phase_info_list[self.agent_player] = []
+            info = phase_info
+
             reward = [reward[i] + extra_reward[i] for i in range(2)]
+
+            _reason = "you are the first player that acts/speaks"
+            if self.phase == "night":
+                if self.agent_role == "werewolf":
+                    _reason = "you are the first werewolf that acts"
+                else:
+                    _reason = "it is the night phase"
+            elif self.phase == "day":
+                _reason = "it is the day phase, player votes are taken independently."
+            elif self.phase == "hunter":
+                _reason = "you are the only hunter that is able to move currently."
+            info +=  f"In this phase {self.phase} round {self.round}, you have not observed actions taken by or messages posted from other players yet because {_reason}"
+
         else:
-            info = f"{self.phase_info} It is now phase {self.phase} round {self.round}."
             self._next_agent()
+            phase_info = "\n\n".join(self._player_phase_info_list[self.agent_player])
+            self._player_phase_info_list[self.agent_player] = []
+            info = f"{phase_info} It is now phase {self.phase} round {self.round}. Current alive players: {', '.join(self._alive_list())}\n"
+
+            # Add observable information for previous players in the same turn
+            previous_actions = []
+            current_idx = len(self.phase_actions)
+
+            if self.phase == "night":
+                # In night phase: werewolves observe actions of previous werewolves
+                if self.agent_role == "werewolf":
+                    for i in range(current_idx):
+                        player = self.phase_player_list[i]
+                        if self.role_type[player] == "werewolf" and player in self.phase_actions:
+                            action = self.phase_actions[player]
+                            previous_actions.append(f"{player}: {action}")
+            elif self.phase == "discussion":
+                # In discussion phase: all players observe speech of previous players
+                for i in range(current_idx):
+                    player = self.phase_player_list[i]
+                    if player in self.phase_actions:
+                        action = self.phase_actions[player]
+                        if action.startswith("say "):
+                            content = action[4:]  # Remove "say " prefix
+                        else:
+                            content = action
+                        previous_actions.append(f"{player} says: {content}")
+
+            if previous_actions:
+                info += f"In this phase {self.phase} round {self.round}, previous player actions are:\n```\n" + "\n".join(previous_actions) + "\n```\n"
+            else:
+                _reason = "you are the first player that acts/speaks"
+                if self.phase == "night":
+                    if self.agent_role == "werewolf":
+                        _reason = "you are the first werewolf that acts"
+                    else:
+                        _reason = "it is the night phase"
+                elif self.phase == "day":
+                    _reason = "it is the day phase, player votes are taken independently."
+                elif self.phase == "hunter":
+                    _reason = "you are the only hunter that is able to move currently."
+                info +=  f"In this phase {self.phase} round {self.round}, you have not observed actions taken by or messages posted from other players yet because {_reason}"
+
 
         if self.phase == "discussion":
             guide = self.guide_discussion
         else:
             guide = self.guide.format(actions=', '.join(self._get_valid_actions()))
         role_prompt = self.role_prompts.get(self.agent_role, "")
-        memory = "; ".join(self.player_memory.get(self.agent_player, []))
+        memory = "\n- ".join(self.player_memory.get(self.agent_player, []))
 
         obs = ""
         if self.repeat_rules:
-            obs += f"{self.rules} You are {self.agent_player} ({self.agent_role}). {role_prompt}"
+            obs += f"{self.rules} You are {self.agent_player} ({self.agent_role}). {role_prompt}\n\n"
         if memory:
-            obs += f" You remember: {memory}"
-        obs += f" {info}"
-        
-        return obs, guide, reward, done, False, {}
+            obs += f"You remember:\n{memory}\n\n"
+        obs += f"{info}\n\n"
+
+        teacher_obs = self._build_teacher_observation(self.agent_player) if not done else obs
+        info_dict = {"teacher_observation": teacher_obs}
+
+        return obs, guide, reward, done, False, info_dict
 
     def get_trajectory(self) -> List[str]:
         """Returns a copy of the trajectory history."""
@@ -581,11 +722,11 @@ class WerewolfEnv(EnvironmentService):
                 if self.role_type[p] == "werewolf" and actions.get(p, "").startswith("kill "):
                     target = actions.get(p, "").split("kill ")[1].strip()
                     if target == kill_target:
-                        self._add_memory(p, f"You killed {kill_target} on {self.phase} {self.round}.")
+                        self._add_memory(p, f"You killed {kill_target} on phase {self.phase} round {self.round}.")
                 elif self.role_type[p] == "werewolf":
-                    self._add_memory(p, f"{kill_target} is killed by another werewolf on {self.phase} {self.round}.")
+                    self._add_memory(p, f"{kill_target} is killed by another werewolf on phase {self.phase} round {self.round}.")
                 else:
-                    self._add_memory(p, f"{kill_target} is killed during the night on {self.phase} {self.round}.")
+                    self._add_memory(p, f"{kill_target} is killed during the night on phase {self.phase} round {self.round}.")
 
         for p in players:
             if self.role_type[p] == "witch":
@@ -600,7 +741,10 @@ class WerewolfEnv(EnvironmentService):
                         msg += self._apply_kill(target, "poisoned")
                         self.witch_poison = False # The witch can only poison once per game.
                         self.stats["witch_poisons"] += 1
-                        self._add_memory(p, f"You poisoned {target} on {self.phase} {self.round}.")
+                        self._add_memory(p, f"You poisoned {target} on phase {self.phase} round {self.round}.")
+                        for _p in players:
+                            if _p != p:
+                                self._add_memory(_p, f"{target} is posioned to death on phase {self.phase} round {self.round}")
                         if self.role_type[target] == "werewolf":
                             self.stats["witch_correct_poisons"] += 1
                 elif act.startswith("save ") and self.witch_heal:
@@ -611,11 +755,11 @@ class WerewolfEnv(EnvironmentService):
                         if not self.alive[heal_target]:
                             self.alive[heal_target] = True
                             msg += f"Witch used heal on {heal_target}."
-                            self._add_memory(p, f"You healed {heal_target} on {self.phase} {self.round}.")
+                            self._add_memory(p, f"You healed {heal_target} on phase {self.phase} round {self.round}.")
                             if self.role_type[heal_target] != "werewolf":
                                 self.stats["witch_correct_heals"] += 1
                         else:
-                            self._add_memory(p, f"You used heal potion on {heal_target} on {self.phase} {self.round}, to no effect.")
+                            self._add_memory(p, f"You used heal potion on {heal_target} on phase {self.phase} round {self.round}, to no effect.")
                             msg += "Witch used heal potion, to no effect."
 
         for p in players:
@@ -627,7 +771,7 @@ class WerewolfEnv(EnvironmentService):
                 target = actions.get(p, "").split("check ")[1].strip()
                 if target in self.alive:
                     role = self.role_type.get(target)
-                    msg += f"Forseer checked the role of {target}."
+                    # msg += f"Forseer checked the role of {target}."
                     self._add_memory(p, f"You checked {target}, who is a {role}.")
 
         logutil(msg)
@@ -640,6 +784,7 @@ class WerewolfEnv(EnvironmentService):
     def _day_phase(self, actions: Dict[str, str], players: List[str]) -> str:
         msg = ""
         votes = []
+        vote_info = []
         for p in players:
             act = actions.get(p, "").lower()
             if act.startswith("vote "):
@@ -648,6 +793,7 @@ class WerewolfEnv(EnvironmentService):
                 choices = [x for x in players if x != p]
                 vote_target = random.choice(choices) if choices else p
             votes.append(vote_target)
+            vote_info.append(f"{p} voted for {vote_target}")
             if self.role_type.get(p) == "villager":
                 if self.role_type.get(vote_target) == "werewolf":
                     self.stats["villager_correct_votes"] += 1
@@ -663,7 +809,7 @@ class WerewolfEnv(EnvironmentService):
             msg += self._apply_kill(target, "voted out")
             for p in players:
                 if p != target:
-                    self._add_memory(p, f"{target} is voted out in day {self.round}.")
+                    self._add_memory(p, f"In day {self.round}, {', '.join(vote_info)}. {target} is voted out in day {self.round}. {target} is a {self.role_type.get(target)}. ")
         else:
             msg += f"No player is voted out in day {self.round} since there are no valid votes."
 

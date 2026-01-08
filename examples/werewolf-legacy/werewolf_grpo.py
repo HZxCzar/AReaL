@@ -179,6 +179,7 @@ def main(args):
         opp_api_model=opp_api_model,
         teacher_api_key=teacher_api_key,
         teacher_api_model=teacher_api_model,
+        teacher_obs_kwargs=getattr(config, "teacher_obs_kwargs", None),
     )
 
     saver = Saver(config.saver, ft_spec)
