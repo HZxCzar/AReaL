@@ -397,7 +397,7 @@ class HanabiWorkflow(RolloutWorkflow):
             payload = {
                 "model": api_model,
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens,
+                "max_completion_tokens": max_tokens,
                 "temperature": temperature,
                 "top_p": top_p,
                 "n": 1,
