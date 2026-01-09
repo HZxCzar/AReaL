@@ -366,7 +366,7 @@ class KuhnPokerWorkflow(RolloutWorkflow):
     def _build_env(self) -> KuhnPokerEnv:
         env_kwargs = dict(self.env_kwargs)
         if "built_in_opponent" not in env_kwargs:
-            env_kwargs["built_in_opponent"] = "cfr"
+            env_kwargs["built_in_opponent"] = "none"
         if self.opp_rollout or self.opp_api_key:
             env_kwargs["built_in_opponent"] = "none"
         if "opponent_player" not in env_kwargs:
@@ -473,12 +473,13 @@ class KuhnPokerWorkflow(RolloutWorkflow):
             legal_actions = execute_results[-1]["legal_actions"]
             done = execute_results[-1]["done"]
 
-        agent_responses: list[ModelResponse] = []
+        response_entries: list[tuple[ModelResponse, int, int, str, str, int]] = []
         prompt_strs: list[str] = []
         completions_strs: list[str] = []
         seqlens: list[int] = []
         step_logs: list[dict] = []
         process_rewards: list[float] = []
+        trajectory_rewards: list[list[float]] = []
 
         turns = 0
         while not done and turns < self.max_turns:
@@ -498,6 +499,10 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                 except ValueError:
                     execute_results = env.get_losing_state(player_id=self.player_id)
                     done = True
+                    step_index = len(trajectory_rewards)
+                    trajectory_rewards.extend(
+                        [result["rewards"] for result in execute_results]
+                    )
                     step_logs.append(
                         {
                             "player": self.player_id,
@@ -508,6 +513,10 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                 else:
                     execute_results = env.step(action)
                     done = execute_results[-1]["done"]
+                    step_index = len(trajectory_rewards)
+                    trajectory_rewards.extend(
+                        [result["rewards"] for result in execute_results]
+                    )
                     step_logs.append(
                         {
                             "player": self.player_id,
@@ -516,10 +525,20 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                         }
                     )
 
-                prompt_strs.append(self.tokenizer.decode(resp.input_tokens))
+                prompt_text = self.tokenizer.decode(resp.input_tokens)
+                prompt_strs.append(prompt_text)
                 completions_strs.append(completion)
                 seqlens.append(len(resp.input_tokens) + len(resp.output_tokens))
-                agent_responses.append(resp)
+                response_entries.append(
+                    (
+                        resp,
+                        self.player_id,
+                        step_index,
+                        prompt_text,
+                        completion,
+                        len(resp.input_tokens) + len(resp.output_tokens),
+                    )
+                )
 
                 if self.teacher_process_reward and (
                     self.teacher_rollout or self.teacher_api_key
@@ -557,11 +576,12 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                     legal_actions = execute_results[-1]["legal_actions"]
 
             else:
+                prompt_messages = self._build_turn_prompt(
+                    env, observation, legal_actions, current_player
+                )
+                invalid_action = False
                 if self.opp_api_key:
-                    prompt_messages = self._build_turn_prompt(
-                        env, observation, legal_actions, current_player
-                    )
-                    _, opp_completion = await self._generate_action_text_api(
+                    opp_resp, opp_completion = await self._generate_action_text_api(
                         prompt_messages,
                         self.opp_tokenizer or self.tokenizer,
                         f"{rid}-opp-{turns}",
@@ -570,67 +590,115 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                         self.opp_api_provider or "openai",
                         "_opp_api_session",
                     )
-                    opp_action_text = self._extract_action(opp_completion)
-                    try:
-                        opp_action = env._string_to_action(opp_action_text)
-                    except ValueError:
-                        execute_results = env.get_losing_state(player_id=current_player)
-                        done = True
-                    else:
-                        execute_results = env.step(opp_action)
-                        done = execute_results[-1]["done"]
                 elif self.opp_rollout:
-                    prompt_messages = self._build_turn_prompt(
-                        env, observation, legal_actions, current_player
-                    )
-                    _, opp_completion = await self._generate_action_text(
+                    opp_resp, opp_completion = await self._generate_action_text(
                         self.opp_rollout,
                         self.opp_tokenizer or self.tokenizer,
                         prompt_messages,
                         f"{rid}-opp-{turns}",
                     )
-                    opp_action_text = self._extract_action(opp_completion)
-                    try:
-                        opp_action = env._string_to_action(opp_action_text)
-                    except ValueError:
-                        execute_results = env.get_losing_state(player_id=current_player)
-                        done = True
-                    else:
-                        execute_results = env.step(opp_action)
-                        done = execute_results[-1]["done"]
                 else:
-                    legal_choices = list(legal_actions.keys())
-                    opp_action = random.choice(legal_choices) if legal_choices else 0
+                    opp_resp, opp_completion = await self._generate_action_text(
+                        engine,
+                        self.tokenizer,
+                        prompt_messages,
+                        f"{rid}-selfplay-{turns}",
+                    )
+
+                opp_action_text = self._extract_action(opp_completion)
+                try:
+                    opp_action = env._string_to_action(opp_action_text)
+                except ValueError:
+                    execute_results = env.get_losing_state(player_id=current_player)
+                    done = True
+                    step_index = len(trajectory_rewards)
+                    trajectory_rewards.extend(
+                        [result["rewards"] for result in execute_results]
+                    )
+                    invalid_action = True
+                else:
                     execute_results = env.step(opp_action)
                     done = execute_results[-1]["done"]
+                    step_index = len(trajectory_rewards)
+                    trajectory_rewards.extend(
+                        [result["rewards"] for result in execute_results]
+                    )
+
+                prompt_text = self.tokenizer.decode(opp_resp.input_tokens)
+                prompt_strs.append(prompt_text)
+                completions_strs.append(opp_completion)
+                seqlens.append(len(opp_resp.input_tokens) + len(opp_resp.output_tokens))
+                response_entries.append(
+                    (
+                        opp_resp,
+                        current_player,
+                        step_index,
+                        prompt_text,
+                        opp_completion,
+                        len(opp_resp.input_tokens) + len(opp_resp.output_tokens),
+                    )
+                )
+                step_logs.append(
+                    {
+                        "player": current_player,
+                        "action": opp_action_text,
+                        "invalid_action": invalid_action,
+                    }
+                )
 
                 if not done:
                     observation = execute_results[-1]["observation"]
                     legal_actions = execute_results[-1]["legal_actions"]
 
-        reward = 0.0
-        if execute_results:
-            rewards = execute_results[-1]["rewards"]
-            if isinstance(rewards, (list, tuple)) and len(rewards) > self.player_id:
-                reward = float(rewards[self.player_id])
-            else:
-                reward = float(rewards)
+        player_returns: dict[int, float] = {0: 0.0, 1: 0.0}
+        if trajectory_rewards:
+            cumulative = {0: 0.0, 1: 0.0}
+            per_step_returns: list[dict[int, float]] = []
+            for rewards in reversed(trajectory_rewards):
+                if isinstance(rewards, (list, tuple)) and len(rewards) >= 2:
+                    cumulative[0] += float(rewards[0])
+                    cumulative[1] += float(rewards[1])
+                else:
+                    cumulative[0] += float(rewards)
+                    cumulative[1] += float(rewards)
+                per_step_returns.append({0: cumulative[0], 1: cumulative[1]})
+            per_step_returns.reverse()
+            player_returns = dict(per_step_returns[0])
+        else:
+            per_step_returns = []
 
-        if self.teacher_process_reward and process_rewards:
-            reward += (
-                sum(process_rewards) / max(1, len(process_rewards))
-            ) * self.process_reward_coef
+        # if self.teacher_process_reward and process_rewards:
+        #     bonus = (
+        #         sum(process_rewards) / max(1, len(process_rewards))
+        #     ) * self.process_reward_coef
+        #     player_returns[self.player_id] += bonus
+        #     if per_step_returns:
+        #         for step in per_step_returns:
+        #             step[self.player_id] += bonus
 
-        stats_tracker.get("rollout").scalar(reward=reward, num_turns=turns)
+        stats_tracker.get("rollout").scalar(
+            reward=player_returns[self.player_id], reward_opp=player_returns[1-self.player_id], num_turns=turns
+        )
+        logger.info(f"Rollout reward: {player_returns[self.player_id]} finished for player {self.player_id} with {turns} steps.")
 
         results = []
-        for idx, resp in enumerate(agent_responses):
-            step_reward = reward * (self.turn_discount ** idx)
-            results.append(self._response_to_tensordict(resp, reward=step_reward))
+        for resp, player_id, step_index, _, _, _ in response_entries:
+            # if player_id != self.player_id:
+            #     continue
+            if per_step_returns and step_index < len(per_step_returns):
+                step_return = float(per_step_returns[step_index][player_id])
+            else:
+                step_return = player_returns[player_id]
+            results.append(self._response_to_tensordict(resp, reward=step_return))
 
-        logger.info(f"Kuhn Pocker game ended with reward {reward}.")
-
-        return results, prompt_strs, completions_strs, [reward], seqlens, step_logs
+        return (
+            results,
+            prompt_strs,
+            completions_strs,
+            [player_returns[0], player_returns[1]],
+            seqlens,
+            step_logs,
+        )
 
     async def arun_episode(
         self, engine: InferenceEngine, data: dict

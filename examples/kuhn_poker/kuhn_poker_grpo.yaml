@@ -19,7 +19,7 @@ teacher_api_model: ""
 teacher_process_reward: false
 process_reward_coef: 0.2
 env_kwargs:
-  built_in_opponent: cfr
+  built_in_opponent: none
   opponent_player: 1
   include_opponent_turn: action
   uct_c: 2.0
@@ -58,7 +58,7 @@ gconfig:
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: /storage/openpsi/models/Qwen__Qwen2.5-3B-Instruct
+  path: /storage/openpsi/models/Qwen__Qwen3-4B
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true

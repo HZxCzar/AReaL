@@ -149,5 +149,7 @@ pip install open_spiel
 
 python -m areal.launcher.local examples/kuhn_poker/kuhn_poker_grpo.py \
     --config examples/kuhn_poker/kuhn_poker_grpo.yaml \
-    stats_logger.wandb.mode=disabled
+    stats_logger.wandb.mode=online \
+    experiment_name=xmy-kuhn \
+    trial_name=trial-qwen3-4b
 """
