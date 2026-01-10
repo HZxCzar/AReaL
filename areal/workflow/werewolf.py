@@ -150,6 +150,8 @@ class WerewolfWorkflow(RolloutWorkflow):
         opp_api_model: str | None = None,
         teacher_api_key: str | None = None,
         teacher_api_model: str | None = None,
+        student_api_key: str | None = None,
+        student_api_model: str | None = None,
         questions: list[str] | None = None,  # kept for backward-compat but unused now
         teacher_obs_kwargs: dict | None = None,
         teacher_process_reward: bool = False,
@@ -175,6 +177,7 @@ class WerewolfWorkflow(RolloutWorkflow):
         self.teacher_tokenizer = teacher_tokenizer
         self.opp_api_key = (opp_api_key or "").strip()
         self.teacher_api_key = (teacher_api_key or "").strip()
+        self.student_api_key = (student_api_key or "").strip()
         self.opp_api_provider = (
             _detect_api_provider(self.opp_api_key) if self.opp_api_key else None
         )
@@ -183,9 +186,17 @@ class WerewolfWorkflow(RolloutWorkflow):
             if self.teacher_api_key
             else None
         )
+        self.student_api_provider = (
+            _detect_api_provider(self.student_api_key)
+            if self.student_api_key
+            else None
+        )
         self.opp_api_model = (opp_api_model or "").strip() if self.opp_api_key else ""
         self.teacher_api_model = (
             (teacher_api_model or "").strip() if self.teacher_api_key else ""
+        )
+        self.student_api_model = (
+            (student_api_model or "").strip() if self.student_api_key else ""
         )
         if self.opp_api_key:
             default_model = (
@@ -213,8 +224,22 @@ class WerewolfWorkflow(RolloutWorkflow):
             self.teacher_api_model = (
                 (self.teacher_api_model or "").strip() or default_teacher_model
             )
+        if self.student_api_key:
+            default_student_model = (
+                "gpt-4o-2024-11-20"
+                if self.student_api_provider == "openai"
+                else "claude-3-7-sonnet-20250219"
+            )
+            if not self.student_api_model:
+                self.student_api_model = os.getenv(
+                    "AREAL_STUDENT_API_MODEL", default_student_model
+                )
+            self.student_api_model = (
+                (self.student_api_model or "").strip() or default_student_model
+            )
         self._opp_api_session: aiohttp.ClientSession | None = None
         self._teacher_api_session: aiohttp.ClientSession | None = None
+        self._student_api_session: aiohttp.ClientSession | None = None
         self.rate_limiter = RateLimiter(per_second=2, per_minute=60)
         self.use_summary = True
 
@@ -616,6 +641,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                 ((current_role != "werewolf" and self.role == "werewolf") or (current_role == "werewolf" and self.role == "villager"))
                 and (self.opp_rollout or self.opp_api_key)
             )
+            use_student_api = (not use_opp_generation) and bool(self.student_api_key)
             prev_summary = summaries[current_agent][-1] if summaries[current_agent] else "The player has not made actions or speaked yet."
 
             # ========== 1) Agent self-generates 3 questions ==========
@@ -646,6 +672,19 @@ class WerewolfWorkflow(RolloutWorkflow):
                     self.opp_api_model,
                     self.opp_api_provider or "openai",
                     "_opp_api_session",
+                    f"{rid}-qgen-{turn}",
+                )
+                t_qgen_total += time.perf_counter() - t0
+                t_qgen_decode_total += 0.0
+            elif use_student_api:
+                t0 = time.perf_counter()
+                qgen_text = await self._api_chat_completion(
+                    qgen_prompt,
+                    qgen_cfg,
+                    self.student_api_key,
+                    self.student_api_model,
+                    self.student_api_provider or "openai",
+                    "_student_api_session",
                     f"{rid}-qgen-{turn}",
                 )
                 t_qgen_total += time.perf_counter() - t0
@@ -746,6 +785,18 @@ class WerewolfWorkflow(RolloutWorkflow):
                             f"{rid}-ans-{turn}-{qi}",
                         )
                     )
+                elif use_student_api:
+                    agent_answer_tasks.append(
+                        self._api_chat_completion(
+                            aprompt,
+                            agent_answer_cfg,
+                            self.student_api_key,
+                            self.student_api_model,
+                            self.student_api_provider or "openai",
+                            "_student_api_session",
+                            f"{rid}-ans-{turn}-{qi}",
+                        )
+                    )
                 elif use_opp_generation:
                     a_req = ModelRequest(
                         rid=f"{rid}-ans-{turn}-{qi}",
@@ -766,7 +817,7 @@ class WerewolfWorkflow(RolloutWorkflow):
             # Only gather the agent's answer now
             agent_answers: list[str]
             agent_answer_resps: list[ModelResponse] = []
-            if use_opp_generation and self.opp_api_key:
+            if (use_opp_generation and self.opp_api_key) or use_student_api:
                 t0 = time.perf_counter()
                 agent_answers = await asyncio.gather(*agent_answer_tasks)
                 t_agent_answer_total += time.perf_counter() - t0
@@ -961,6 +1012,22 @@ class WerewolfWorkflow(RolloutWorkflow):
                 t0 = time.perf_counter()
                 resp = self._build_api_response(action_ids, completion_str, self.tokenizer)
                 t_action_decode_total += time.perf_counter() - t0
+            elif use_student_api:
+                action_cfg = self.gconfig.new(n_samples=1, max_new_tokens=8192)
+                t0 = time.perf_counter()
+                completion_str = await self._api_chat_completion(
+                    action_prompt,
+                    action_cfg,
+                    self.student_api_key,
+                    self.student_api_model,
+                    self.student_api_provider or "openai",
+                    "_student_api_session",
+                    rid,
+                )
+                t_action_gen_total += time.perf_counter() - t0
+                t0 = time.perf_counter()
+                resp = self._build_api_response(action_ids, completion_str, self.tokenizer)
+                t_action_decode_total += time.perf_counter() - t0
             elif use_opp_generation:
                 req = ModelRequest(
                     rid=rid,
@@ -1108,6 +1175,16 @@ class WerewolfWorkflow(RolloutWorkflow):
                         "_opp_api_session",
                         f"{rid}-s-{turn}",
                     )]
+                elif use_student_api:
+                    summary_tasks = [self._api_chat_completion(
+                        summary_prompt,
+                        self.gconfig.new(n_samples=1, max_new_tokens=2048),
+                        self.student_api_key,
+                        self.student_api_model,
+                        self.student_api_provider or "openai",
+                        "_student_api_session",
+                        f"{rid}-s-{turn}",
+                    )]
                 elif use_opp_generation:
                     summary_tasks = [self.opp_rollout.agenerate(summary_req)]
                 else:
@@ -1119,6 +1196,8 @@ class WerewolfWorkflow(RolloutWorkflow):
 
                 if use_opp_generation and self.opp_api_key:
                     agent_summary = summary_resps[0]
+                elif use_student_api:
+                    agent_summary = summary_resps[0]
                 elif use_opp_generation and self.opp_tokenizer:
                     agent_summary = self.opp_tokenizer.decode(summary_resps[0].output_tokens, skip_special_tokens=True)
                 else:
@@ -1126,7 +1205,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                 summaries[current_agent].append(agent_summary)
 
                 # Add summary to training data (only for student agent, not opponent)
-                if not use_opp_generation:
+                if not use_opp_generation and not use_student_api:
                     t0 = time.perf_counter()
                     player_idx = env.roles.index(current_agent) if current_agent in env.roles else -1
                     summary_resp = summary_resps[0]

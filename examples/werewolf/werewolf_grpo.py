@@ -22,6 +22,8 @@ class WerewolfGRPOConfig(GRPOConfig):
     teacher_tokenizer_path: str = ""
     teacher_api_key: str = ""
     teacher_api_model: str = ""
+    student_api_key: str = ""
+    student_api_model: str = ""
     scenario: str | None = None  # "full" or "easy"
     num_villagers: int = 2
     num_werewolves: int = 3
@@ -155,6 +157,8 @@ def main(args):
                 opp_api_model=config.opp_api_model,
                 teacher_api_key=config.teacher_api_key,
                 teacher_api_model=config.teacher_api_model,
+                student_api_key=config.student_api_key,
+                student_api_model=config.student_api_model,
                 env_kwargs=env_kwargs,
                 max_turns=config.max_turns,
                 turn_discount=config.turn_discount,
@@ -192,5 +196,5 @@ python -m areal.launcher.slurm examples/werewolf/werewolf_grpo.py \
     --config examples/werewolf/werewolf_grpo.yaml \
     stats_logger.wandb.mode=online \
     experiment_name=xmy-werewolf-eval \
-    trial_name=qwen3-8b-prm2.5-vs-gpt-5-step51
+    trial_name=gpt-5-vs-gpt-5
 """

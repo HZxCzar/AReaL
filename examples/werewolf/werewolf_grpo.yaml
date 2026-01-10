@@ -8,6 +8,8 @@ tokenizer_path: ${actor.path}
 
 # Werewolf-specific options
 role: villager
+student_api_key: "sk-43dd5f664179406d92fec42a9364f8a5"
+student_api_model: "gpt-5-2025-08-07"
 opp_server_addrs: ""
 opp_tokenizer_path: ""
 opp_api_key: "sk-43dd5f664179406d92fec42a9364f8a5"
@@ -62,7 +64,7 @@ actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   # path: /storage/openpsi/models/Qwen__Qwen2.5-3B-Instruct
-  path: /storage/openpsi/experiments/checkpoints/admin/gjx-werewolf/qwen3-4b-sft-villager-prm2.5-rl-train-trial1/default/epoch0epochstep51globalstep51
+  path: /storage/openpsi/experiments/checkpoints/admin/gjx-werewolf/qwen3-4b-sft-villager-prm2.5-rl-train-trial1/default/epoch2epochstep31globalstep155
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
