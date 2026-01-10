@@ -122,7 +122,7 @@ class KuhnPokerWorkflow(RolloutWorkflow):
         self.opp_tokenizer = opp_tokenizer
         self.teacher_rollout = teacher_rollout
         self.teacher_tokenizer = teacher_tokenizer
-        self.teacher_process_reward = teacher_process_reward
+        # self.teacher_process_reward = teacher_process_reward
         self.process_reward_coef = process_reward_coef
 
         self.opp_api_key = (opp_api_key or "").strip()
@@ -389,7 +389,7 @@ class KuhnPokerWorkflow(RolloutWorkflow):
             f"{observation}\n\n"
             "LEGAL ACTIONS:\n"
             f"{actions_str}\n\n"
-            "Respond with the action only."
+            "Please keep your answers concise."
         )
         return [
             {"role": "system", "content": prefix["system"]},
@@ -414,13 +414,13 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                 prompt_messages,
                 tokenize=True,
                 add_generation_prompt=True,
-                enable_thinking=False,
+                # enable_thinking=False,
             )
         )
         req = ModelRequest(
             rid=rid,
             input_ids=input_ids,
-            gconfig=self.gconfig.new(n_samples=1),
+            gconfig=self.gconfig.new(n_samples=1, max_new_tokens=2048),
             tokenizer=tokenizer,
         )
         resp = await engine.agenerate(req)
@@ -452,7 +452,7 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                 prompt_messages,
                 tokenize=True,
                 add_generation_prompt=True,
-                enable_thinking=False,
+                # enable_thinking=False,
             )
         )
         resp = self._build_api_response(input_ids, text, tokenizer)
@@ -481,6 +481,9 @@ class KuhnPokerWorkflow(RolloutWorkflow):
         process_rewards: list[float] = []
         trajectory_rewards: list[list[float]] = []
 
+        format_reward = [0.05, 0.05]
+        length_reward = [0.0, 0.0]
+
         turns = 0
         while not done and turns < self.max_turns:
             turns += 1
@@ -503,6 +506,7 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                     trajectory_rewards.extend(
                         [result["rewards"] for result in execute_results]
                     )
+                    format_reward[self.player_id] = -10.0 # Large penalty for format error
                     step_logs.append(
                         {
                             "player": self.player_id,
@@ -529,6 +533,7 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                 prompt_strs.append(prompt_text)
                 completions_strs.append(completion)
                 seqlens.append(len(resp.input_tokens) + len(resp.output_tokens))
+                length_reward[self.player_id] = 0.5 * max(0, 1 - (len(resp.output_tokens) - 11) / (2048 - 11))
                 response_entries.append(
                     (
                         resp,
@@ -539,37 +544,6 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                         len(resp.input_tokens) + len(resp.output_tokens),
                     )
                 )
-
-                if self.teacher_process_reward and (
-                    self.teacher_rollout or self.teacher_api_key
-                ):
-                    teacher_prompt = self._build_turn_prompt(
-                        env, observation, legal_actions, self.player_id
-                    )
-                    if self.teacher_api_key:
-                        _, teacher_completion = await self._generate_action_text_api(
-                            teacher_prompt,
-                            self.teacher_tokenizer or self.tokenizer,
-                            f"{rid}-teacher-{turns}",
-                            self.teacher_api_key,
-                            self.teacher_api_model,
-                            self.teacher_api_provider or "openai",
-                            "_teacher_api_session",
-                        )
-                    else:
-                        _, teacher_completion = await self._generate_action_text(
-                            self.teacher_rollout,
-                            self.teacher_tokenizer or self.tokenizer,
-                            teacher_prompt,
-                            f"{rid}-teacher-{turns}",
-                        )
-                    teacher_action_text = self._extract_action(teacher_completion)
-                    try:
-                        teacher_action = env._string_to_action(teacher_action_text)
-                    except ValueError:
-                        process_rewards.append(0.0)
-                    else:
-                        process_rewards.append(float(teacher_action == action))
 
                 if not done:
                     observation = execute_results[-1]["observation"]
@@ -616,6 +590,7 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                         [result["rewards"] for result in execute_results]
                     )
                     invalid_action = True
+                    format_reward[1 - self.player_id] = -10.0 # Large penalty for format error
                 else:
                     execute_results = env.step(opp_action)
                     done = execute_results[-1]["done"]
@@ -628,6 +603,7 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                 prompt_strs.append(prompt_text)
                 completions_strs.append(opp_completion)
                 seqlens.append(len(opp_resp.input_tokens) + len(opp_resp.output_tokens))
+                length_reward[1 - self.player_id] = 0.5 * max(0, 1 - (len(opp_resp.output_tokens) - 11) / (2048 - 11))
                 response_entries.append(
                     (
                         opp_resp,
@@ -655,6 +631,7 @@ class KuhnPokerWorkflow(RolloutWorkflow):
             cumulative = {0: 0.0, 1: 0.0}
             per_step_returns: list[dict[int, float]] = []
             for rewards in reversed(trajectory_rewards):
+                # Calculate the returns at each step. Safety check in case of mismatch
                 if isinstance(rewards, (list, tuple)) and len(rewards) >= 2:
                     cumulative[0] += float(rewards[0])
                     cumulative[1] += float(rewards[1])
@@ -667,28 +644,25 @@ class KuhnPokerWorkflow(RolloutWorkflow):
         else:
             per_step_returns = []
 
-        # if self.teacher_process_reward and process_rewards:
-        #     bonus = (
-        #         sum(process_rewards) / max(1, len(process_rewards))
-        #     ) * self.process_reward_coef
-        #     player_returns[self.player_id] += bonus
-        #     if per_step_returns:
-        #         for step in per_step_returns:
-        #             step[self.player_id] += bonus
-
         stats_tracker.get("rollout").scalar(
-            reward=player_returns[self.player_id], reward_opp=player_returns[1-self.player_id], num_turns=turns
+            reward=player_returns[self.player_id], 
+            reward_opp=player_returns[1-self.player_id], 
+            format_reward=format_reward[self.player_id],
+            length_reward=length_reward[self.player_id],
+            num_turns=turns
         )
         logger.info(f"Rollout reward: {player_returns[self.player_id]} finished for player {self.player_id} with {turns} steps.")
 
         results = []
         for resp, player_id, step_index, _, _, _ in response_entries:
-            # if player_id != self.player_id:
-            #     continue
+            # In agentic tasks, the reward shall in essence be the retrun at each step, not the step-wise reward.
+            if player_id != self.player_id:
+                continue
             if per_step_returns and step_index < len(per_step_returns):
                 step_return = float(per_step_returns[step_index][player_id])
             else:
                 step_return = player_returns[player_id]
+            step_return += (format_reward[player_id] + length_reward[player_id])
             results.append(self._response_to_tensordict(resp, reward=step_return))
 
         return (

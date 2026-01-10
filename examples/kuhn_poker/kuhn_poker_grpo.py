@@ -152,4 +152,10 @@ python -m areal.launcher.local examples/kuhn_poker/kuhn_poker_grpo.py \
     stats_logger.wandb.mode=online \
     experiment_name=xmy-kuhn \
     trial_name=trial-qwen3-4b
+
+python -m areal.launcher.slurm examples/kuhn_poker/kuhn_poker_grpo.py \
+    --config examples/kuhn_poker/kuhn_poker_grpo.yaml \
+    stats_logger.wandb.mode=online \
+    experiment_name=xmy-kuhn \
+    trial_name=trial-qwen3-4b-cfr-0-bs128-25k-newrew
 """
