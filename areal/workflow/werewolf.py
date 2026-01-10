@@ -158,6 +158,7 @@ class WerewolfWorkflow(RolloutWorkflow):
         process_reward_coef: float = 0.2,
     ):
         self.gconfig = gconfig
+        self.max_new_tokens = gconfig.max_new_tokens or 4096
         self.tokenizer = tokenizer
         self.max_turns = max_turns
         self.turn_discount = turn_discount
@@ -415,11 +416,12 @@ class WerewolfWorkflow(RolloutWorkflow):
         else:
             choices = data.get("choices", [])
             if not choices:
+                logger.warning(f"API call failed with empty choices, data: {data}")
                 return ""
             message = choices[0].get("message", {})
             resp = message.get("content", "")
-            if resp:
-                logger.info(f"API call successful with resp: {resp}")
+            if resp == "":
+                logger.warning(f"API call failed with empty resp, data: {data}, payload: {payload}")
             return resp
 
     def _build_api_response(
@@ -755,7 +757,7 @@ class WerewolfWorkflow(RolloutWorkflow):
             agent_answer_tasks = []
             agent_answer_inputs: list[list[int]] = []  # Store input_ids for later
             agent_answer_prompts: list[str] = []  # Store prompts for SFT data generation
-            agent_answer_cfg = self.gconfig.new(n_samples=1, max_new_tokens=2048)
+            agent_answer_cfg = self.gconfig.new(n_samples=1, max_new_tokens=self.max_new_tokens)
             for qi, q in enumerate(self_questions):
                 aprompt = self._build_agent_answer_prompt(
                     obs=obs,
@@ -842,7 +844,7 @@ class WerewolfWorkflow(RolloutWorkflow):
             _teacher_obs_used = obs  # Default to student observation
             if (not use_opp_generation) and (self.teacher_rollout or self.teacher_api_key):
                 teacher_answer_tasks = []
-                teacher_answer_cfg = self.gconfig.new(n_samples=1, max_new_tokens=2048)
+                teacher_answer_cfg = self.gconfig.new(n_samples=1, max_new_tokens=self.max_new_tokens)
                 teacher_tok = self.teacher_tokenizer or self.tokenizer
 
                 # Build agent thoughts section for privileged information
@@ -1162,13 +1164,13 @@ class WerewolfWorkflow(RolloutWorkflow):
                 summary_req = ModelRequest(
                     rid=f"{rid}-s-{turn}",
                     input_ids=summary_ids,
-                    gconfig=self.gconfig.new(n_samples=1, max_new_tokens=2048),
+                    gconfig=self.gconfig.new(n_samples=1, max_new_tokens=self.max_new_tokens),
                     tokenizer=self.tokenizer,
                 )
                 if use_opp_generation and self.opp_api_key:
                     summary_tasks = [self._api_chat_completion(
                         summary_prompt,
-                        self.gconfig.new(n_samples=1, max_new_tokens=2048),
+                        self.gconfig.new(n_samples=1, max_new_tokens=self.max_new_tokens),
                         self.opp_api_key,
                         self.opp_api_model,
                         self.opp_api_provider or "openai",
@@ -1178,7 +1180,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                 elif use_student_api:
                     summary_tasks = [self._api_chat_completion(
                         summary_prompt,
-                        self.gconfig.new(n_samples=1, max_new_tokens=2048),
+                        self.gconfig.new(n_samples=1, max_new_tokens=self.max_new_tokens),
                         self.student_api_key,
                         self.student_api_model,
                         self.student_api_provider or "openai",

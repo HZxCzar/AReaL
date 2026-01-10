@@ -519,13 +519,8 @@ class WerewolfEnv(EnvironmentService):
                     reward[0] += 20.0
                 info += f"Game over. {winner} win."
             else:
-                # Check if hunter shall act
-                if self.await_hunter:
-                    self.phase = "hunter"
-                    info += f"The hunter is dead. He shall choose a player to shoot. "
-                else:
-                    self.phase = "discussion"
-                    info += f"Night ends. Alive players: {', '.join(self._alive_list())}. Discussion begins."
+                self.phase = "discussion"
+                info += f"Night ends. Alive players: {', '.join(self._alive_list())}. Discussion begins."
         elif self.phase == "discussion":
             info += self._discussion_phase(actions, players)
             self.phase = "day"
@@ -543,9 +538,14 @@ class WerewolfEnv(EnvironmentService):
                     reward[0] += 20.0
                 info += f"Game over. {winner} win."
             else:
-                self.round += 1
-                self.phase = "night"
-                info += f"Day ends. Night {self.round}. "
+                # Check if hunter shall act
+                if self.await_hunter:
+                    self.phase = "hunter"
+                    info += f"The hunter is dead. He shall choose a player to shoot. "
+                else:
+                    self.round += 1
+                    self.phase = "night"
+                    info += f"Day ends. Night {self.round}. "
         elif self.phase == "hunter":
             shoot_act = actions.get(players[0], "") if players else ""
             if shoot_act.startswith("shoot "):
@@ -568,8 +568,9 @@ class WerewolfEnv(EnvironmentService):
                     reward[0] += 20.0
                 info += f"Game over. {winner} win."
             else:
-                self.phase = "discussion"
-                info += f"Night ends. Alive players: {', '.join(self._alive_list())}. Discussion begins."
+                self.round += 1
+                self.phase = "night"
+                info += f"Day ends. Night {self.round}. "
         
         if done:
             logger.warning(f"Game successfully ends with winner {winner}!")
