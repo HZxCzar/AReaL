@@ -801,8 +801,8 @@ class WerewolfEnv(EnvironmentService):
             if act.startswith("vote "):
                 vote_target = act.split("vote ")[1].strip()
             else:
-                choices = [x for x in players if x != p]
-                vote_target = random.choice(choices) if choices else p
+                vote_info.append(f"{p} skipped the vote.")
+                continue
             votes.append(vote_target)
             vote_info.append(f"{p} voted for {vote_target}")
             if self.role_type.get(p) == "villager":
