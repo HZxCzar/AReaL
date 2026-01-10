@@ -357,7 +357,7 @@ class WerewolfEnv(EnvironmentService):
             msg = f"{target} died (Reason is '{reason}')."
             logutil(f"Player {target} is {reason}.")
 
-            if self.role_type.get(target) == "hunter":
+            if self.role_type.get(target) == "hunter" and reason == "killed":
                 logutil(f"{target} is a hunter. Now the hunter will shoot another player.")
                 self.await_hunter = True
                 self.hunter_player = target
@@ -508,8 +508,24 @@ class WerewolfEnv(EnvironmentService):
 
         if self.phase == "night":
             info += self._night_phase(actions, players)
-            self.phase = "discussion"
-            info += f"Night ends. Alive players: {', '.join(self._alive_list())}. Discussion begins."
+            winner = self._check_win()
+            if winner:
+                done = True
+                if winner == "werewolf":
+                    self.stats["were_wins"] += 1
+                    reward[1] += 20.0
+                else:
+                    self.stats["vill_wins"] += 1
+                    reward[0] += 20.0
+                info += f"Game over. {winner} win."
+            else:
+                # Check if hunter shall act
+                if self.await_hunter:
+                    self.phase = "hunter"
+                    info += f"The hunter is dead. He shall choose a player to shoot. "
+                else:
+                    self.phase = "discussion"
+                    info += f"Night ends. Alive players: {', '.join(self._alive_list())}. Discussion begins."
         elif self.phase == "discussion":
             info += self._discussion_phase(actions, players)
             self.phase = "day"
@@ -527,14 +543,9 @@ class WerewolfEnv(EnvironmentService):
                     reward[0] += 20.0
                 info += f"Game over. {winner} win."
             else:
-                # Check if hunter shall act
-                if self.await_hunter:
-                    self.phase = "hunter"
-                    info += f"The hunter is dead. He shall choose a player to shoot. "
-                else:
-                    self.round += 1
-                    self.phase = "night"
-                    info += f"Day ends. Night {self.round}. "
+                self.round += 1
+                self.phase = "night"
+                info += f"Day ends. Night {self.round}. "
         elif self.phase == "hunter":
             shoot_act = actions.get(players[0], "") if players else ""
             if shoot_act.startswith("shoot "):
@@ -557,9 +568,8 @@ class WerewolfEnv(EnvironmentService):
                     reward[0] += 20.0
                 info += f"Game over. {winner} win."
             else:
-                self.phase = "night"
-                self.round += 1
-                info += f"Day ends. Night {self.round}. "
+                self.phase = "discussion"
+                info += f"Night ends. Alive players: {', '.join(self._alive_list())}. Discussion begins."
         
         if done:
             logger.warning(f"Game successfully ends with winner {winner}!")
@@ -710,7 +720,7 @@ class WerewolfEnv(EnvironmentService):
 
         if kill_target is None and any(self.alive[p] for p in players if self.role_type[p] == "werewolf"):
             candidates = [r for r in players if self.role_type[r] != "werewolf" and self.alive[r]]
-            if candidates and self.round > 4:
+            if candidates and self.round > 10:
                 kill_target = random.choice(candidates)
 
         if kill_target:

@@ -8,8 +8,8 @@ tokenizer_path: ${actor.path}
 
 # Werewolf-specific options
 role: villager
-student_api_key: "sk-43dd5f664179406d92fec42a9364f8a5"
-student_api_model: "gpt-5-2025-08-07"
+student_api_key: ""
+student_api_model: ""
 opp_server_addrs: ""
 opp_tokenizer_path: ""
 opp_api_key: "sk-43dd5f664179406d92fec42a9364f8a5"
