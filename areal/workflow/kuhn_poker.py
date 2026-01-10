@@ -481,9 +481,6 @@ class KuhnPokerWorkflow(RolloutWorkflow):
         process_rewards: list[float] = []
         trajectory_rewards: list[list[float]] = []
 
-        format_reward = [0.05, 0.05]
-        length_reward = [0.0, 0.0]
-
         turns = 0
         while not done and turns < self.max_turns:
             turns += 1
@@ -506,7 +503,6 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                     trajectory_rewards.extend(
                         [result["rewards"] for result in execute_results]
                     )
-                    format_reward[self.player_id] = -10.0 # Large penalty for format error
                     step_logs.append(
                         {
                             "player": self.player_id,
@@ -533,7 +529,6 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                 prompt_strs.append(prompt_text)
                 completions_strs.append(completion)
                 seqlens.append(len(resp.input_tokens) + len(resp.output_tokens))
-                length_reward[self.player_id] = 0.5 * max(0, 1 - (len(resp.output_tokens) - 11) / (2048 - 11))
                 response_entries.append(
                     (
                         resp,
@@ -590,7 +585,6 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                         [result["rewards"] for result in execute_results]
                     )
                     invalid_action = True
-                    format_reward[1 - self.player_id] = -10.0 # Large penalty for format error
                 else:
                     execute_results = env.step(opp_action)
                     done = execute_results[-1]["done"]
@@ -603,7 +597,6 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                 prompt_strs.append(prompt_text)
                 completions_strs.append(opp_completion)
                 seqlens.append(len(opp_resp.input_tokens) + len(opp_resp.output_tokens))
-                length_reward[1 - self.player_id] = 0.5 * max(0, 1 - (len(opp_resp.output_tokens) - 11) / (2048 - 11))
                 response_entries.append(
                     (
                         opp_resp,
@@ -647,8 +640,6 @@ class KuhnPokerWorkflow(RolloutWorkflow):
         stats_tracker.get("rollout").scalar(
             reward=player_returns[self.player_id], 
             reward_opp=player_returns[1-self.player_id], 
-            format_reward=format_reward[self.player_id],
-            length_reward=length_reward[self.player_id],
             num_turns=turns
         )
         logger.info(f"Rollout reward: {player_returns[self.player_id]} finished for player {self.player_id} with {turns} steps.")
@@ -662,7 +653,6 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                 step_return = float(per_step_returns[step_index][player_id])
             else:
                 step_return = player_returns[player_id]
-            step_return += (format_reward[player_id] + length_reward[player_id])
             results.append(self._response_to_tensordict(resp, reward=step_return))
 
         return (
