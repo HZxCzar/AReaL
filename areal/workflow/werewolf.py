@@ -248,6 +248,8 @@ class WerewolfWorkflow(RolloutWorkflow):
         self._max_retries = 6
         self._base_backoff = 1.0
         self._max_backoff = 10.0
+        self.num_reasoning_tokens = 0
+        self.num_api_calls = 0
 
         # Deprecated path: we no longer use predefined questions
         self.answer_questions = True
@@ -329,7 +331,9 @@ class WerewolfWorkflow(RolloutWorkflow):
                     aiohttp.ClientPayloadError,
                     asyncio.TimeoutError) as e:
                 if attempt == self._max_retries:
-                    raise RuntimeError(f"Network or timeout error after retries: {e}") from e
+                    logger.error(f"Network or timeout error after retries: {e}")
+                    return {}
+                    # raise RuntimeError() from e
                 await asyncio.sleep(self._compute_backoff(attempt))
                 continue
 
@@ -366,10 +370,12 @@ class WerewolfWorkflow(RolloutWorkflow):
                 "content-type": "application/json",
             }
             payload = {
+                # "stream": True,
                 "model": api_model,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "top_p": top_p,
+                # "stream_options": {"include_usage": True},
                 "messages": [
                     {
                         "role": "user",
@@ -391,10 +397,12 @@ class WerewolfWorkflow(RolloutWorkflow):
                 "Content-Type": "application/json",
             }
             payload = {
+                # "stream": True,
                 "model": api_model,
                 "messages": [{"role": "user", "content": prompt}],
                 "max_completion_tokens": max_tokens,
                 "temperature": temperature,
+                # "stream_options": {"include_usage": True},
                 "top_p": top_p,
                 "n": 1,
             }
@@ -414,6 +422,10 @@ class WerewolfWorkflow(RolloutWorkflow):
             ]
             return "".join(texts)
         else:
+            usage = data.get("usage", {})
+            reasoning_tokens = usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0)
+            self.num_reasoning_tokens += reasoning_tokens 
+            
             choices = data.get("choices", [])
             if not choices:
                 logger.warning(f"API call failed with empty choices, data: {data}")
@@ -422,6 +434,7 @@ class WerewolfWorkflow(RolloutWorkflow):
             resp = message.get("content", "")
             if resp == "":
                 logger.warning(f"API call failed with empty resp, data: {data}, payload: {payload}")
+            self.num_api_calls += 1
             return resp
 
     def _build_api_response(
@@ -779,7 +792,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                     agent_answer_tasks.append(
                         self._api_chat_completion(
                             aprompt,
-                            agent_answer_cfg,
+                            self.gconfig.new(n_samples=1, max_new_tokens=6144),
                             self.opp_api_key,
                             self.opp_api_model,
                             self.opp_api_provider or "openai",
@@ -791,7 +804,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                     agent_answer_tasks.append(
                         self._api_chat_completion(
                             aprompt,
-                            agent_answer_cfg,
+                            self.gconfig.new(n_samples=1, max_new_tokens=6144),
                             self.student_api_key,
                             self.student_api_model,
                             self.student_api_provider or "openai",
@@ -1170,7 +1183,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                 if use_opp_generation and self.opp_api_key:
                     summary_tasks = [self._api_chat_completion(
                         summary_prompt,
-                        self.gconfig.new(n_samples=1, max_new_tokens=self.max_new_tokens),
+                        self.gconfig.new(n_samples=1, max_new_tokens=6144),
                         self.opp_api_key,
                         self.opp_api_model,
                         self.opp_api_provider or "openai",
@@ -1180,7 +1193,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                 elif use_student_api:
                     summary_tasks = [self._api_chat_completion(
                         summary_prompt,
-                        self.gconfig.new(n_samples=1, max_new_tokens=self.max_new_tokens),
+                        self.gconfig.new(n_samples=1, max_new_tokens=6144),
                         self.student_api_key,
                         self.student_api_model,
                         self.student_api_provider or "openai",
@@ -1390,7 +1403,8 @@ class WerewolfWorkflow(RolloutWorkflow):
             stats.get("hunter_shots", 0),           # 16
             stats.get("hunter_correct_shots", 0),   # 17
             env.answer_format_record[0] / env.answer_format_record[1], # 18
-        ] + timing_vals                              # 19+ timing slots as documented above
+            (self.num_reasoning_tokens / self.num_api_calls) if self.num_api_calls != 0 else 0, # 19
+        ] + timing_vals                              # 20+ timing slots as documented above
 
         log_tensor = torch.tensor(logging_vals, dtype=torch.float32).unsqueeze(0)
         if results:

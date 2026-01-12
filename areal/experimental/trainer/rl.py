@@ -85,6 +85,7 @@ WEREWOLF_LOGGING_KEYS = [
     "hunter_shots",
     "hunter_correct_shots",
     "format_reward_scale",
+    "avg_num_reasoning_tokens",
     "avgt_qgen",
     "avgt_agent_ans",
     "avgt_teacher_ans",
