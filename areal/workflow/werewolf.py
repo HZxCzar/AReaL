@@ -89,42 +89,44 @@ def _detect_api_provider(api_key: str) -> str:
         return "claude"
     return "openai"
 
+
 class RateLimiter:
-    """Asynchronous rate limiter supporting per-second and per-minute limits."""
-    def __init__(self, per_second: int, per_minute: int):
-        self.per_second = per_second
-        self.per_minute = per_minute
+    """Async rate limiter: float per-second + int per-minute (sliding 60s)."""
+
+    def __init__(self, per_second: float, per_minute: int):
+        self.per_second = float(per_second)
+        self.per_minute = int(per_minute)
+
+        self._sec_interval = 1.0 / self.per_second  # e.g. 0.5 -> 2.0s
         self._lock = asyncio.Lock()
         self._req_timestamps: Deque[float] = deque()
 
-    async def acquire(self):
+    async def acquire(self) -> None:
         async with self._lock:
-            now = time.monotonic()
-            # Drop timestamps older than 60s
-            while self._req_timestamps and now - self._req_timestamps[0] > 60:
-                self._req_timestamps.popleft()
-
-            # If we’re exceeding limits, wait
             while True:
                 now = time.monotonic()
-                # Clean up old timestamps again inside loop
-                while self._req_timestamps and now - self._req_timestamps[0] > 60:
+
+                # Drop timestamps older than 60s for the per-minute window
+                cutoff = now - 60.0
+                while self._req_timestamps and self._req_timestamps[0] <= cutoff:
                     self._req_timestamps.popleft()
 
-                # Count requests within 1s window and 60s window
-                last_1s = [t for t in self._req_timestamps if now - t <= 1.0]
-                last_60s = len(self._req_timestamps)
+                wait_for = 0.0
 
-                if len(last_1s) < self.per_second and last_60s < self.per_minute:
+                # Enforce per-second (fractional-safe) via minimum spacing
+                if self._req_timestamps:
+                    wait_for = max(wait_for, (self._req_timestamps[-1] + self._sec_interval) - now)
+
+                # Enforce per-minute (integer cap) via sliding window
+                if len(self._req_timestamps) >= self.per_minute:
+                    wait_for = max(wait_for, (self._req_timestamps[0] + 60.0) - now)
+
+                if wait_for <= 0:
                     self._req_timestamps.append(now)
-                    return  # allowed to proceed
+                    return
 
-                # Sleep until earliest timestamp expires
-                next_allowed = min(
-                    (1.0 - (now - last_1s[0])) if last_1s else 0,
-                    (60.0 - (now - self._req_timestamps[0])) if self._req_timestamps else 0,
-                )
-                await asyncio.sleep(max(next_allowed, 0.01))
+                await asyncio.sleep(max(wait_for, 5))
+
 
 class WerewolfWorkflow(RolloutWorkflow):
     """
@@ -241,14 +243,15 @@ class WerewolfWorkflow(RolloutWorkflow):
         self._opp_api_session: aiohttp.ClientSession | None = None
         self._teacher_api_session: aiohttp.ClientSession | None = None
         self._student_api_session: aiohttp.ClientSession | None = None
-        self.rate_limiter = RateLimiter(per_second=2, per_minute=60)
+        self.rate_limiter = RateLimiter(per_second=1, per_minute=20)
         self.use_summary = True
 
         # API retry configs
         self._max_retries = 6
         self._base_backoff = 1.0
         self._max_backoff = 10.0
-        self.num_reasoning_tokens = 0
+        self.api_completion_tokens = 0
+        self.api_total_tokens = 0
         self.num_api_calls = 0
 
         # Deprecated path: we no longer use predefined questions
@@ -283,6 +286,91 @@ class WerewolfWorkflow(RolloutWorkflow):
             pass
         return None
 
+    async def handle_streaming_response(self, response, model_name, return_raw_result=True):
+        """
+        Handle streaming response from the LLM API.
+        Yields chunks of data as they arrive.
+        """
+        full_content = ""
+        reasoning_content = ""
+        full_response = {
+            "id": None,
+            "model": model_name,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "",
+                },
+                "finish_reason": None
+            }],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            }
+        }
+        
+        async for line in response.content:
+            line = line.decode('utf-8').strip()
+            
+            # Skip empty lines and the "data: [DONE]" message
+            # if line == "data:[DONE]":
+            #     print(line, flush=True)
+            if not line or line == "data:[DONE]":
+                continue
+            
+            # Parse SSE format
+            if line.startswith("data:"):
+                line = line[5:]  # Remove "data: " prefix
+            
+            try:
+                data = json.loads(line) 
+
+                # print(line, flush=True)
+                
+                # Update response metadata
+                if full_response["id"] is None and "id" in data:
+                    full_response["id"] = data["id"]
+                
+                # Handle choices
+                if "choices" in data and data["choices"]:
+                    choice = data["choices"][0]
+                    
+                    # Handle delta content
+                    if "delta" in choice:
+                        content_chunk = choice["delta"].get("content", None)
+                        reasoning_chunk = choice["delta"].get("reasoning_content", None)
+                        if content_chunk:
+                            full_content += content_chunk
+                            full_response["choices"][0]["message"]["content"] = full_content
+                            
+                        if reasoning_chunk:
+                            # print("[DEBUG] reasoning content detected", flush=True)
+                            reasoning_content += reasoning_chunk
+                            full_response["choices"][0]["message"]["reasoning_content"] = reasoning_content
+                    
+                    # Update finish reason
+                    if choice.get("finish_reason"):
+                        full_response["choices"][0]["finish_reason"] = choice["finish_reason"]
+                
+                # Handle usage
+                if "usage" in data and data["usage"]:
+                    # Accumulate usage stats
+                    full_response["usage"] = data["usage"]
+                    
+            except json.JSONDecodeError as e:
+                logger.error(f"⚠️  Failed to parse SSE data: {line}, error: {e}")
+                continue
+        
+        # After streaming is complete, return the full response if needed
+        if return_raw_result:
+            # For consistency with non-streaming mode, yield the final complete response
+            return full_response
+        else:
+            return full_response["choices"][0]
+
     async def _request_json_with_retries(
         self,
         session: aiohttp.ClientSession,
@@ -291,6 +379,8 @@ class WerewolfWorkflow(RolloutWorkflow):
         *,
         headers: dict,
         json: dict,
+        model_name: str="",
+        stream: bool=True,
     ) -> dict:
         last_err_text = None
 
@@ -301,7 +391,11 @@ class WerewolfWorkflow(RolloutWorkflow):
             logger.info(f"Starting API generation attempt {attempt}.")
 
             try:
-                async with session.request(method, url, headers=headers, json=json) as resp:
+                async with session.request(method, url, headers=headers, json=json, timeout=aiohttp.ClientTimeout(total=100*60,connect=50*60, sock_read=50*60)) as resp:
+                    # Goto streaming mode
+                    if stream:
+                        return await self.handle_streaming_response(resp, model_name)
+
                     # Successful JSON
                     if 200 <= resp.status < 300:
                         return await resp.json()
@@ -315,6 +409,8 @@ class WerewolfWorkflow(RolloutWorkflow):
 
                     if not retryable or attempt == self._max_retries:
                         raise RuntimeError(f"API request failed with status {resp.status}: {text}")
+
+                    logger.warning(f"Retrying API calling due to: {resp}")
 
                     # Honor Retry-After if present (esp. on 429)
                     retry_after_hdr = resp.headers.get("Retry-After")
@@ -331,9 +427,10 @@ class WerewolfWorkflow(RolloutWorkflow):
                     aiohttp.ClientPayloadError,
                     asyncio.TimeoutError) as e:
                 if attempt == self._max_retries:
-                    logger.error(f"Network or timeout error after retries: {e}")
-                    return {}
-                    # raise RuntimeError() from e
+                    # logger.error(f"Network or timeout error after retries: {e}")
+                    # return {}
+                    raise RuntimeError(f"Network or timeout error after retries: {e}") from e
+                logger.warning(f"Retrying API calling due to: {e}")
                 await asyncio.sleep(self._compute_backoff(attempt))
                 continue
 
@@ -349,6 +446,7 @@ class WerewolfWorkflow(RolloutWorkflow):
         provider: str,
         session_attr: str,
         rid: str,
+        stream: bool=True,
     ) -> str:
         # Await rate limiter
         await self.rate_limiter.acquire()
@@ -359,7 +457,7 @@ class WerewolfWorkflow(RolloutWorkflow):
         top_p = min(max(cfg.top_p, 0.0), 1.0)
         stop_words = cfg.stop or []
 
-        if provider == "claude":
+        if provider == "claude" and False: # TODO: Claude calling on Areal server is the same with openai
             url = os.getenv(
                 "ANTHROPIC_API_URL",
                 os.getenv("AREAL_CLAUDE_API_URL", "https://api.anthropic.com/v1/messages"),
@@ -372,7 +470,7 @@ class WerewolfWorkflow(RolloutWorkflow):
             payload = {
                 # "stream": True,
                 "model": api_model,
-                "max_tokens": max_tokens,
+                "max_completion_tokens": max_tokens,
                 "temperature": temperature,
                 "top_p": top_p,
                 # "stream_options": {"include_usage": True},
@@ -397,23 +495,23 @@ class WerewolfWorkflow(RolloutWorkflow):
                 "Content-Type": "application/json",
             }
             payload = {
-                # "stream": True,
+                # "stream": stream,
                 "model": api_model,
                 "messages": [{"role": "user", "content": prompt}],
                 "max_completion_tokens": max_tokens,
                 "temperature": temperature,
                 # "stream_options": {"include_usage": True},
-                "top_p": top_p,
+                # "top_p": top_p,
                 "n": 1,
             }
             if stop_words:
                 payload["stop"] = stop_words
 
         data = await self._request_json_with_retries(
-            session, "POST", url, headers=headers, json=payload
+            session, "POST", url, headers=headers, json=payload, model_name=api_model, stream=False
         )
 
-        if provider == "claude":
+        if provider == "claude" and False: # TODO: Claude calling on Areal server is the same with openai
             content = data.get("content", [])
             texts = [
                 block.get("text", "")
@@ -422,9 +520,15 @@ class WerewolfWorkflow(RolloutWorkflow):
             ]
             return "".join(texts)
         else:
-            usage = data.get("usage", {})
-            reasoning_tokens = usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0)
-            self.num_reasoning_tokens += reasoning_tokens 
+            usage = data.get("usage", {"placeholder": 0})
+            # completion_details = usage.get("completion_tokens", 0)
+            # if completion_details:
+            #     reasoning_tokens = completion_details.get("reasoning_tokens", 0)
+            # else:
+            #     reasoning_tokens = 0
+            self.api_completion_tokens += usage.get("completion_tokens", 0)
+            self.api_total_tokens += usage.get("total_tokens", 0)
+            self.num_api_calls += 1
             
             choices = data.get("choices", [])
             if not choices:
@@ -434,7 +538,6 @@ class WerewolfWorkflow(RolloutWorkflow):
             resp = message.get("content", "")
             if resp == "":
                 logger.warning(f"API call failed with empty resp, data: {data}, payload: {payload}")
-            self.num_api_calls += 1
             return resp
 
     def _build_api_response(
@@ -792,7 +895,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                     agent_answer_tasks.append(
                         self._api_chat_completion(
                             aprompt,
-                            self.gconfig.new(n_samples=1, max_new_tokens=6144),
+                            self.gconfig.new(n_samples=1, max_new_tokens=32768),
                             self.opp_api_key,
                             self.opp_api_model,
                             self.opp_api_provider or "openai",
@@ -804,7 +907,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                     agent_answer_tasks.append(
                         self._api_chat_completion(
                             aprompt,
-                            self.gconfig.new(n_samples=1, max_new_tokens=6144),
+                            self.gconfig.new(n_samples=1, max_new_tokens=32768),
                             self.student_api_key,
                             self.student_api_model,
                             self.student_api_provider or "openai",
@@ -1183,7 +1286,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                 if use_opp_generation and self.opp_api_key:
                     summary_tasks = [self._api_chat_completion(
                         summary_prompt,
-                        self.gconfig.new(n_samples=1, max_new_tokens=6144),
+                        self.gconfig.new(n_samples=1, max_new_tokens=32768),
                         self.opp_api_key,
                         self.opp_api_model,
                         self.opp_api_provider or "openai",
@@ -1193,7 +1296,7 @@ class WerewolfWorkflow(RolloutWorkflow):
                 elif use_student_api:
                     summary_tasks = [self._api_chat_completion(
                         summary_prompt,
-                        self.gconfig.new(n_samples=1, max_new_tokens=6144),
+                        self.gconfig.new(n_samples=1, max_new_tokens=32768),
                         self.student_api_key,
                         self.student_api_model,
                         self.student_api_provider or "openai",
@@ -1389,22 +1492,23 @@ class WerewolfWorkflow(RolloutWorkflow):
             traj_len[1],                            # 3
             vill_total,                             # 4
             were_total,                             # 5
-            sum(process_rewards) / len(process_rewards),
-            stats.get("vill_wins", 0),              # 6
-            stats.get("were_wins", 0),              # 7
-            stats.get("werewolf_kills", 0),         # 8
-            stats.get("werewolf_correct_kills", 0), # 9
-            stats.get("villager_correct_votes", 0), # 10
-            stats.get("villager_wrong_votes", 0),   # 11
-            stats.get("witch_heals", 0),            # 12
-            stats.get("witch_correct_heals", 0),    # 13
-            stats.get("witch_poisons", 0),          # 14
-            stats.get("witch_correct_poisons", 0),  # 15
-            stats.get("hunter_shots", 0),           # 16
-            stats.get("hunter_correct_shots", 0),   # 17
-            env.answer_format_record[0] / env.answer_format_record[1], # 18
-            (self.num_reasoning_tokens / self.num_api_calls) if self.num_api_calls != 0 else 0, # 19
-        ] + timing_vals                              # 20+ timing slots as documented above
+            sum(process_rewards) / len(process_rewards), # 6
+            stats.get("vill_wins", 0),              # 7
+            stats.get("were_wins", 0),              # 8
+            stats.get("werewolf_kills", 0),         # 9
+            stats.get("werewolf_correct_kills", 0), # 10
+            stats.get("villager_correct_votes", 0), # 11
+            stats.get("villager_wrong_votes", 0),   # 12
+            stats.get("witch_heals", 0),            # 13
+            stats.get("witch_correct_heals", 0),    # 14
+            stats.get("witch_poisons", 0),          # 15
+            stats.get("witch_correct_poisons", 0),  # 16
+            stats.get("hunter_shots", 0),           # 17
+            stats.get("hunter_correct_shots", 0),   # 18
+            env.answer_format_record[0] / env.answer_format_record[1], # 19
+            self.api_completion_tokens,             # 20
+            self.api_total_tokens,                  # 21
+        ] + timing_vals                             # 22+ timing slots as documented above
 
         log_tensor = torch.tensor(logging_vals, dtype=torch.float32).unsqueeze(0)
         if results:
