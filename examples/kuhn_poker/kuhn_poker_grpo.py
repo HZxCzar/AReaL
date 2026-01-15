@@ -147,15 +147,15 @@ sudo srun --mpi=pmi2 --ntasks=1 --gres=gpu:8 \
 cd /storage/openpsi/users/<your name>/inclusionAI/AReaL
 pip install open_spiel
 
-python -m areal.launcher.local examples/kuhn_poker/kuhn_poker_grpo.py \
+python -m areal.launcher.slurm examples/kuhn_poker/kuhn_poker_grpo.py \
     --config examples/kuhn_poker/kuhn_poker_grpo.yaml \
-    stats_logger.wandb.mode=online \
+    stats_logger.wandb.mode=dsiabled \
     experiment_name=xmy-kuhn \
-    trial_name=trial-qwen3-4b
+    trial_name=infer-only-qwen3-4b
 
 python -m areal.launcher.slurm examples/kuhn_poker/kuhn_poker_grpo.py \
     --config examples/kuhn_poker/kuhn_poker_grpo.yaml \
     stats_logger.wandb.mode=online \
     experiment_name=xmy-kuhn \
-    trial_name=trial-qwen3-4b-cfr-0-bs128-25k-newrew
+    trial_name=train-qwen3-4b-vs-qwen3-4b-0-bs512-650k-smalllr
 """

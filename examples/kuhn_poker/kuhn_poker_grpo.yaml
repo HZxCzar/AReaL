@@ -3,13 +3,13 @@ trial_name: trial0
 
 seed: 1
 enable_offload: false
-total_train_epochs: 1
+total_train_epochs: 5
 tokenizer_path: ${actor.path}
 
 # Kuhn Poker-specific options
 player_id: 0
-opp_server_addrs: ""
-opp_tokenizer_path: ""
+opp_server_addrs: "33.180.173.17:27134, 33.180.173.17:20522, 33.180.173.17:30677, 33.180.173.17:17860, 33.180.173.17:35543, 33.180.173.17:46366, 33.180.173.17:10418, 33.180.173.17:43106"
+opp_tokenizer_path: "/storage/openpsi/models/Qwen__Qwen3-4B"
 opp_api_key: ""
 opp_api_model: ""
 teacher_server_addrs: ""
@@ -19,7 +19,7 @@ teacher_api_model: ""
 teacher_process_reward: false
 process_reward_coef: 0.2
 env_kwargs:
-  built_in_opponent: cfr # none: self-play; cfr; mcts
+  built_in_opponent: none # none: self-play; cfr; mcts
   opponent_player: 1
   include_opponent_turn: action
   uct_c: 2.0
@@ -51,7 +51,7 @@ rollout:
 gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 2048
+  max_new_tokens: 4096
   greedy: false
   temperature: 1.0
 
@@ -59,6 +59,7 @@ actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   path: /storage/openpsi/models/Qwen__Qwen3-4B
+  # path: /storage/openpsi/experiments/checkpoints/admin/xmy-kuhn/trial-qwen3-4b-cfr-0-bs128-131k/default/epoch0epochstep549globalstep549
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
@@ -67,7 +68,7 @@ actor:
     max_tokens_per_mb: 32768
   optimizer:
     type: adam
-    lr: 3e-6
+    lr: 1e-6
     beta1: 0.9
     beta2: 0.999
     eps: 1e-8
@@ -121,10 +122,10 @@ vllm:
 
 # datasets
 train_dataset:
-  batch_size: 128
+  batch_size: 512
   pin_memory: true
   num_workers: 4
-  path: /storage/openpsi/users/xmy/inclusionAI/AReaL-New/data/Werewolf_placeholder_25k.jsonl
+  path: /storage/openpsi/users/xmy/inclusionAI/AReaL-New/data/Werewolf_placeholder_131k.jsonl
   type: rl
 
 # Utilities
