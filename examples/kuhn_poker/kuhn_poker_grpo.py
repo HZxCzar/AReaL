@@ -14,6 +14,7 @@ from areal.workflow.kuhn_poker import KuhnPokerWorkflow
 @dataclass
 class KuhnPokerGRPOConfig(GRPOConfig):
     player_id: int = 0
+    use_mixed_player: bool = False
     opp_server_addrs: str = ""
     opp_tokenizer_path: str = ""
     opp_api_key: str = ""
@@ -43,6 +44,10 @@ def _append_stop_tokens(tokenizer, stop_token_ids: list[int]) -> None:
 
 
 def main(args):
+    args = list(args)
+    if "--use-mixed-player" in args:
+        args.remove("--use-mixed-player")
+        args.append("use_mixed_player=true")
     config, _ = load_expr_config(args, KuhnPokerGRPOConfig)
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
 
@@ -114,6 +119,7 @@ def main(args):
                 ),
                 env_kwargs=env_kwargs,
                 player_id=config.player_id,
+                use_mixed_player=config.use_mixed_player,
                 opp_rollout=opp_rollout,
                 opp_tokenizer=opp_tokenizer,
                 teacher_rollout=teacher_rollout,

@@ -8,6 +8,7 @@ tokenizer_path: ${actor.path}
 
 # Kuhn Poker-specific options
 player_id: 0
+use_mixed_player: true
 opp_server_addrs: "33.180.173.17:27134, 33.180.173.17:20522, 33.180.173.17:30677, 33.180.173.17:17860, 33.180.173.17:35543, 33.180.173.17:46366, 33.180.173.17:10418, 33.180.173.17:43106"
 opp_tokenizer_path: "/storage/openpsi/models/Qwen__Qwen3-4B"
 opp_api_key: ""

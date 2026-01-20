@@ -95,6 +95,7 @@ class KuhnPokerWorkflow(RolloutWorkflow):
         dump_dir: str | None = None,
         env_kwargs: dict | None = None,
         player_id: int = 0,
+        use_mixed_player: bool = False,
         opp_rollout: InferenceEngine | None = None,
         opp_tokenizer: PreTrainedTokenizerFast | None = None,
         teacher_rollout: InferenceEngine | None = None,
@@ -118,6 +119,7 @@ class KuhnPokerWorkflow(RolloutWorkflow):
         self.dump_dir = dump_dir
         self.env_kwargs = env_kwargs or {}
         self.player_id = player_id
+        self.use_mixed_player = use_mixed_player
         self.opp_rollout = opp_rollout
         self.opp_tokenizer = opp_tokenizer
         self.teacher_rollout = teacher_rollout
@@ -363,14 +365,16 @@ class KuhnPokerWorkflow(RolloutWorkflow):
             "attention_mask": torch.ones(len(full_ids), dtype=torch.bool).unsqueeze(0),
         }
 
-    def _build_env(self) -> KuhnPokerEnv:
+    def _build_env(self, player_id: int) -> KuhnPokerEnv:
         env_kwargs = dict(self.env_kwargs)
         if "built_in_opponent" not in env_kwargs:
             env_kwargs["built_in_opponent"] = "none"
         if self.opp_rollout or self.opp_api_key:
             env_kwargs["built_in_opponent"] = "none"
-        if "opponent_player" not in env_kwargs:
-            env_kwargs["opponent_player"] = 1 - self.player_id
+        if self.use_mixed_player:
+            env_kwargs["opponent_player"] = 1 - player_id
+        elif "opponent_player" not in env_kwargs:
+            env_kwargs["opponent_player"] = 1 - player_id
         config = KuhnPokerConfig(**env_kwargs)
         return KuhnPokerEnv(config)
 
@@ -459,7 +463,10 @@ class KuhnPokerWorkflow(RolloutWorkflow):
         return resp, text
 
     async def _run_one_episode(self, engine: InferenceEngine, data: dict, rid: str):
-        env = self._build_env()
+        player_id = self.player_id
+        if self.use_mixed_player:
+            player_id = 0 if random.random() < 0.5 else 1
+        env = self._build_env(player_id)
         seed = data.get("seed")
         if seed is None:
             seed = random.randint(0, 1_000_000)
@@ -486,9 +493,9 @@ class KuhnPokerWorkflow(RolloutWorkflow):
             turns += 1
             current_player = env.current_player
 
-            if current_player == self.player_id:
+            if current_player == player_id:
                 prompt_messages = self._build_turn_prompt(
-                    env, observation, legal_actions, self.player_id
+                    env, observation, legal_actions, player_id
                 )
                 resp, completion = await self._generate_action_text(
                     engine, self.tokenizer, prompt_messages, f"{rid}-agent-{turns}"
@@ -497,7 +504,7 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                 try:
                     action = env._string_to_action(action_text)
                 except ValueError:
-                    execute_results = env.get_losing_state(player_id=self.player_id)
+                    execute_results = env.get_losing_state(player_id=player_id)
                     done = True
                     step_index = len(trajectory_rewards)
                     trajectory_rewards.extend(
@@ -505,7 +512,7 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                     )
                     step_logs.append(
                         {
-                            "player": self.player_id,
+                            "player": player_id,
                             "action": action_text,
                             "invalid_action": True,
                         }
@@ -519,8 +526,8 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                     )
                     step_logs.append(
                         {
-                            "player": self.player_id,
-                            "action": env._action_to_string(self.player_id, action),
+                            "player": player_id,
+                            "action": env._action_to_string(player_id, action),
                             "invalid_action": False,
                         }
                     )
@@ -532,7 +539,7 @@ class KuhnPokerWorkflow(RolloutWorkflow):
                 response_entries.append(
                     (
                         resp,
-                        self.player_id,
+                        player_id,
                         step_index,
                         prompt_text,
                         completion,
@@ -638,21 +645,21 @@ class KuhnPokerWorkflow(RolloutWorkflow):
             per_step_returns = []
 
         stats_tracker.get("rollout").scalar(
-            reward=player_returns[self.player_id], 
-            reward_opp=player_returns[1-self.player_id], 
+            reward=player_returns[player_id], 
+            reward_opp=player_returns[1-player_id], 
             num_turns=turns
         )
         logger.info(f"Rollout reward: {player_returns[self.player_id]} finished for player {self.player_id} with {turns} steps.")
 
         results = []
-        for resp, player_id, step_index, _, _, _ in response_entries:
+        for resp, entry_player_id, step_index, _, _, _ in response_entries:
             # In agentic tasks, the reward shall in essence be the retrun at each step, not the step-wise reward.
-            if player_id != self.player_id:
+            if entry_player_id != player_id:
                 continue
             if per_step_returns and step_index < len(per_step_returns):
-                step_return = float(per_step_returns[step_index][player_id])
+                step_return = float(per_step_returns[step_index][entry_player_id])
             else:
-                step_return = player_returns[player_id]
+                step_return = player_returns[entry_player_id]
             results.append(self._response_to_tensordict(resp, reward=step_return))
 
         return (
