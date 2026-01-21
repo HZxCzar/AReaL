@@ -25,13 +25,13 @@ ROLE_ALIASES = {
 VILLAGER_SIDE_ROLES = {"villager", "foreseer", "witch", "hunter"}
 
 REASONING_PATTERNS = {
-    "concealment": "Hiding or disguising identity/intent, avoiding revealing information.",
-    "cooperation": "Coordinating, supporting allies, or collaboration actions (e.g., healing/protecting).",
-    "bluffing": "Misleading, false claims, deception, or deliberate misinformation.",
+    "concealment": "Intentionally hiding or disguising identity/intent, avoiding revealing secret information to werewolves, contributing to villager side winning.",
+    "cooperation": "Successfully coordinating, supporting allies, or collaboration actions (e.g., healing villagers/shooting werewolves), beneficial to villager side.",
+    "bluffing": "Misleading, false claims, deception, or deliberate misinformation that truly contribute to villager side winning.",
     "sacrificing": "Intentional sacrifice or trading a player for strategic gain.",
     "pressure": "Applying pressure, forcing choices, cornering or pushing votes.",
     "consensus_building": "Building agreement, bandwagoning, or forming a voting majority.",
-    "role_signal": "Explicitly signaling or discussing roles/claims as part of strategy.",
+    "role_revealing": "Explicitly signaling or discussing roles/claim, potentially leaking role information to werewolves.",
 }
 
 
@@ -107,7 +107,7 @@ def build_judge_prompt(sentences: list[str]) -> str:
         f"{pattern_lines}\n\n"
         "Return strict JSON. Each object must contain:\n"
         "concealment, cooperation, bluffing, sacrificing, "
-        "pressure, consensus_building, role_signal (each yes/no).\n\n"
+        "pressure, consensus_building, role_revealing (each yes/no).\n\n"
         f"Sentence:\n{items}\n"
     )
 
@@ -282,8 +282,8 @@ def write_summary(path: Path, results: list[SentenceJudgeResult]) -> None:
 
 
 """
-python examples/werewolf/detailed_analyser.py --root /storage/openpsi/experiments/logs/admin/xmy-werewolf-eval/qwen3-8b-prm2.5-vs-claude-4-5-thinking-noqa-step149/generated/0 \
-    --output-dir analysis/detailed/149
+python examples/werewolf/detailed_analyser.py --root /storage/openpsi/experiments/logs/admin/xmy-werewolf-eval/qwen3-8b-prm2.5-vs-claude-4-5-thinking-noqa-step4/generated/0 \
+    --output-dir analysis/detailed/4-2
 """
 
 def main() -> None:

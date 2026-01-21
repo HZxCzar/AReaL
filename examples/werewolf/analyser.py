@@ -735,8 +735,8 @@ def write_judge_csv(path: Path, results: list[JudgeResult]) -> None:
 
 
 """
-python examples/werewolf/analyser.py --root /storage/openpsi/experiments/logs/admin/xmy-werewolf-eval/qwen3-8b-prm2.5-vs-claude-4-5-thinking-noqa-step299/generated/0 \
-    --output-dir analysis/299-abl
+python examples/werewolf/analyser.py --root /storage/openpsi/experiments/logs/admin/xmy-werewolf-eval/qwen3-8b-prm2.5-vs-claude-4-5-thinking-noqa-step4/generated/0 \
+    --output-dir analysis/4-2
 """
 
 def main() -> None:
