@@ -255,7 +255,7 @@ class WerewolfWorkflow(RolloutWorkflow):
         self.num_api_calls = 0
 
         # Deprecated path: we no longer use predefined questions
-        self.answer_questions = True
+        self.disable_opp_qa = True
         self.questions = []
 
         if self.dump_dir is not None and not os.path.exists(self.dump_dir):
@@ -448,6 +448,10 @@ class WerewolfWorkflow(RolloutWorkflow):
         rid: str,
         stream: bool=True,
     ) -> str:
+        if self.disable_opp_qa:
+            if "opp" in session_attr and ("qgen" in rid or "ans" in rid):
+                return ""
+
         # Await rate limiter
         await self.rate_limiter.acquire()
 
@@ -498,10 +502,14 @@ class WerewolfWorkflow(RolloutWorkflow):
                 # "stream": stream,
                 "model": api_model,
                 "messages": [{"role": "user", "content": prompt}],
-                "max_completion_tokens": max_tokens,
+                "max_tokens": 30000,
                 "temperature": temperature,
                 # "stream_options": {"include_usage": True},
                 # "top_p": top_p,
+                "thinking":{
+                    "type": "enabled",
+                    "budget_tokens": 15000,
+                },
                 "n": 1,
             }
             if stop_words:
@@ -1075,10 +1083,13 @@ class WerewolfWorkflow(RolloutWorkflow):
                 t_pack_tensors_total += time.perf_counter() - t0
 
             # ========== 3) Use agent's Q&A to guide action generation ==========
-            qa_block = "\n".join([
-                f"{i+1}) {self_questions[i]}\nAnswer: {agent_answers[i].strip()}"
-                for i in range(len(agent_answers))
-            ])
+            if use_opp_generation and self.disable_opp_qa:
+                qa_block = "You do not have any questions about the game now."
+            else:
+                qa_block = "\n".join([
+                    f"{i+1}) {self_questions[i]}\nAnswer: {agent_answers[i].strip()}"
+                    for i in range(len(agent_answers))
+                ])
             t0 = time.perf_counter()
 
             if self.use_summary:

@@ -343,51 +343,52 @@ Your job is to judge whether the **villager side** demonstrates useful team stra
 Evaluate these strategy dimensions (use the definitions below). Then output **STRICT JSON ONLY**.
 
 ## Strategy definitions and decision rules
-1) information_sharing (yes/no/uncertain)
-- What it means: Villager-aligned players share relevant observations that help others update beliefs.
-  Examples: quoting past statements, reporting vote intentions, summarizing who accused whom, clarifying timeline, sharing constraints (e.g., "I was targeted last night").
+1) information_sharing (yes/no)
+- What it means: Villager side players share relevant observations that help others update beliefs.
+  Examples: quoting past statements, reporting vote intentions, claiming oneself's role, clarifying timeline, reminding others to be vigilant during voting.
 - Mark "yes" if: there is clear, actionable sharing that improves group situational awareness.
 - Mark "no" if: discussion is mostly noise, self-focused, or lacks concrete shareable info.
-- Mark "uncertain" if: the trajectory is too short/fragmented to tell.
 
-2) coordinated_voting (yes/no/uncertain)
-- What it means: Villagers align votes through explicit coordination or convergence.
+2) coordinated_voting (yes/no)
+- What it means: Villager side align votes through explicit coordination or convergence.
   Examples: proposing a vote plan, negotiating a consensus target, whip-like “if X then vote Y”, reacting to new evidence and pivoting together.
 - Mark "yes" if: there is explicit coordination or visible convergence with stated reasons.
 - Mark "no" if: votes appear random, purely individual, or no attempt to align is present.
-- Mark "uncertain" if: votes are not shown or the log lacks the voting phase.
 
-3) role_claim_timing (yes/no/uncertain)
+3) role_claim_timing (yes/no)
 - What it means: Role claims (e.g., seer/doctor) are made at a time that helps villagers:
   not too early to be easily eliminated, not too late to be useless; claims are used to guide decisions.
-- Mark "yes" if: claims are timely and strategically leveraged (e.g., to prevent misvote, to confirm information, to coordinate protection).
+- Mark "yes" if: claims are timely and strategically leveraged (e.g., to prevent misvote, to confirm information, to coordinate voting).
 - Mark "no" if: claims are reckless (very early with no need), manipulative without follow-through, or so late they provide no benefit.
-- Mark "uncertain" if: there are no claims or role context is missing.
 
-4) evidence_usage (yes/no/uncertain)
-- What it means: Villagers use evidence to justify accusations/defenses rather than vibes.
-  Evidence includes: contradictions, consistency over time, voting record, night actions, seer checks, probabilistic reasoning, elimination logic.
-- Mark "yes" if: arguments cite concrete events or logical chains tied to the trajectory.
+4) evidence_usage (yes/no)
+- What it means: Villager side use evidence or reasoning to justify accusations/defenses rather than vibes.
+  Evidence includes: contradictions, general reasoning, voting record, night actions, seer checks, elimination logic.
+- Mark "yes" if: arguments cite concrete events or reasoning tied to the trajectory.
 - Mark "no" if: accusations are mostly ad hominem, vibes-only, or ignore available evidence.
-- Mark "uncertain" if: the log doesn’t contain enough argumentation.
+
+Please pay close attention if the winner side is the werewolf.
+When the winner is werewolf, you shall judge carefully whether the strategies are used by the villager side and whether or not the strategy is making a positive contribution;
+When the winner is villagers, try to analyze how these patterns appeared in the trajectory to benefit the final winning. 
 
 ## Output format requirements
 Return STRICT JSON with EXACT keys:
-- "information_sharing": "yes" | "no" | "uncertain"
-- "coordinated_voting": "yes" | "no" | "uncertain"
-- "role_claim_timing": "yes" | "no" | "uncertain"
-- "evidence_usage": "yes" | "no" | "uncertain"
+- "information_sharing": "yes" | "no"
+- "coordinated_voting": "yes" | "no"
+- "role_claim_timing": "yes" | "no"
+- "evidence_usage": "yes" | "no"
 - "notes": string
 
 Rules:
 - Output JSON ONLY (no markdown, no extra text).
 - In notes, give 2–5 short bullet-like sentences explaining the main evidence for your labels.
-- If villagers are not clearly identifiable, judge based on behavior consistent with villager-side strategy (team-information and truth-seeking).
 
 Trajectory:
 {joined}
 """
 
+# Please pay close attention if the winner side is the werewolf. You shall judge carefully whether the strategies are used by the villager side and whether or not the strategy is positively contributing to the villager side;
+# If not, you shall still output no.
 
 def ensure_transformers_available() -> None:
     if importlib.util.find_spec("transformers") is None:
@@ -736,7 +737,7 @@ def write_judge_csv(path: Path, results: list[JudgeResult]) -> None:
 
 """
 python examples/werewolf/analyser.py --root /storage/openpsi/experiments/logs/admin/xmy-werewolf-eval/qwen3-8b-prm2.5-vs-claude-4-5-thinking-noqa-step4/generated/0 \
-    --output-dir analysis/4-2
+    --output-dir analysis/summarized/4
 """
 
 def main() -> None:
