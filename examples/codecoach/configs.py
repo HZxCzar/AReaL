@@ -1,10 +1,10 @@
 from dataclasses import dataclass, field
 
-from areal.api.cli_args import PPOConfig
+from areal.api.cli_args import GRPOConfig
 
 
 @dataclass
-class CodeCoachConfig(PPOConfig):
+class CodeCoachConfig(GRPOConfig):
     workflow: str = field(
         default="examples.codecoach.workflow.CodeCoachAgentWorkflow",
         metadata={"help": "Training workflow import path."},

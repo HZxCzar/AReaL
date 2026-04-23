@@ -1,10 +1,10 @@
 from dataclasses import dataclass, field
 
-from areal.api.cli_args import PPOConfig
+from areal.api.cli_args import GRPOConfig
 
 
 @dataclass
-class TutorConfig(PPOConfig):
+class TutorConfig(GRPOConfig):
     workflow: str = field(
         default="examples.tutor.workflow.TutorAgentWorkflow",
         metadata={"help": "Training workflow import path."},
