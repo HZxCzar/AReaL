@@ -239,7 +239,8 @@ override-dependencies = [
     "mamba-ssm; sys_platform == 'never'",
     "causal-conv1d; sys_platform == 'never'",
     "flash-linear-attention; sys_platform == 'never'",
-
+    "nvidia-resiliency-ext; sys_platform == 'never'",
+    
     # Version conflicts with megatron-bridge (resorting to the existing version)
     "megatron-core==0.16.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "hydra-core==1.4.0.dev1",
