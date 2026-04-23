@@ -73,10 +73,8 @@ actor:
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    # Current AReaL workflow exports later turns with accumulated history in prompt.
-    # Match old verL response budget by allowing 16384 tokens per sample, and
-    # cover one full train batch (4 * 16384) in compute_logp micro-batches.
-    max_tokens_per_mb: 65536
+    # Use smaller token-bounded micro-batches during PPO updates.
+    max_tokens_per_mb: 16384
   optimizer:
     type: adam
     lr: 1.70e-5
@@ -92,7 +90,7 @@ actor:
   reward_scaling: 10.0
   reward_bias: -0.5
   kl_ctl: 0.0
-  ppo_n_minibatches: 1
+  ppo_n_minibatches: 4
   recompute_logprob: true
   use_decoupled_loss: true
   behave_imp_weight_cap: 5.0
@@ -121,7 +119,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 65536
+    max_tokens_per_mb: 16384
   optimizer: null
   scheduling_strategy:
     type: colocation
