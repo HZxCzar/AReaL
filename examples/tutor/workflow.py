@@ -135,7 +135,9 @@ class TutorAgentWorkflow:
         rewards: dict[str, float] = {}
         task = str(data["task"])
         ground_truth = str(data["ground_truth"])
-        student_answer, student_error = await self._run_student(task, teacher_action=None)
+        student_answer, student_error = await self._run_student(
+            task, teacher_action=None, history=[]
+        )
         initial_student_answer = student_answer
         judge_result = self._score_aime_answer(task, ground_truth, student_answer)
         latest_student_answer = student_answer
@@ -221,7 +223,9 @@ class TutorAgentWorkflow:
                 termination_reason = "max_turns" if round_idx >= self.max_turns else "continue"
                 continue
 
-            student_answer, student_error = await self._run_student(task, teacher_action)
+            student_answer, student_error = await self._run_student(
+                task, teacher_action, history=history
+            )
             judge_result = self._score_aime_answer(task, ground_truth, student_answer)
             latest_student_answer = student_answer
             latest_judge_result = judge_result
@@ -282,13 +286,20 @@ class TutorAgentWorkflow:
         return rewards
 
     async def _run_student(
-        self, task: str, teacher_action: str | None
+        self,
+        task: str,
+        teacher_action: str | None,
+        history: list[dict[str, Any]],
     ) -> tuple[str, str | None]:
         teacher_feedback = teacher_action or "(none, produce the first answer attempt)"
+        visible_history = self._student_visible_history_summaries(history)
         prompt = dedent(
             f"""\
             Task:
             {task}
+
+            Visible student history:
+            {"No previous visible turns." if not visible_history else "\n".join(visible_history)}
 
             Current teacher feedback:
             {teacher_feedback}
@@ -352,7 +363,9 @@ class TutorAgentWorkflow:
         }
         if not generation.task or not generation.ground_truth:
             return payload
-        answer, answer_error = await self._run_student(generation.task, teacher_action=None)
+        answer, answer_error = await self._run_student(
+            generation.task, teacher_action=None, history=[]
+        )
         judge_result = self._score_aime_answer(
             generation.task, generation.ground_truth, answer
         )
@@ -462,7 +475,6 @@ class TutorAgentWorkflow:
             status_lines = [
                 f"- Current round: {round_idx - 1}/{self.max_turns}",
                 f"- Remaining rounds: {max(self.max_turns - round_idx + 1, 0)}",
-                "- Latest student answer: unchanged from the previous visible attempt.",
                 "- Latest env feedback: "
                 + (
                     latest_record.get("leak_feedback")
@@ -477,7 +489,6 @@ class TutorAgentWorkflow:
             status_lines = [
                 f"- Current round: {round_idx - 1}/{self.max_turns}",
                 f"- Remaining rounds: {max(self.max_turns - round_idx + 1, 0)}",
-                f"- Latest student answer: {latest_student_answer or '(empty)'}",
                 f"- Latest judge result: {'correct' if latest_judge_result.correct else 'incorrect'}",
                 f"- Latest judge feedback: {latest_judge_result.feedback}",
                 f"- Pre-solved: {pre_solved}",
@@ -564,9 +575,34 @@ class TutorAgentWorkflow:
             raw_result=parsed,
         )
 
+    def _student_visible_history_summaries(
+        self, history: list[dict[str, Any]]
+    ) -> list[str]:
+        summaries: list[str] = []
+        for record in history:
+            if record.get("leak_detected"):
+                continue
+            teacher_text = _compact_text(record.get("teacher_action", "(empty)"))
+            student_text = _compact_text(record.get("student_answer", "(empty)"))
+            judge_text = _compact_text(record.get("judge_feedback", "(empty)"))
+            summaries.append(
+                f"Turn {record['round_idx']}: Teacher guidance: {teacher_text}. "
+                f"Student reply: {student_text}. Judge feedback: {judge_text}."
+            )
+        return summaries
+
 
 def _strip_think_tags(text: str) -> str:
     return re.sub(r"</?think>", "", text or "", flags=re.IGNORECASE).strip()
+
+
+def _compact_text(text: str, max_chars: int = 240) -> str:
+    compact = " ".join((text or "").split())
+    if not compact:
+        return "(empty)"
+    if len(compact) <= max_chars:
+        return compact
+    return compact[: max_chars - 3].rstrip() + "..."
 
 
 def _fix_fracs(string):
