@@ -1,0 +1,18 @@
+[
+  {
+    "id": 0,
+    "task": "If 12 + 15 = ?",
+    "ground_truth": "27",
+    "metadata": {
+      "source": "demo"
+    }
+  },
+  {
+    "id": 1,
+    "task": "What is 9 * 8?",
+    "ground_truth": "72",
+    "metadata": {
+      "source": "demo"
+    }
+  }
+]

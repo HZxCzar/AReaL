@@ -1,0 +1,14 @@
+[
+  {
+    "id": 0,
+    "task_markdown_path": "task.md",
+    "initial_code_path": "initial_program.py",
+    "evaluator_path": "evaluator.py",
+    "target_score": 1.0,
+    "entry_function": "construct_answer",
+    "eval_timeout_sec": 30,
+    "metadata": {
+      "source": "demo"
+    }
+  }
+]
