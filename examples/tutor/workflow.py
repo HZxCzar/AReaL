@@ -136,6 +136,7 @@ class TutorAgentWorkflow:
         task = str(data["task"])
         ground_truth = str(data["ground_truth"])
         student_answer, student_error = await self._run_student(task, teacher_action=None)
+        initial_student_answer = student_answer
         judge_result = self._score_aime_answer(task, ground_truth, student_answer)
         latest_student_answer = student_answer
         latest_judge_result = judge_result
@@ -153,6 +154,7 @@ class TutorAgentWorkflow:
                 ground_truth=ground_truth,
                 latest_student_answer=latest_student_answer,
                 latest_judge_result=latest_judge_result,
+                initial_student_answer=initial_student_answer,
                 history=history,
                 round_idx=round_idx,
                 pre_solved=pre_solved,
@@ -423,31 +425,64 @@ class TutorAgentWorkflow:
         ground_truth: str,
         latest_student_answer: str,
         latest_judge_result: JudgeResult,
+        initial_student_answer: str,
         history: list[dict[str, Any]],
         round_idx: int,
         pre_solved: bool,
     ) -> str:
-        lines = [f"1. Student initial answer: {latest_student_answer or '(empty)'}"]
-        idx = 2
+        lines = [f"Turn 0", f"Student Initial Answer: {initial_student_answer or '(empty)'}"]
         for record in history:
+            lines.append("")
+            lines.append(f"Turn {record['round_idx']}")
             lines.append(
-                f"{idx}. Teacher turn {record['round_idx']}: {record.get('teacher_action', '(empty)') or '(empty)'}"
+                f"Teacher: {record.get('teacher_action', '(empty)') or '(empty)'}"
             )
-            idx += 1
             if record.get("leak_detected"):
                 lines.append(
-                    f"{idx}. Leak feedback after teacher turn {record['round_idx']}: {record.get('leak_feedback') or 'The teacher leaked the answer.'}"
+                    "Env Feedback: "
+                    + (
+                        record.get("leak_feedback")
+                        or "The teacher leaked the answer and the student did not see this turn."
+                    )
                 )
             else:
                 lines.append(
-                    f"{idx}. Student reply after teacher turn {record['round_idx']}: {record.get('student_answer', '(empty)') or '(empty)'}"
+                    f"Student: {record.get('student_answer', '(empty)') or '(empty)'}"
                 )
-            idx += 1
+                lines.append(
+                    f"Judge Feedback: {record.get('judge_feedback') or '(empty)'}"
+                )
         pre_solved_note = (
             "The student already solved the task during reset. Your next action will terminate the episode with reward 0."
             if pre_solved
             else "The student still needs guidance."
         )
+        latest_record = history[-1] if history else None
+        if latest_record and latest_record.get("leak_detected"):
+            status_lines = [
+                f"- Current round: {round_idx - 1}/{self.max_turns}",
+                f"- Remaining rounds: {max(self.max_turns - round_idx + 1, 0)}",
+                "- Latest student answer: unchanged from the previous visible attempt.",
+                "- Latest env feedback: "
+                + (
+                    latest_record.get("leak_feedback")
+                    or "The previous teacher turn leaked the answer and was hidden from the student."
+                ),
+                f"- Latest judge result: {'correct' if latest_judge_result.correct else 'incorrect'}",
+                f"- Latest judge feedback: {latest_judge_result.feedback}",
+                f"- Pre-solved: {pre_solved}",
+                f"- Note: {pre_solved_note}",
+            ]
+        else:
+            status_lines = [
+                f"- Current round: {round_idx - 1}/{self.max_turns}",
+                f"- Remaining rounds: {max(self.max_turns - round_idx + 1, 0)}",
+                f"- Latest student answer: {latest_student_answer or '(empty)'}",
+                f"- Latest judge result: {'correct' if latest_judge_result.correct else 'incorrect'}",
+                f"- Latest judge feedback: {latest_judge_result.feedback}",
+                f"- Pre-solved: {pre_solved}",
+                f"- Note: {pre_solved_note}",
+            ]
         return dedent(
             f"""\
             Task:
@@ -460,13 +495,7 @@ class TutorAgentWorkflow:
             {"\n".join(lines)}
 
             Current Status:
-            - Current round: {round_idx - 1}/{self.max_turns}
-            - Remaining rounds: {max(self.max_turns - round_idx + 1, 0)}
-            - Latest student answer: {latest_student_answer or "(empty)"}
-            - Latest judge result: {"correct" if latest_judge_result.correct else "incorrect"}
-            - Latest judge feedback: {latest_judge_result.feedback}
-            - Pre-solved: {pre_solved}
-            - Note: {pre_solved_note}
+            {"\n".join(status_lines)}
 
             Reply with concise tutoring guidance only. Do not reveal the final answer directly.
             """
