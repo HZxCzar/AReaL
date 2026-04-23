@@ -33,6 +33,7 @@ except Exception:  # pragma: no cover - lightweight local test environments
     stats_tracker = _DummyTracker()
     logging = _DummyLogging()
 
+from examples.common.episode_budget import EpisodeTokenBudget
 from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig, make_teacher_client
 from examples.common.parsing import join_errors, parse_json_dict
 
@@ -98,6 +99,8 @@ class TutorAgentWorkflow:
         judge_system_prompt: str = "",
         leak_check_system_prompt: str = "",
         generator_system_prompt: str = "",
+        max_episode_total_tokens: int | None = None,
+        token_budget_penalty: float = -0.2,
     ):
         self.max_turns = max_turns
         self.temperature = temperature
@@ -110,6 +113,8 @@ class TutorAgentWorkflow:
         self.judge_system_prompt = judge_system_prompt.strip()
         self.leak_check_system_prompt = leak_check_system_prompt.strip()
         self.generator_system_prompt = generator_system_prompt.strip()
+        self.max_episode_total_tokens = max_episode_total_tokens
+        self.token_budget_penalty = token_budget_penalty
         aux_config = AuxModelConfig(
             base_url=aux_base_url,
             model=aux_model,
@@ -138,6 +143,9 @@ class TutorAgentWorkflow:
         leak_count = 0
         termination_reason = "pre_solved" if pre_solved else "max_turns"
         transfer_success = False
+        token_budget = EpisodeTokenBudget(
+            max_episode_total_tokens=self.max_episode_total_tokens,
+        )
 
         for round_idx in range(1, self.max_turns + 1):
             prompt = self._build_teacher_prompt(
@@ -162,6 +170,11 @@ class TutorAgentWorkflow:
             teacher_action = _strip_think_tags(
                 response.choices[0].message.content or ""
             ).strip()
+            budget_snapshot = token_budget.observe_turn(
+                response=response,
+                prompt_text=prompt,
+                completion_text=teacher_action,
+            )
 
             if pre_solved:
                 rewards[response.id] = 0.0
@@ -172,6 +185,10 @@ class TutorAgentWorkflow:
                         "teacher_action": teacher_action,
                         "reward": 0.0,
                         "pre_solved_terminal": True,
+                        "turn_prompt_tokens": budget_snapshot.turn_prompt_tokens,
+                        "turn_completion_tokens": budget_snapshot.turn_completion_tokens,
+                        "turn_total_tokens": budget_snapshot.turn_total_tokens,
+                        "termination_feedback": budget_snapshot.stop_feedback,
                     }
                 )
                 break
@@ -180,6 +197,8 @@ class TutorAgentWorkflow:
             if leak_result.leaked:
                 leak_count += 1
                 reward = -0.6
+                if budget_snapshot.stop_reason is not None:
+                    reward += self.token_budget_penalty
                 rewards[response.id] = reward
                 history.append(
                     {
@@ -188,8 +207,15 @@ class TutorAgentWorkflow:
                         "reward": reward,
                         "leak_detected": True,
                         "leak_feedback": leak_result.feedback,
+                        "turn_prompt_tokens": budget_snapshot.turn_prompt_tokens,
+                        "turn_completion_tokens": budget_snapshot.turn_completion_tokens,
+                        "turn_total_tokens": budget_snapshot.turn_total_tokens,
+                        "termination_feedback": budget_snapshot.stop_feedback,
                     }
                 )
+                if budget_snapshot.stop_reason is not None:
+                    termination_reason = budget_snapshot.stop_reason
+                    break
                 termination_reason = "max_turns" if round_idx >= self.max_turns else "continue"
                 continue
 
@@ -207,6 +233,10 @@ class TutorAgentWorkflow:
                 "judge_feedback": judge_result.feedback,
                 "judge_correct": judge_result.correct,
                 "leak_detected": False,
+                "turn_prompt_tokens": budget_snapshot.turn_prompt_tokens,
+                "turn_completion_tokens": budget_snapshot.turn_completion_tokens,
+                "turn_total_tokens": budget_snapshot.turn_total_tokens,
+                "termination_feedback": budget_snapshot.stop_feedback,
             }
             if judge_result.correct:
                 transfer_result = await self._run_transfer_round(task, ground_truth)
@@ -227,9 +257,16 @@ class TutorAgentWorkflow:
             else:
                 termination_reason = "continue"
 
-            rewards[response.id] = reward
-            record["reward"] = reward
+            final_reward = reward
+            if budget_snapshot.stop_reason is not None:
+                final_reward += self.token_budget_penalty
+                record["length_penalty"] = self.token_budget_penalty
+            rewards[response.id] = final_reward
+            record["reward"] = final_reward
             history.append(record)
+            if budget_snapshot.stop_reason is not None and termination_reason == "continue":
+                termination_reason = budget_snapshot.stop_reason
+                break
             if judge_result.correct:
                 break
 

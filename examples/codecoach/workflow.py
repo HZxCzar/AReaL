@@ -36,6 +36,7 @@ except Exception:  # pragma: no cover - lightweight local test environments
     logging = _DummyLogging()
 
 from examples.common.files import make_run_dir
+from examples.common.episode_budget import EpisodeTokenBudget
 from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig, make_teacher_client
 from examples.common.parsing import join_errors, parse_json_dict
 
@@ -86,12 +87,16 @@ class CodeCoachAgentWorkflow:
         api_params_config_path: str | None = None,
         api_params_key: str | None = None,
         work_dir_root: str = "examples/codecoach/artifacts",
+        max_episode_total_tokens: int | None = None,
+        token_budget_penalty: float = -0.2,
     ):
         self.max_turns = max_turns
         self.temperature = temperature
         self.top_p = top_p
         self.max_completion_tokens = max_completion_tokens
         self.work_dir_root = work_dir_root
+        self.max_episode_total_tokens = max_episode_total_tokens
+        self.token_budget_penalty = token_budget_penalty
         self.student_caller = AsyncLLMCaller(
             AuxModelConfig(
                 base_url=student_base_url,
@@ -128,6 +133,9 @@ class CodeCoachAgentWorkflow:
         best_ratio_history: list[float] = []
         rewards: dict[str, float] = {}
         history: list[dict[str, Any]] = []
+        token_budget = EpisodeTokenBudget(
+            max_episode_total_tokens=self.max_episode_total_tokens,
+        )
 
         for round_idx in range(1, self.max_turns + 1):
             prompt = self._build_teacher_prompt(
@@ -153,6 +161,11 @@ class CodeCoachAgentWorkflow:
                 max_completion_tokens=self.max_completion_tokens,
             )
             teacher_action = (response.choices[0].message.content or "").strip()
+            budget_snapshot = token_budget.observe_turn(
+                response=response,
+                prompt_text=prompt,
+                completion_text=teacher_action,
+            )
             raw_student_output = await self.student_caller.call_text(
                 self._build_student_messages(
                     task_markdown=task_markdown,
@@ -187,7 +200,10 @@ class CodeCoachAgentWorkflow:
                 best_eval = eval_result
             best_ratio_history.append(best_eval.target_ratio)
             reward = self._current_auc_gain(best_ratio_history, initial_eval.target_ratio)
-            rewards[response.id] = reward
+            final_reward = reward
+            if budget_snapshot.stop_reason is not None:
+                final_reward += self.token_budget_penalty
+            rewards[response.id] = final_reward
             record = {
                 "round_idx": round_idx,
                 "teacher_action": teacher_action,
@@ -195,11 +211,21 @@ class CodeCoachAgentWorkflow:
                 "code_updated": code_updated,
                 "eval_result": eval_result,
                 "best_eval": best_eval,
-                "reward": reward,
+                "reward": final_reward,
                 "error": join_errors(update_error, eval_result.error),
+                "turn_prompt_tokens": budget_snapshot.turn_prompt_tokens,
+                "turn_completion_tokens": budget_snapshot.turn_completion_tokens,
+                "turn_total_tokens": budget_snapshot.turn_total_tokens,
+                "termination_feedback": budget_snapshot.stop_feedback,
             }
+            if budget_snapshot.stop_reason is not None:
+                record["length_penalty"] = self.token_budget_penalty
             history.append(record)
-            if round_idx >= self.max_turns or eval_result.target_ratio >= 1.0:
+            if (
+                round_idx >= self.max_turns
+                or eval_result.target_ratio >= 1.0
+                or budget_snapshot.stop_reason is not None
+            ):
                 break
 
         final_eval = history[-1]["eval_result"] if history else initial_eval

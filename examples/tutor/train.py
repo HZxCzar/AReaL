@@ -47,6 +47,7 @@ def main(args):
         judge_system_prompt=config.judge_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
         generator_system_prompt=config.generator_system_prompt,
+        max_episode_total_tokens=config.gconfig.max_tokens,
     )
 
     eval_workflow_kwargs = workflow_kwargs.copy()
