@@ -10,8 +10,10 @@ Prepare a HuggingFace dataset on disk from a manifest:
 
 ```bash
 python3 examples/codecoach/prepare_dataset.py \
-  --manifest examples/codecoach/demo/manifest.json \
-  --output examples/codecoach/demo_dataset
+  --manifest /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AgentGym-RL/examples/codecoach/circle_packing_manifest.json \
+  --train-ids /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AgentGym-RL/AgentGym-RL/AgentItemId/codecoach_train.json \
+  --test-ids /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AgentGym-RL/AgentGym-RL/AgentItemId/codecoach_test.json \
+  --output /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/codecoach/circle_packing_dataset
 ```
 
 Each dataset sample contains:
@@ -24,6 +26,10 @@ Each dataset sample contains:
 - `entry_function`
 - `eval_timeout_sec`
 - `metadata`
+
+If `--train-ids` and `--test-ids` are provided, the split follows the old
+`AgentItemId/codecoach_train.json` and `AgentItemId/codecoach_test.json` files. Duplicate
+item ids are preserved in the resulting split.
 
 ## Train
 

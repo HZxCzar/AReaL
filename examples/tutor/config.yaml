@@ -1,34 +1,34 @@
 experiment_name: tutor-ppo
-trial_name: demo
+trial_name: 20260414_085601
 
 seed: 1
 enable_offload: false
-total_train_epochs: 1
+total_train_epochs: 200
 tokenizer_path: ${actor.path}
 
 workflow: examples.tutor.workflow.TutorAgentWorkflow
 eval_workflow: ${workflow}
-max_turns: 4
-aux_base_url: http://127.0.0.1:30000/v1
-aux_model: qwen-aux
+max_turns: 5
+aux_base_url: http://127.0.0.1:30001/v1
+aux_model: default
 aux_api_key: EMPTY
 aux_timeout: 120
 aux_max_tokens: 1024
 aux_temperature: 0.7
-aux_top_p: 1.0
-max_concurrent_aux_calls: 8
+aux_top_p: null
+max_concurrent_aux_calls: 4
 api_params_config_path: examples/tutor/api_params_config.json
-api_params_key: ""
+api_params_key: "sglang:30001"
 transfer_success_reward: 1.2
 transfer_fail_reward: 0.6
 
 cluster:
   n_nodes: 1
-  n_gpus_per_node: 1
-  fileroot: /tmp/areal/experiments
+  n_gpus_per_node: 4
+  fileroot: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor
   name_resolve:
     type: nfs
-    nfs_record_root: /tmp/areal/name_resolve
+    nfs_record_root: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor/name_resolve
 
 scheduler:
   type: local
@@ -54,10 +54,12 @@ rollout:
     turn_discount: 1.0
 
 gconfig:
-  n_samples: 2
+  n_samples: 8
   min_new_tokens: 0
-  max_new_tokens: 256
-  max_tokens: 512
+  # Old verL config used data.max_response_length=16384.
+  max_new_tokens: 16384
+  # Old tutor train script used data.max_prompt_length=4096, so total budget is 4096 + 16384.
+  max_tokens: 20480
   greedy: false
   temperature: 1.0
   top_p: 1.0
@@ -66,7 +68,7 @@ actor:
   backend: "fsdp:d4p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen2.5-1.5B-Instruct
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
@@ -127,23 +129,23 @@ sglang:
   skip_tokenizer_init: true
   dtype: ${actor.dtype}
   max_running_requests: null
-  context_length: 8192
-  mem_fraction_static: 0.7
+  context_length: 32768
+  mem_fraction_static: 0.6
 
 train_dataset:
   batch_size: 4
   shuffle: true
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/demo_dataset
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/aime_dataset
   type: rl
-  max_length: 1024
+  max_length: 4096
 
 valid_dataset:
   batch_size: 4
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/demo_dataset
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/aime_dataset
   type: rl
 
 saver:

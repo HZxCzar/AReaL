@@ -81,7 +81,7 @@ class CodeCoachAgentWorkflow:
         student_timeout: int = 120,
         student_max_tokens: int = 4096,
         student_temperature: float = 0.7,
-        student_top_p: float = 1.0,
+        student_top_p: float | None = None,
         max_concurrent_students: int = 8,
         api_params_config_path: str | None = None,
         api_params_key: str | None = None,

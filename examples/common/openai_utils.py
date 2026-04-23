@@ -20,9 +20,9 @@ class AuxModelConfig:
     model: str
     api_key: str = "EMPTY"
     timeout: int = 120
-    max_tokens: int = 1024
-    temperature: float = 0.7
-    top_p: float = 1.0
+    max_tokens: int | None = None
+    temperature: float | None = None
+    top_p: float | None = None
     max_concurrency: int = 8
     api_params_config_path: str | None = None
     api_params_key: str | None = None
@@ -45,7 +45,7 @@ def infer_api_params_key(base_url: str, model: str) -> str | None:
     parsed = urlparse(base_url)
     host = (parsed.hostname or "").lower()
     port = parsed.port
-    if host in {"127.0.0.1", "localhost"} and port is not None:
+    if host in {"127.0.0.1", "localhost", "0.0.0.0"} and port is not None:
         return f"sglang:{port}"
     if "openrouter.ai" in host:
         return f"openrouter:{model}"
@@ -73,9 +73,9 @@ def split_endpoint_config(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[s
 def resolve_endpoint_request_config(config: AuxModelConfig) -> dict[str, Any]:
     api_params_config = load_api_params_config(config.api_params_config_path)
     resolved: dict[str, Any] = {
-        "temperature": config.temperature,
-        "top_p": config.top_p,
-        "max_tokens": config.max_tokens,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "max_tokens": 32768,
     }
     resolved_extra_body: dict[str, Any] = {}
     applied_keys: list[str] = []
@@ -94,6 +94,13 @@ def resolve_endpoint_request_config(config: AuxModelConfig) -> dict[str, Any]:
         resolved.update(endpoint_base)
         resolved_extra_body.update(endpoint_extra)
         applied_keys.append(endpoint_key)
+
+    if config.temperature is not None:
+        resolved["temperature"] = config.temperature
+    if config.top_p is not None:
+        resolved["top_p"] = config.top_p
+    if config.max_tokens is not None:
+        resolved["max_tokens"] = config.max_tokens
 
     resolved["extra_body"] = resolved_extra_body
     resolved["resolved_api_params_key"] = endpoint_key
@@ -118,14 +125,21 @@ class AsyncLLMCaller:
     async def call_text(self, messages: list[dict[str, str]]) -> str:
         if self._client is None:
             raise RuntimeError("openai package is required for auxiliary model calls")
+        request_kwargs = {
+            key: value
+            for key, value in self.request_config.items()
+            if key
+            not in {"extra_body", "resolved_api_params_key", "applied_api_params_keys"}
+            and value is not None
+        }
+        if "max_tokens" in request_kwargs:
+            request_kwargs["max_completion_tokens"] = int(request_kwargs.pop("max_tokens"))
         async with self._semaphore:
             response = await self._client.chat.completions.create(
                 model=self.config.model,
                 messages=messages,
-                max_completion_tokens=int(self.request_config["max_tokens"]),
-                temperature=float(self.request_config["temperature"]),
-                top_p=float(self.request_config["top_p"]),
                 extra_body=self.request_config.get("extra_body") or None,
+                **request_kwargs,
             )
         content = response.choices[0].message.content
         return (content or "").strip()

@@ -87,7 +87,7 @@ class TutorAgentWorkflow:
         aux_timeout: int = 120,
         aux_max_tokens: int = 1024,
         aux_temperature: float = 0.7,
-        aux_top_p: float = 1.0,
+        aux_top_p: float | None = None,
         max_concurrent_aux_calls: int = 8,
         api_params_config_path: str | None = None,
         api_params_key: str | None = None,

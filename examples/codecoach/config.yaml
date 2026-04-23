@@ -1,33 +1,33 @@
 experiment_name: codecoach-ppo
-trial_name: demo
+trial_name: 20260414_084510
 
 seed: 1
 enable_offload: false
-total_train_epochs: 1
+total_train_epochs: 200
 tokenizer_path: ${actor.path}
 
 workflow: examples.codecoach.workflow.CodeCoachAgentWorkflow
 eval_workflow: ${workflow}
-max_turns: 4
-student_base_url: http://127.0.0.1:30000/v1
-student_model: qwen-student
+max_turns: 5
+student_base_url: http://127.0.0.1:30001/v1
+student_model: default
 student_api_key: EMPTY
 student_timeout: 120
-student_max_tokens: 2048
+student_max_tokens: 4096
 student_temperature: 0.7
-student_top_p: 1.0
-max_concurrent_students: 8
+student_top_p: null
+max_concurrent_students: 4
 api_params_config_path: examples/codecoach/api_params_config.json
-api_params_key: ""
-work_dir_root: examples/codecoach/artifacts
+api_params_key: "sglang:30001"
+work_dir_root: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/codecoach/artifacts
 
 cluster:
   n_nodes: 1
-  n_gpus_per_node: 1
-  fileroot: /tmp/areal/experiments
+  n_gpus_per_node: 4
+  fileroot: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/codecoach
   name_resolve:
     type: nfs
-    nfs_record_root: /tmp/areal/name_resolve
+    nfs_record_root: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/codecoach/name_resolve
 
 scheduler:
   type: local
@@ -53,10 +53,12 @@ rollout:
     turn_discount: 1.0
 
 gconfig:
-  n_samples: 2
+  n_samples: 8
   min_new_tokens: 0
-  max_new_tokens: 256
-  max_tokens: 512
+  # Old verL config used data.max_response_length=16384.
+  max_new_tokens: 16384
+  # Old base config used data.max_prompt_length=2048 and codecoach train script did not override it.
+  max_tokens: 18432
   greedy: false
   temperature: 1.0
   top_p: 1.0
@@ -65,7 +67,7 @@ actor:
   backend: "fsdp:d4p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen2.5-1.5B-Instruct
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
@@ -126,23 +128,23 @@ sglang:
   skip_tokenizer_init: true
   dtype: ${actor.dtype}
   max_running_requests: null
-  context_length: 8192
-  mem_fraction_static: 0.7
+  context_length: 32768
+  mem_fraction_static: 0.6
 
 train_dataset:
-  batch_size: 2
+  batch_size: 4
   shuffle: true
   pin_memory: false
   num_workers: 0
-  path: examples/codecoach/demo_dataset
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/codecoach/circle_packing_dataset
   type: rl
   max_length: 2048
 
 valid_dataset:
-  batch_size: 2
+  batch_size: 4
   pin_memory: false
   num_workers: 0
-  path: examples/codecoach/demo_dataset
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/codecoach/circle_packing_dataset
   type: rl
 
 saver:

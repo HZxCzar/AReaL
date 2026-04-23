@@ -20,7 +20,7 @@ class TutorConfig(PPOConfig):
     aux_timeout: int = field(default=120)
     aux_max_tokens: int = field(default=1024)
     aux_temperature: float = field(default=0.7)
-    aux_top_p: float = field(default=1.0)
+    aux_top_p: float | None = field(default=None)
     max_concurrent_aux_calls: int = field(default=8)
     api_params_config_path: str = field(default="")
     api_params_key: str = field(default="")

@@ -10,8 +10,10 @@ Prepare a HuggingFace dataset on disk from a manifest:
 
 ```bash
 python3 examples/tutor/prepare_dataset.py \
-  --manifest examples/tutor/demo/manifest.json \
-  --output examples/tutor/demo_dataset
+  --manifest /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AgentGym-RL/examples/tutor/aime_manifest.json \
+  --train-ids /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AgentGym-RL/AgentGym-RL/AgentItemId/tutor_train.json \
+  --test-ids /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AgentGym-RL/AgentGym-RL/AgentItemId/tutor_test.json \
+  --output /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/aime_dataset
 ```
 
 Each dataset sample contains:
@@ -20,6 +22,10 @@ Each dataset sample contains:
 - `task`
 - `ground_truth`
 - `metadata`
+
+If `--train-ids` and `--test-ids` are provided, the split follows the old
+`AgentItemId/tutor_train.json` and `AgentItemId/tutor_test.json` files instead of using
+the last `N` samples as test data.
 
 ## Train
 

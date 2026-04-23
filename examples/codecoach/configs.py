@@ -20,7 +20,7 @@ class CodeCoachConfig(PPOConfig):
     student_timeout: int = field(default=120)
     student_max_tokens: int = field(default=4096)
     student_temperature: float = field(default=0.7)
-    student_top_p: float = field(default=1.0)
+    student_top_p: float | None = field(default=None)
     max_concurrent_students: int = field(default=8)
     api_params_config_path: str = field(default="")
     api_params_key: str = field(default="")
