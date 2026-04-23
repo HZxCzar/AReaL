@@ -177,6 +177,11 @@ async def _run_one(
     with patch_teacher_factory(tutor_workflow_module, _factory):
         rewards = await workflow.run(row, **teacher_extra_kwargs)
 
+    visible_history_summaries = [
+        str(record.get("student_visible_summary", ""))
+        for record in workflow.last_history
+        if not record.get("leak_detected") and record.get("student_visible_summary")
+    ]
     turn_totals = [
         (usage.get("prompt_tokens") or 0) + (usage.get("completion_tokens") or 0)
         for usage in logged_teacher.logged_usage
@@ -193,6 +198,7 @@ async def _run_one(
         "turn_total_tokens": turn_totals,
         "length_budget": config.gconfig.max_tokens,
         "length_exceeded_turns": length_exceeded_turns,
+        "student_visible_history": visible_history_summaries,
         "judge_outputs": workflow.last_judge_outputs,
         "aux_request_config": workflow.aux_caller.request_config,
     }
@@ -208,6 +214,7 @@ async def _run_one(
             "aux_model": config.aux_model,
         },
     }
+    sink.dump_json("history.json", workflow.last_history)
     sink.dump_json("summary.json", summary)
     sink.dump_json("meta.json", meta)
     return summary

@@ -115,6 +115,7 @@ class TutorAgentWorkflow:
         self.generator_system_prompt = generator_system_prompt.strip()
         self.max_episode_total_tokens = max_episode_total_tokens
         self.token_budget_penalty = token_budget_penalty
+        self.last_history: list[dict[str, Any]] = []
         aux_config = AuxModelConfig(
             base_url=aux_base_url,
             model=aux_model,
@@ -244,6 +245,7 @@ class TutorAgentWorkflow:
                 "turn_total_tokens": budget_snapshot.turn_total_tokens,
                 "termination_feedback": budget_snapshot.stop_feedback,
             }
+            record["student_visible_summary"] = self._build_student_visible_summary(record)
             if judge_result.correct:
                 transfer_result = await self._run_transfer_round(task, ground_truth)
                 transfer_success = transfer_result["transfer_success"]
@@ -283,6 +285,7 @@ class TutorAgentWorkflow:
             primary_success=bool(latest_judge_result.correct),
             transfer_success=transfer_success,
         )
+        self.last_history = [dict(record) for record in history]
         return rewards
 
     async def _run_student(
@@ -582,14 +585,20 @@ class TutorAgentWorkflow:
         for record in history:
             if record.get("leak_detected"):
                 continue
-            teacher_text = _compact_text(record.get("teacher_action", "(empty)"))
-            student_text = _compact_text(record.get("student_answer", "(empty)"))
-            judge_text = _compact_text(record.get("judge_feedback", "(empty)"))
-            summaries.append(
-                f"Turn {record['round_idx']}: Teacher guidance: {teacher_text}. "
-                f"Student reply: {student_text}. Judge feedback: {judge_text}."
-            )
+            summary = record.get("student_visible_summary")
+            if not isinstance(summary, str) or not summary.strip():
+                summary = self._build_student_visible_summary(record)
+            summaries.append(summary)
         return summaries
+
+    def _build_student_visible_summary(self, record: dict[str, Any]) -> str:
+        teacher_text = _compact_text(record.get("teacher_action", "(empty)"))
+        student_text = _compact_text(record.get("student_answer", "(empty)"))
+        judge_text = _compact_text(record.get("judge_feedback", "(empty)"))
+        return (
+            f"Turn {record['round_idx']}: Teacher guidance: {teacher_text}. "
+            f"Student reply: {student_text}. Judge feedback: {judge_text}."
+        )
 
 
 def _strip_think_tags(text: str) -> str:
