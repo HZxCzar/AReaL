@@ -7,6 +7,7 @@ import pathlib
 import sys
 from datetime import datetime
 from pathlib import Path
+from textwrap import dedent
 from typing import Any
 
 sys.path.append(str(pathlib.Path(__file__).parent))
@@ -36,7 +37,10 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
         return await super().run(data, **extra_kwargs)
 
     async def _run_student(
-        self, task: str, teacher_action: str | None
+        self,
+        task: str,
+        teacher_action: str | None,
+        history: list[dict[str, Any]],
     ) -> tuple[str, str | None]:
         if teacher_action is None and task == self.root_task:
             label = "student_init"
@@ -45,7 +49,21 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
         else:
             label = "student"
         teacher_feedback = teacher_action or "(none, produce the first answer attempt)"
-        prompt = f"Task:\n{task}\n\nCurrent teacher feedback:\n{teacher_feedback}\n\nReply with only the student's next answer attempt."
+        visible_history = self._student_visible_history_summaries(history)
+        prompt = dedent(
+            f"""\
+            Task:
+            {task}
+
+            Visible student history:
+            {"No previous visible turns." if not visible_history else "\n".join(visible_history)}
+
+            Current teacher feedback:
+            {teacher_feedback}
+
+            Reply with only the student's next answer attempt.
+            """
+        ).strip()
         messages = [
             {"role": "system", "content": self.student_system_prompt},
             {"role": "user", "content": prompt},
