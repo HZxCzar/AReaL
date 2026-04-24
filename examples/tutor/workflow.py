@@ -145,7 +145,8 @@ class TutorAgentWorkflow:
     async def run(self, data: dict[str, Any], **extra_kwargs):
         teacher_client = make_teacher_client(extra_kwargs)
         history: list[dict[str, Any]] = []
-        rewards: dict[str, float] = {}
+        total_reward = 0.0
+        last_completion_id: str | None = None
         task = str(data["task"])
         ground_truth = str(data["ground_truth"])
         student_answer, student_error = await self._run_student(
@@ -162,28 +163,28 @@ class TutorAgentWorkflow:
         token_budget = EpisodeTokenBudget(
             max_episode_total_tokens=self.max_episode_total_tokens,
         )
+        teacher_messages = [
+            {"role": "system", "content": self.teacher_system_prompt},
+            {
+                "role": "user",
+                "content": self._build_teacher_initial_prompt(
+                    task=task,
+                    ground_truth=ground_truth,
+                    initial_student_answer=initial_student_answer,
+                    latest_judge_result=latest_judge_result,
+                    pre_solved=pre_solved,
+                    round_idx=1,
+                ),
+            },
+        ]
 
         for round_idx in range(1, self.max_turns + 1):
-            prompt = self._build_teacher_prompt(
-                task=task,
-                ground_truth=ground_truth,
-                latest_student_answer=latest_student_answer,
-                latest_judge_result=latest_judge_result,
-                initial_student_answer=initial_student_answer,
-                history=history,
-                round_idx=round_idx,
-                pre_solved=pre_solved,
-            )
-            teacher_messages = [
-                {"role": "system", "content": self.teacher_system_prompt},
-                {"role": "user", "content": prompt},
-            ]
             safe_max_completion_tokens, prompt_tokens = self.teacher_context_budget.clamp_max_completion_tokens(
                 teacher_messages,
                 self.max_completion_tokens,
             )
             if safe_max_completion_tokens <= 0:
-                rewards[f"context_budget_stop_{round_idx}"] = self.token_budget_penalty
+                total_reward += self.token_budget_penalty
                 history.append(
                     {
                         "round_idx": round_idx,
@@ -203,20 +204,20 @@ class TutorAgentWorkflow:
                 model="default",
                 messages=teacher_messages,
                 temperature=self.temperature,
-                top_p=self.top_p,
-                max_completion_tokens=safe_max_completion_tokens,
-            )
+                    top_p=self.top_p,
+                    max_completion_tokens=safe_max_completion_tokens,
+                )
+            last_completion_id = response.id
             teacher_action = _strip_think_tags(
                 response.choices[0].message.content or ""
             ).strip()
             budget_snapshot = token_budget.observe_turn(
                 response=response,
-                prompt_text=prompt,
+                prompt_text=teacher_messages[-1]["content"],
                 completion_text=teacher_action,
             )
 
             if pre_solved:
-                rewards[response.id] = 0.0
                 termination_reason = "pre_solved"
                 history.append(
                     {
@@ -238,7 +239,7 @@ class TutorAgentWorkflow:
                 reward = -0.6
                 if budget_snapshot.stop_reason is not None:
                     reward += self.token_budget_penalty
-                rewards[response.id] = reward
+                total_reward += reward
                 history.append(
                     {
                         "round_idx": round_idx,
@@ -256,6 +257,21 @@ class TutorAgentWorkflow:
                     termination_reason = budget_snapshot.stop_reason
                     break
                 termination_reason = "max_turns" if round_idx >= self.max_turns else "continue"
+                if round_idx < self.max_turns:
+                    teacher_messages.extend(
+                        [
+                            {"role": "assistant", "content": teacher_action},
+                            {
+                                "role": "user",
+                                "content": self._build_teacher_followup_prompt(
+                                    latest_record=history[-1],
+                                    latest_judge_result=latest_judge_result,
+                                    round_idx=round_idx + 1,
+                                    pre_solved=pre_solved,
+                                ),
+                            },
+                        ]
+                    )
                 continue
 
             student_answer, student_error = await self._run_student(
@@ -303,7 +319,7 @@ class TutorAgentWorkflow:
             if budget_snapshot.stop_reason is not None:
                 final_reward += self.token_budget_penalty
                 record["length_penalty"] = self.token_budget_penalty
-            rewards[response.id] = final_reward
+            total_reward += final_reward
             record["reward"] = final_reward
             history.append(record)
             if budget_snapshot.stop_reason is not None and termination_reason == "continue":
@@ -311,16 +327,33 @@ class TutorAgentWorkflow:
                 break
             if judge_result.correct:
                 break
+            if round_idx < self.max_turns:
+                teacher_messages.extend(
+                    [
+                        {"role": "assistant", "content": teacher_action},
+                        {
+                            "role": "user",
+                            "content": self._build_teacher_followup_prompt(
+                                latest_record=record,
+                                latest_judge_result=latest_judge_result,
+                                round_idx=round_idx + 1,
+                                pre_solved=pre_solved,
+                            ),
+                        },
+                    ]
+                )
 
         _safe_scalar(
-            reward=sum(rewards.values()),
-            num_turns=len(rewards),
+            reward=total_reward,
+            num_turns=len(history),
             leak_count=leak_count,
             primary_success=bool(latest_judge_result.correct),
             transfer_success=transfer_success,
         )
         self.last_history = [dict(record) for record in history]
-        return rewards
+        if last_completion_id is None:
+            return {}
+        return total_reward
 
     async def _run_student(
         self,
@@ -469,68 +502,20 @@ class TutorAgentWorkflow:
             raw_result=parsed,
         )
 
-    def _build_teacher_prompt(
+    def _build_teacher_initial_prompt(
         self,
         task: str,
         ground_truth: str,
-        latest_student_answer: str,
-        latest_judge_result: JudgeResult,
         initial_student_answer: str,
-        history: list[dict[str, Any]],
         round_idx: int,
+        latest_judge_result: JudgeResult,
         pre_solved: bool,
     ) -> str:
-        lines = [f"Turn 0", f"Student Initial Answer: {initial_student_answer or '(empty)'}"]
-        for record in history:
-            lines.append("")
-            lines.append(f"Turn {record['round_idx']}")
-            lines.append(
-                f"Teacher: {record.get('teacher_action', '(empty)') or '(empty)'}"
-            )
-            if record.get("leak_detected"):
-                lines.append(
-                    "Env Feedback: "
-                    + (
-                        record.get("leak_feedback")
-                        or "The teacher leaked the answer and the student did not see this turn."
-                    )
-                )
-            else:
-                lines.append(
-                    f"Student: {record.get('student_answer', '(empty)') or '(empty)'}"
-                )
-                lines.append(
-                    f"Judge Feedback: {record.get('judge_feedback') or '(empty)'}"
-                )
         pre_solved_note = (
             "The student already solved the task during reset. Your next action will terminate the episode with reward 0."
             if pre_solved
             else "The student still needs guidance."
         )
-        latest_record = history[-1] if history else None
-        if latest_record and latest_record.get("leak_detected"):
-            status_lines = [
-                f"- Current round: {round_idx - 1}/{self.max_turns}",
-                f"- Remaining rounds: {max(self.max_turns - round_idx + 1, 0)}",
-                "- Latest env feedback: "
-                + (
-                    latest_record.get("leak_feedback")
-                    or "The previous teacher turn leaked the answer and was hidden from the student."
-                ),
-                f"- Latest judge result: {'correct' if latest_judge_result.correct else 'incorrect'}",
-                f"- Latest judge feedback: {latest_judge_result.feedback}",
-                f"- Pre-solved: {pre_solved}",
-                f"- Note: {pre_solved_note}",
-            ]
-        else:
-            status_lines = [
-                f"- Current round: {round_idx - 1}/{self.max_turns}",
-                f"- Remaining rounds: {max(self.max_turns - round_idx + 1, 0)}",
-                f"- Latest judge result: {'correct' if latest_judge_result.correct else 'incorrect'}",
-                f"- Latest judge feedback: {latest_judge_result.feedback}",
-                f"- Pre-solved: {pre_solved}",
-                f"- Note: {pre_solved_note}",
-            ]
         return dedent(
             f"""\
             Task:
@@ -539,15 +524,69 @@ class TutorAgentWorkflow:
             Ground Truth:
             {ground_truth}
 
-            Teacher-Side History:
-            {"\n".join(lines)}
-
-            Current Status:
-            {"\n".join(status_lines)}
+            Turn 0:
+            - Student initial answer: {initial_student_answer or '(empty)'}
+            - Initial judge result: {'correct' if latest_judge_result.correct else 'incorrect'}
+            - Initial judge feedback: {latest_judge_result.feedback}
+            - Current round: {round_idx - 1}/{self.max_turns}
+            - Remaining rounds: {max(self.max_turns - round_idx + 1, 0)}
+            - Pre-solved: {pre_solved}
+            - Note: {pre_solved_note}
 
             Reply with concise tutoring guidance only. Do not reveal the final answer directly.
             """
         ).strip()
+
+    def _build_teacher_followup_prompt(
+        self,
+        latest_record: dict[str, Any],
+        latest_judge_result: JudgeResult,
+        round_idx: int,
+        pre_solved: bool,
+    ) -> str:
+        lines = [
+            f"Turn {latest_record['round_idx']} update:",
+            f"- Current round: {round_idx - 1}/{self.max_turns}",
+            f"- Remaining rounds: {max(self.max_turns - round_idx + 1, 0)}",
+            f"- Pre-solved: {pre_solved}",
+        ]
+        if latest_record.get("leak_detected"):
+            lines.append(
+                "- Env feedback: "
+                + (
+                    latest_record.get("leak_feedback")
+                    or "The previous teacher turn leaked the answer and the student did not see it."
+                )
+            )
+            lines.append(
+                f"- Latest judge result: {'correct' if latest_judge_result.correct else 'incorrect'}"
+            )
+            lines.append(f"- Latest judge feedback: {latest_judge_result.feedback}")
+        else:
+            lines.append(
+                f"- Student reply: {latest_record.get('student_answer', '(empty)') or '(empty)'}"
+            )
+            lines.append(
+                f"- Judge result: {'correct' if latest_record.get('judge_correct') else 'incorrect'}"
+            )
+            lines.append(
+                f"- Judge feedback: {latest_record.get('judge_feedback') or '(empty)'}"
+            )
+            if latest_record.get("transfer_triggered"):
+                lines.append(
+                    f"- Transfer success: {bool(latest_record.get('transfer_success'))}"
+                )
+                lines.append(
+                    f"- Transfer judge feedback: {latest_record.get('transfer_judge_feedback') or '(empty)'}"
+                )
+            if latest_record.get("termination_feedback"):
+                lines.append(
+                    f"- Budget feedback: {latest_record.get('termination_feedback')}"
+                )
+        lines.append(
+            "Reply with concise tutoring guidance only. Do not reveal the final answer directly."
+        )
+        return "\n".join(lines)
 
     def _score_aime_answer(
         self, task: str, ground_truth: str, student_answer: str

@@ -49,7 +49,7 @@ rollout:
     mode: inline
     tool_call_parser: qwen25
     reasoning_parser: qwen3
-    export_style: individual
+    export_style: concat
     turn_discount: 1.0
 
 gconfig:

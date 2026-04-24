@@ -143,35 +143,37 @@ class CodeCoachAgentWorkflow:
         )
         best_eval = initial_eval
         best_ratio_history: list[float] = []
-        rewards: dict[str, float] = {}
+        total_reward = 0.0
+        last_completion_id: str | None = None
         history: list[dict[str, Any]] = []
         token_budget = EpisodeTokenBudget(
             max_episode_total_tokens=self.max_episode_total_tokens,
         )
+        teacher_messages = [
+            {
+                "role": "system",
+                "content": "You are the teacher in a code-coaching environment. Reply with concise natural-language guidance only. Do not output code.",
+            },
+            {
+                "role": "user",
+                "content": self._build_teacher_initial_prompt(
+                    task_markdown=task_markdown,
+                    current_code=current_code,
+                    current_eval=initial_eval,
+                    best_eval=best_eval,
+                    entry_function=entry_function,
+                    round_idx=1,
+                ),
+            },
+        ]
 
         for round_idx in range(1, self.max_turns + 1):
-            prompt = self._build_teacher_prompt(
-                task_markdown=task_markdown,
-                current_code=current_code,
-                current_eval=initial_eval if not history else history[-1]["eval_result"],
-                best_eval=best_eval,
-                entry_function=entry_function,
-                history=history,
-                round_idx=round_idx,
-            )
-            teacher_messages = [
-                {
-                    "role": "system",
-                    "content": "You are the teacher in a code-coaching environment. Reply with concise natural-language guidance only. Do not output code.",
-                },
-                {"role": "user", "content": prompt},
-            ]
             safe_max_completion_tokens, prompt_tokens = self.teacher_context_budget.clamp_max_completion_tokens(
                 teacher_messages,
                 self.max_completion_tokens,
             )
             if safe_max_completion_tokens <= 0:
-                rewards[f"context_budget_stop_{round_idx}"] = self.token_budget_penalty
+                total_reward += self.token_budget_penalty
                 history.append(
                     {
                         "round_idx": round_idx,
@@ -196,13 +198,14 @@ class CodeCoachAgentWorkflow:
                 model="default",
                 messages=teacher_messages,
                 temperature=self.temperature,
-                top_p=self.top_p,
-                max_completion_tokens=safe_max_completion_tokens,
-            )
+                    top_p=self.top_p,
+                    max_completion_tokens=safe_max_completion_tokens,
+                )
+            last_completion_id = response.id
             teacher_action = (response.choices[0].message.content or "").strip()
             budget_snapshot = token_budget.observe_turn(
                 response=response,
-                prompt_text=prompt,
+                prompt_text=teacher_messages[-1]["content"],
                 completion_text=teacher_action,
             )
             raw_student_output = await self.student_caller.call_text(
@@ -242,7 +245,7 @@ class CodeCoachAgentWorkflow:
             final_reward = reward
             if budget_snapshot.stop_reason is not None:
                 final_reward += self.token_budget_penalty
-            rewards[response.id] = final_reward
+            total_reward += final_reward
             record = {
                 "round_idx": round_idx,
                 "teacher_action": teacher_action,
@@ -266,37 +269,43 @@ class CodeCoachAgentWorkflow:
                 or budget_snapshot.stop_reason is not None
             ):
                 break
+            teacher_messages.extend(
+                [
+                    {"role": "assistant", "content": teacher_action},
+                    {
+                        "role": "user",
+                        "content": self._build_teacher_followup_prompt(
+                            current_code=current_code,
+                            latest_record=record,
+                            best_eval=best_eval,
+                            entry_function=entry_function,
+                            round_idx=round_idx + 1,
+                        ),
+                    },
+                ]
+            )
 
         final_eval = history[-1]["eval_result"] if history else initial_eval
         _safe_scalar(
-            reward=sum(rewards.values()),
-            num_turns=len(rewards),
+            reward=total_reward,
+            num_turns=len(history),
             score=final_eval.score,
             best_score=best_eval.score,
             auc_gain=self._current_auc_gain(best_ratio_history, initial_eval.target_ratio),
         )
-        return rewards
+        if last_completion_id is None:
+            return {}
+        return total_reward
 
-    def _build_teacher_prompt(
+    def _build_teacher_initial_prompt(
         self,
         task_markdown: str,
         current_code: str,
         current_eval: EvalResult,
         best_eval: EvalResult,
         entry_function: str,
-        history: list[dict[str, Any]],
         round_idx: int,
     ) -> str:
-        history_lines = []
-        for record in history[-5:]:
-            student_reply: StudentReply = record["student_reply"]
-            eval_result: EvalResult = record["eval_result"]
-            error_text = record["error"] or "None"
-            history_lines.append(
-                f"Round {record['round_idx']}: score={eval_result.score:.6f}, "
-                f"best={record['best_eval'].score:.6f}, updated={record['code_updated']}, "
-                f"student_message={json.dumps(student_reply.message)}, error={json.dumps(error_text)}"
-            )
         return dedent(
             f"""\
             Task:
@@ -314,8 +323,38 @@ class CodeCoachAgentWorkflow:
             - Best target ratio: {best_eval.target_ratio:.6f}
             - Required entry function: {entry_function}
 
-            Recent history:
-            {"No previous rounds." if not history_lines else "\n".join(history_lines)}
+            Current code:
+            ```python
+            {current_code}
+            ```
+            """
+        ).strip()
+
+    def _build_teacher_followup_prompt(
+        self,
+        current_code: str,
+        latest_record: dict[str, Any],
+        best_eval: EvalResult,
+        entry_function: str,
+        round_idx: int,
+    ) -> str:
+        student_reply: StudentReply = latest_record["student_reply"]
+        eval_result: EvalResult = latest_record["eval_result"]
+        error_text = latest_record["error"] or "None"
+        return dedent(
+            f"""\
+            Round {latest_record['round_idx']} update:
+            - Current round: {round_idx - 1}/{self.max_turns}
+            - Remaining rounds: {max(self.max_turns - round_idx + 1, 0)}
+            - Student message: {json.dumps(student_reply.message)}
+            - Code updated: {latest_record['code_updated']}
+            - Error: {json.dumps(error_text)}
+            - Score: {eval_result.score:.6f}
+            - Target ratio: {eval_result.target_ratio:.6f}
+            - Validity: {eval_result.validity:.6f}
+            - Best score: {best_eval.score:.6f}
+            - Best target ratio: {best_eval.target_ratio:.6f}
+            - Required entry function: {entry_function}
 
             Current code:
             ```python
