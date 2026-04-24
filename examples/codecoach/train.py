@@ -45,7 +45,7 @@ def main(args):
         model_context_length=config.sglang.context_length,
     )
     eval_workflow_kwargs = workflow_kwargs.copy()
-    eval_workflow_kwargs["temperature"] = 0.6
+    eval_workflow_kwargs["gconfig"] = config.gconfig.new(temperature=0.6, n_samples=1)
 
     with PPOTrainer(
         config,

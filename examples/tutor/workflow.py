@@ -177,7 +177,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             tool_call_parser=self.tool_call_parser,
             reasoning_parser=self.reasoning_parser,
             chat_template_type="concat",
-            engine_max_tokens=self.max_episode_total_tokens,
         )
         result = await self._run_episode(data, direct_client=client)
         if result is None:
@@ -186,6 +185,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if last_completion_id is None:
             return None
         client.set_reward(last_completion_id, total_reward)
+        client.apply_reward_discount(turn_discount=1.0)
         interactions = client.export_interactions(style="concat")
         if len(interactions) != 1:
             raise RuntimeError(
