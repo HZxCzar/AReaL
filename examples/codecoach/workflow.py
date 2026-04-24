@@ -230,6 +230,11 @@ class CodeCoachAgentWorkflow(RolloutWorkflow):
                 teacher_messages,
                 self.max_completion_tokens,
             )
+            if self.max_episode_total_tokens is not None:
+                safe_max_completion_tokens = min(
+                    safe_max_completion_tokens,
+                    max(0, self.max_episode_total_tokens - prompt_tokens),
+                )
             if safe_max_completion_tokens <= 0:
                 total_reward += self.token_budget_penalty
                 history.append(
@@ -246,7 +251,7 @@ class CodeCoachAgentWorkflow(RolloutWorkflow):
                         "turn_total_tokens": prompt_tokens,
                         "termination_feedback": (
                             "Episode terminated before teacher generation because prompt length "
-                            "exhausted the available context window."
+                            "exhausted the available episode or context budget."
                         ),
                         "length_penalty": self.token_budget_penalty,
                     }
