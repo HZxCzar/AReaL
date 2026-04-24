@@ -73,8 +73,7 @@ actor:
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    # Use smaller token-bounded micro-batches during PPO updates.
-    max_tokens_per_mb: 32768
+    max_tokens_per_mb: 24576
   optimizer:
     type: adam
     lr: 1.70e-5
@@ -119,7 +118,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 32768
+    max_tokens_per_mb: 24576
   optimizer: null
   scheduling_strategy:
     type: colocation
@@ -132,7 +131,7 @@ sglang:
   skip_tokenizer_init: true
   dtype: ${actor.dtype}
   max_running_requests: null
-  context_length: 32768
+  context_length: ${gconfig.max_tokens}
   mem_fraction_static: 0.6
 
 train_dataset:
