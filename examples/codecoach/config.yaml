@@ -74,7 +74,7 @@ actor:
   dtype: bfloat16
   mb_spec:
     # Use smaller token-bounded micro-batches during PPO updates.
-    max_tokens_per_mb: 20480
+    max_tokens_per_mb: 32768
   optimizer:
     type: adam
     lr: 1.70e-5
@@ -119,7 +119,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 20480
+    max_tokens_per_mb: 32768
   optimizer: null
   scheduling_strategy:
     type: colocation
