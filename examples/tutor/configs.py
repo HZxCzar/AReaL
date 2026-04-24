@@ -56,3 +56,11 @@ class TutorConfig(GRPOConfig):
             "optional similarity_notes."
         )
     )
+    debug_trace_dir: str = field(
+        default="",
+        metadata={"help": "Optional directory to dump readable per-rollout tutor traces."},
+    )
+    debug_trace_every_n_rollouts: int = field(
+        default=10,
+        metadata={"help": "Dump one readable tutor trace every N rollout episodes."},
+    )

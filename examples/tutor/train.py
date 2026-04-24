@@ -46,6 +46,8 @@ def main(args):
         judge_system_prompt=config.judge_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
         generator_system_prompt=config.generator_system_prompt,
+        debug_trace_dir=config.debug_trace_dir or None,
+        debug_trace_every_n_rollouts=config.debug_trace_every_n_rollouts,
         max_episode_total_tokens=config.gconfig.max_tokens,
         tokenizer_path=config.tokenizer_path,
         model_context_length=config.sglang.context_length,

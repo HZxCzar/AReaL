@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import logging as py_logging
+import os
 import re
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from textwrap import dedent
 from typing import Any
 
@@ -111,6 +114,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         judge_system_prompt: str = "",
         leak_check_system_prompt: str = "",
         generator_system_prompt: str = "",
+        debug_trace_dir: str | None = None,
+        debug_trace_every_n_rollouts: int = 1,
         max_episode_total_tokens: int | None = None,
         token_budget_penalty: float = -0.2,
         tokenizer_path: str | None = None,
@@ -135,6 +140,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.judge_system_prompt = judge_system_prompt.strip()
         self.leak_check_system_prompt = leak_check_system_prompt.strip()
         self.generator_system_prompt = generator_system_prompt.strip()
+        self.debug_trace_dir = debug_trace_dir.strip() if debug_trace_dir else ""
+        self.debug_trace_every_n_rollouts = max(1, int(debug_trace_every_n_rollouts))
         self.max_episode_total_tokens = max_episode_total_tokens
         self.token_budget_penalty = token_budget_penalty
         self.last_history: list[dict[str, Any]] = []
@@ -416,6 +423,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
             transfer_success=transfer_success,
         )
         self.last_history = [dict(record) for record in history]
+        self._maybe_dump_debug_trace(
+            task=task,
+            ground_truth=ground_truth,
+            initial_student_answer=initial_student_answer,
+            latest_student_answer=latest_student_answer,
+            total_reward=total_reward,
+            history=history,
+            termination_reason=termination_reason,
+            primary_success=bool(latest_judge_result.correct),
+            transfer_success=bool(transfer_success),
+            leak_count=leak_count,
+        )
         if last_completion_id is None:
             return None
         return total_reward, last_completion_id
@@ -737,6 +756,80 @@ class TutorAgentWorkflow(RolloutWorkflow):
             f"Turn {record['round_idx']}: Teacher guidance: {teacher_text}. "
             f"Student reply: {student_text}. Judge feedback: {judge_text}."
         )
+
+    def _maybe_dump_debug_trace(
+        self,
+        *,
+        task: str,
+        ground_truth: str,
+        initial_student_answer: str,
+        latest_student_answer: str,
+        total_reward: float,
+        history: list[dict[str, Any]],
+        termination_reason: str,
+        primary_success: bool,
+        transfer_success: bool,
+        leak_count: int,
+    ) -> None:
+        if not self.debug_trace_dir:
+            return
+        try:
+            ctx = workflow_context.get()
+            task_id = ctx.task_id
+            if task_id is None:
+                return
+            if task_id % self.debug_trace_every_n_rollouts != 0:
+                return
+
+            out_dir = Path(self.debug_trace_dir) / ("eval" if ctx.is_eval else "train")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            file_path = out_dir / f"task_{task_id:08d}_{int(time.time() * 1000)}.json"
+
+            rounds: list[dict[str, Any]] = []
+            for record in history:
+                rounds.append(
+                    {
+                        "round_idx": int(record.get("round_idx", 0)),
+                        "teacher_action": record.get("teacher_action", ""),
+                        "student_answer": record.get("student_answer", ""),
+                        "student_error": record.get("student_error"),
+                        "judge_feedback": record.get("judge_feedback"),
+                        "judge_correct": bool(record.get("judge_correct", False)),
+                        "reward": float(record.get("reward", 0.0) or 0.0),
+                        "leak_detected": bool(record.get("leak_detected", False)),
+                        "leak_feedback": record.get("leak_feedback"),
+                        "turn_prompt_tokens": int(record.get("turn_prompt_tokens", 0) or 0),
+                        "turn_completion_tokens": int(record.get("turn_completion_tokens", 0) or 0),
+                        "turn_total_tokens": int(record.get("turn_total_tokens", 0) or 0),
+                        "termination_feedback": record.get("termination_feedback"),
+                        "transfer_success": bool(record.get("transfer_success", False)),
+                        "transfer_task": record.get("transfer_task"),
+                        "transfer_student_answer": record.get("transfer_student_answer"),
+                    }
+                )
+
+            payload = {
+                "task_id": task_id,
+                "is_eval": bool(ctx.is_eval),
+                "termination_reason": termination_reason,
+                "total_reward": float(total_reward),
+                "num_turns": len(history),
+                "primary_success": bool(primary_success),
+                "transfer_success": bool(transfer_success),
+                "leak_count": int(leak_count),
+                "task": task,
+                "ground_truth": ground_truth,
+                "initial_student_answer": initial_student_answer,
+                "latest_student_answer": latest_student_answer,
+                "rounds": rounds,
+            }
+            file_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            logger.info("Tutor debug trace dumped to %s", os.fspath(file_path))
+        except Exception:
+            logger.exception("Failed to dump tutor debug trace.")
 
 
 def _strip_think_tags(text: str) -> str:
