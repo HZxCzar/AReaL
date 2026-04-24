@@ -11,7 +11,10 @@ from typing import Any
 
 try:
     from areal import workflow_context
+    from areal.api import RolloutWorkflow
+    from areal.experimental.openai import ArealOpenAI
     from areal.utils import logging, stats_tracker
+    from areal.utils.hf_utils import load_hf_tokenizer
 except Exception:  # pragma: no cover - lightweight local test environments
     class _DummyWorkflowContext:
         @staticmethod
@@ -32,8 +35,12 @@ except Exception:  # pragma: no cover - lightweight local test environments
             return py_logging.getLogger(name)
 
     workflow_context = _DummyWorkflowContext()
+    RolloutWorkflow = object
+    ArealOpenAI = Any
     stats_tracker = _DummyTracker()
     logging = _DummyLogging()
+    def load_hf_tokenizer(path):  # type: ignore[no-redef]
+        return path
 
 from examples.common.chat_budget import ChatContextBudget
 from examples.common.files import make_run_dir
@@ -70,13 +77,17 @@ def _safe_scalar(**metrics: Any) -> None:
         logger.debug("Skipping stats logging outside workflow context.")
 
 
-class CodeCoachAgentWorkflow:
+class CodeCoachAgentWorkflow(RolloutWorkflow):
     def __init__(
         self,
+        gconfig: Any | None = None,
+        tokenizer: str | Any | None = None,
         max_turns: int = 6,
         temperature: float = 1.0,
         top_p: float = 1.0,
         max_completion_tokens: int = 512,
+        tool_call_parser: str = "qwen25",
+        reasoning_parser: str = "qwen3",
         student_base_url: str = "http://127.0.0.1:30000/v1",
         student_model: str = "qwen-student",
         student_api_key: str = "EMPTY",
@@ -95,12 +106,22 @@ class CodeCoachAgentWorkflow:
         context_window_margin: int = 256,
     ):
         self.max_turns = max_turns
-        self.temperature = temperature
-        self.top_p = top_p
-        self.max_completion_tokens = max_completion_tokens
+        self.gconfig = gconfig
+        self.temperature = (
+            gconfig.temperature if gconfig is not None else temperature
+        )
+        self.top_p = gconfig.top_p if gconfig is not None else top_p
+        self.max_completion_tokens = (
+            gconfig.max_new_tokens if gconfig is not None else max_completion_tokens
+        )
+        self.tool_call_parser = tool_call_parser
+        self.reasoning_parser = reasoning_parser
         self.work_dir_root = work_dir_root
         self.max_episode_total_tokens = max_episode_total_tokens
         self.token_budget_penalty = token_budget_penalty
+        self.tokenizer = (
+            load_hf_tokenizer(tokenizer) if isinstance(tokenizer, str) else tokenizer
+        )
         self.teacher_context_budget = ChatContextBudget(
             tokenizer_path=tokenizer_path,
             context_length=model_context_length,
@@ -124,8 +145,45 @@ class CodeCoachAgentWorkflow:
             )
         )
 
+    async def arun_episode(self, engine, data: dict[str, Any]):
+        client = ArealOpenAI(
+            engine=engine,
+            tokenizer=self.tokenizer,
+            tool_call_parser=self.tool_call_parser,
+            reasoning_parser=self.reasoning_parser,
+            chat_template_type="concat",
+            engine_max_tokens=self.max_episode_total_tokens,
+        )
+        result = await self._run_episode(data, direct_client=client)
+        if result is None:
+            return None
+        total_reward, last_completion_id = result
+        if last_completion_id is None:
+            return None
+        client.set_reward(last_completion_id, total_reward)
+        interactions = client.export_interactions(style="concat")
+        if len(interactions) != 1:
+            raise RuntimeError(
+                f"CodeCoach rollout should export exactly 1 interaction, got {len(interactions)}"
+            )
+        return interactions
+
     async def run(self, data: dict[str, Any], **extra_kwargs):
         teacher_client = make_teacher_client(extra_kwargs)
+        result = await self._run_episode(data, external_client=teacher_client)
+        if result is None:
+            return {}
+        total_reward, _ = result
+        return total_reward
+
+    async def _run_episode(
+        self,
+        data: dict[str, Any],
+        direct_client: Any | None = None,
+        external_client: Any | None = None,
+    ) -> tuple[float, str | None] | None:
+        if (direct_client is None) == (external_client is None):
+            raise ValueError("Exactly one teacher client must be provided.")
         run_dir = make_run_dir(self.work_dir_root, "codecoach")
         task_markdown = str(data["task_markdown"])
         current_code = str(data["initial_code"])
@@ -149,7 +207,7 @@ class CodeCoachAgentWorkflow:
         token_budget = EpisodeTokenBudget(
             max_episode_total_tokens=self.max_episode_total_tokens,
         )
-        teacher_messages = [
+        teacher_messages: list[dict[str, Any]] = [
             {
                 "role": "system",
                 "content": "You are the teacher in a code-coaching environment. Reply with concise natural-language guidance only. Do not output code.",
@@ -194,15 +252,24 @@ class CodeCoachAgentWorkflow:
                     }
                 )
                 break
-            response = await teacher_client.chat.completions.create(
-                model="default",
-                messages=teacher_messages,
-                temperature=self.temperature,
+            if direct_client is not None:
+                response = await direct_client.chat.completions.create(
+                    messages=teacher_messages,
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    max_completion_tokens=safe_max_completion_tokens,
+                )
+            else:
+                response = await external_client.chat.completions.create(
+                    model="default",
+                    messages=teacher_messages,
+                    temperature=self.temperature,
                     top_p=self.top_p,
                     max_completion_tokens=safe_max_completion_tokens,
                 )
             last_completion_id = response.id
-            teacher_action = (response.choices[0].message.content or "").strip()
+            teacher_message = response.choices[0].message
+            teacher_action = (teacher_message.content or "").strip()
             budget_snapshot = token_budget.observe_turn(
                 response=response,
                 prompt_text=teacher_messages[-1]["content"],
@@ -271,7 +338,7 @@ class CodeCoachAgentWorkflow:
                 break
             teacher_messages.extend(
                 [
-                    {"role": "assistant", "content": teacher_action},
+                    teacher_message.model_dump(exclude_none=True),
                     {
                         "role": "user",
                         "content": self._build_teacher_followup_prompt(
@@ -294,8 +361,8 @@ class CodeCoachAgentWorkflow:
             auc_gain=self._current_auc_gain(best_ratio_history, initial_eval.target_ratio),
         )
         if last_completion_id is None:
-            return {}
-        return total_reward
+            return None
+        return total_reward, last_completion_id
 
     def _build_teacher_initial_prompt(
         self,

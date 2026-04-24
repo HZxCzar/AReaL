@@ -26,9 +26,8 @@ def main(args):
     )
 
     workflow_kwargs = dict(
-        temperature=config.gconfig.temperature,
-        top_p=config.gconfig.top_p,
-        max_completion_tokens=config.gconfig.max_new_tokens,
+        gconfig=config.gconfig,
+        tokenizer=config.tokenizer_path,
         max_turns=config.max_turns,
         aux_base_url=config.aux_base_url,
         aux_model=config.aux_model,
