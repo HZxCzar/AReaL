@@ -42,6 +42,8 @@ def main(args):
         api_params_key=config.api_params_key or None,
         work_dir_root=config.work_dir_root,
         max_episode_total_tokens=config.gconfig.max_tokens,
+        tokenizer_path=config.tokenizer_path,
+        model_context_length=config.sglang.context_length,
     )
     eval_workflow_kwargs = workflow_kwargs.copy()
     eval_workflow_kwargs["temperature"] = 0.6

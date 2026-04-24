@@ -63,6 +63,8 @@ def build_workflow_kwargs(config: CodeCoachConfig, trace_sink: TraceSink) -> dic
         api_params_key=config.api_params_key or None,
         work_dir_root=config.work_dir_root,
         max_episode_total_tokens=config.gconfig.max_tokens,
+        tokenizer_path=config.tokenizer_path,
+        model_context_length=config.sglang.context_length,
     )
 
 

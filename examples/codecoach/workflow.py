@@ -35,6 +35,7 @@ except Exception:  # pragma: no cover - lightweight local test environments
     stats_tracker = _DummyTracker()
     logging = _DummyLogging()
 
+from examples.common.chat_budget import ChatContextBudget
 from examples.common.files import make_run_dir
 from examples.common.episode_budget import EpisodeTokenBudget
 from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig, make_teacher_client
@@ -89,6 +90,9 @@ class CodeCoachAgentWorkflow:
         work_dir_root: str = "examples/codecoach/artifacts",
         max_episode_total_tokens: int | None = None,
         token_budget_penalty: float = -0.2,
+        tokenizer_path: str | None = None,
+        model_context_length: int | None = None,
+        context_window_margin: int = 256,
     ):
         self.max_turns = max_turns
         self.temperature = temperature
@@ -97,6 +101,11 @@ class CodeCoachAgentWorkflow:
         self.work_dir_root = work_dir_root
         self.max_episode_total_tokens = max_episode_total_tokens
         self.token_budget_penalty = token_budget_penalty
+        self.teacher_context_budget = ChatContextBudget(
+            tokenizer_path=tokenizer_path,
+            context_length=model_context_length,
+            safety_margin=context_window_margin,
+        )
         self.student_caller = AsyncLLMCaller(
             AuxModelConfig(
                 base_url=student_base_url,
@@ -109,6 +118,9 @@ class CodeCoachAgentWorkflow:
                 max_concurrency=max_concurrent_students,
                 api_params_config_path=api_params_config_path,
                 api_params_key=api_params_key,
+                tokenizer_path=tokenizer_path,
+                context_length=model_context_length,
+                context_window_margin=context_window_margin,
             )
         )
 
@@ -147,18 +159,45 @@ class CodeCoachAgentWorkflow:
                 history=history,
                 round_idx=round_idx,
             )
+            teacher_messages = [
+                {
+                    "role": "system",
+                    "content": "You are the teacher in a code-coaching environment. Reply with concise natural-language guidance only. Do not output code.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+            safe_max_completion_tokens, prompt_tokens = self.teacher_context_budget.clamp_max_completion_tokens(
+                teacher_messages,
+                self.max_completion_tokens,
+            )
+            if safe_max_completion_tokens <= 0:
+                rewards[f"context_budget_stop_{round_idx}"] = self.token_budget_penalty
+                history.append(
+                    {
+                        "round_idx": round_idx,
+                        "teacher_action": "",
+                        "code_updated": False,
+                        "eval_result": history[-1]["eval_result"] if history else initial_eval,
+                        "best_eval": best_eval,
+                        "reward": self.token_budget_penalty,
+                        "error": None,
+                        "turn_prompt_tokens": prompt_tokens,
+                        "turn_completion_tokens": 0,
+                        "turn_total_tokens": prompt_tokens,
+                        "termination_feedback": (
+                            "Episode terminated before teacher generation because prompt length "
+                            "exhausted the available context window."
+                        ),
+                        "length_penalty": self.token_budget_penalty,
+                    }
+                )
+                break
             response = await teacher_client.chat.completions.create(
                 model="default",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are the teacher in a code-coaching environment. Reply with concise natural-language guidance only. Do not output code.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
+                messages=teacher_messages,
                 temperature=self.temperature,
                 top_p=self.top_p,
-                max_completion_tokens=self.max_completion_tokens,
+                max_completion_tokens=safe_max_completion_tokens,
             )
             teacher_action = (response.choices[0].message.content or "").strip()
             budget_snapshot = token_budget.observe_turn(

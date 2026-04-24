@@ -33,6 +33,7 @@ except Exception:  # pragma: no cover - lightweight local test environments
     stats_tracker = _DummyTracker()
     logging = _DummyLogging()
 
+from examples.common.chat_budget import ChatContextBudget
 from examples.common.episode_budget import EpisodeTokenBudget
 from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig, make_teacher_client
 from examples.common.parsing import join_errors, parse_json_dict
@@ -101,6 +102,9 @@ class TutorAgentWorkflow:
         generator_system_prompt: str = "",
         max_episode_total_tokens: int | None = None,
         token_budget_penalty: float = -0.2,
+        tokenizer_path: str | None = None,
+        model_context_length: int | None = None,
+        context_window_margin: int = 256,
     ):
         self.max_turns = max_turns
         self.temperature = temperature
@@ -116,6 +120,11 @@ class TutorAgentWorkflow:
         self.max_episode_total_tokens = max_episode_total_tokens
         self.token_budget_penalty = token_budget_penalty
         self.last_history: list[dict[str, Any]] = []
+        self.teacher_context_budget = ChatContextBudget(
+            tokenizer_path=tokenizer_path,
+            context_length=model_context_length,
+            safety_margin=context_window_margin,
+        )
         aux_config = AuxModelConfig(
             base_url=aux_base_url,
             model=aux_model,
@@ -127,6 +136,9 @@ class TutorAgentWorkflow:
             max_concurrency=max_concurrent_aux_calls,
             api_params_config_path=api_params_config_path,
             api_params_key=api_params_key,
+            tokenizer_path=tokenizer_path,
+            context_length=model_context_length,
+            context_window_margin=context_window_margin,
         )
         self.aux_caller = AsyncLLMCaller(aux_config)
 
@@ -162,15 +174,37 @@ class TutorAgentWorkflow:
                 round_idx=round_idx,
                 pre_solved=pre_solved,
             )
+            teacher_messages = [
+                {"role": "system", "content": self.teacher_system_prompt},
+                {"role": "user", "content": prompt},
+            ]
+            safe_max_completion_tokens, prompt_tokens = self.teacher_context_budget.clamp_max_completion_tokens(
+                teacher_messages,
+                self.max_completion_tokens,
+            )
+            if safe_max_completion_tokens <= 0:
+                rewards[f"context_budget_stop_{round_idx}"] = self.token_budget_penalty
+                history.append(
+                    {
+                        "round_idx": round_idx,
+                        "teacher_action": "",
+                        "reward": self.token_budget_penalty,
+                        "turn_prompt_tokens": prompt_tokens,
+                        "turn_completion_tokens": 0,
+                        "turn_total_tokens": prompt_tokens,
+                        "termination_feedback": (
+                            "Episode terminated before teacher generation because prompt length "
+                            "exhausted the available context window."
+                        ),
+                    }
+                )
+                break
             response = await teacher_client.chat.completions.create(
                 model="default",
-                messages=[
-                    {"role": "system", "content": self.teacher_system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
+                messages=teacher_messages,
                 temperature=self.temperature,
                 top_p=self.top_p,
-                max_completion_tokens=self.max_completion_tokens,
+                max_completion_tokens=safe_max_completion_tokens,
             )
             teacher_action = _strip_think_tags(
                 response.choices[0].message.content or ""

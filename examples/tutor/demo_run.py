@@ -154,6 +154,8 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         leak_check_system_prompt=config.leak_check_system_prompt,
         generator_system_prompt=config.generator_system_prompt,
         max_episode_total_tokens=config.gconfig.max_tokens,
+        tokenizer_path=config.tokenizer_path,
+        model_context_length=config.sglang.context_length,
     )
 
 

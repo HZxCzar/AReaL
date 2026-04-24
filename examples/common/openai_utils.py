@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from examples.common.chat_budget import ChatContextBudget
+
 try:
     from openai import AsyncOpenAI
 except ImportError:  # pragma: no cover - exercised in lightweight test envs
@@ -26,6 +28,9 @@ class AuxModelConfig:
     max_concurrency: int = 8
     api_params_config_path: str | None = None
     api_params_key: str | None = None
+    tokenizer_path: str | None = None
+    context_length: int | None = None
+    context_window_margin: int = 256
 
 
 def load_api_params_config(path: str | Path | None) -> dict[str, Any]:
@@ -112,6 +117,11 @@ class AsyncLLMCaller:
     def __init__(self, config: AuxModelConfig):
         self.config = config
         self.request_config = resolve_endpoint_request_config(config)
+        self.context_budget = ChatContextBudget(
+            tokenizer_path=config.tokenizer_path,
+            context_length=config.context_length,
+            safety_margin=config.context_window_margin,
+        )
         self._semaphore = asyncio.Semaphore(max(1, int(config.max_concurrency)))
         self._client = None
         if AsyncOpenAI is not None:
@@ -134,6 +144,20 @@ class AsyncLLMCaller:
         }
         if "max_tokens" in request_kwargs:
             request_kwargs["max_completion_tokens"] = int(request_kwargs.pop("max_tokens"))
+        requested_max_completion_tokens = request_kwargs.get("max_completion_tokens")
+        if requested_max_completion_tokens is not None:
+            safe_max_completion_tokens, prompt_tokens = self.context_budget.clamp_max_completion_tokens(
+                messages,
+                int(requested_max_completion_tokens),
+            )
+            if safe_max_completion_tokens <= 0:
+                raise RuntimeError(
+                    "No completion budget remaining after accounting for prompt length: "
+                    f"prompt_tokens={prompt_tokens}, "
+                    f"context_length={self.context_budget.context_length}, "
+                    f"safety_margin={self.context_budget.safety_margin}."
+                )
+            request_kwargs["max_completion_tokens"] = safe_max_completion_tokens
         async with self._semaphore:
             response = await self._client.chat.completions.create(
                 model=self.config.model,
