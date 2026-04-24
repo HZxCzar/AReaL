@@ -133,7 +133,7 @@ sglang:
   skip_tokenizer_init: true
   dtype: ${actor.dtype}
   max_running_requests: null
-  context_length: ${gconfig.max_tokens}
+  context_length: 40960
   mem_fraction_static: 0.6
 
 train_dataset:
