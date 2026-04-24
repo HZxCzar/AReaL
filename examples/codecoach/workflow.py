@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging as py_logging
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -274,20 +276,21 @@ class CodeCoachAgentWorkflow(RolloutWorkflow):
                 )
             last_completion_id = response.id
             teacher_message = response.choices[0].message
-            teacher_action = (teacher_message.content or "").strip()
+            teacher_action = _strip_think_tags(teacher_message.content or "")
             budget_snapshot = token_budget.observe_turn(
                 response=response,
                 prompt_text=teacher_messages[-1]["content"],
                 completion_text=teacher_action,
             )
-            raw_student_output = await self.student_caller.call_text(
+            raw_student_output = await self._call_student_with_retry(
                 self._build_student_messages(
                     task_markdown=task_markdown,
                     current_code=current_code,
                     teacher_action=teacher_action,
                     entry_function=entry_function,
                     history=history,
-                )
+                ),
+                round_idx=round_idx,
             )
             student_reply = self._parse_student_reply(raw_student_output)
             update_error = student_reply.parse_error
@@ -492,6 +495,36 @@ class CodeCoachAgentWorkflow(RolloutWorkflow):
             {"role": "user", "content": prompt},
         ]
 
+    async def _call_student_with_retry(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        round_idx: int,
+        max_attempts: int = 3,
+    ) -> str:
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await self.student_caller.call_text(messages)
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= max_attempts:
+                    raise RuntimeError(
+                        f"Student call failed after {max_attempts} attempts "
+                        f"at round {round_idx}."
+                    ) from exc
+                logger.warning(
+                    "Student call failed on attempt %s/%s at round %s; retrying: %s",
+                    attempt,
+                    max_attempts,
+                    round_idx,
+                    exc,
+                )
+                await asyncio.sleep(float(attempt))
+        raise RuntimeError(
+            f"Student call failed after {max_attempts} attempts at round {round_idx}."
+        ) from last_exc
+
     def _parse_student_reply(self, raw_output: str) -> StudentReply:
         parsed, parse_error = parse_json_dict(raw_output)
         if parsed is None:
@@ -572,3 +605,20 @@ class CodeCoachAgentWorkflow(RolloutWorkflow):
             raw_result=result,
             error=error,
         )
+
+
+def _strip_think_tags(text: str) -> str:
+    text = text or ""
+    text = re.sub(
+        r"<think\b[^>]*>.*?</think\s*>",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(
+        r"<think\b[^>]*>.*$",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return re.sub(r"</?think\b[^>]*>", "", text, flags=re.IGNORECASE).strip()

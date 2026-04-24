@@ -838,7 +838,20 @@ class TutorAgentWorkflow(RolloutWorkflow):
 
 
 def _strip_think_tags(text: str) -> str:
-    return re.sub(r"</?think>", "", text or "", flags=re.IGNORECASE).strip()
+    text = text or ""
+    text = re.sub(
+        r"<think\b[^>]*>.*?</think\s*>",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(
+        r"<think\b[^>]*>.*$",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return re.sub(r"</?think\b[^>]*>", "", text, flags=re.IGNORECASE).strip()
 
 
 def _compact_text(text: str, max_chars: int = 240) -> str:
