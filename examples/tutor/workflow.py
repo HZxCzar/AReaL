@@ -244,15 +244,21 @@ class TutorAgentWorkflow(RolloutWorkflow):
         ]
 
         for round_idx in range(1, self.max_turns + 1):
-            safe_max_completion_tokens, prompt_tokens = self.teacher_context_budget.clamp_max_completion_tokens(
-                teacher_messages,
-                self.max_completion_tokens,
-            )
-            if self.max_episode_total_tokens is not None:
-                safe_max_completion_tokens = min(
-                    safe_max_completion_tokens,
-                    max(0, self.max_episode_total_tokens - prompt_tokens),
+            if direct_client is not None:
+                prompt_tokens = self.teacher_context_budget.count_message_tokens(
+                    teacher_messages
                 )
+                safe_max_completion_tokens = self.max_completion_tokens
+            else:
+                safe_max_completion_tokens, prompt_tokens = self.teacher_context_budget.clamp_max_completion_tokens(
+                    teacher_messages,
+                    self.max_completion_tokens,
+                )
+                if self.max_episode_total_tokens is not None:
+                    safe_max_completion_tokens = min(
+                        safe_max_completion_tokens,
+                        max(0, self.max_episode_total_tokens - prompt_tokens),
+                    )
             if safe_max_completion_tokens <= 0:
                 total_reward += self.token_budget_penalty
                 history.append(
@@ -271,12 +277,40 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
                 break
             if direct_client is not None:
-                response = await direct_client.chat.completions.create(
-                    messages=teacher_messages,
-                    temperature=self.temperature,
-                    top_p=self.top_p,
-                    max_completion_tokens=safe_max_completion_tokens,
-                )
+                create_kwargs = {
+                    "messages": teacher_messages,
+                    "temperature": self.temperature,
+                    "top_p": self.top_p,
+                    "max_completion_tokens": safe_max_completion_tokens,
+                }
+                if self.max_episode_total_tokens is not None:
+                    create_kwargs["max_total_tokens"] = self.max_episode_total_tokens
+                try:
+                    response = await direct_client.chat.completions.create(
+                        **create_kwargs
+                    )
+                except ValueError as exc:
+                    if _is_max_total_tokens_error(exc):
+                        total_reward += self.token_budget_penalty
+                        history.append(
+                            {
+                                "round_idx": round_idx,
+                                "teacher_action": "",
+                                "reward": self.token_budget_penalty,
+                                "turn_prompt_tokens": prompt_tokens,
+                                "turn_completion_tokens": 0,
+                                "turn_total_tokens": prompt_tokens,
+                                "termination_feedback": (
+                                    "Episode terminated before teacher generation because "
+                                    "the real concat prompt exhausted the token budget: "
+                                    f"{exc}"
+                                ),
+                                "length_penalty": self.token_budget_penalty,
+                            }
+                        )
+                        termination_reason = "episode_total_token_budget"
+                        break
+                    raise
             else:
                 response = await external_client.chat.completions.create(
                     model="default",
@@ -852,6 +886,10 @@ def _strip_think_tags(text: str) -> str:
         flags=re.IGNORECASE | re.DOTALL,
     )
     return re.sub(r"</?think\b[^>]*>", "", text, flags=re.IGNORECASE).strip()
+
+
+def _is_max_total_tokens_error(exc: Exception) -> bool:
+    return "exceeds max_total_tokens" in str(exc)
 
 
 def _compact_text(text: str, max_chars: int = 240) -> str:
