@@ -107,6 +107,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         max_concurrent_aux_calls: int = 8,
         api_params_config_path: str | None = None,
         api_params_key: str | None = None,
+        primary_success_reward: float = 1.0,
+        transfer_bonus_reward: float = 0.5,
         transfer_success_reward: float = 1.2,
         transfer_fail_reward: float = 0.6,
         teacher_system_prompt: str = "",
@@ -133,6 +135,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         self.tool_call_parser = tool_call_parser
         self.reasoning_parser = reasoning_parser
+        self.primary_success_reward = primary_success_reward
+        self.transfer_bonus_reward = transfer_bonus_reward
         self.transfer_success_reward = transfer_success_reward
         self.transfer_fail_reward = transfer_fail_reward
         self.teacher_system_prompt = teacher_system_prompt.strip()
@@ -392,7 +396,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             latest_student_answer = student_answer
             latest_judge_result = judge_result
 
-            reward = -0.1
+            reward = 0.0
             record: dict[str, Any] = {
                 "round_idx": round_idx,
                 "teacher_action": teacher_action,
@@ -410,10 +414,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if judge_result.correct:
                 transfer_result = await self._run_transfer_round(task, ground_truth)
                 transfer_success = transfer_result["transfer_success"]
-                reward = (
-                    self.transfer_success_reward
-                    if transfer_success
-                    else self.transfer_fail_reward
+                step_factor = (self.max_turns - round_idx + 1) / max(self.max_turns, 1)
+                reward = self.primary_success_reward * step_factor
+                if transfer_success:
+                    reward += self.transfer_bonus_reward * step_factor
+                record["step_factor"] = step_factor
+                record["primary_reward"] = self.primary_success_reward * step_factor
+                record["transfer_bonus_reward"] = (
+                    self.transfer_bonus_reward * step_factor if transfer_success else 0.0
                 )
                 record.update(transfer_result)
                 termination_reason = (
@@ -454,12 +462,66 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     ]
                 )
 
+        success_rounds = [
+            int(record["round_idx"])
+            for record in history
+            if bool(record.get("judge_correct", False))
+        ]
+        leak_rounds = [
+            int(record["round_idx"])
+            for record in history
+            if bool(record.get("leak_detected", False))
+        ]
+        primary_reward_sum = sum(
+            float(record.get("primary_reward", 0.0) or 0.0) for record in history
+        )
+        transfer_bonus_sum = sum(
+            float(record.get("transfer_bonus_reward", 0.0) or 0.0)
+            for record in history
+        )
+        length_penalty_count = sum(1 for record in history if "length_penalty" in record)
+        length_penalty_sum = sum(
+            float(record.get("length_penalty", 0.0) or 0.0) for record in history
+        )
+        max_completion_tokens = max(
+            [int(record.get("turn_completion_tokens", 0) or 0) for record in history]
+            or [0]
+        )
+        max_total_tokens = max(
+            [int(record.get("turn_total_tokens", 0) or 0) for record in history]
+            or [0]
+        )
+        avg_completion_tokens = sum(
+            int(record.get("turn_completion_tokens", 0) or 0) for record in history
+        ) / max(len(history), 1)
+        avg_total_tokens = sum(
+            int(record.get("turn_total_tokens", 0) or 0) for record in history
+        ) / max(len(history), 1)
         _safe_scalar(
             reward=total_reward,
             num_turns=len(history),
             leak_count=leak_count,
             primary_success=bool(latest_judge_result.correct),
             transfer_success=transfer_success,
+            term_budget=float(termination_reason == "episode_total_token_budget"),
+            term_max_turns=float(termination_reason == "max_turns"),
+            term_success=float(
+                termination_reason
+                in {"success_transfer_pass", "success_transfer_fail"}
+            ),
+            term_pre_solved=float(termination_reason == "pre_solved"),
+            term_continue=float(termination_reason == "continue"),
+            length_penalty_rate=float(length_penalty_count > 0),
+            length_penalty_count=length_penalty_count,
+            length_penalty_sum=length_penalty_sum,
+            avg_completion_tokens=avg_completion_tokens,
+            avg_total_tokens=avg_total_tokens,
+            max_completion_tokens=max_completion_tokens,
+            max_total_tokens=max_total_tokens,
+            primary_reward_sum=primary_reward_sum,
+            transfer_bonus_sum=transfer_bonus_sum,
+            success_round=success_rounds[0] if success_rounds else 0,
+            leak_first_round=leak_rounds[0] if leak_rounds else 0,
         )
         self.last_history = [dict(record) for record in history]
         self._maybe_dump_debug_trace(
@@ -835,6 +897,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                         "judge_feedback": record.get("judge_feedback"),
                         "judge_correct": bool(record.get("judge_correct", False)),
                         "reward": float(record.get("reward", 0.0) or 0.0),
+                        "step_factor": record.get("step_factor"),
+                        "primary_reward": record.get("primary_reward"),
+                        "transfer_bonus_reward": record.get("transfer_bonus_reward"),
                         "leak_detected": bool(record.get("leak_detected", False)),
                         "leak_feedback": record.get("leak_feedback"),
                         "turn_prompt_tokens": int(record.get("turn_prompt_tokens", 0) or 0),
@@ -856,6 +921,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "primary_success": bool(primary_success),
                 "transfer_success": bool(transfer_success),
                 "leak_count": int(leak_count),
+                "primary_reward_sum": float(
+                    sum(float(record.get("primary_reward", 0.0) or 0.0) for record in history)
+                ),
+                "transfer_bonus_sum": float(
+                    sum(
+                        float(record.get("transfer_bonus_reward", 0.0) or 0.0)
+                        for record in history
+                    )
+                ),
+                "length_penalty_sum": float(
+                    sum(float(record.get("length_penalty", 0.0) or 0.0) for record in history)
+                ),
                 "task": task,
                 "ground_truth": ground_truth,
                 "initial_student_answer": initial_student_answer,
