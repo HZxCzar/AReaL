@@ -1,6 +1,13 @@
 from dataclasses import dataclass, field
 
 from areal.api.cli_args import GRPOConfig
+from examples.tutor.prompts import (
+    DEFAULT_GENERATOR_SYSTEM_PROMPT,
+    DEFAULT_JUDGE_SYSTEM_PROMPT,
+    DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
+    DEFAULT_STUDENT_SYSTEM_PROMPT,
+    DEFAULT_TEACHER_SYSTEM_PROMPT,
+)
 
 
 @dataclass
@@ -35,39 +42,11 @@ class TutorConfig(GRPOConfig):
         default=0.6,
         metadata={"help": "Deprecated. Transfer failure now gives no positive reward."},
     )
-    teacher_system_prompt: str = field(
-        default=(
-            "You are a careful math tutor, not a solver. Help the student repair their "
-            "own reasoning with one focused hint, correction, or guiding question at a "
-            "time. Do not provide a full solution, compute the final answer, or write a "
-            "calculation chain that directly determines the final answer."
-        )
-    )
-    student_system_prompt: str = field(
-        default=(
-            "You are a real student solving the task. Use the teacher's latest feedback "
-            "naturally: make a revised answer attempt when you can, or briefly say what "
-            "you do not understand and ask a short question when you are stuck."
-        )
-    )
-    judge_system_prompt: str = field(
-        default="Unused legacy prompt. Primary and transfer evaluation are rule-based."
-    )
-    leak_check_system_prompt: str = field(
-        default=(
-            "You are a strict answer leakage detector. Decide whether the teacher's latest "
-            "message directly reveals the ground-truth answer. Return valid JSON only with "
-            "keys leaked (boolean) and feedback (string)."
-        )
-    )
-    generator_system_prompt: str = field(
-        default=(
-            "You are a careful AIME-style problem generator. Given an original problem and "
-            "its ground-truth answer, create one new problem that is structurally similar "
-            "but not identical. Return valid JSON only with keys task, ground_truth, and "
-            "optional similarity_notes."
-        )
-    )
+    teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
+    student_system_prompt: str = field(default=DEFAULT_STUDENT_SYSTEM_PROMPT)
+    judge_system_prompt: str = field(default=DEFAULT_JUDGE_SYSTEM_PROMPT)
+    leak_check_system_prompt: str = field(default=DEFAULT_LEAK_CHECK_SYSTEM_PROMPT)
+    generator_system_prompt: str = field(default=DEFAULT_GENERATOR_SYSTEM_PROMPT)
     debug_trace_dir: str = field(
         default="",
         metadata={"help": "Optional directory to dump readable per-rollout tutor traces."},

@@ -7,7 +7,6 @@ import pathlib
 import sys
 from datetime import datetime
 from pathlib import Path
-from textwrap import dedent
 from typing import Any
 
 sys.path.append(str(pathlib.Path(__file__).parent))
@@ -48,22 +47,7 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
             label = "transfer_student"
         else:
             label = "student"
-        teacher_feedback = teacher_action or "(none, produce the first answer attempt)"
-        visible_history = self._student_visible_history_summaries(history)
-        prompt = dedent(
-            f"""\
-            Task:
-            {task}
-
-            Visible student history:
-            {"No previous visible turns." if not visible_history else "\n".join(visible_history)}
-
-            Current teacher feedback:
-            {teacher_feedback}
-
-            Reply with only the student's next answer attempt.
-            """
-        ).strip()
+        prompt = self._build_student_prompt(task, teacher_action, history)
         messages = [
             {"role": "system", "content": self.student_system_prompt},
             {"role": "user", "content": prompt},
@@ -81,11 +65,7 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
     async def _run_leak_check(
         self, task: str, ground_truth: str, teacher_action: str
     ):
-        prompt = (
-            f"Task:\n{task}\n\nGround Truth:\n{ground_truth}\n\nTeacher Message:\n"
-            f"{teacher_action or '(empty)'}\n\nReturn JSON only with this schema:\n"
-            '{\n  "leaked": false,\n  "feedback": "short explanation"\n}'
-        )
+        prompt = self._build_leak_check_prompt(task, ground_truth, teacher_action)
         messages = [
             {"role": "system", "content": self.leak_check_system_prompt},
             {"role": "user", "content": prompt},
@@ -96,13 +76,7 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
         return result
 
     async def _run_transfer_generation(self, task: str, ground_truth: str):
-        prompt = (
-            f"Original Task:\n{task}\n\nOriginal Ground Truth:\n{ground_truth}\n\n"
-            "Create one new, self-contained problem that is clearly similar in structure "
-            "and solution method, but not a restatement of the original problem.\n"
-            "Return JSON only with this schema:\n"
-            '{\n  "task": "new problem statement",\n  "ground_truth": "final answer only",\n  "similarity_notes": "optional short note"\n}'
-        )
+        prompt = self._build_transfer_generation_prompt(task, ground_truth)
         messages = [
             {"role": "system", "content": self.generator_system_prompt},
             {"role": "user", "content": prompt},

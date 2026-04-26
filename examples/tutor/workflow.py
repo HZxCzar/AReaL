@@ -7,7 +7,6 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from textwrap import dedent
 from typing import Any
 
 try:
@@ -47,6 +46,14 @@ from examples.common.chat_budget import ChatContextBudget
 from examples.common.episode_budget import EpisodeTokenBudget
 from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig, make_teacher_client
 from examples.common.parsing import join_errors, parse_json_dict
+from examples.tutor.prompts import (
+    LEAK_CHECK_USER_TEMPLATE,
+    STUDENT_USER_TEMPLATE,
+    TEACHER_FOLLOWUP_USER_TEMPLATE,
+    TEACHER_INITIAL_USER_TEMPLATE,
+    TRANSFER_GENERATION_USER_TEMPLATE,
+    render_prompt,
+)
 
 logger = logging.getLogger("TutorWorkflow")
 
@@ -546,22 +553,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_action: str | None,
         history: list[dict[str, Any]],
     ) -> tuple[str, str | None]:
-        teacher_feedback = teacher_action or "(none, produce the first answer attempt)"
-        visible_history = self._student_visible_history_summaries(history)
-        prompt = dedent(
-            f"""\
-            Task:
-            {task}
-
-            Visible student history:
-            {"No previous visible turns." if not visible_history else "\n".join(visible_history)}
-
-            Current teacher feedback:
-            {teacher_feedback}
-
-            Reply with only the student's next answer attempt.
-            """
-        ).strip()
+        prompt = self._build_student_prompt(task, teacher_action, history)
         try:
             answer = await self.aux_caller.call_text(
                 [
@@ -576,24 +568,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
     async def _run_leak_check(
         self, task: str, ground_truth: str, teacher_action: str
     ) -> LeakCheckResult:
-        prompt = dedent(
-            f"""\
-            Task:
-            {task}
-
-            Ground Truth:
-            {ground_truth}
-
-            Teacher Message:
-            {teacher_action or "(empty)"}
-
-            Return JSON only with this schema:
-            {{
-              "leaked": false,
-              "feedback": "short explanation"
-            }}
-            """
-        ).strip()
+        prompt = self._build_leak_check_prompt(task, ground_truth, teacher_action)
         try:
             raw_output = await self.aux_caller.call_text(
                 [
@@ -637,23 +612,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
     async def _run_transfer_generation(
         self, task: str, ground_truth: str
     ) -> GeneratedProblemResult:
-        prompt = dedent(
-            f"""\
-            Original Task:
-            {task}
-
-            Original Ground Truth:
-            {ground_truth}
-
-            Create one new, self-contained problem that is clearly similar in structure and solution method, but not a restatement of the original problem.
-            Return JSON only with this schema:
-            {{
-              "task": "new problem statement",
-              "ground_truth": "final answer only",
-              "similarity_notes": "optional short note"
-            }}
-            """
-        ).strip()
+        prompt = self._build_transfer_generation_prompt(task, ground_truth)
         try:
             raw_output = await self.aux_caller.call_text(
                 [
@@ -702,24 +661,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if pre_solved
             else "The student still needs guidance."
         )
-        return dedent(
-            f"""\
-            Task:
-            {task}
-
-            Turn 0:
-            - Student initial answer: {initial_student_answer or '(empty)'}
-            - Initial judge result: {'correct' if latest_judge_result.correct else 'incorrect'}
-            - Initial judge feedback: {latest_judge_result.feedback}
-            - Current round: {round_idx - 1}/{self.max_turns}
-            - Remaining rounds: {max(self.max_turns - round_idx + 1, 0)}
-            - Pre-solved: {pre_solved}
-            - Note: {pre_solved_note}
-
-            Reply as a tutor with exactly one focused hint, correction, or guiding question.
-            Do not solve the problem, compute the final answer, or provide a full derivation.
-            """
-        ).strip()
+        return render_prompt(
+            TEACHER_INITIAL_USER_TEMPLATE,
+            task=task,
+            initial_student_answer=initial_student_answer,
+            initial_correct=latest_judge_result.correct,
+            initial_feedback=latest_judge_result.feedback,
+            current_round=round_idx - 1,
+            max_turns=self.max_turns,
+            remaining_rounds=max(self.max_turns - round_idx + 1, 0),
+            pre_solved=pre_solved,
+            pre_solved_note=pre_solved_note,
+        )
 
     def _build_teacher_followup_prompt(
         self,
@@ -728,50 +681,59 @@ class TutorAgentWorkflow(RolloutWorkflow):
         round_idx: int,
         pre_solved: bool,
     ) -> str:
-        lines = [
-            f"Turn {latest_record['round_idx']} update:",
-            f"- Current round: {round_idx - 1}/{self.max_turns}",
-            f"- Remaining rounds: {max(self.max_turns - round_idx + 1, 0)}",
-            f"- Pre-solved: {pre_solved}",
-        ]
-        if latest_record.get("leak_detected"):
-            lines.append(
-                "- Env feedback: "
-                + (
-                    latest_record.get("leak_feedback")
-                    or "The previous teacher turn leaked the answer and the student did not see it."
-                )
-            )
-            lines.append(
-                f"- Latest judge result: {'correct' if latest_judge_result.correct else 'incorrect'}"
-            )
-            lines.append(f"- Latest judge feedback: {latest_judge_result.feedback}")
-        else:
-            lines.append(
-                f"- Student reply: {latest_record.get('student_answer', '(empty)') or '(empty)'}"
-            )
-            lines.append(
-                f"- Judge result: {'correct' if latest_record.get('judge_correct') else 'incorrect'}"
-            )
-            lines.append(
-                f"- Judge feedback: {latest_record.get('judge_feedback') or '(empty)'}"
-            )
-            if latest_record.get("transfer_triggered"):
-                lines.append(
-                    f"- Transfer success: {bool(latest_record.get('transfer_success'))}"
-                )
-                lines.append(
-                    f"- Transfer judge feedback: {latest_record.get('transfer_judge_feedback') or '(empty)'}"
-                )
-            if latest_record.get("termination_feedback"):
-                lines.append(
-                    f"- Budget feedback: {latest_record.get('termination_feedback')}"
-                )
-        lines.append(
-            "Reply as a tutor with exactly one focused hint, correction, or guiding question. "
-            "Do not solve the problem, compute the final answer, or provide a full derivation."
+        leak_feedback = (
+            latest_record.get("leak_feedback")
+            or "The previous teacher turn leaked the answer and the student did not see it."
         )
-        return "\n".join(lines)
+        return render_prompt(
+            TEACHER_FOLLOWUP_USER_TEMPLATE,
+            previous_round_idx=latest_record["round_idx"],
+            current_round=round_idx - 1,
+            max_turns=self.max_turns,
+            remaining_rounds=max(self.max_turns - round_idx + 1, 0),
+            pre_solved=pre_solved,
+            leak_detected=bool(latest_record.get("leak_detected")),
+            leak_feedback=leak_feedback,
+            latest_correct=latest_judge_result.correct,
+            latest_feedback=latest_judge_result.feedback,
+            student_answer=latest_record.get("student_answer", ""),
+            judge_correct=bool(latest_record.get("judge_correct")),
+            judge_feedback=latest_record.get("judge_feedback", ""),
+            transfer_triggered=bool(latest_record.get("transfer_triggered")),
+            transfer_success=bool(latest_record.get("transfer_success")),
+            transfer_judge_feedback=latest_record.get("transfer_judge_feedback", ""),
+            termination_feedback=latest_record.get("termination_feedback", ""),
+        )
+
+    def _build_student_prompt(
+        self,
+        task: str,
+        teacher_action: str | None,
+        history: list[dict[str, Any]],
+    ) -> str:
+        return render_prompt(
+            STUDENT_USER_TEMPLATE,
+            task=task,
+            visible_history=self._student_visible_history_summaries(history),
+            teacher_feedback=teacher_action or "(none, produce the first answer attempt)",
+        )
+
+    def _build_leak_check_prompt(
+        self, task: str, ground_truth: str, teacher_action: str
+    ) -> str:
+        return render_prompt(
+            LEAK_CHECK_USER_TEMPLATE,
+            task=task,
+            ground_truth=ground_truth,
+            teacher_action=teacher_action,
+        )
+
+    def _build_transfer_generation_prompt(self, task: str, ground_truth: str) -> str:
+        return render_prompt(
+            TRANSFER_GENERATION_USER_TEMPLATE,
+            task=task,
+            ground_truth=ground_truth,
+        )
 
     def _score_aime_answer(
         self, task: str, ground_truth: str, student_answer: str
