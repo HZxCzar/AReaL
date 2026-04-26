@@ -55,10 +55,6 @@ class RolloutCallback:
             )
             resp.raise_for_status()
             return resp.json()
-        except requests.HTTPError as e:
-            response_text = e.response.text if e.response is not None else ""
-            logger.error(f"Callback to {url} failed: {e}. Response: {response_text}")
-            raise
         except requests.RequestException as e:
             logger.error(f"Callback to {url} failed: {e}")
             raise

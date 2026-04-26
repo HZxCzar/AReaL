@@ -596,8 +596,8 @@ class RolloutController:
 
         @app.errorhandler(Exception)
         def handle_error(e):
-            logger.exception(f"Callback handler error: {e}")
-            return jsonify({"error": str(e), "type": type(e).__name__}), 500
+            logger.error(f"Callback handler error: {e}")
+            return jsonify({"error": str(e)}), 500
 
         self._callback_port = find_free_ports(1)[0]
         self._callback_host = gethostip()
