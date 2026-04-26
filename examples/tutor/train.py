@@ -29,6 +29,7 @@ def main(args):
         gconfig=config.gconfig,
         tokenizer=config.tokenizer_path,
         max_turns=config.max_turns,
+        enable_thinking=config.enable_thinking,
         aux_base_url=config.aux_base_url,
         aux_model=config.aux_model,
         aux_api_key=config.aux_api_key,

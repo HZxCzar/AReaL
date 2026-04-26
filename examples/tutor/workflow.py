@@ -99,6 +99,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         gconfig: Any | None = None,
         tokenizer: str | Any | None = None,
         max_turns: int = 6,
+        enable_thinking: bool = False,
         temperature: float = 1.0,
         top_p: float = 1.0,
         max_completion_tokens: int = 512,
@@ -132,6 +133,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         context_window_margin: int = 256,
     ):
         self.max_turns = max_turns
+        self.enable_thinking = enable_thinking
         self.gconfig = gconfig
         self.temperature = (
             gconfig.temperature if gconfig is not None else temperature
@@ -293,6 +295,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     "temperature": self.temperature,
                     "top_p": self.top_p,
                     "max_completion_tokens": safe_max_completion_tokens,
+                    "extra_body": {
+                        "chat_template_kwargs": {
+                            "enable_thinking": self.enable_thinking,
+                        },
+                    },
                 }
                 if self.max_episode_total_tokens is not None:
                     create_kwargs["max_total_tokens"] = self.max_episode_total_tokens

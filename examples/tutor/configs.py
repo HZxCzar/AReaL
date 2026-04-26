@@ -21,6 +21,12 @@ class TutorConfig(GRPOConfig):
         metadata={"help": "Evaluation workflow import path."},
     )
     max_turns: int = field(default=6, metadata={"help": "Maximum teacher turns."})
+    enable_thinking: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to enable thinking mode for the tutor rollout model."
+        },
+    )
     aux_base_url: str = field(default="http://127.0.0.1:30000/v1")
     aux_model: str = field(default="qwen-aux")
     aux_api_key: str = field(default="EMPTY")

@@ -110,6 +110,7 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         top_p=config.gconfig.top_p,
         max_completion_tokens=config.gconfig.max_new_tokens,
         max_turns=config.max_turns,
+        enable_thinking=config.enable_thinking,
         aux_base_url=config.aux_base_url,
         aux_model=config.aux_model,
         aux_api_key=config.aux_api_key,
@@ -187,6 +188,7 @@ async def _run_one(
         "teacher_model_override": teacher_model,
         "workflow_config": {
             "max_turns": config.max_turns,
+            "enable_thinking": config.enable_thinking,
             "max_completion_tokens": config.gconfig.max_new_tokens,
             "max_episode_total_tokens": config.gconfig.max_tokens,
             "aux_base_url": config.aux_base_url,
