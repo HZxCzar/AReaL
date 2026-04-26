@@ -37,14 +37,17 @@ class TutorConfig(GRPOConfig):
     )
     teacher_system_prompt: str = field(
         default=(
-            "You are a careful tutor. Give concise, helpful hints that move the student "
-            "forward without directly revealing the final answer."
+            "You are a careful math tutor, not a solver. Help the student repair their "
+            "own reasoning with one focused hint, correction, or guiding question at a "
+            "time. Do not provide a full solution, compute the final answer, or write a "
+            "calculation chain that directly determines the final answer."
         )
     )
     student_system_prompt: str = field(
         default=(
-            "You are a student solving the task. Read the teacher's latest feedback and "
-            "reply with only your next answer attempt."
+            "You are a real student solving the task. Use the teacher's latest feedback "
+            "naturally: make a revised answer attempt when you can, or briefly say what "
+            "you do not understand and ask a short question when you are stuck."
         )
     )
     judge_system_prompt: str = field(

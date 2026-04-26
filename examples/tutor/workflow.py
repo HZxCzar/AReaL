@@ -696,6 +696,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         latest_judge_result: JudgeResult,
         pre_solved: bool,
     ) -> str:
+        del ground_truth
         pre_solved_note = (
             "The student already solved the task during reset. Your next action will terminate the episode with reward 0."
             if pre_solved
@@ -706,9 +707,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             Task:
             {task}
 
-            Ground Truth:
-            {ground_truth}
-
             Turn 0:
             - Student initial answer: {initial_student_answer or '(empty)'}
             - Initial judge result: {'correct' if latest_judge_result.correct else 'incorrect'}
@@ -718,7 +716,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             - Pre-solved: {pre_solved}
             - Note: {pre_solved_note}
 
-            Reply with concise tutoring guidance only. Do not reveal the final answer directly.
+            Reply as a tutor with exactly one focused hint, correction, or guiding question.
+            Do not solve the problem, compute the final answer, or provide a full derivation.
             """
         ).strip()
 
@@ -769,7 +768,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     f"- Budget feedback: {latest_record.get('termination_feedback')}"
                 )
         lines.append(
-            "Reply with concise tutoring guidance only. Do not reveal the final answer directly."
+            "Reply as a tutor with exactly one focused hint, correction, or guiding question. "
+            "Do not solve the problem, compute the final answer, or provide a full derivation."
         )
         return "\n".join(lines)
 
