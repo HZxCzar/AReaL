@@ -37,17 +37,9 @@ class TutorConfig(GRPOConfig):
     max_concurrent_aux_calls: int = field(default=8)
     api_params_config_path: str = field(default="")
     api_params_key: str = field(default="")
-    primary_success_reward: float = field(default=1.0)
+    term_success_reward: float = field(default=1.0)
     transfer_bonus_reward: float = field(default=0.5)
     token_budget_penalty: float = field(default=-1.0)
-    transfer_success_reward: float = field(
-        default=1.2,
-        metadata={"help": "Deprecated. Use primary_success_reward and transfer_bonus_reward."},
-    )
-    transfer_fail_reward: float = field(
-        default=0.6,
-        metadata={"help": "Deprecated. Transfer failure now gives no positive reward."},
-    )
     teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
     student_system_prompt: str = field(default=DEFAULT_STUDENT_SYSTEM_PROMPT)
     judge_system_prompt: str = field(default=DEFAULT_JUDGE_SYSTEM_PROMPT)

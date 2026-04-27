@@ -20,11 +20,9 @@ aux_top_p: null
 max_concurrent_aux_calls: 4
 api_params_config_path: examples/tutor/api_params_config.json
 api_params_key: "sglang:30001"
-primary_success_reward: 1.0
+term_success_reward: 1.0
 transfer_bonus_reward: 0.5
 token_budget_penalty: -0.5
-transfer_success_reward: 1.2
-transfer_fail_reward: 0.6
 debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor/debug_traces/${experiment_name}/${trial_name}
 debug_trace_every_n_rollouts: 10
 
@@ -65,7 +63,7 @@ gconfig:
   min_new_tokens: 0
   max_new_tokens: 1024
   # Total prompt + response budget for the tutor rollout model.
-  max_tokens: 16384
+  max_tokens: 32768
   greedy: false
   temperature: 1.0
   top_p: 1.0

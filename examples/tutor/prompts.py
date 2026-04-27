@@ -17,7 +17,7 @@ DEFAULT_STUDENT_SYSTEM_PROMPT = (
 )
 
 DEFAULT_JUDGE_SYSTEM_PROMPT = (
-    "Unused legacy prompt. Primary and transfer evaluation are rule-based."
+    "Unused legacy prompt. Tutor and transfer evaluation are rule-based."
 )
 
 DEFAULT_LEAK_CHECK_SYSTEM_PROMPT = (
@@ -122,6 +122,27 @@ Return JSON only with this schema:
   "ground_truth": "final answer only",
   "similarity_notes": "optional short note"
 }
+"""
+
+TRANSFER_STUDENT_USER_TEMPLATE = """\
+Original task:
+{{ original_task }}
+
+Initial student answer:
+{{ initial_student_answer or '(empty)' }}
+
+Visible tutoring history:
+{% if visible_history %}
+{{ visible_history | join('\n') }}
+{% else %}
+No visible teacher turns before transfer.
+{% endif %}
+
+New related task:
+{{ transfer_task }}
+
+You are now solving the new related task. Use the tutoring history above as guidance,
+but answer the new related task only.
 """
 
 @cache
