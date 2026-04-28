@@ -14,7 +14,7 @@ aux_base_url: http://127.0.0.1:30001/v1
 aux_model: default
 aux_api_key: EMPTY
 aux_timeout: 120
-aux_max_tokens: 4096
+aux_max_tokens: 2048
 aux_temperature: 0.7
 aux_top_p: null
 max_concurrent_aux_calls: 4
@@ -63,7 +63,7 @@ gconfig:
   min_new_tokens: 0
   max_new_tokens: 1024
   # Total prompt + response budget for the tutor rollout model.
-  max_tokens: 32768
+  max_tokens: 20478
   greedy: false
   temperature: 1.0
   top_p: 1.0
@@ -78,7 +78,7 @@ actor:
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 32768
+    max_tokens_per_mb: 20478
   optimizer:
     type: adam
     lr: 1.70e-5
@@ -123,7 +123,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 32768
+    max_tokens_per_mb: 20478
   optimizer: null
   scheduling_strategy:
     type: colocation
@@ -147,7 +147,7 @@ train_dataset:
   path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/aime_dataset
   type: rl
   # Per-sample length
-  max_length: 32768
+  max_length: 16384
 
 valid_dataset:
   batch_size: 4

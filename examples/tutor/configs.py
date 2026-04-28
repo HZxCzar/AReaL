@@ -31,7 +31,7 @@ class TutorConfig(GRPOConfig):
     aux_model: str = field(default="qwen-aux")
     aux_api_key: str = field(default="EMPTY")
     aux_timeout: int = field(default=120)
-    aux_max_tokens: int = field(default=4096)
+    aux_max_tokens: int = field(default=2048)
     aux_temperature: float = field(default=0.7)
     aux_top_p: float | None = field(default=None)
     max_concurrent_aux_calls: int = field(default=8)
