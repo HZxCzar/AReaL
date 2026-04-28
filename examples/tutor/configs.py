@@ -39,6 +39,7 @@ class TutorConfig(GRPOConfig):
     api_params_key: str = field(default="")
     term_success_reward: float = field(default=1.0)
     transfer_bonus_reward: float = field(default=0.5)
+    counterfactual_student_reward: float = field(default=0.5)
     token_budget_penalty: float = field(default=-1.0)
     teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
     student_system_prompt: str = field(default=DEFAULT_STUDENT_SYSTEM_PROMPT)
