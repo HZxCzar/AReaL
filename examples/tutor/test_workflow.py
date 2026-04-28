@@ -177,26 +177,29 @@ class _ScriptedTutorWorkflow(TutorAgentWorkflow):
 
 
 @pytest.mark.asyncio
-async def test_run_episode_when_pre_solved_returns_none_and_logs_pre_success(
+async def test_run_episode_when_pre_solved_exports_zero_reward_trajectory(
     monkeypatch,
 ):
-    """Pre-solved samples are logged but not exported for GRPO update."""
+    """Pre-solved samples keep the GRPO group complete with a zero-reward turn."""
     stats: list[dict[str, Any]] = []
     monkeypatch.setattr(tutor_workflow, "_safe_scalar", lambda **kwargs: stats.append(kwargs))
     workflow = _ScriptedTutorWorkflow(student_outputs=["The answer is 7."])
-    teacher = _TeacherClient(outputs=["unused"])
+    teacher = _TeacherClient(outputs=["One final hint"])
 
     result = await workflow._run_episode(
         {"task": "original task", "ground_truth": "7"},
         external_client=teacher,
     )
 
-    assert result is None
-    assert teacher.completions.calls == []
-    assert workflow.last_history == []
+    assert result == (0.0, "completion-1")
+    assert len(teacher.completions.calls) == 1
+    assert len(workflow.last_history) == 1
+    assert workflow.last_history[0]["pre_solved"] is True
+    assert workflow.last_history[0]["reward"] == 0.0
     assert stats[-1]["pre_success"] == 1.0
     assert stats[-1]["term_success"] == 0.0
     assert stats[-1]["transfer_success"] == 0.0
+    assert stats[-1]["success_round"] == 0
 
 
 @pytest.mark.asyncio

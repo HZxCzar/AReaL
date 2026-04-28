@@ -235,29 +235,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         leak_count = 0
         termination_reason = "pre_solved" if pre_solved else "max_turns"
         transfer_success = False
-        if pre_solved:
-            self.last_history = []
-            self._log_rollout_stats(
-                history=[],
-                total_reward=total_reward,
-                termination_reason=termination_reason,
-                transfer_success=transfer_success,
-                leak_count=leak_count,
-            )
-            self._maybe_dump_debug_trace(
-                task=task,
-                ground_truth=ground_truth,
-                initial_student_answer=initial_student_answer,
-                latest_student_answer=latest_student_answer,
-                total_reward=total_reward,
-                history=[],
-                termination_reason=termination_reason,
-                pre_success=True,
-                term_success=False,
-                transfer_success=False,
-                leak_count=leak_count,
-            )
-            return None
         token_budget = EpisodeTokenBudget(
             max_episode_total_tokens=self.max_episode_total_tokens,
         )
@@ -365,6 +342,36 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 prompt_text=teacher_messages[-1]["content"],
                 completion_text=teacher_action,
             )
+            if pre_solved:
+                termination_feedback = (
+                    "Student solved the task before teaching; stopped after one "
+                    "zero-reward tutor action to keep the GRPO group complete."
+                )
+                if budget_snapshot.stop_feedback:
+                    termination_feedback = (
+                        f"{termination_feedback} {budget_snapshot.stop_feedback}"
+                    )
+                record: dict[str, Any] = {
+                    "round_idx": round_idx,
+                    "teacher_action": teacher_action,
+                    "student_answer": initial_student_answer,
+                    "student_error": student_error,
+                    "judge_feedback": judge_result.feedback,
+                    "judge_correct": judge_result.correct,
+                    "pre_solved": True,
+                    "leak_detected": False,
+                    "reward": 0.0,
+                    "turn_prompt_tokens": budget_snapshot.turn_prompt_tokens,
+                    "turn_completion_tokens": budget_snapshot.turn_completion_tokens,
+                    "turn_total_tokens": budget_snapshot.turn_total_tokens,
+                    "termination_feedback": termination_feedback,
+                }
+                record["student_visible_summary"] = self._build_student_visible_summary(
+                    record
+                )
+                history.append(record)
+                termination_reason = "pre_solved"
+                break
 
             leak_result = await self._run_leak_check(task, ground_truth, teacher_action)
             if leak_result.leaked:
@@ -505,7 +512,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             total_reward=total_reward,
             history=history,
             termination_reason=termination_reason,
-            pre_success=False,
+            pre_success=termination_reason == "pre_solved",
             term_success=term_success,
             transfer_success=bool(transfer_success),
             leak_count=leak_count,
@@ -527,6 +534,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             int(record["round_idx"])
             for record in history
             if bool(record.get("judge_correct", False))
+            and not bool(record.get("pre_solved", False))
         ]
         leak_rounds = [
             int(record["round_idx"])

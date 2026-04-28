@@ -27,6 +27,26 @@ If `--train-ids` and `--test-ids` are provided, the split follows the old
 `AgentItemId/tutor_train.json` and `AgentItemId/tutor_test.json` files instead of using
 the last `N` samples as test data.
 
+## Filter pre-solved tasks
+
+Before training, optionally remove train rows that the auxiliary student can solve
+without tutor feedback:
+
+```bash
+python3 examples/tutor/filter_pre_solved.py \
+  --config examples/tutor/config.yaml \
+  --input /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/aime_dataset \
+  --output /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/aime_dataset_no_pre_solve \
+  --splits train \
+  --attempts 1 \
+  --overwrite
+```
+
+The output dataset keeps unselected splits unchanged, so both `train_dataset.path` and
+`valid_dataset.path` can point to the filtered dataset directory. Increase `--attempts`
+to drop a row if any sampled initial student attempt solves it. The script also writes a
+`*_pre_solve_filter_report.json` file with kept, dropped, and error ids.
+
 ## Train
 
 ```bash
