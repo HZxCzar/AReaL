@@ -13,6 +13,7 @@ export WANDB_MODE="${WANDB_MODE:-offline}"
 TRIAL_NAME="${TRIAL_NAME:-$(date +%Y%m%d_%H%M%S)}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-tutor-grpo}"
 N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-4}"
+TUTOR_DATASET_PATH="$ROOT_DIR/examples/tutor/aime_dataset_no_pre_solve"
 
 python examples/tutor/train.py \
   --config examples/tutor/config.yaml \
@@ -20,4 +21,6 @@ python examples/tutor/train.py \
   cluster.n_gpus_per_node="$N_GPUS_PER_NODE" \
   experiment_name="$EXPERIMENT_NAME" \
   trial_name="$TRIAL_NAME" \
+  train_dataset.path="$TUTOR_DATASET_PATH" \
+  valid_dataset.path="$TUTOR_DATASET_PATH" \
   "$@"
