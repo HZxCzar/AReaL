@@ -37,6 +37,9 @@ TEACHER_INITIAL_USER_TEMPLATE = """\
 Task:
 {{ task }}
 
+Ground Truth:
+{{ ground_truth }}
+
 Turn 0:
 - Student initial answer: {{ initial_student_answer or '(empty)' }}
 - Initial judge result: {{ 'correct' if initial_correct else 'incorrect' }}

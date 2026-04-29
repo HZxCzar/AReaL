@@ -732,7 +732,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         latest_judge_result: JudgeResult,
         pre_solved: bool,
     ) -> str:
-        del ground_truth
         pre_solved_note = (
             "The student already solved the task during reset. Your next action will terminate the episode with reward 0."
             if pre_solved
@@ -741,6 +740,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return render_prompt(
             TEACHER_INITIAL_USER_TEMPLATE,
             task=task,
+            ground_truth=ground_truth,
             initial_student_answer=initial_student_answer,
             initial_correct=latest_judge_result.correct,
             initial_feedback=latest_judge_result.feedback,

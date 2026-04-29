@@ -94,6 +94,7 @@ def _patch_render_prompt(monkeypatch):
         if "Turn 0:" in template:
             return (
                 f"Task:\n{context['task']}\n\n"
+                f"Ground Truth:\n{context['ground_truth']}\n\n"
                 f"Turn 0:\n- Student initial answer: "
                 f"{context['initial_student_answer']}"
             )
@@ -274,3 +275,24 @@ def test_build_transfer_student_prompt_excludes_leaked_turns():
     assert "visible hint" in prompt
     assert "revised answer" in prompt
     assert "transfer" in prompt
+
+
+def test_build_teacher_initial_prompt_includes_ground_truth(monkeypatch):
+    workflow = TutorAgentWorkflow(debug_trace_dir="")
+    prompt = workflow._build_teacher_initial_prompt(
+        task="original task",
+        ground_truth="7",
+        initial_student_answer="The answer is 1.",
+        round_idx=1,
+        latest_judge_result=tutor_workflow.JudgeResult(
+            raw_output="{}",
+            correct=False,
+            feedback="Incorrect.",
+            parse_error=None,
+            raw_result={},
+        ),
+        pre_solved=False,
+    )
+
+    assert "Task:\noriginal task" in prompt
+    assert "Ground Truth:\n7" in prompt
