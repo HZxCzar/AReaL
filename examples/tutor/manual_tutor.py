@@ -145,7 +145,47 @@ def resolve_local_tokenizer_path(tokenizer_path: str | None) -> str | None:
 def build_workflow(config: Any, max_turns: int) -> Any:
     from workflow import TutorAgentWorkflow
 
-    return TutorAgentWorkflow(
+    class ManualTutorWorkflow(TutorAgentWorkflow):
+        async def _run_transfer_round(
+            self,
+            *,
+            task: str,
+            ground_truth: str,
+            initial_student_answer: str,
+            history: list[dict[str, Any]],
+        ) -> dict[str, Any]:
+            generation = await self._run_transfer_generation(task, ground_truth)
+            payload: dict[str, Any] = {
+                "transfer_triggered": True,
+                "transfer_task": generation.task,
+                "transfer_ground_truth": generation.ground_truth,
+                "transfer_generation_error": generation.parse_error,
+                "transfer_generation_raw_output": generation.raw_output,
+                "transfer_similarity_notes": generation.similarity_notes,
+                "transfer_success": False,
+            }
+            if not generation.task or not generation.ground_truth:
+                return payload
+            answer, answer_error = await self._run_transfer_student(
+                original_task=task,
+                initial_student_answer=initial_student_answer,
+                history=history,
+                transfer_task=generation.task,
+            )
+            judge_result = self._score_aime_answer(
+                generation.task, generation.ground_truth, answer
+            )
+            payload.update(
+                {
+                    "transfer_student_answer": answer,
+                    "transfer_student_error": answer_error,
+                    "transfer_judge_feedback": judge_result.feedback,
+                    "transfer_success": judge_result.correct,
+                }
+            )
+            return payload
+
+    return ManualTutorWorkflow(
         temperature=config.gconfig.temperature,
         top_p=config.gconfig.top_p,
         max_completion_tokens=config.gconfig.max_new_tokens,
@@ -357,6 +397,17 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
                     "Transfer Student Answer",
                     str(transfer_result.get("transfer_student_answer", "")),
                 )
+                generation_error = transfer_result.get("transfer_generation_error")
+                if generation_error:
+                    print_block("Transfer Generation Error", str(generation_error))
+                    print_block(
+                        "Transfer Generator Raw Output",
+                        str(
+                            transfer_result.get(
+                                "transfer_generation_raw_output", ""
+                            )
+                        ),
+                    )
                 print(
                     "\nTransfer success: "
                     f"{bool(transfer_result.get('transfer_success', False))}"
