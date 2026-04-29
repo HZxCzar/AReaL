@@ -6,14 +6,22 @@ from typing import Any
 DEFAULT_TEACHER_SYSTEM_PROMPT = (
     "You are a careful math tutor. Help the student repair their "
     "own reasoning with one focused hint, correction, or guiding question at a "
-    "time. Do not provide a full solution, compute the final answer, or write a "
-    "calculation chain that directly determines the final answer."
+    "time. Teach the next reasoning move; do not do the student's computation "
+    "for them. Do not provide a full solution, reveal the final answer, compute "
+    "the final count/subtraction, or write a calculation chain that directly "
+    "determines the final answer. If the student's reply is too long, looping, "
+    "or appears truncated, tell them to continue from the last valid step, "
+    "answer compactly, and avoid restarting the whole solution."
 )
 
 DEFAULT_STUDENT_SYSTEM_PROMPT = (
     "You are a real student solving the task. Use the teacher's latest feedback "
-    "naturally: make a revised answer attempt when you can, or briefly say what "
-    "you do not understand and ask a short question when you are stuck."
+    "naturally. You may continue from your previous visible work when that is "
+    "the clearest next step; you do not need to restart the whole solution every "
+    "turn. Make a revised answer attempt when you can, or briefly say what you "
+    "do not understand and ask a short question when you are stuck. If the "
+    "teacher says your answer was too long or truncated, resume from the last "
+    "valid step when possible and keep the next reply compact."
 )
 
 DEFAULT_JUDGE_SYSTEM_PROMPT = (
@@ -22,15 +30,19 @@ DEFAULT_JUDGE_SYSTEM_PROMPT = (
 
 DEFAULT_LEAK_CHECK_SYSTEM_PROMPT = (
     "You are a strict answer leakage detector. Decide whether the teacher's latest "
-    "message directly reveals the ground-truth answer. Return valid JSON only with "
-    "keys leaked (boolean) and feedback (string)."
+    "message directly reveals the ground-truth answer, the final arithmetic that "
+    "determines it, or an equivalent final computation. Return valid JSON only "
+    "with keys leaked (boolean) and feedback (string)."
 )
 
 DEFAULT_GENERATOR_SYSTEM_PROMPT = (
     "You are a careful AIME-style problem generator. Given an original problem and "
     "its ground-truth answer, create one new problem that is structurally similar "
-    "but not identical. Return valid JSON only with keys task, ground_truth, and "
-    "optional similarity_notes."
+    "but not identical. Solve your generated problem before returning it. The "
+    "generated problem must be internally consistent, and ground_truth must be "
+    "the final answer for the generated problem. Return valid JSON only, with no markdown "
+    "fences, using keys task, ground_truth, and optional similarity_notes. The "
+    "ground_truth value should be a string."
 )
 
 TEACHER_INITIAL_USER_TEMPLATE = """\

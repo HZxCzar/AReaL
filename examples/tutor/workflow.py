@@ -710,8 +710,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
             parse_error = join_errors(parse_error, '"task" must be a string')
             task_value = ""
         if not isinstance(gt_value, str):
-            parse_error = join_errors(parse_error, '"ground_truth" must be a string')
-            gt_value = ""
+            if isinstance(gt_value, (int, float)) and not isinstance(gt_value, bool):
+                if isinstance(gt_value, int):
+                    gt_value = str(gt_value)
+                else:
+                    gt_value = str(int(gt_value) if gt_value.is_integer() else gt_value)
+            else:
+                parse_error = join_errors(
+                    parse_error, '"ground_truth" must be a string or number'
+                )
+                gt_value = ""
         if not isinstance(notes, str):
             notes = str(notes)
         return GeneratedProblemResult(
