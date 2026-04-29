@@ -38,7 +38,7 @@ scheduler:
   type: local
 
 rollout:
-  backend: "sglang:d4p1t1"
+  backend: "sglang:d2p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
@@ -69,7 +69,7 @@ gconfig:
   top_p: 1.0
 
 actor:
-  backend: "fsdp:d4p1t1"
+  backend: "fsdp:d2p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
