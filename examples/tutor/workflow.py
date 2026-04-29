@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging as py_logging
 import os
@@ -119,7 +118,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         api_params_key: str | None = None,
         term_success_reward: float = 1.0,
         transfer_bonus_reward: float = 0.5,
-        counterfactual_student_reward: float = 0.5,
         teacher_system_prompt: str = "",
         student_system_prompt: str = "",
         judge_system_prompt: str = "",
@@ -147,7 +145,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.reasoning_parser = reasoning_parser
         self.term_success_reward = term_success_reward
         self.transfer_bonus_reward = transfer_bonus_reward
-        self.counterfactual_student_reward = counterfactual_student_reward
         self.teacher_system_prompt = teacher_system_prompt.strip()
         self.student_system_prompt = student_system_prompt.strip()
         self.judge_system_prompt = judge_system_prompt.strip()
@@ -417,38 +414,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     )
                 continue
 
-            if self.counterfactual_student_reward:
-                (
-                    (student_answer, student_error),
-                    (baseline_student_answer, baseline_student_error),
-                ) = await asyncio.gather(
-                    self._run_student(task, teacher_action, history=history),
-                    self._run_student(task, teacher_action=None, history=history),
-                )
-                baseline_judge_result = self._score_aime_answer(
-                    task, ground_truth, baseline_student_answer
-                )
-            else:
-                student_answer, student_error = await self._run_student(
-                    task, teacher_action, history=history
-                )
-                baseline_student_answer = ""
-                baseline_student_error = None
-                baseline_judge_result = None
+            student_answer, student_error = await self._run_student(
+                task, teacher_action, history=history
+            )
             judge_result = self._score_aime_answer(task, ground_truth, student_answer)
             latest_student_answer = student_answer
             latest_judge_result = judge_result
 
             reward = 0.0
-            counterfactual_reward = 0.0
-            counterfactual_delta = 0
-            if baseline_judge_result is not None:
-                counterfactual_delta = int(judge_result.correct) - int(
-                    baseline_judge_result.correct
-                )
-                counterfactual_reward = (
-                    self.counterfactual_student_reward * counterfactual_delta
-                )
             record: dict[str, Any] = {
                 "round_idx": round_idx,
                 "teacher_action": teacher_action,
@@ -456,16 +429,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "student_error": student_error,
                 "judge_feedback": judge_result.feedback,
                 "judge_correct": judge_result.correct,
-                "baseline_student_answer": baseline_student_answer,
-                "baseline_student_error": baseline_student_error,
-                "baseline_judge_feedback": (
-                    baseline_judge_result.feedback if baseline_judge_result else None
-                ),
-                "baseline_judge_correct": (
-                    baseline_judge_result.correct if baseline_judge_result else None
-                ),
-                "counterfactual_delta": counterfactual_delta,
-                "counterfactual_reward": counterfactual_reward,
                 "leak_detected": False,
                 "turn_prompt_tokens": budget_snapshot.turn_prompt_tokens,
                 "turn_completion_tokens": budget_snapshot.turn_completion_tokens,
@@ -501,7 +464,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             else:
                 termination_reason = "continue"
 
-            final_reward = reward + counterfactual_reward
+            final_reward = reward
             if budget_snapshot.stop_reason is not None:
                 final_reward += self.token_budget_penalty
                 record["length_penalty"] = self.token_budget_penalty
@@ -585,40 +548,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             float(record.get("transfer_bonus_reward", 0.0) or 0.0)
             for record in history
         )
-        counterfactual_reward_sum = sum(
-            float(record.get("counterfactual_reward", 0.0) or 0.0)
-            for record in history
-        )
-        counterfactual_records = [
-            record
-            for record in history
-            if record.get("baseline_judge_correct") is not None
-        ]
-        counterfactual_improved_count = sum(
-            1
-            for record in counterfactual_records
-            if int(record.get("counterfactual_delta", 0) or 0) > 0
-        )
-        counterfactual_regressed_count = sum(
-            1
-            for record in counterfactual_records
-            if int(record.get("counterfactual_delta", 0) or 0) < 0
-        )
-        counterfactual_tie_count = sum(
-            1
-            for record in counterfactual_records
-            if int(record.get("counterfactual_delta", 0) or 0) == 0
-        )
-        counterfactual_with_hint_success = sum(
-            1
-            for record in counterfactual_records
-            if bool(record.get("judge_correct", False))
-        )
-        counterfactual_baseline_success = sum(
-            1
-            for record in counterfactual_records
-            if bool(record.get("baseline_judge_correct", False))
-        )
         length_penalty_count = sum(1 for record in history if "length_penalty" in record)
         length_penalty_sum = sum(
             float(record.get("length_penalty", 0.0) or 0.0) for record in history
@@ -659,12 +588,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             max_total_tokens=max_total_tokens,
             term_reward_sum=term_reward_sum,
             transfer_bonus_sum=transfer_bonus_sum,
-            counterfactual_reward_sum=counterfactual_reward_sum,
-            counterfactual_improved_count=counterfactual_improved_count,
-            counterfactual_regressed_count=counterfactual_regressed_count,
-            counterfactual_tie_count=counterfactual_tie_count,
-            counterfactual_with_hint_success=counterfactual_with_hint_success,
-            counterfactual_baseline_success=counterfactual_baseline_success,
             success_round=success_rounds[0] if success_rounds else 0,
             leak_first_round=leak_rounds[0] if leak_rounds else 0,
         )
@@ -869,12 +792,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             STUDENT_USER_TEMPLATE,
             task=task,
             visible_history=self._student_visible_history_summaries(history),
-            teacher_feedback=teacher_action
-            or (
-                "(none, produce the first answer attempt)"
-                if not history
-                else "(none; continue from the visible history)"
-            ),
+            teacher_feedback=teacher_action or "(none, produce the first answer attempt)",
         )
 
     def _build_transfer_student_prompt(
@@ -1034,16 +952,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
                         "student_error": record.get("student_error"),
                         "judge_feedback": record.get("judge_feedback"),
                         "judge_correct": bool(record.get("judge_correct", False)),
-                        "baseline_student_answer": record.get("baseline_student_answer"),
-                        "baseline_student_error": record.get("baseline_student_error"),
-                        "baseline_judge_feedback": record.get("baseline_judge_feedback"),
-                        "baseline_judge_correct": record.get("baseline_judge_correct"),
-                        "counterfactual_delta": int(
-                            record.get("counterfactual_delta", 0) or 0
-                        ),
-                        "counterfactual_reward": float(
-                            record.get("counterfactual_reward", 0.0) or 0.0
-                        ),
                         "reward": float(record.get("reward", 0.0) or 0.0),
                         "step_factor": record.get("step_factor"),
                         "term_reward": record.get("term_reward"),
@@ -1076,12 +984,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "transfer_bonus_sum": float(
                     sum(
                         float(record.get("transfer_bonus_reward", 0.0) or 0.0)
-                        for record in history
-                    )
-                ),
-                "counterfactual_reward_sum": float(
-                    sum(
-                        float(record.get("counterfactual_reward", 0.0) or 0.0)
                         for record in history
                     )
                 ),

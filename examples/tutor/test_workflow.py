@@ -141,12 +141,10 @@ class _ScriptedTutorWorkflow(TutorAgentWorkflow):
         *,
         student_outputs: list[str],
         transfer_generation: GeneratedProblemResult | None = None,
-        counterfactual_student_reward: float = 0.5,
     ):
         super().__init__(
             term_success_reward=1.0,
             transfer_bonus_reward=0.5,
-            counterfactual_student_reward=counterfactual_student_reward,
             max_turns=2,
             debug_trace_dir="",
         )
@@ -215,7 +213,6 @@ async def test_run_episode_when_tutor_solves_and_transfer_passes_logs_term_metri
         student_outputs=[
             "The answer is 1.",
             "The answer is 7.",
-            "The answer is 1.",
             "The answer is 9.",
         ],
         transfer_generation=GeneratedProblemResult(
@@ -234,65 +231,18 @@ async def test_run_episode_when_tutor_solves_and_transfer_passes_logs_term_metri
         external_client=teacher,
     )
 
-    assert result == (2.0, "completion-1")
+    assert result == (1.5, "completion-1")
     assert stats[-1]["pre_success"] == 0.0
     assert stats[-1]["term_success"] == 1.0
     assert stats[-1]["transfer_success"] == 1.0
     assert stats[-1]["term_reward_sum"] == 1.0
     assert stats[-1]["transfer_bonus_sum"] == 0.5
-    assert stats[-1]["counterfactual_reward_sum"] == 0.5
-    assert stats[-1]["counterfactual_improved_count"] == 1
-    assert workflow.last_history[0]["baseline_judge_correct"] is False
-    assert workflow.last_history[0]["counterfactual_reward"] == 0.5
     transfer_prompt = workflow.student_prompts[-1]
     assert "Original task:\noriginal task" in transfer_prompt
     assert "Initial student answer:\nThe answer is 1." in transfer_prompt
     assert "Teacher guidance: Helpful hint." in transfer_prompt
     assert "Student reply: The answer is 7." in transfer_prompt
     assert "New related task:\nnew related task" in transfer_prompt
-
-
-@pytest.mark.asyncio
-async def test_run_episode_counterfactual_student_uses_same_history_without_latest_hint(
-    monkeypatch,
-):
-    """The baseline student sees prior visible history but not the current hint."""
-    stats: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        tutor_workflow, "_safe_scalar", lambda **kwargs: stats.append(kwargs)
-    )
-    workflow = _ScriptedTutorWorkflow(
-        student_outputs=[
-            "The answer is 1.",
-            "The answer is 2.",
-            "The answer is 3.",
-            "The answer is 7.",
-            "The answer is 4.",
-        ],
-    )
-    teacher = _TeacherClient(outputs=["First hint", "Second hint"])
-
-    result = await workflow._run_episode(
-        {"task": "original task", "ground_truth": "7"},
-        external_client=teacher,
-    )
-
-    assert result == (1.0, "completion-2")
-    assert len(workflow.last_history) == 2
-    assert workflow.last_history[1]["counterfactual_delta"] == 1
-    assert workflow.last_history[1]["counterfactual_reward"] == 0.5
-    assert stats[-1]["counterfactual_reward_sum"] == 0.5
-
-    with_hint_prompt = workflow.student_prompts[3]
-    baseline_prompt = workflow.student_prompts[4]
-    assert "Teacher guidance: First hint." in with_hint_prompt
-    assert "Teacher guidance: First hint." in baseline_prompt
-    assert "Current teacher feedback:\nSecond hint" in with_hint_prompt
-    assert "Second hint" not in baseline_prompt
-    assert (
-        "Current teacher feedback:\n(none; continue from the visible history)"
-        in baseline_prompt
-    )
 
 
 def test_build_transfer_student_prompt_excludes_leaked_turns():

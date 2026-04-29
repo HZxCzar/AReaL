@@ -42,7 +42,6 @@ def main(args):
         api_params_key=config.api_params_key or None,
         term_success_reward=config.term_success_reward,
         transfer_bonus_reward=config.transfer_bonus_reward,
-        counterfactual_student_reward=config.counterfactual_student_reward,
         token_budget_penalty=config.token_budget_penalty,
         teacher_system_prompt=config.teacher_system_prompt,
         student_system_prompt=config.student_system_prompt,
