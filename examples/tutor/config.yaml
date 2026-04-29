@@ -49,6 +49,7 @@ rollout:
   max_head_offpolicyness: 2
   enable_rollout_tracing: false
   scheduling_spec: ${actor.scheduling_spec}
+  use_lora: true
   dump_to_file: true
   openai:
     mode: inline
@@ -106,6 +107,11 @@ actor:
     mean_level: batch
     std_level: batch
   weight_update_mode: disk
+  use_lora: ${rollout.use_lora}
+  peft_type: lora
+  lora_rank: 16
+  lora_alpha: 16
+  target_modules: [all-linear]
   max_new_tokens: ${gconfig.max_new_tokens}
   scheduling_spec:
     - task_type: worker
@@ -138,6 +144,8 @@ sglang:
   max_running_requests: 2
   context_length: 40960
   mem_fraction_static: 0.6
+  enable_lora: ${actor.use_lora}
+  max_lora_rank: ${actor.lora_rank}
 
 train_dataset:
   batch_size: 4
