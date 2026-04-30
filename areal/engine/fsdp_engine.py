@@ -1324,13 +1324,47 @@ class FSDPEngine(TrainEngine):
     @trace_perf("fsdp_engine.update_weights_from_disk", category="io")
     def _update_weights_from_disk(self, meta: WeightUpdateMeta):
         fut = Future()
+        debug_meta = {
+            "type": meta.type,
+            "path": meta.path,
+            "version": meta.version,
+            "use_lora": meta.use_lora,
+            "lora_name": meta.lora_name,
+            "base_model_name": meta.base_model_name,
+        }
+        self.logger.info(
+            "[debug-weight-update] fsdp disk update start rank=%s meta=%s",
+            dist.get_rank(),
+            debug_meta,
+        )
 
         if dist.get_rank() == 0:
+            self.logger.info(
+                "[debug-weight-update] fsdp rank0 pausing rollout before disk update meta=%s",
+                debug_meta,
+            )
             self.rollout_engine.pause_generation()
+            self.logger.info(
+                "[debug-weight-update] fsdp rank0 notifying rollout to update from disk meta=%s",
+                debug_meta,
+            )
             fut = self.rollout_engine.update_weights_from_disk(meta)
 
         assert meta.path is not None
+        save_tik = time.perf_counter()
+        self.logger.info(
+            "[debug-weight-update] fsdp saving HF weights start rank=%s path=%s use_lora=%s",
+            dist.get_rank(),
+            meta.path,
+            meta.use_lora,
+        )
         self._save_model_to_hf(meta.path, self.tokenizer, self.processor)
+        self.logger.info(
+            "[debug-weight-update] fsdp saving HF weights done rank=%s path=%s elapsed=%.2fs",
+            dist.get_rank(),
+            meta.path,
+            time.perf_counter() - save_tik,
+        )
         # dist.barrier() are called when _save_model_to_hf finished
 
         if dist.get_rank() == 0:
@@ -1343,11 +1377,31 @@ class FSDPEngine(TrainEngine):
                 update_name, str(datetime.now().timestamp()), keepalive_ttl=120
             )
 
+            self.logger.info(
+                "[debug-weight-update] fsdp rank0 waiting for rollout disk update future name=%s meta=%s",
+                update_name,
+                debug_meta,
+            )
+            wait_tik = time.perf_counter()
             fut.result()
+            self.logger.info(
+                "[debug-weight-update] fsdp rank0 rollout disk update future done elapsed=%.2fs meta=%s",
+                time.perf_counter() - wait_tik,
+                debug_meta,
+            )
             self.rollout_engine.continue_generation()
+            self.logger.info(
+                "[debug-weight-update] fsdp rank0 continued rollout after disk update meta=%s",
+                debug_meta,
+            )
 
         current_platform.synchronize()
         dist.barrier(group=self.cpu_group)
+        self.logger.info(
+            "[debug-weight-update] fsdp disk update finished rank=%s meta=%s",
+            dist.get_rank(),
+            debug_meta,
+        )
 
     def _save_model_to_hf(
         self,

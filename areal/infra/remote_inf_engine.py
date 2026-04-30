@@ -1315,14 +1315,86 @@ def _update_weights_from_disk(
     """Helper to update weights from disk in a separate process."""
 
     async def _fn():
+        logger.info(
+            "[debug-weight-update] remote disk update start experiment=%s trial=%s model_version=%s addresses=%s meta=%s",
+            experiment_name,
+            trial_name,
+            model_version,
+            addresses,
+            {
+                "type": meta.type,
+                "path": meta.path,
+                "version": meta.version,
+                "use_lora": meta.use_lora,
+                "lora_name": meta.lora_name,
+                "base_model_name": meta.base_model_name,
+            },
+        )
         update_name = names.update_weights_from_disk(
             experiment_name, trial_name, model_version
         )
+        logger.info(
+            "[debug-weight-update] remote waiting for saved weights marker name=%s timeout=120s",
+            update_name,
+        )
         save_timestamp = float(name_resolve.wait(update_name, timeout=120))
         load_timestamp = datetime.now().timestamp()
+        logger.info(
+            "[debug-weight-update] remote saw saved weights marker name=%s wait_delta=%.2fs",
+            update_name,
+            load_timestamp - save_timestamp,
+        )
 
         # Get requests from backend with version for LoRA name
         weight_reqs = backend.build_disk_weight_update_requests(meta)
+        logger.info(
+            "[debug-weight-update] remote built disk update requests=%s",
+            [
+                {
+                    "endpoint": req.endpoint,
+                    "method": req.method,
+                    "payload": req.payload,
+                }
+                for req in weight_reqs.requests
+            ],
+        )
+
+        async def request_one(addr: str, http_req: HttpRequest):
+            tik = time.perf_counter()
+            logger.info(
+                "[debug-weight-update] remote request start addr=%s endpoint=%s method=%s payload=%s",
+                addr,
+                http_req.endpoint,
+                http_req.method,
+                http_req.payload,
+            )
+            try:
+                result = await arequest_with_retry(
+                    session=session,
+                    addr=addr,
+                    endpoint=http_req.endpoint,
+                    payload=http_req.payload,
+                    method=http_req.method,
+                    max_retries=request_retries,
+                    timeout=request_timeout,
+                )
+                logger.info(
+                    "[debug-weight-update] remote request done addr=%s endpoint=%s elapsed=%.2fs result_type=%s",
+                    addr,
+                    http_req.endpoint,
+                    time.perf_counter() - tik,
+                    type(result).__name__,
+                )
+                return result
+            except Exception as e:
+                logger.error(
+                    "[debug-weight-update] remote request failed addr=%s endpoint=%s elapsed=%.2fs error=%r",
+                    addr,
+                    http_req.endpoint,
+                    time.perf_counter() - tik,
+                    e,
+                )
+                raise
 
         # Execute all requests
         async with aiohttp.ClientSession(
@@ -1331,20 +1403,22 @@ def _update_weights_from_disk(
             connector=get_default_connector(),
         ) as session:
             for http_req in weight_reqs.requests:
-                jobs = [
-                    arequest_with_retry(
-                        session=session,
-                        addr=addr,
-                        endpoint=http_req.endpoint,
-                        payload=http_req.payload,
-                        method=http_req.method,
-                        max_retries=request_retries,
-                        timeout=request_timeout,
-                    )
-                    for addr in addresses
-                ]
+                logger.info(
+                    "[debug-weight-update] remote request batch start endpoint=%s num_addresses=%d",
+                    http_req.endpoint,
+                    len(addresses),
+                )
+                jobs = [request_one(addr, http_req) for addr in addresses]
                 await asyncio.gather(*jobs)
+                logger.info(
+                    "[debug-weight-update] remote request batch done endpoint=%s",
+                    http_req.endpoint,
+                )
 
+        logger.info(
+            "[debug-weight-update] remote disk update done total_delta=%.2fs",
+            datetime.now().timestamp() - save_timestamp,
+        )
         return load_timestamp - save_timestamp
 
     return uvloop.run(_fn())
