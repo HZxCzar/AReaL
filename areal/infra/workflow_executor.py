@@ -1043,11 +1043,8 @@ class WorkflowExecutor:
 
         async def _execute_workflow() -> _RolloutResult | None:
             """Execute workflow.arun_episode and apply AReaL-specific logic."""
-<<<<<<< HEAD
-=======
             task_id = pending_task.task_id
 
->>>>>>> parent of 8a0d21a (loraa unload)
             # Set task_id in ContextVar before entering arun_episode
             perf_tracer.set_task_id(task_id)
 
