@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import shutil
 import threading
-import time
 import traceback
 from collections import defaultdict
 from collections.abc import Callable
@@ -48,19 +47,6 @@ from ..staleness_manager import StalenessManager
 from ..workflow_executor import BatchTaskDispatcher, TaskIdGenerator
 
 logger = logging.getLogger("RolloutController")
-
-
-def _debug_meta_summary(meta: WeightUpdateMeta | None) -> dict[str, Any]:
-    if meta is None:
-        return {}
-    return {
-        "type": meta.type,
-        "path": meta.path,
-        "version": meta.version,
-        "use_lora": meta.use_lora,
-        "lora_name": meta.lora_name,
-        "base_model_name": meta.base_model_name,
-    }
 
 
 # NOTE: remote task input has a slightly different
@@ -585,17 +571,7 @@ class RolloutController:
         def update_weights_disk():
             payload = request.get_json() or {}
             meta = deserialize_value(payload.get("meta"))
-            tik = time.perf_counter()
-            logger.info(
-                "[debug-weight-update] rollout callback received update_weights_disk meta=%s",
-                _debug_meta_summary(meta),
-            )
             self._callback_loop.run_until_complete(self.update_weights_from_disk(meta))
-            logger.info(
-                "[debug-weight-update] rollout callback finished update_weights_disk elapsed=%.2fs meta=%s",
-                time.perf_counter() - tik,
-                _debug_meta_summary(meta),
-            )
             return jsonify({"status": "ok"})
 
         @app.route("/callback/pause_generation", methods=["POST"])
@@ -1053,20 +1029,9 @@ class RolloutController:
         )
 
     async def update_weights_from_disk(self, meta: WeightUpdateMeta):
-        tik = time.perf_counter()
-        logger.info(
-            "[debug-weight-update] rollout collective update_weights_from_disk start workers=%d meta=%s",
-            len(self.workers),
-            _debug_meta_summary(meta),
-        )
         meta.clear_checkpoint_after_load = False
         await self._collective_rpc_async("update_weights_from_disk", meta=meta)
         shutil.rmtree(meta.path, ignore_errors=True)
-        logger.info(
-            "[debug-weight-update] rollout collective update_weights_from_disk done elapsed=%.2fs meta=%s",
-            time.perf_counter() - tik,
-            _debug_meta_summary(meta),
-        )
 
     async def pause_generation(self):
         await self._collective_rpc_async("pause_generation")

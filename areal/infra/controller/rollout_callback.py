@@ -2,7 +2,6 @@
 
 from concurrent.futures import Future
 from dataclasses import dataclass
-import time
 from typing import Any
 
 import requests
@@ -13,24 +12,6 @@ from areal.infra.utils.concurrent import get_executor
 from areal.utils import logging
 
 logger = logging.getLogger(__name__)
-
-
-def _summarize_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
-    if not payload:
-        return {}
-    meta = payload.get("meta")
-    if isinstance(meta, dict) and meta.get("type") == "dataclass":
-        meta = meta.get("data", {})
-    if isinstance(meta, dict):
-        return {
-            "meta_type": meta.get("type"),
-            "path": meta.get("path"),
-            "version": meta.get("version"),
-            "use_lora": meta.get("use_lora"),
-            "lora_name": meta.get("lora_name"),
-            "base_model_name": meta.get("base_model_name"),
-        }
-    return {"payload_keys": sorted(payload.keys())}
 
 
 @dataclass
@@ -66,13 +47,6 @@ class RolloutCallback:
             Response JSON from controller
         """
         url = f"http://{self.controller_addr}{endpoint}"
-        tik = time.perf_counter()
-        logger.info(
-            "[debug-weight-update] callback POST start endpoint=%s timeout=%.1fs payload=%s",
-            endpoint,
-            self.request_timeout,
-            _summarize_payload(payload),
-        )
         try:
             resp = requests.post(
                 url,
@@ -80,20 +54,8 @@ class RolloutCallback:
                 timeout=self.request_timeout,
             )
             resp.raise_for_status()
-            logger.info(
-                "[debug-weight-update] callback POST done endpoint=%s elapsed=%.2fs status=%s",
-                endpoint,
-                time.perf_counter() - tik,
-                resp.status_code,
-            )
             return resp.json()
         except requests.RequestException as e:
-            logger.error(
-                "[debug-weight-update] callback POST failed endpoint=%s elapsed=%.2fs error=%r",
-                endpoint,
-                time.perf_counter() - tik,
-                e,
-            )
             logger.error(f"Callback to {url} failed: {e}")
             raise
 
