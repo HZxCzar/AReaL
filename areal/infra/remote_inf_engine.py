@@ -367,7 +367,6 @@ class RemoteInfEngine(InferenceEngine):
         self._lora_cleanup_lock = Lock()
         self._active_lora_versions: dict[int, int] = {}
         self._loaded_lora_versions: set[int] = set()
-        self._unloaded_lora_versions: set[int] = set()
         self._lora_name: str | None = None
 
     def _wait_for_server(self, address: str, process: subprocess.Popen | None = None):
@@ -537,7 +536,6 @@ class RemoteInfEngine(InferenceEngine):
                 self._lora_name = lora_name
                 # The initial adapter is preloaded as v0 when LoRA is enabled.
                 self._loaded_lora_versions.add(0)
-                self._unloaded_lora_versions.discard(0)
             elif self._lora_name != lora_name:
                 raise ValueError(
                     f"RemoteInfEngine can track one LoRA name at a time, got "
@@ -550,7 +548,6 @@ class RemoteInfEngine(InferenceEngine):
         self._ensure_lora_tracking(meta.lora_name)
         with self._lora_lock:
             self._loaded_lora_versions.add(meta.version)
-            self._unloaded_lora_versions.discard(meta.version)
 
     def _schedule_lora_cleanup(self) -> None:
         if not self.config.use_lora:
@@ -567,7 +564,7 @@ class RemoteInfEngine(InferenceEngine):
 
         fut.add_done_callback(callback)
 
-    def _cleanup_stale_lora_versions(self, latest_version: int | None = None) -> None:
+    def _cleanup_stale_lora_versions(self) -> None:
         if not self.config.use_lora:
             return
         if not self.addresses:
@@ -580,26 +577,17 @@ class RemoteInfEngine(InferenceEngine):
 
         try:
             with self._lora_lock:
-                if self._lora_name is None:
+                if self._lora_name is None or not self._loaded_lora_versions:
                     return
-                if latest_version is None:
-                    if not self._loaded_lora_versions:
-                        return
-                    latest_version = max(self._loaded_lora_versions)
+                latest_version = max(self._loaded_lora_versions)
                 keep_versions = max(1, self.config.max_head_offpolicyness + 2)
                 min_kept_version = latest_version - keep_versions + 1
-                tracked_stale_versions = {
+                stale_versions = [
                     version
-                    for version in self._loaded_lora_versions
+                    for version in sorted(self._loaded_lora_versions)
                     if version < min_kept_version
-                }
-                inferred_stale_versions = set(range(max(0, min_kept_version)))
-                stale_versions = sorted(
-                    version
-                    for version in tracked_stale_versions | inferred_stale_versions
-                    if self._active_lora_versions.get(version, 0) == 0
-                    and version not in self._unloaded_lora_versions
-                )
+                    and self._active_lora_versions.get(version, 0) == 0
+                ]
                 lora_name = self._lora_name
 
             engine_logger = getattr(self, "logger", logger)
@@ -620,7 +608,6 @@ class RemoteInfEngine(InferenceEngine):
                 with self._lora_lock:
                     if self._active_lora_versions.get(version, 0) == 0:
                         self._loaded_lora_versions.discard(version)
-                        self._unloaded_lora_versions.add(version)
         finally:
             self._lora_cleanup_lock.release()
 
@@ -1117,7 +1104,7 @@ class RemoteInfEngine(InferenceEngine):
 
         if meta.use_lora:
             self._ensure_lora_tracking(meta.lora_name)
-            self._cleanup_stale_lora_versions(latest_version=meta.version)
+            self._cleanup_stale_lora_versions()
 
         fut = get_executor().submit(
             _update_weights_from_disk,
