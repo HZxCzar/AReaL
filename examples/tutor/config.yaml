@@ -68,6 +68,7 @@ gconfig:
   greedy: false
   temperature: 1.0
   top_p: 1.0
+  lora_name: default_lora
 
 actor:
   backend: "fsdp:d2p1t1"
