@@ -1028,19 +1028,6 @@ class WorkflowExecutor:
             filtering/validation.
         """
 
-        task_id = pending_task.task_id
-        model_version = self.inference_engine.get_version()
-        lora_version_acquired = False
-        if self.config.use_lora:
-            self.inference_engine.acquire_lora_version(model_version)
-            lora_version_acquired = True
-
-        def release_lora_version() -> None:
-            nonlocal lora_version_acquired
-            if lora_version_acquired:
-                self.inference_engine.release_lora_version(model_version)
-                lora_version_acquired = False
-
         async def _execute_workflow() -> _RolloutResult | None:
             """Execute workflow.arun_episode and apply AReaL-specific logic."""
             task_id = pending_task.task_id
