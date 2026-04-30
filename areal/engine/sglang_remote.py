@@ -157,6 +157,13 @@ class SGLangBackend:
                 ]
             )
 
+    def build_lora_unload_request(self, lora_name: str, version: int) -> HttpRequest:
+        """Build SGLang LoRA unload request."""
+        return HttpRequest(
+            endpoint="/unload_lora_adapter",
+            payload={"lora_name": get_versioned_lora_name(lora_name, version)},
+        )
+
     def build_distributed_weight_update_requests(
         self, meta: WeightUpdateMeta, param_specs: list[ParamSpec]
     ) -> WeightUpdateRequests:

@@ -363,6 +363,11 @@ class RemoteInfEngine(InferenceEngine):
         self._initialized = False
         self._proxy_gateway_addr: str | None = None
         self.local_server_processes: list[LocalInfServerInfo] = []
+        self._lora_lock = Lock()
+        self._lora_cleanup_lock = Lock()
+        self._active_lora_versions: dict[int, int] = {}
+        self._loaded_lora_versions: set[int] = set()
+        self._lora_name: str | None = None
 
     def _wait_for_server(self, address: str, process: subprocess.Popen | None = None):
         """Wait for a server to become healthy."""
@@ -501,6 +506,110 @@ class RemoteInfEngine(InferenceEngine):
         """Get the current weight version."""
         with self.lock:
             return self._version
+
+    def acquire_lora_version(self, version: int) -> None:
+        """Mark a LoRA version as in-use by an active rollout task."""
+        if not self.config.use_lora:
+            return
+        with self._lora_lock:
+            self._active_lora_versions[version] = (
+                self._active_lora_versions.get(version, 0) + 1
+            )
+
+    def release_lora_version(self, version: int) -> None:
+        """Release a LoRA version held by a completed rollout task."""
+        if not self.config.use_lora:
+            return
+        with self._lora_lock:
+            active_count = self._active_lora_versions.get(version, 0)
+            if active_count <= 1:
+                self._active_lora_versions.pop(version, None)
+            else:
+                self._active_lora_versions[version] = active_count - 1
+        self._schedule_lora_cleanup()
+
+    def _ensure_lora_tracking(self, lora_name: str) -> None:
+        if not self.config.use_lora or not lora_name:
+            return
+        with self._lora_lock:
+            if self._lora_name is None:
+                self._lora_name = lora_name
+                # The initial adapter is preloaded as v0 when LoRA is enabled.
+                self._loaded_lora_versions.add(0)
+            elif self._lora_name != lora_name:
+                raise ValueError(
+                    f"RemoteInfEngine can track one LoRA name at a time, got "
+                    f"{lora_name!r} after {self._lora_name!r}."
+                )
+
+    def _mark_lora_version_loaded(self, meta: WeightUpdateMeta) -> None:
+        if not meta.use_lora or meta.version is None:
+            return
+        self._ensure_lora_tracking(meta.lora_name)
+        with self._lora_lock:
+            self._loaded_lora_versions.add(meta.version)
+
+    def _schedule_lora_cleanup(self) -> None:
+        if not self.config.use_lora:
+            return
+
+        fut = get_executor().submit(self._cleanup_stale_lora_versions)
+
+        def callback(fut):
+            try:
+                fut.result()
+            except Exception as exc:  # pragma: no cover - defensive logging
+                engine_logger = getattr(self, "logger", logger)
+                engine_logger.warning("LoRA cleanup failed: %s", exc, exc_info=True)
+
+        fut.add_done_callback(callback)
+
+    def _cleanup_stale_lora_versions(self) -> None:
+        if not self.config.use_lora:
+            return
+        if not self.addresses:
+            return
+        build_unload_request = getattr(self.backend, "build_lora_unload_request", None)
+        if build_unload_request is None:
+            return
+        if not self._lora_cleanup_lock.acquire(blocking=False):
+            return
+
+        try:
+            with self._lora_lock:
+                if self._lora_name is None or not self._loaded_lora_versions:
+                    return
+                latest_version = max(self._loaded_lora_versions)
+                keep_versions = max(1, self.config.max_head_offpolicyness + 2)
+                min_kept_version = latest_version - keep_versions + 1
+                stale_versions = [
+                    version
+                    for version in sorted(self._loaded_lora_versions)
+                    if version < min_kept_version
+                    and self._active_lora_versions.get(version, 0) == 0
+                ]
+                lora_name = self._lora_name
+
+            engine_logger = getattr(self, "logger", logger)
+            for version in stale_versions:
+                req = build_unload_request(lora_name, version)
+                try:
+                    self._run_request_on_all_servers(req)
+                except Exception as exc:
+                    engine_logger.warning(
+                        "Failed to unload stale LoRA adapter %s-v%s: %s",
+                        lora_name,
+                        version,
+                        exc,
+                        exc_info=True,
+                    )
+                    continue
+
+                with self._lora_lock:
+                    if self._active_lora_versions.get(version, 0) == 0:
+                        self._loaded_lora_versions.discard(version)
+        finally:
+            self._lora_cleanup_lock.release()
 
     def set_proxy_gateway_addr(self, addr: str) -> None:
         """Set the proxy gateway address.
@@ -780,6 +889,10 @@ class RemoteInfEngine(InferenceEngine):
 
         # Get the shared session from workflow context
         session = await workflow_context.get_aiohttp_session()
+        pinned_version = workflow_context.get().model_version
+        request_version = (
+            pinned_version if pinned_version is not None else self.get_version()
+        )
 
         # Deal with rollout interruption
         stop_reason = None
@@ -797,7 +910,7 @@ class RemoteInfEngine(InferenceEngine):
             http_req = self.backend.build_generation_request(
                 req,
                 with_lora=self.config.use_lora,
-                version=self.get_version(),
+                version=request_version,
             )
 
             # Loop until the generation is complete
@@ -836,7 +949,7 @@ class RemoteInfEngine(InferenceEngine):
             accumulated_output_tokens.extend(gen_result.output_tokens)
             accumulated_output_logprobs.extend(gen_result.output_logprobs)
             accumulated_versions.extend(
-                [self.get_version()] * len(gen_result.output_tokens)
+                [request_version] * len(gen_result.output_tokens)
             )
             # Accumulate routed_experts for MoE models
             if gen_result.routed_experts is not None:
@@ -989,6 +1102,10 @@ class RemoteInfEngine(InferenceEngine):
                 "Experiment and trial names must be set for disk-based weight updates."
             )
 
+        if meta.use_lora:
+            self._ensure_lora_tracking(meta.lora_name)
+            self._cleanup_stale_lora_versions()
+
         fut = get_executor().submit(
             _update_weights_from_disk,
             self.backend,
@@ -1003,6 +1120,9 @@ class RemoteInfEngine(InferenceEngine):
 
         def callback(fut):
             respond_time = fut.result()
+            if meta.use_lora:
+                self._mark_lora_version_loaded(meta)
+                self._schedule_lora_cleanup()
             self.logger.info(
                 f"Loading weights from disk done "
                 f"in {(time.perf_counter() - tik):.2f}s. "
