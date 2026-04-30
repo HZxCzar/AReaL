@@ -371,11 +371,6 @@ class BatchTaskDispatcher(Generic[TInput, TResult]):
                     if self.enable_tracing:
                         self.logger.info(f"Submit rollout. {self._rollout_stats()}")
                 except TaskQueueFullError:
-                    release_on_submit_failure = getattr(
-                        task_fn, "_release_on_submit_failure", None
-                    )
-                    if release_on_submit_failure is not None:
-                        release_on_submit_failure()
                     with self._input_cv:
                         self._pending_inputs.appendleft(task_input)
                         self._input_cv.wait_for(
@@ -386,13 +381,6 @@ class BatchTaskDispatcher(Generic[TInput, TResult]):
                         )
                     # Allow other threads to make progress before retrying
                     continue
-                except Exception:
-                    release_on_submit_failure = getattr(
-                        task_fn, "_release_on_submit_failure", None
-                    )
-                    if release_on_submit_failure is not None:
-                        release_on_submit_failure()
-                    raise
 
             except Exception as e:
                 self.logger.error("Producer thread failed", exc_info=True)
@@ -1055,16 +1043,17 @@ class WorkflowExecutor:
 
         async def _execute_workflow() -> _RolloutResult | None:
             """Execute workflow.arun_episode and apply AReaL-specific logic."""
+<<<<<<< HEAD
+=======
+            task_id = pending_task.task_id
+
+>>>>>>> parent of 8a0d21a (loraa unload)
             # Set task_id in ContextVar before entering arun_episode
             perf_tracer.set_task_id(task_id)
 
             # Set workflow execution context
             workflow_context.set(
-                WorkflowContext(
-                    is_eval=pending_task.is_eval,
-                    task_id=task_id,
-                    model_version=model_version,
-                )
+                WorkflowContext(is_eval=pending_task.is_eval, task_id=task_id)
             )
 
             manager = self.staleness_manager
@@ -1169,10 +1158,7 @@ class WorkflowExecutor:
                         "Workflow execution failed: %s", exc, exc_info=True
                     )
                 return None
-            finally:
-                release_lora_version()
 
-        setattr(_execute_workflow, "_release_on_submit_failure", release_lora_version)
         return _execute_workflow
 
     def submit(

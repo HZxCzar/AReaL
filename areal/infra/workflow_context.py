@@ -27,13 +27,10 @@ class WorkflowContext:
         Whether the workflow is running in evaluation mode.
     task_id : int | None
         The task ID assigned by the workflow executor.
-    model_version : int | None
-        The model version pinned for this workflow task.
     """
 
     is_eval: bool = False
     task_id: int | None = None
-    model_version: int | None = None
 
 
 _current_context: ContextVar[WorkflowContext] = ContextVar(
