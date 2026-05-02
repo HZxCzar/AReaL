@@ -19,6 +19,9 @@ VALID_DATASETS = [
     "virl39k",
     "hh-rlhf",
     "torl_data",
+    "hanabi",
+    "werewolf",
+    "kuhn_poker",
 ]
 
 logger = logging.getLogger("Dataset")
@@ -117,6 +120,48 @@ def _get_custom_dataset(
         from .torl_data import get_torl_data_rl_dataset
 
         return get_torl_data_rl_dataset(
+            path=path,
+            split=split,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            **kwargs,
+        )
+    elif "hanabi" in path.lower() and type == "sft":
+        from .legacy.hanabi import get_hanabi_sft_dataset
+
+        return get_hanabi_sft_dataset(
+            path=path,
+            split=split,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            **kwargs,
+        )
+    elif "hanabi" in path.lower() and type == "rl":
+        from .legacy.hanabi import get_hanabi_rl_dataset
+
+        return get_hanabi_rl_dataset(
+            path=path,
+            split=split,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            **kwargs,
+        )
+    elif "werewolf" in path.lower() and type == "rl":
+        from .legacy.werewolf import get_werewolf_rl_dataset
+
+        return get_werewolf_rl_dataset(
+            path=path,
+            split=split,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            **kwargs,
+        )
+    elif (
+        "kuhn_poker" in path.lower() or "kuhn-poker" in path.lower()
+    ) and type == "rl":
+        from .legacy.werewolf import get_werewolf_rl_dataset
+
+        return get_werewolf_rl_dataset(
             path=path,
             split=split,
             tokenizer=tokenizer,

@@ -1,0 +1,103 @@
+experiment_name: hanabi-sft
+trial_name: trial0
+
+seed: 1
+enable_offload: false
+total_train_epochs: 1
+tokenizer_path: ${actor.path}
+
+cluster:
+  n_nodes: 4
+  n_gpus_per_node: 8
+  fileroot: /storage/openpsi/experiments
+  name_resolve:
+    type: nfs
+    nfs_record_root: /storage/openpsi/experiments
+
+scheduler:
+  type: null
+
+actor:
+  backend: "fsdp:d16p1t2"
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: /storage/openpsi/models/Qwen__Qwen3-4B
+  init_from_scratch: false
+  gradient_checkpointing: true
+  dtype: bfloat16
+  mb_spec:
+    max_tokens_per_mb: 32768
+  optimizer:
+    type: adam
+    lr: 2e-5
+    weight_decay: 0.05
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1e-5
+    lr_scheduler_type: cosine
+    gradient_clipping: 1.0
+  scheduling_spec:
+    - task_type: worker
+      port_count: 2
+      gpu: 1
+      cpu: 4
+      mem: 64
+      image: /storage/openpsi/images/areal-latest.sif
+      mount: /storage:/storage
+      cmd: python3 -m areal.infra.rpc.rpc_server
+      env_vars: {}
+
+train_dataset:
+  batch_size: 32
+  pin_memory: true
+  num_workers: 4
+  path: /storage/openpsi/data/hanabi-sft/Qwen3_data_Qwen3_template_small.jsonl
+  type: sft
+
+valid_dataset:
+  batch_size: 32
+  pin_memory: true
+  num_workers: 4
+  path: /storage/openpsi/data/hanabi-sft/Qwen3_data_Qwen3_template_small.jsonl
+  type: sft
+
+# Utilities
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: 100
+  freq_secs: 7200
+
+recover:
+  mode: disabled
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: 3600
+
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 3
+  freq_secs: null
+
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: online
+
+perf_tracer:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  enabled: false
+  session_tracer:
+    enabled: false

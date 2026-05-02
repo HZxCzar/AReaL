@@ -1218,6 +1218,12 @@ class PPOActorConfig(TrainEngineConfig):
     m2_threshold: float | None = field(
         default=None, metadata={"help": "The second momentum threshold for M2PO."}
     )
+    sft_reg: float = field(
+        default=1.0,
+        metadata={
+            "help": "Loss weight for SFT samples selected by the sft_ppo_mask field."
+        },
+    )
     # Reward
     reward_norm: NormConfig | None = field(
         default=None,

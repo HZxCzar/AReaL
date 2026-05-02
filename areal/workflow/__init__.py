@@ -4,12 +4,20 @@ __all__ = [
     "RLVRWorkflow",
     "MultiTurnWorkflow",
     "VisionRLVRWorkflow",
+    "HanabiWorkflow",
+    "HanabiOnlineSFTWorkflow",
+    "KuhnPokerWorkflow",
+    "WerewolfWorkflow",
 ]
 
 _LAZY_IMPORTS = {
     "RLVRWorkflow": "areal.workflow.rlvr",
     "MultiTurnWorkflow": "areal.workflow.multi_turn",
     "VisionRLVRWorkflow": "areal.workflow.vision_rlvr",
+    "HanabiWorkflow": "areal.workflow.hanabi",
+    "HanabiOnlineSFTWorkflow": "areal.workflow.hanabi_online_sft",
+    "KuhnPokerWorkflow": "areal.workflow.kuhn_poker",
+    "WerewolfWorkflow": "areal.workflow.werewolf",
 }
 
 

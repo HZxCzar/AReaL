@@ -38,6 +38,22 @@ from areal.utils.functional import (
 from areal.utils.perf_tracer import trace_perf
 
 logger = logging.getLogger("PPOActor")
+PPO_SFT_MASK_KEY = "sft_ppo_mask"
+
+
+def _split_batch_by_mask(data: dict[str, Any], mask: torch.Tensor) -> dict[str, Any]:
+    if mask.numel() == 0:
+        return {}
+    mask_list = mask.tolist()
+    filtered: dict[str, Any] = {}
+    for key, value in data.items():
+        if isinstance(value, torch.Tensor) and value.shape[0] == mask.shape[0]:
+            filtered[key] = value[mask]
+        elif isinstance(value, list) and len(value) == len(mask_list):
+            filtered[key] = [item for item, keep in zip(value, mask_list) if keep]
+        else:
+            filtered[key] = value
+    return filtered
 
 
 class PPOActor:
@@ -64,6 +80,7 @@ class PPOActor:
         self.temperature = config.temperature
 
         self.m2_threshold = config.m2_threshold
+        self.sft_reg = config.sft_reg
 
         # Log critical GSPO/GRPO configuration for reproducibility
         self._log_configuration()
@@ -251,6 +268,43 @@ class PPOActor:
         batched_call(self._ppo_update, data, unpack=False)
 
     def _ppo_update(self, data: dict[str, Any]) -> None:
+        mask = data.get(PPO_SFT_MASK_KEY)
+        if mask is not None:
+            mask = mask.view(-1).bool()
+            ppo_data = _split_batch_by_mask(data, ~mask)
+            sft_data = _split_batch_by_mask(data, mask)
+            ppo_data.pop(PPO_SFT_MASK_KEY, None)
+            sft_data.pop(PPO_SFT_MASK_KEY, None)
+        else:
+            ppo_data = data
+            sft_data = None
+
+        ppo_tokens = (
+            int(ppo_data["loss_mask"].count_nonzero())
+            if ppo_data and ppo_data["loss_mask"].numel() > 0
+            else 0
+        )
+        sft_tokens = (
+            int(sft_data["loss_mask"].count_nonzero())
+            if sft_data and sft_data["loss_mask"].numel() > 0
+            else 0
+        )
+        stats_tracker.scalar(
+            ppo_tokens=ppo_tokens,
+            sft_tokens=sft_tokens,
+            sft_reg=self.sft_reg,
+        )
+
+        if not ppo_data or ppo_data["loss_mask"].numel() == 0:
+            ppo_data = None
+
+        if ppo_data is not None:
+            self._ppo_update_rl(ppo_data)
+
+        if sft_data is not None and sft_data.get("loss_mask") is not None:
+            self._ppo_update_sft(sft_data)
+
+    def _ppo_update_rl(self, data: dict[str, Any]) -> None:
         attn_mask = data["attention_mask"]
         loss_mask = data["loss_mask"]
         reward_score = data["rewards"]
@@ -358,6 +412,38 @@ class PPOActor:
                     loss_weight_fn=lambda x: x["loss_mask"].count_nonzero(),
                 )
                 stats_tracker.scalar(**train_stat)
+
+    def _ppo_update_sft(self, data: dict[str, Any]) -> None:
+        for key in [
+            "advantages",
+            "kl_rewards",
+            "tot_rewards",
+            "rewards",
+            "prox_logp",
+            "ref_logp",
+            "logprobs",
+            "versions",
+        ]:
+            data.pop(key, None)
+
+        if data["loss_mask"].numel() == 0:
+            return
+
+        self.engine.train()
+        mb_inputs = split_padded_tensor_dict_into_mb_list(
+            data,
+            mb_spec=MicroBatchSpec(n_mbs=self.config.ppo_n_minibatches),
+        )
+        for mb in mb_inputs.mbs:
+            train_stat = self.engine.train_batch(
+                mb,
+                loss_fn=functools.partial(
+                    sft_loss_fn,
+                    sft_reg=self.sft_reg,
+                ),
+                loss_weight_fn=lambda x: x["loss_mask"].count_nonzero(),
+            )
+            stats_tracker.scalar(**train_stat)
 
 
 class PPOActorController(TrainController):
@@ -589,6 +675,46 @@ def grpo_loss_fn(
         )
 
     return loss
+
+
+def sft_loss_fn(
+    logprobs: torch.Tensor,
+    entropy: torch.Tensor,  # noqa: ARG001
+    input_data: dict,
+    sft_reg: float = 1.0,
+    vocab_min_logits: torch.Tensor | None = None,
+    vocab_max_logits: torch.Tensor | None = None,
+):
+    """Cross-entropy loss for samples marked by ``sft_ppo_mask``."""
+    loss_mask = input_data["loss_mask"].bool()
+    if loss_mask.ndim > 1:
+        loss_mask = loss_mask.reshape(-1)
+    logprobs = logprobs.reshape(-1)
+    loss_mask = torch.roll(loss_mask, shifts=-1, dims=-1)
+    logprobs = torch.where(loss_mask, logprobs, 0.0)
+    loss = -logprobs.sum() / loss_mask.count_nonzero().clamp(min=1)
+
+    valid_logprobs = logprobs[loss_mask]
+    mean_logp = (
+        valid_logprobs.mean()
+        if valid_logprobs.numel() > 0
+        else torch.tensor(0.0, device=logprobs.device)
+    )
+    stats_tracker.scalar(
+        sft_loss=loss.item(),
+        sft_mean_logp=mean_logp.item(),
+        sft_tokens=int(loss_mask.count_nonzero()),
+    )
+    if vocab_min_logits is not None and vocab_max_logits is not None:
+        if vocab_min_logits.ndim > 1:
+            vocab_min_logits = vocab_min_logits.reshape(-1)
+        if vocab_max_logits.ndim > 1:
+            vocab_max_logits = vocab_max_logits.reshape(-1)
+        stats_tracker.scalar(
+            sft_vocab_min_logits=float(vocab_min_logits.mean().item()),
+            sft_vocab_max_logits=float(vocab_max_logits.max().item()),
+        )
+    return loss * sft_reg
 
 
 # =============================================================================
