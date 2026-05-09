@@ -7,7 +7,6 @@ import pathlib
 import sys
 from datetime import datetime
 from pathlib import Path
-from textwrap import dedent
 from typing import Any
 
 sys.path.append(str(pathlib.Path(__file__).parent))
@@ -48,22 +47,7 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
             label = "transfer_student"
         else:
             label = "student"
-        teacher_feedback = teacher_action or "(none, produce the first answer attempt)"
-        visible_history = self._student_visible_history_summaries(history)
-        prompt = dedent(
-            f"""\
-            Task:
-            {task}
-
-            Visible student history:
-            {"No previous visible turns." if not visible_history else "\n".join(visible_history)}
-
-            Current teacher feedback:
-            {teacher_feedback}
-
-            Reply with only the student's next answer attempt.
-            """
-        ).strip()
+        prompt = self._build_student_prompt(task, teacher_action, history)
         messages = [
             {"role": "system", "content": self.student_system_prompt},
             {"role": "user", "content": prompt},
@@ -81,11 +65,7 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
     async def _run_leak_check(
         self, task: str, ground_truth: str, teacher_action: str
     ):
-        prompt = (
-            f"Task:\n{task}\n\nGround Truth:\n{ground_truth}\n\nTeacher Message:\n"
-            f"{teacher_action or '(empty)'}\n\nReturn JSON only with this schema:\n"
-            '{\n  "leaked": false,\n  "feedback": "short explanation"\n}'
-        )
+        prompt = self._build_leak_check_prompt(task, ground_truth, teacher_action)
         messages = [
             {"role": "system", "content": self.leak_check_system_prompt},
             {"role": "user", "content": prompt},
@@ -96,13 +76,7 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
         return result
 
     async def _run_transfer_generation(self, task: str, ground_truth: str):
-        prompt = (
-            f"Original Task:\n{task}\n\nOriginal Ground Truth:\n{ground_truth}\n\n"
-            "Create one new, self-contained problem that is clearly similar in structure "
-            "and solution method, but not a restatement of the original problem.\n"
-            "Return JSON only with this schema:\n"
-            '{\n  "task": "new problem statement",\n  "ground_truth": "final answer only",\n  "similarity_notes": "optional short note"\n}'
-        )
+        prompt = self._build_transfer_generation_prompt(task, ground_truth)
         messages = [
             {"role": "system", "content": self.generator_system_prompt},
             {"role": "user", "content": prompt},
@@ -136,6 +110,7 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         top_p=config.gconfig.top_p,
         max_completion_tokens=config.gconfig.max_new_tokens,
         max_turns=config.max_turns,
+        enable_thinking=config.enable_thinking,
         aux_base_url=config.aux_base_url,
         aux_model=config.aux_model,
         aux_api_key=config.aux_api_key,
@@ -146,10 +121,8 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         max_concurrent_aux_calls=config.max_concurrent_aux_calls,
         api_params_config_path=config.api_params_config_path or None,
         api_params_key=config.api_params_key or None,
-        primary_success_reward=config.primary_success_reward,
+        term_success_reward=config.term_success_reward,
         transfer_bonus_reward=config.transfer_bonus_reward,
-        transfer_success_reward=config.transfer_success_reward,
-        transfer_fail_reward=config.transfer_fail_reward,
         token_budget_penalty=config.token_budget_penalty,
         teacher_system_prompt=config.teacher_system_prompt,
         student_system_prompt=config.student_system_prompt,
@@ -213,6 +186,7 @@ async def _run_one(
         "teacher_model_override": teacher_model,
         "workflow_config": {
             "max_turns": config.max_turns,
+            "enable_thinking": config.enable_thinking,
             "max_completion_tokens": config.gconfig.max_new_tokens,
             "max_episode_total_tokens": config.gconfig.max_tokens,
             "aux_base_url": config.aux_base_url,

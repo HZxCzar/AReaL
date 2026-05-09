@@ -7,7 +7,6 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from textwrap import dedent
 from typing import Any
 
 try:
@@ -47,6 +46,15 @@ from examples.common.chat_budget import ChatContextBudget
 from examples.common.episode_budget import EpisodeTokenBudget
 from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig, make_teacher_client
 from examples.common.parsing import join_errors, parse_json_dict
+from examples.tutor.prompts import (
+    LEAK_CHECK_USER_TEMPLATE,
+    STUDENT_USER_TEMPLATE,
+    TEACHER_FOLLOWUP_USER_TEMPLATE,
+    TEACHER_INITIAL_USER_TEMPLATE,
+    TRANSFER_GENERATION_USER_TEMPLATE,
+    TRANSFER_STUDENT_USER_TEMPLATE,
+    render_prompt,
+)
 
 logger = logging.getLogger("TutorWorkflow")
 
@@ -92,6 +100,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         gconfig: Any | None = None,
         tokenizer: str | Any | None = None,
         max_turns: int = 6,
+        enable_thinking: bool = False,
         temperature: float = 1.0,
         top_p: float = 1.0,
         max_completion_tokens: int = 512,
@@ -107,10 +116,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         max_concurrent_aux_calls: int = 8,
         api_params_config_path: str | None = None,
         api_params_key: str | None = None,
-        primary_success_reward: float = 1.0,
+        term_success_reward: float = 1.0,
         transfer_bonus_reward: float = 0.5,
-        transfer_success_reward: float = 1.2,
-        transfer_fail_reward: float = 0.6,
         teacher_system_prompt: str = "",
         student_system_prompt: str = "",
         judge_system_prompt: str = "",
@@ -125,6 +132,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         context_window_margin: int = 256,
     ):
         self.max_turns = max_turns
+        self.enable_thinking = enable_thinking
         self.gconfig = gconfig
         self.temperature = (
             gconfig.temperature if gconfig is not None else temperature
@@ -135,10 +143,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         self.tool_call_parser = tool_call_parser
         self.reasoning_parser = reasoning_parser
-        self.primary_success_reward = primary_success_reward
+        self.term_success_reward = term_success_reward
         self.transfer_bonus_reward = transfer_bonus_reward
-        self.transfer_success_reward = transfer_success_reward
-        self.transfer_fail_reward = transfer_fail_reward
         self.teacher_system_prompt = teacher_system_prompt.strip()
         self.student_system_prompt = student_system_prompt.strip()
         self.judge_system_prompt = judge_system_prompt.strip()
@@ -286,6 +292,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     "temperature": self.temperature,
                     "top_p": self.top_p,
                     "max_completion_tokens": safe_max_completion_tokens,
+                    "extra_body": {
+                        "chat_template_kwargs": {
+                            "enable_thinking": self.enable_thinking,
+                        },
+                    },
                 }
                 if self.max_episode_total_tokens is not None:
                     create_kwargs["max_total_tokens"] = self.max_episode_total_tokens
@@ -331,21 +342,35 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 prompt_text=teacher_messages[-1]["content"],
                 completion_text=teacher_action,
             )
-
             if pre_solved:
-                termination_reason = "pre_solved"
-                history.append(
-                    {
-                        "round_idx": round_idx,
-                        "teacher_action": teacher_action,
-                        "reward": 0.0,
-                        "pre_solved_terminal": True,
-                        "turn_prompt_tokens": budget_snapshot.turn_prompt_tokens,
-                        "turn_completion_tokens": budget_snapshot.turn_completion_tokens,
-                        "turn_total_tokens": budget_snapshot.turn_total_tokens,
-                        "termination_feedback": budget_snapshot.stop_feedback,
-                    }
+                termination_feedback = (
+                    "Student solved the task before teaching; stopped after one "
+                    "zero-reward tutor action to keep the GRPO group complete."
                 )
+                if budget_snapshot.stop_feedback:
+                    termination_feedback = (
+                        f"{termination_feedback} {budget_snapshot.stop_feedback}"
+                    )
+                record: dict[str, Any] = {
+                    "round_idx": round_idx,
+                    "teacher_action": teacher_action,
+                    "student_answer": initial_student_answer,
+                    "student_error": student_error,
+                    "judge_feedback": judge_result.feedback,
+                    "judge_correct": judge_result.correct,
+                    "pre_solved": True,
+                    "leak_detected": False,
+                    "reward": 0.0,
+                    "turn_prompt_tokens": budget_snapshot.turn_prompt_tokens,
+                    "turn_completion_tokens": budget_snapshot.turn_completion_tokens,
+                    "turn_total_tokens": budget_snapshot.turn_total_tokens,
+                    "termination_feedback": termination_feedback,
+                }
+                record["student_visible_summary"] = self._build_student_visible_summary(
+                    record
+                )
+                history.append(record)
+                termination_reason = "pre_solved"
                 break
 
             leak_result = await self._run_leak_check(task, ground_truth, teacher_action)
@@ -412,14 +437,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
             }
             record["student_visible_summary"] = self._build_student_visible_summary(record)
             if judge_result.correct:
-                transfer_result = await self._run_transfer_round(task, ground_truth)
+                transfer_result = await self._run_transfer_round(
+                    task=task,
+                    ground_truth=ground_truth,
+                    initial_student_answer=initial_student_answer,
+                    history=[*history, record],
+                )
                 transfer_success = transfer_result["transfer_success"]
                 step_factor = (self.max_turns - round_idx + 1) / max(self.max_turns, 1)
-                reward = self.primary_success_reward * step_factor
+                reward = self.term_success_reward * step_factor
                 if transfer_success:
                     reward += self.transfer_bonus_reward * step_factor
                 record["step_factor"] = step_factor
-                record["primary_reward"] = self.primary_success_reward * step_factor
+                record["term_reward"] = self.term_success_reward * step_factor
                 record["transfer_bonus_reward"] = (
                     self.transfer_bonus_reward * step_factor if transfer_success else 0.0
                 )
@@ -462,18 +492,57 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     ]
                 )
 
+        self._log_rollout_stats(
+            history=history,
+            total_reward=total_reward,
+            termination_reason=termination_reason,
+            transfer_success=transfer_success,
+            leak_count=leak_count,
+        )
+        self.last_history = [dict(record) for record in history]
+        term_success = termination_reason in {
+            "success_transfer_pass",
+            "success_transfer_fail",
+        }
+        self._maybe_dump_debug_trace(
+            task=task,
+            ground_truth=ground_truth,
+            initial_student_answer=initial_student_answer,
+            latest_student_answer=latest_student_answer,
+            total_reward=total_reward,
+            history=history,
+            termination_reason=termination_reason,
+            pre_success=termination_reason == "pre_solved",
+            term_success=term_success,
+            transfer_success=bool(transfer_success),
+            leak_count=leak_count,
+        )
+        if last_completion_id is None:
+            return None
+        return total_reward, last_completion_id
+
+    def _log_rollout_stats(
+        self,
+        *,
+        history: list[dict[str, Any]],
+        total_reward: float,
+        termination_reason: str,
+        transfer_success: bool,
+        leak_count: int,
+    ) -> None:
         success_rounds = [
             int(record["round_idx"])
             for record in history
             if bool(record.get("judge_correct", False))
+            and not bool(record.get("pre_solved", False))
         ]
         leak_rounds = [
             int(record["round_idx"])
             for record in history
             if bool(record.get("leak_detected", False))
         ]
-        primary_reward_sum = sum(
-            float(record.get("primary_reward", 0.0) or 0.0) for record in history
+        term_reward_sum = sum(
+            float(record.get("term_reward", 0.0) or 0.0) for record in history
         )
         transfer_bonus_sum = sum(
             float(record.get("transfer_bonus_reward", 0.0) or 0.0)
@@ -488,8 +557,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             or [0]
         )
         max_total_tokens = max(
-            [int(record.get("turn_total_tokens", 0) or 0) for record in history]
-            or [0]
+            [int(record.get("turn_total_tokens", 0) or 0) for record in history] or [0]
         )
         avg_completion_tokens = sum(
             int(record.get("turn_completion_tokens", 0) or 0) for record in history
@@ -497,19 +565,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
         avg_total_tokens = sum(
             int(record.get("turn_total_tokens", 0) or 0) for record in history
         ) / max(len(history), 1)
+        term_success = termination_reason in {
+            "success_transfer_pass",
+            "success_transfer_fail",
+        }
         _safe_scalar(
             reward=total_reward,
             num_turns=len(history),
             leak_count=leak_count,
-            primary_success=bool(latest_judge_result.correct),
-            transfer_success=transfer_success,
+            pre_success=float(termination_reason == "pre_solved"),
+            term_success=float(term_success),
+            transfer_success=float(transfer_success),
             term_budget=float(termination_reason == "episode_total_token_budget"),
             term_max_turns=float(termination_reason == "max_turns"),
-            term_success=float(
-                termination_reason
-                in {"success_transfer_pass", "success_transfer_fail"}
-            ),
-            term_pre_solved=float(termination_reason == "pre_solved"),
             term_continue=float(termination_reason == "continue"),
             length_penalty_rate=float(length_penalty_count > 0),
             length_penalty_count=length_penalty_count,
@@ -518,27 +586,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             avg_total_tokens=avg_total_tokens,
             max_completion_tokens=max_completion_tokens,
             max_total_tokens=max_total_tokens,
-            primary_reward_sum=primary_reward_sum,
+            term_reward_sum=term_reward_sum,
             transfer_bonus_sum=transfer_bonus_sum,
             success_round=success_rounds[0] if success_rounds else 0,
             leak_first_round=leak_rounds[0] if leak_rounds else 0,
         )
-        self.last_history = [dict(record) for record in history]
-        self._maybe_dump_debug_trace(
-            task=task,
-            ground_truth=ground_truth,
-            initial_student_answer=initial_student_answer,
-            latest_student_answer=latest_student_answer,
-            total_reward=total_reward,
-            history=history,
-            termination_reason=termination_reason,
-            primary_success=bool(latest_judge_result.correct),
-            transfer_success=bool(transfer_success),
-            leak_count=leak_count,
-        )
-        if last_completion_id is None:
-            return None
-        return total_reward, last_completion_id
 
     async def _run_student(
         self,
@@ -546,54 +598,46 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_action: str | None,
         history: list[dict[str, Any]],
     ) -> tuple[str, str | None]:
-        teacher_feedback = teacher_action or "(none, produce the first answer attempt)"
-        visible_history = self._student_visible_history_summaries(history)
-        prompt = dedent(
-            f"""\
-            Task:
-            {task}
-
-            Visible student history:
-            {"No previous visible turns." if not visible_history else "\n".join(visible_history)}
-
-            Current teacher feedback:
-            {teacher_feedback}
-
-            Reply with only the student's next answer attempt.
-            """
-        ).strip()
+        prompt = self._build_student_prompt(task, teacher_action, history)
         try:
-            answer = await self.aux_caller.call_text(
-                [
-                    {"role": "system", "content": self.student_system_prompt},
-                    {"role": "user", "content": prompt},
-                ]
-            )
+            answer = await self._call_student_prompt(prompt)
             return answer, None
         except Exception as exc:
             return "", f"Student call failed: {exc}"
 
+    async def _run_transfer_student(
+        self,
+        *,
+        original_task: str,
+        initial_student_answer: str,
+        history: list[dict[str, Any]],
+        transfer_task: str,
+    ) -> tuple[str, str | None]:
+        prompt = self._build_transfer_student_prompt(
+            original_task=original_task,
+            initial_student_answer=initial_student_answer,
+            history=history,
+            transfer_task=transfer_task,
+        )
+        try:
+            answer = await self._call_student_prompt(prompt)
+            return answer, None
+        except Exception as exc:
+            return "", f"Transfer student call failed: {exc}"
+
+    async def _call_student_prompt(self, prompt: str) -> str:
+        answer = await self.aux_caller.call_text(
+            [
+                {"role": "system", "content": self.student_system_prompt},
+                {"role": "user", "content": prompt},
+            ]
+        )
+        return answer
+
     async def _run_leak_check(
         self, task: str, ground_truth: str, teacher_action: str
     ) -> LeakCheckResult:
-        prompt = dedent(
-            f"""\
-            Task:
-            {task}
-
-            Ground Truth:
-            {ground_truth}
-
-            Teacher Message:
-            {teacher_action or "(empty)"}
-
-            Return JSON only with this schema:
-            {{
-              "leaked": false,
-              "feedback": "short explanation"
-            }}
-            """
-        ).strip()
+        prompt = self._build_leak_check_prompt(task, ground_truth, teacher_action)
         try:
             raw_output = await self.aux_caller.call_text(
                 [
@@ -606,7 +650,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return self._parse_leak_check_result(raw_output)
 
     async def _run_transfer_round(
-        self, task: str, ground_truth: str
+        self,
+        *,
+        task: str,
+        ground_truth: str,
+        initial_student_answer: str,
+        history: list[dict[str, Any]],
     ) -> dict[str, Any]:
         generation = await self._run_transfer_generation(task, ground_truth)
         payload: dict[str, Any] = {
@@ -618,8 +667,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         }
         if not generation.task or not generation.ground_truth:
             return payload
-        answer, answer_error = await self._run_student(
-            generation.task, teacher_action=None, history=[]
+        answer, answer_error = await self._run_transfer_student(
+            original_task=task,
+            initial_student_answer=initial_student_answer,
+            history=history,
+            transfer_task=generation.task,
         )
         judge_result = self._score_aime_answer(
             generation.task, generation.ground_truth, answer
@@ -637,23 +689,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
     async def _run_transfer_generation(
         self, task: str, ground_truth: str
     ) -> GeneratedProblemResult:
-        prompt = dedent(
-            f"""\
-            Original Task:
-            {task}
-
-            Original Ground Truth:
-            {ground_truth}
-
-            Create one new, self-contained problem that is clearly similar in structure and solution method, but not a restatement of the original problem.
-            Return JSON only with this schema:
-            {{
-              "task": "new problem statement",
-              "ground_truth": "final answer only",
-              "similarity_notes": "optional short note"
-            }}
-            """
-        ).strip()
+        prompt = self._build_transfer_generation_prompt(task, ground_truth)
         try:
             raw_output = await self.aux_caller.call_text(
                 [
@@ -674,8 +710,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
             parse_error = join_errors(parse_error, '"task" must be a string')
             task_value = ""
         if not isinstance(gt_value, str):
-            parse_error = join_errors(parse_error, '"ground_truth" must be a string')
-            gt_value = ""
+            if isinstance(gt_value, (int, float)) and not isinstance(gt_value, bool):
+                if isinstance(gt_value, int):
+                    gt_value = str(gt_value)
+                else:
+                    gt_value = str(int(gt_value) if gt_value.is_integer() else gt_value)
+            else:
+                parse_error = join_errors(
+                    parse_error, '"ground_truth" must be a string or number'
+                )
+                gt_value = ""
         if not isinstance(notes, str):
             notes = str(notes)
         return GeneratedProblemResult(
@@ -701,26 +745,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if pre_solved
             else "The student still needs guidance."
         )
-        return dedent(
-            f"""\
-            Task:
-            {task}
-
-            Ground Truth:
-            {ground_truth}
-
-            Turn 0:
-            - Student initial answer: {initial_student_answer or '(empty)'}
-            - Initial judge result: {'correct' if latest_judge_result.correct else 'incorrect'}
-            - Initial judge feedback: {latest_judge_result.feedback}
-            - Current round: {round_idx - 1}/{self.max_turns}
-            - Remaining rounds: {max(self.max_turns - round_idx + 1, 0)}
-            - Pre-solved: {pre_solved}
-            - Note: {pre_solved_note}
-
-            Reply with concise tutoring guidance only. Do not reveal the final answer directly.
-            """
-        ).strip()
+        return render_prompt(
+            TEACHER_INITIAL_USER_TEMPLATE,
+            task=task,
+            ground_truth=ground_truth,
+            initial_student_answer=initial_student_answer,
+            initial_correct=latest_judge_result.correct,
+            initial_feedback=latest_judge_result.feedback,
+            current_round=round_idx - 1,
+            max_turns=self.max_turns,
+            remaining_rounds=max(self.max_turns - round_idx + 1, 0),
+            pre_solved=pre_solved,
+            pre_solved_note=pre_solved_note,
+        )
 
     def _build_teacher_followup_prompt(
         self,
@@ -729,49 +766,75 @@ class TutorAgentWorkflow(RolloutWorkflow):
         round_idx: int,
         pre_solved: bool,
     ) -> str:
-        lines = [
-            f"Turn {latest_record['round_idx']} update:",
-            f"- Current round: {round_idx - 1}/{self.max_turns}",
-            f"- Remaining rounds: {max(self.max_turns - round_idx + 1, 0)}",
-            f"- Pre-solved: {pre_solved}",
-        ]
-        if latest_record.get("leak_detected"):
-            lines.append(
-                "- Env feedback: "
-                + (
-                    latest_record.get("leak_feedback")
-                    or "The previous teacher turn leaked the answer and the student did not see it."
-                )
-            )
-            lines.append(
-                f"- Latest judge result: {'correct' if latest_judge_result.correct else 'incorrect'}"
-            )
-            lines.append(f"- Latest judge feedback: {latest_judge_result.feedback}")
-        else:
-            lines.append(
-                f"- Student reply: {latest_record.get('student_answer', '(empty)') or '(empty)'}"
-            )
-            lines.append(
-                f"- Judge result: {'correct' if latest_record.get('judge_correct') else 'incorrect'}"
-            )
-            lines.append(
-                f"- Judge feedback: {latest_record.get('judge_feedback') or '(empty)'}"
-            )
-            if latest_record.get("transfer_triggered"):
-                lines.append(
-                    f"- Transfer success: {bool(latest_record.get('transfer_success'))}"
-                )
-                lines.append(
-                    f"- Transfer judge feedback: {latest_record.get('transfer_judge_feedback') or '(empty)'}"
-                )
-            if latest_record.get("termination_feedback"):
-                lines.append(
-                    f"- Budget feedback: {latest_record.get('termination_feedback')}"
-                )
-        lines.append(
-            "Reply with concise tutoring guidance only. Do not reveal the final answer directly."
+        leak_feedback = (
+            latest_record.get("leak_feedback")
+            or "The previous teacher turn leaked the answer and the student did not see it."
         )
-        return "\n".join(lines)
+        return render_prompt(
+            TEACHER_FOLLOWUP_USER_TEMPLATE,
+            previous_round_idx=latest_record["round_idx"],
+            current_round=round_idx - 1,
+            max_turns=self.max_turns,
+            remaining_rounds=max(self.max_turns - round_idx + 1, 0),
+            pre_solved=pre_solved,
+            leak_detected=bool(latest_record.get("leak_detected")),
+            leak_feedback=leak_feedback,
+            latest_correct=latest_judge_result.correct,
+            latest_feedback=latest_judge_result.feedback,
+            student_answer=latest_record.get("student_answer", ""),
+            judge_correct=bool(latest_record.get("judge_correct")),
+            judge_feedback=latest_record.get("judge_feedback", ""),
+            transfer_triggered=bool(latest_record.get("transfer_triggered")),
+            transfer_success=bool(latest_record.get("transfer_success")),
+            transfer_judge_feedback=latest_record.get("transfer_judge_feedback", ""),
+            termination_feedback=latest_record.get("termination_feedback", ""),
+        )
+
+    def _build_student_prompt(
+        self,
+        task: str,
+        teacher_action: str | None,
+        history: list[dict[str, Any]],
+    ) -> str:
+        return render_prompt(
+            STUDENT_USER_TEMPLATE,
+            task=task,
+            visible_history=self._student_visible_history_summaries(history),
+            teacher_feedback=teacher_action or "(none, produce the first answer attempt)",
+        )
+
+    def _build_transfer_student_prompt(
+        self,
+        *,
+        original_task: str,
+        initial_student_answer: str,
+        history: list[dict[str, Any]],
+        transfer_task: str,
+    ) -> str:
+        return render_prompt(
+            TRANSFER_STUDENT_USER_TEMPLATE,
+            original_task=original_task,
+            initial_student_answer=initial_student_answer,
+            visible_history=self._student_visible_history_summaries(history),
+            transfer_task=transfer_task,
+        )
+
+    def _build_leak_check_prompt(
+        self, task: str, ground_truth: str, teacher_action: str
+    ) -> str:
+        return render_prompt(
+            LEAK_CHECK_USER_TEMPLATE,
+            task=task,
+            ground_truth=ground_truth,
+            teacher_action=teacher_action,
+        )
+
+    def _build_transfer_generation_prompt(self, task: str, ground_truth: str) -> str:
+        return render_prompt(
+            TRANSFER_GENERATION_USER_TEMPLATE,
+            task=task,
+            ground_truth=ground_truth,
+        )
 
     def _score_aime_answer(
         self, task: str, ground_truth: str, student_answer: str
@@ -868,7 +931,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         total_reward: float,
         history: list[dict[str, Any]],
         termination_reason: str,
-        primary_success: bool,
+        pre_success: bool,
+        term_success: bool,
         transfer_success: bool,
         leak_count: int,
     ) -> None:
@@ -898,7 +962,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                         "judge_correct": bool(record.get("judge_correct", False)),
                         "reward": float(record.get("reward", 0.0) or 0.0),
                         "step_factor": record.get("step_factor"),
-                        "primary_reward": record.get("primary_reward"),
+                        "term_reward": record.get("term_reward"),
                         "transfer_bonus_reward": record.get("transfer_bonus_reward"),
                         "leak_detected": bool(record.get("leak_detected", False)),
                         "leak_feedback": record.get("leak_feedback"),
@@ -918,11 +982,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "termination_reason": termination_reason,
                 "total_reward": float(total_reward),
                 "num_turns": len(history),
-                "primary_success": bool(primary_success),
+                "pre_success": bool(pre_success),
+                "term_success": bool(term_success),
                 "transfer_success": bool(transfer_success),
                 "leak_count": int(leak_count),
-                "primary_reward_sum": float(
-                    sum(float(record.get("primary_reward", 0.0) or 0.0) for record in history)
+                "term_reward_sum": float(
+                    sum(float(record.get("term_reward", 0.0) or 0.0) for record in history)
                 ),
                 "transfer_bonus_sum": float(
                     sum(

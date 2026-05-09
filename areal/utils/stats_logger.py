@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import getpass
+import json
 import os
 import time
 from dataclasses import asdict
@@ -30,6 +31,11 @@ class StatsLogger:
         self.exp_config = config
         self.config = config.stats_logger
         self.ft_spec = ft_spec
+        self.log_path = self.get_log_path(self.config)
+        self.metrics_jsonl_path = os.path.join(self.log_path, "metrics.jsonl")
+        self.ppo_diagnostics_jsonl_path = os.path.join(
+            self.log_path, "ppo_diagnostics.jsonl"
+        )
         self.init()
 
         self._last_commit_step = -1
@@ -71,7 +77,7 @@ class StatsLogger:
             notes=self.config.wandb.notes,
             tags=self.config.wandb.tags,
             config=exp_config_dict,  # save all experiment config to wandb
-            dir=self.get_log_path(self.config),
+            dir=self.log_path,
             force=True,
             id=f"{self.config.experiment_name}_{self.config.trial_name}_{suffix}",
             resume="allow",
@@ -90,7 +96,7 @@ class StatsLogger:
             experiment_name=swanlab_config.name or self.config.trial_name + "_train",
             # NOTE: change from swanlab_config.config to log all experiment config, to be tested
             config=exp_config_dict,
-            logdir=self.get_log_path(self.config),
+            logdir=self.log_path,
             mode=swanlab_config.mode,
         )
 
@@ -146,20 +152,106 @@ class StatsLogger:
         for i, item in enumerate(data):
             # Filter out counter keys for scalar variables
             item = {k: v for k, v in item.items() if not k.endswith("__count")}
+            current_step = log_step + i
 
             logger.info(f"Stats ({i + 1}/{len(data)}):")
             self.print_stats(item)
-            wandb.log(item, step=log_step + i)
-            swanlab.log(item, step=log_step + i)
+            self._write_local_stats(epoch, step, global_step, current_step, item)
+            wandb.log(item, step=current_step)
+            swanlab.log(item, step=current_step)
             if getattr(self, "_trackio_enabled", False):
-                trackio.log(item, step=log_step + i)
+                trackio.log(item, step=current_step)
             if self.summary_writer is not None:
                 for key, val in item.items():
-                    self.summary_writer.add_scalar(f"{key}", val, log_step + i)
+                    self.summary_writer.add_scalar(f"{key}", val, current_step)
         self._last_commit_step = log_step + len(data) - 1
 
     def print_stats(self, stats: dict[str, float]):
         logger.info("\n" + tabulate_stats(stats))
+
+    def _write_local_stats(
+        self,
+        epoch: int,
+        step: int,
+        global_step: int,
+        log_step: int,
+        stats: dict[str, float],
+    ) -> None:
+        record = {
+            "epoch": epoch,
+            "epoch_step": step,
+            "global_step": global_step,
+            "log_step": log_step,
+            "wall_time": time.time(),
+            "stats": stats,
+        }
+        self._append_jsonl(self.metrics_jsonl_path, record)
+
+        ppo_record = self._build_ppo_diagnostics_record(record)
+        if ppo_record is not None:
+            self._append_jsonl(self.ppo_diagnostics_jsonl_path, ppo_record)
+
+    @staticmethod
+    def _append_jsonl(path: str, record: dict) -> None:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _build_ppo_diagnostics_record(record: dict) -> dict | None:
+        stats = record["stats"]
+        key_prefixes = (
+            "ppo_actor/update/",
+            "ppo_actor/compute_logp/",
+            "ppo_actor/version_stats/",
+        )
+        exact_keys = {
+            "ppo_actor/entropy/avg",
+            "ppo_actor/final_reward/avg",
+            "ppo_actor/task_reward/avg",
+            "ppo_actor/advantages/avg",
+            "ppo_actor/kl_rewards/avg",
+            "ppo_actor/no_eos_ratios/avg",
+            "timeperf/rollout",
+            "timeperf/train_step",
+            "timeperf/update_weights",
+        }
+        diagnostics = {
+            key: value
+            for key, value in stats.items()
+            if key in exact_keys or key.startswith(key_prefixes)
+        }
+        if not diagnostics:
+            return None
+
+        derived = {}
+        entropy = diagnostics.get("ppo_actor/update/entropy/avg")
+        if entropy is None:
+            entropy = diagnostics.get("ppo_actor/entropy/avg")
+        if entropy is not None:
+            derived["entropy_avg"] = entropy
+        for name in (
+            "clip_ratio",
+            "approx_kl",
+            "importance_weight",
+            "behave_imp_weight",
+            "behave_approx_kl",
+            "vocab_max_logits",
+            "vocab_min_logits",
+        ):
+            for suffix in ("avg", "min", "max"):
+                key = f"ppo_actor/update/{name}/{suffix}"
+                if key in diagnostics:
+                    derived[f"{name}_{suffix}"] = diagnostics[key]
+
+        return {
+            "epoch": record["epoch"],
+            "epoch_step": record["epoch_step"],
+            "global_step": record["global_step"],
+            "log_step": record["log_step"],
+            "wall_time": record["wall_time"],
+            "diagnostics": diagnostics,
+            "derived": derived,
+        }
 
     @staticmethod
     def get_log_path(
