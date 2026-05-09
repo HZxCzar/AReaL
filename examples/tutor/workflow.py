@@ -5,21 +5,28 @@ import logging as py_logging
 import os
 import re
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+import torch
 
 try:
     from areal import workflow_context
-    from areal.api import RolloutWorkflow
-    from areal.experimental.openai import ArealOpenAI
+    from areal.api import ModelRequest, ModelResponse, RolloutWorkflow
     from areal.utils import logging, stats_tracker
+    from areal.utils.data import concat_padded_tensors
     from areal.utils.hf_utils import load_hf_tokenizer
 except Exception:  # pragma: no cover - lightweight local test environments
     class _DummyWorkflowContext:
         @staticmethod
         def stat_scope():
             return "examples"
+
+        @staticmethod
+        def get():
+            return type("WorkflowContext", (), {"task_id": None, "is_eval": False})()
 
     class _DummyTracker:
         @staticmethod
@@ -34,29 +41,93 @@ except Exception:  # pragma: no cover - lightweight local test environments
         def getLogger(name: str):
             return py_logging.getLogger(name)
 
+    @dataclass
+    class ModelRequest:  # type: ignore[no-redef]
+        rid: str = field(default_factory=lambda: str(uuid.uuid4()))
+        input_ids: list[int] = field(default_factory=list)
+        gconfig: Any | None = None
+        metadata: dict[str, Any] = field(default_factory=dict)
+        tokenizer: Any | None = None
+
+    @dataclass
+    class ModelResponse:  # type: ignore[no-redef]
+        input_tokens: list[int] = field(default_factory=list)
+        output_tokens: list[int] = field(default_factory=list)
+        output_logprobs: list[float] = field(default_factory=list)
+        output_versions: list[int] = field(default_factory=list)
+        stop_reason: str = "stop"
+        tokenizer: Any | None = None
+
+        @property
+        def input_len(self) -> int:
+            return len(self.input_tokens)
+
+        @property
+        def output_len(self) -> int:
+            return len(self.output_tokens)
+
+    class RolloutWorkflow:  # type: ignore[no-redef]
+        pass
+
+    def concat_padded_tensors(  # type: ignore[no-redef]
+        tensor_dicts: list[dict[str, Any]], pad_value: float = 0.0
+    ) -> dict[str, Any]:
+        if not tensor_dicts:
+            return {}
+        if len(tensor_dicts) == 1:
+            return dict(tensor_dicts[0])
+        keys = set(tensor_dicts[0])
+        for item in tensor_dicts[1:]:
+            if set(item) != keys:
+                raise ValueError("tensor dict keys must match")
+        result: dict[str, Any] = {}
+        for key in tensor_dicts[0]:
+            values = [item[key] for item in tensor_dicts]
+            if isinstance(values[0], torch.Tensor):
+                max_shape = list(values[0].shape)
+                for value in values[1:]:
+                    max_shape = [
+                        max(a, b) if idx > 0 else a
+                        for idx, (a, b) in enumerate(zip(max_shape, value.shape))
+                    ]
+                padded = []
+                for value in values:
+                    pad = []
+                    for current, target in reversed(list(zip(value.shape[1:], max_shape[1:]))):
+                        pad.extend([0, target - current])
+                    pv = 0.0 if key == "attention_mask" else pad_value
+                    padded.append(torch.nn.functional.pad(value, pad, value=pv))
+                result[key] = torch.cat(padded, dim=0)
+            else:
+                result[key] = values[0]
+        return result
+
     workflow_context = _DummyWorkflowContext()
-    RolloutWorkflow = object
-    ArealOpenAI = Any
     stats_tracker = _DummyTracker()
     logging = _DummyLogging()
+
     def load_hf_tokenizer(path):  # type: ignore[no-redef]
         return path
 
 from examples.common.chat_budget import ChatContextBudget
-from examples.common.episode_budget import EpisodeTokenBudget
 from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig, make_teacher_client
 from examples.common.parsing import join_errors, parse_json_dict
 from examples.tutor.prompts import (
     LEAK_CHECK_USER_TEMPLATE,
-    STUDENT_USER_TEMPLATE,
-    TEACHER_FOLLOWUP_USER_TEMPLATE,
-    TEACHER_INITIAL_USER_TEMPLATE,
+    PROGRESS_JUDGE_USER_TEMPLATE,
+    STUDENT_STATE_USER_TEMPLATE,
+    SUMMARY_USER_TEMPLATE,
+    TEACHER_STATE_USER_TEMPLATE,
     TRANSFER_GENERATION_USER_TEMPLATE,
     TRANSFER_STUDENT_USER_TEMPLATE,
     render_prompt,
 )
 
 logger = logging.getLogger("TutorWorkflow")
+
+ProgressLabel = Literal["improved", "same", "regressed", "unknown"]
+ConfidenceLabel = Literal["high", "medium", "low"]
+FeedbackKind = Literal["none", "student_judged", "leak"]
 
 
 @dataclass(slots=True)
@@ -85,6 +156,69 @@ class GeneratedProblemResult:
     similarity_notes: str
     parse_error: str | None
     raw_result: dict[str, Any]
+
+
+@dataclass(slots=True)
+class PublicHistoryState:
+    summary: str = ""
+    turn_count: int = 0
+
+
+@dataclass(slots=True)
+class TutorPrivateFeedback:
+    kind: FeedbackKind = "none"
+    student_output: str = ""
+    judge_correct: bool = False
+    judge_feedback: str = ""
+    progress_label: ProgressLabel = "unknown"
+    progress_feedback: str = ""
+    leak_feedback: str = ""
+
+
+@dataclass(slots=True)
+class TutorTurnState:
+    task: str
+    ground_truth: str
+    public_history: PublicHistoryState
+    previous_tutor_visible_output: str
+    previous_feedback: TutorPrivateFeedback
+    turn_idx: int
+    max_turns: int
+
+
+@dataclass(slots=True)
+class StudentTurnState:
+    task: str
+    public_history: PublicHistoryState
+    previous_student_output: str
+    latest_tutor_visible_output: str
+
+
+@dataclass(slots=True)
+class ProgressJudgment:
+    raw_output: str
+    label: ProgressLabel
+    confidence: ConfidenceLabel
+    feedback: str
+    parse_error: str | None = None
+    raw_result: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class TurnTrace:
+    turn_idx: int
+    tutor_state: TutorTurnState
+    tutor_raw_output: str
+    tutor_visible_output: str
+    leaked: bool
+    student_output: str
+    judge_correct: bool
+    judge_feedback: str
+    progress: ProgressJudgment
+    reward: float
+    reward_components: dict[str, float]
+    public_history_before: str
+    public_history_after: str
 
 
 def _safe_scalar(**metrics: Any) -> None:
@@ -116,17 +250,25 @@ class TutorAgentWorkflow(RolloutWorkflow):
         max_concurrent_aux_calls: int = 8,
         api_params_config_path: str | None = None,
         api_params_key: str | None = None,
-        term_success_reward: float = 1.0,
-        transfer_bonus_reward: float = 0.5,
+        success_reward: float | None = None,
+        leak_penalty: float = -1.0,
+        progress_improved_reward: float = 0.3,
+        progress_same_reward: float = 0.0,
+        progress_regressed_reward: float = -0.3,
+        progress_unknown_reward: float = 0.0,
+        term_success_reward: float | None = None,
+        transfer_bonus_reward: float = 0.0,
         teacher_system_prompt: str = "",
         student_system_prompt: str = "",
         judge_system_prompt: str = "",
         leak_check_system_prompt: str = "",
         generator_system_prompt: str = "",
+        summary_system_prompt: str = "",
+        progress_judge_system_prompt: str = "",
         debug_trace_dir: str | None = None,
         debug_trace_every_n_rollouts: int = 1,
         max_episode_total_tokens: int | None = None,
-        token_budget_penalty: float = -0.2,
+        token_budget_penalty: float = -1.0,
         tokenizer_path: str | None = None,
         model_context_length: int | None = None,
         context_window_margin: int = 256,
@@ -134,27 +276,40 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.max_turns = max_turns
         self.enable_thinking = enable_thinking
         self.gconfig = gconfig
-        self.temperature = (
-            gconfig.temperature if gconfig is not None else temperature
-        )
+        self.temperature = gconfig.temperature if gconfig is not None else temperature
         self.top_p = gconfig.top_p if gconfig is not None else top_p
         self.max_completion_tokens = (
             gconfig.max_new_tokens if gconfig is not None else max_completion_tokens
         )
         self.tool_call_parser = tool_call_parser
         self.reasoning_parser = reasoning_parser
-        self.term_success_reward = term_success_reward
+        self.success_reward = (
+            float(success_reward)
+            if success_reward is not None
+            else float(term_success_reward if term_success_reward is not None else 1.0)
+        )
+        self.leak_penalty = float(leak_penalty)
+        self.progress_rewards = {
+            "improved": float(progress_improved_reward),
+            "same": float(progress_same_reward),
+            "regressed": float(progress_regressed_reward),
+            "unknown": float(progress_unknown_reward),
+        }
         self.transfer_bonus_reward = transfer_bonus_reward
         self.teacher_system_prompt = teacher_system_prompt.strip()
         self.student_system_prompt = student_system_prompt.strip()
         self.judge_system_prompt = judge_system_prompt.strip()
         self.leak_check_system_prompt = leak_check_system_prompt.strip()
         self.generator_system_prompt = generator_system_prompt.strip()
+        self.summary_system_prompt = summary_system_prompt.strip()
+        self.progress_judge_system_prompt = progress_judge_system_prompt.strip()
         self.debug_trace_dir = debug_trace_dir.strip() if debug_trace_dir else ""
         self.debug_trace_every_n_rollouts = max(1, int(debug_trace_every_n_rollouts))
         self.max_episode_total_tokens = max_episode_total_tokens
         self.token_budget_penalty = token_budget_penalty
         self.last_history: list[dict[str, Any]] = []
+        self.last_traces: list[TurnTrace] = []
+        self.last_total_reward = 0.0
         self.tokenizer = (
             load_hf_tokenizer(tokenizer) if isinstance(tokenizer, str) else tokenizer
         )
@@ -181,430 +336,850 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.aux_caller = AsyncLLMCaller(aux_config)
 
     async def arun_episode(self, engine, data: dict[str, Any]):
-        client = ArealOpenAI(
-            engine=engine,
-            tokenizer=self.tokenizer,
-            tool_call_parser=self.tool_call_parser,
-            reasoning_parser=self.reasoning_parser,
-            chat_template_type="concat",
-        )
-        result = await self._run_episode(data, direct_client=client)
-        if result is None:
-            return None
-        total_reward, last_completion_id = result
-        if last_completion_id is None:
-            return None
-        client.set_reward(last_completion_id, total_reward)
-        client.apply_reward_discount(turn_discount=1.0)
-        interactions = client.export_interactions(style="concat")
-        if len(interactions) != 1:
-            raise RuntimeError(
-                f"Tutor rollout should export exactly 1 interaction, got {len(interactions)}"
-            )
-        return interactions
+        return await self._run_episode(data, engine=engine)
 
     async def run(self, data: dict[str, Any], **extra_kwargs):
         teacher_client = make_teacher_client(extra_kwargs)
-        result = await self._run_episode(data, external_client=teacher_client)
-        if result is None:
-            return {}
-        total_reward, _ = result
-        return total_reward
+        await self._run_episode(data, external_client=teacher_client)
+        return self.last_total_reward
 
     async def _run_episode(
         self,
         data: dict[str, Any],
+        engine: Any | None = None,
         direct_client: Any | None = None,
         external_client: Any | None = None,
-    ) -> tuple[float, str | None] | None:
-        if (direct_client is None) == (external_client is None):
-            raise ValueError("Exactly one teacher client must be provided.")
-        history: list[dict[str, Any]] = []
-        total_reward = 0.0
-        last_completion_id: str | None = None
+    ) -> dict[str, torch.Tensor] | None:
+        if direct_client is not None:
+            external_client = direct_client
+        if (engine is None) == (external_client is None):
+            raise ValueError("Exactly one tutor generation source must be provided.")
+
         task = str(data["task"])
         ground_truth = str(data["ground_truth"])
-        student_answer, student_error = await self._run_student(
-            task, teacher_action=None, history=[]
-        )
-        initial_student_answer = student_answer
-        judge_result = self._score_aime_answer(task, ground_truth, student_answer)
-        latest_student_answer = student_answer
-        latest_judge_result = judge_result
-        pre_solved = judge_result.correct
+        results: list[dict[str, torch.Tensor]] = []
+        traces: list[TurnTrace] = []
+        history: list[dict[str, Any]] = []
         leak_count = 0
-        termination_reason = "pre_solved" if pre_solved else "max_turns"
-        transfer_success = False
-        token_budget = EpisodeTokenBudget(
-            max_episode_total_tokens=self.max_episode_total_tokens,
-        )
-        teacher_messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self.teacher_system_prompt},
-            {
-                "role": "user",
-                "content": self._build_teacher_initial_prompt(
-                    task=task,
-                    ground_truth=ground_truth,
-                    initial_student_answer=initial_student_answer,
-                    latest_judge_result=latest_judge_result,
-                    pre_solved=pre_solved,
-                    round_idx=1,
-                ),
-            },
-        ]
+        termination_reason = "max_turns"
 
-        for round_idx in range(1, self.max_turns + 1):
-            if direct_client is not None:
-                prompt_tokens = self.teacher_context_budget.count_message_tokens(
-                    teacher_messages
-                )
-                safe_max_completion_tokens = self.max_completion_tokens
-            else:
-                safe_max_completion_tokens, prompt_tokens = self.teacher_context_budget.clamp_max_completion_tokens(
-                    teacher_messages,
-                    self.max_completion_tokens,
-                )
-                if self.max_episode_total_tokens is not None:
-                    safe_max_completion_tokens = min(
-                        safe_max_completion_tokens,
-                        max(0, self.max_episode_total_tokens - prompt_tokens),
-                    )
-            if safe_max_completion_tokens <= 0:
-                total_reward += self.token_budget_penalty
-                history.append(
-                    {
-                        "round_idx": round_idx,
-                        "teacher_action": "",
-                        "reward": self.token_budget_penalty,
-                        "turn_prompt_tokens": prompt_tokens,
-                        "turn_completion_tokens": 0,
-                        "turn_total_tokens": prompt_tokens,
-                        "termination_feedback": (
-                            "Episode terminated before teacher generation because prompt length "
-                            "exhausted the available episode or context budget."
-                        ),
-                    }
-                )
-                break
-            if direct_client is not None:
-                create_kwargs = {
-                    "messages": teacher_messages,
-                    "temperature": self.temperature,
-                    "top_p": self.top_p,
-                    "max_completion_tokens": safe_max_completion_tokens,
-                    "extra_body": {
-                        "chat_template_kwargs": {
-                            "enable_thinking": self.enable_thinking,
-                        },
-                    },
-                }
-                if self.max_episode_total_tokens is not None:
-                    create_kwargs["max_total_tokens"] = self.max_episode_total_tokens
-                try:
-                    response = await direct_client.chat.completions.create(
-                        **create_kwargs
-                    )
-                except ValueError as exc:
-                    if _is_max_total_tokens_error(exc):
-                        total_reward += self.token_budget_penalty
-                        history.append(
-                            {
-                                "round_idx": round_idx,
-                                "teacher_action": "",
-                                "reward": self.token_budget_penalty,
-                                "turn_prompt_tokens": prompt_tokens,
-                                "turn_completion_tokens": 0,
-                                "turn_total_tokens": prompt_tokens,
-                                "termination_feedback": (
-                                    "Episode terminated before teacher generation because "
-                                    "the real concat prompt exhausted the token budget: "
-                                    f"{exc}"
-                                ),
-                                "length_penalty": self.token_budget_penalty,
-                            }
-                        )
-                        termination_reason = "episode_total_token_budget"
-                        break
-                    raise
-            else:
-                response = await external_client.chat.completions.create(
-                    model="default",
-                    messages=teacher_messages,
-                    temperature=self.temperature,
-                    top_p=self.top_p,
-                    max_completion_tokens=safe_max_completion_tokens,
-                )
-            last_completion_id = response.id
-            teacher_message = response.choices[0].message
-            teacher_action = _strip_think_tags(teacher_message.content or "").strip()
-            budget_snapshot = token_budget.observe_turn(
-                response=response,
-                prompt_text=teacher_messages[-1]["content"],
-                completion_text=teacher_action,
+        initial_student_answer, initial_student_error = await self._run_student(
+            StudentTurnState(
+                task=task,
+                public_history=PublicHistoryState(),
+                previous_student_output="",
+                latest_tutor_visible_output="(none, produce the first answer attempt)",
             )
-            if pre_solved:
-                termination_feedback = (
-                    "Student solved the task before teaching; stopped after one "
-                    "zero-reward tutor action to keep the GRPO group complete."
-                )
-                if budget_snapshot.stop_feedback:
-                    termination_feedback = (
-                        f"{termination_feedback} {budget_snapshot.stop_feedback}"
-                    )
-                record: dict[str, Any] = {
-                    "round_idx": round_idx,
-                    "teacher_action": teacher_action,
-                    "student_answer": initial_student_answer,
-                    "student_error": student_error,
-                    "judge_feedback": judge_result.feedback,
-                    "judge_correct": judge_result.correct,
-                    "pre_solved": True,
-                    "leak_detected": False,
-                    "reward": 0.0,
-                    "turn_prompt_tokens": budget_snapshot.turn_prompt_tokens,
-                    "turn_completion_tokens": budget_snapshot.turn_completion_tokens,
-                    "turn_total_tokens": budget_snapshot.turn_total_tokens,
-                    "termination_feedback": termination_feedback,
-                }
-                record["student_visible_summary"] = self._build_student_visible_summary(
-                    record
-                )
-                history.append(record)
-                termination_reason = "pre_solved"
-                break
+        )
+        initial_student_answer = _strip_reasoning_for_context(initial_student_answer)
+        judge_result = self._score_aime_answer(task, ground_truth, initial_student_answer)
+        if judge_result.correct:
+            self.last_history = []
+            self.last_traces = []
+            self.last_total_reward = 0.0
+            termination_reason = "pre_solved"
+            self._log_rollout_stats(
+                total_reward=0.0,
+                history=[],
+                traces=[],
+                termination_reason=termination_reason,
+                pre_success=True,
+                leak_count=0,
+            )
+            self._maybe_dump_debug_trace(
+                task=task,
+                ground_truth=ground_truth,
+                initial_student_answer=initial_student_answer,
+                latest_student_answer=initial_student_answer,
+                total_reward=0.0,
+                traces=[],
+                termination_reason=termination_reason,
+                pre_success=True,
+                leak_count=0,
+            )
+            return None
 
-            leak_result = await self._run_leak_check(task, ground_truth, teacher_action)
+        public_history = PublicHistoryState(
+            summary=self._build_initial_public_summary(initial_student_answer),
+            turn_count=0,
+        )
+        previous_tutor_visible_output = ""
+        previous_student_output = initial_student_answer
+        previous_feedback = TutorPrivateFeedback(
+            kind="student_judged",
+            student_output=initial_student_answer,
+            judge_correct=False,
+            judge_feedback=judge_result.feedback,
+            progress_label="unknown",
+            progress_feedback="Initial student attempt was incorrect.",
+        )
+
+        for turn_idx in range(1, self.max_turns + 1):
+            tutor_state = TutorTurnState(
+                task=task,
+                ground_truth=ground_truth,
+                public_history=public_history,
+                previous_tutor_visible_output=previous_tutor_visible_output,
+                previous_feedback=previous_feedback,
+                turn_idx=turn_idx,
+                max_turns=self.max_turns,
+            )
+            response, tutor_raw_output = await self._generate_tutor_response(
+                tutor_state,
+                engine=engine,
+                external_client=external_client,
+            )
+            tutor_visible_output = _strip_reasoning_for_context(tutor_raw_output)
+            public_before = public_history.summary
+
+            leak_result = await self._run_leak_check(
+                task, ground_truth, tutor_visible_output
+            )
             if leak_result.leaked:
                 leak_count += 1
-                reward = -0.6
-                if budget_snapshot.stop_reason is not None:
-                    reward += self.token_budget_penalty
-                total_reward += reward
-                history.append(
-                    {
-                        "round_idx": round_idx,
-                        "teacher_action": teacher_action,
-                        "reward": reward,
-                        "leak_detected": True,
-                        "leak_feedback": leak_result.feedback,
-                        "turn_prompt_tokens": budget_snapshot.turn_prompt_tokens,
-                        "turn_completion_tokens": budget_snapshot.turn_completion_tokens,
-                        "turn_total_tokens": budget_snapshot.turn_total_tokens,
-                        "termination_feedback": budget_snapshot.stop_feedback,
-                    }
+                reward = self.leak_penalty
+                results.append(self._response_to_tensordict(response, reward=reward))
+                progress = ProgressJudgment(
+                    raw_output="",
+                    label="unknown",
+                    confidence="low",
+                    feedback="Skipped because the tutor message leaked private answer information.",
                 )
-                if budget_snapshot.stop_reason is not None:
-                    termination_reason = budget_snapshot.stop_reason
-                    break
-                termination_reason = "max_turns" if round_idx >= self.max_turns else "continue"
-                if round_idx < self.max_turns:
-                    teacher_messages.extend(
-                        [
-                            teacher_message.model_dump(exclude_none=True),
-                            {
-                                "role": "user",
-                                "content": self._build_teacher_followup_prompt(
-                                    latest_record=history[-1],
-                                    latest_judge_result=latest_judge_result,
-                                    round_idx=round_idx + 1,
-                                    pre_solved=pre_solved,
-                                ),
-                            },
-                        ]
-                    )
+                trace = TurnTrace(
+                    turn_idx=turn_idx,
+                    tutor_state=tutor_state,
+                    tutor_raw_output=tutor_raw_output,
+                    tutor_visible_output=tutor_visible_output,
+                    leaked=True,
+                    student_output="",
+                    judge_correct=False,
+                    judge_feedback="",
+                    progress=progress,
+                    reward=reward,
+                    reward_components={"leak": reward},
+                    public_history_before=public_before,
+                    public_history_after=public_before,
+                )
+                traces.append(trace)
+                history.append(self._trace_to_history_record(trace, leak_result))
+                previous_feedback = TutorPrivateFeedback(
+                    kind="leak",
+                    leak_feedback=leak_result.feedback,
+                )
+                previous_tutor_visible_output = tutor_visible_output
+                termination_reason = "max_turns" if turn_idx == self.max_turns else "continue"
                 continue
 
-            student_answer, student_error = await self._run_student(
-                task, teacher_action, history=history
+            student_state = StudentTurnState(
+                task=task,
+                public_history=public_history,
+                previous_student_output=previous_student_output,
+                latest_tutor_visible_output=tutor_visible_output,
             )
+            student_answer, student_error = await self._run_student(student_state)
+            student_answer = _strip_reasoning_for_context(student_answer)
             judge_result = self._score_aime_answer(task, ground_truth, student_answer)
-            latest_student_answer = student_answer
-            latest_judge_result = judge_result
 
-            reward = 0.0
-            record: dict[str, Any] = {
-                "round_idx": round_idx,
-                "teacher_action": teacher_action,
-                "student_answer": student_answer,
-                "student_error": student_error,
-                "judge_feedback": judge_result.feedback,
-                "judge_correct": judge_result.correct,
-                "leak_detected": False,
-                "turn_prompt_tokens": budget_snapshot.turn_prompt_tokens,
-                "turn_completion_tokens": budget_snapshot.turn_completion_tokens,
-                "turn_total_tokens": budget_snapshot.turn_total_tokens,
-                "termination_feedback": budget_snapshot.stop_feedback,
-            }
-            record["student_visible_summary"] = self._build_student_visible_summary(record)
             if judge_result.correct:
-                transfer_result = await self._run_transfer_round(
+                progress = ProgressJudgment(
+                    raw_output="",
+                    label="improved",
+                    confidence="high",
+                    feedback="The student reached the correct final answer.",
+                )
+                reward = self.success_reward
+                reward_components = {"success": self.success_reward}
+                termination_reason = "success"
+            else:
+                progress = await self._run_progress_judge(
                     task=task,
                     ground_truth=ground_truth,
-                    initial_student_answer=initial_student_answer,
-                    history=[*history, record],
+                    previous_student_answer=previous_student_output,
+                    current_student_answer=student_answer,
+                    tutor_visible_output=tutor_visible_output,
                 )
-                transfer_success = transfer_result["transfer_success"]
-                step_factor = (self.max_turns - round_idx + 1) / max(self.max_turns, 1)
-                reward = self.term_success_reward * step_factor
-                if transfer_success:
-                    reward += self.transfer_bonus_reward * step_factor
-                record["step_factor"] = step_factor
-                record["term_reward"] = self.term_success_reward * step_factor
-                record["transfer_bonus_reward"] = (
-                    self.transfer_bonus_reward * step_factor if transfer_success else 0.0
-                )
-                record.update(transfer_result)
-                termination_reason = (
-                    "success_transfer_pass"
-                    if transfer_success
-                    else "success_transfer_fail"
-                )
-            elif round_idx >= self.max_turns:
-                termination_reason = "max_turns"
-            else:
-                termination_reason = "continue"
+                reward = self.progress_rewards.get(progress.label, 0.0)
+                reward_components = {f"progress_{progress.label}": reward}
+                termination_reason = "max_turns" if turn_idx == self.max_turns else "continue"
 
-            final_reward = reward
-            if budget_snapshot.stop_reason is not None:
-                final_reward += self.token_budget_penalty
-                record["length_penalty"] = self.token_budget_penalty
-            total_reward += final_reward
-            record["reward"] = final_reward
-            history.append(record)
-            if budget_snapshot.stop_reason is not None and termination_reason == "continue":
-                termination_reason = budget_snapshot.stop_reason
-                break
+            results.append(self._response_to_tensordict(response, reward=reward))
+            next_public_history = await self._run_public_summary_update(
+                old_public_history=public_history,
+                previous_student_answer=previous_student_output,
+                tutor_visible_output=tutor_visible_output,
+                current_student_answer=student_answer,
+            )
+            trace = TurnTrace(
+                turn_idx=turn_idx,
+                tutor_state=tutor_state,
+                tutor_raw_output=tutor_raw_output,
+                tutor_visible_output=tutor_visible_output,
+                leaked=False,
+                student_output=student_answer,
+                judge_correct=judge_result.correct,
+                judge_feedback=judge_result.feedback,
+                progress=progress,
+                reward=reward,
+                reward_components=reward_components,
+                public_history_before=public_before,
+                public_history_after=next_public_history.summary,
+            )
+            traces.append(trace)
+            history.append(self._trace_to_history_record(trace, None, student_error))
+
+            public_history = next_public_history
+            previous_tutor_visible_output = tutor_visible_output
+            previous_student_output = student_answer
+            previous_feedback = TutorPrivateFeedback(
+                kind="student_judged",
+                student_output=student_answer,
+                judge_correct=judge_result.correct,
+                judge_feedback=judge_result.feedback,
+                progress_label=progress.label,
+                progress_feedback=progress.feedback,
+            )
             if judge_result.correct:
                 break
-            if round_idx < self.max_turns:
-                teacher_messages.extend(
-                    [
-                        teacher_message.model_dump(exclude_none=True),
-                        {
-                            "role": "user",
-                            "content": self._build_teacher_followup_prompt(
-                                latest_record=record,
-                                latest_judge_result=latest_judge_result,
-                                round_idx=round_idx + 1,
-                                pre_solved=pre_solved,
-                            ),
-                        },
-                    ]
-                )
 
+        total_reward = float(sum(trace.reward for trace in traces))
+        self.last_history = history
+        self.last_traces = traces
+        self.last_total_reward = total_reward
         self._log_rollout_stats(
-            history=history,
             total_reward=total_reward,
+            history=history,
+            traces=traces,
             termination_reason=termination_reason,
-            transfer_success=transfer_success,
+            pre_success=False,
             leak_count=leak_count,
         )
-        self.last_history = [dict(record) for record in history]
-        term_success = termination_reason in {
-            "success_transfer_pass",
-            "success_transfer_fail",
-        }
         self._maybe_dump_debug_trace(
             task=task,
             ground_truth=ground_truth,
             initial_student_answer=initial_student_answer,
-            latest_student_answer=latest_student_answer,
+            latest_student_answer=previous_student_output,
             total_reward=total_reward,
-            history=history,
+            traces=traces,
             termination_reason=termination_reason,
-            pre_success=termination_reason == "pre_solved",
-            term_success=term_success,
-            transfer_success=bool(transfer_success),
+            pre_success=False,
             leak_count=leak_count,
         )
-        if last_completion_id is None:
+        if not results:
             return None
-        return total_reward, last_completion_id
+        return concat_padded_tensors(results)
 
-    def _log_rollout_stats(
+    async def _generate_tutor_response(
         self,
+        tutor_state: TutorTurnState,
         *,
-        history: list[dict[str, Any]],
-        total_reward: float,
-        termination_reason: str,
-        transfer_success: bool,
-        leak_count: int,
-    ) -> None:
-        success_rounds = [
-            int(record["round_idx"])
-            for record in history
-            if bool(record.get("judge_correct", False))
-            and not bool(record.get("pre_solved", False))
+        engine: Any | None,
+        external_client: Any | None,
+    ) -> tuple[ModelResponse, str]:
+        messages = [
+            {"role": "system", "content": self.teacher_system_prompt},
+            {"role": "user", "content": self._build_tutor_prompt(tutor_state)},
         ]
-        leak_rounds = [
-            int(record["round_idx"])
-            for record in history
-            if bool(record.get("leak_detected", False))
-        ]
-        term_reward_sum = sum(
-            float(record.get("term_reward", 0.0) or 0.0) for record in history
+        input_ids = self._apply_chat_template(messages)
+        if engine is not None:
+            req = ModelRequest(
+                rid=f"tutor-{int(time.time() * 1000)}-{tutor_state.turn_idx}",
+                input_ids=input_ids,
+                gconfig=self._generation_config(),
+                tokenizer=self.tokenizer,
+            )
+            response = await engine.agenerate(req)
+            raw_output = self._decode_output(response)
+            return response, raw_output
+
+        safe_max_completion_tokens, _ = self.teacher_context_budget.clamp_max_completion_tokens(
+            messages,
+            int(self.max_completion_tokens),
         )
-        transfer_bonus_sum = sum(
-            float(record.get("transfer_bonus_reward", 0.0) or 0.0)
-            for record in history
+        response_obj = await external_client.chat.completions.create(
+            model="default",
+            messages=messages,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            max_completion_tokens=max(1, safe_max_completion_tokens),
         )
-        length_penalty_count = sum(1 for record in history if "length_penalty" in record)
-        length_penalty_sum = sum(
-            float(record.get("length_penalty", 0.0) or 0.0) for record in history
+        raw_output = response_obj.choices[0].message.content or ""
+        output_tokens = self._encode_text(raw_output)
+        return (
+            ModelResponse(
+                input_tokens=list(input_ids),
+                output_tokens=output_tokens,
+                output_logprobs=[0.0] * len(output_tokens),
+                output_versions=[0] * len(output_tokens),
+                tokenizer=self.tokenizer,
+            ),
+            raw_output,
         )
-        max_completion_tokens = max(
-            [int(record.get("turn_completion_tokens", 0) or 0) for record in history]
-            or [0]
-        )
-        max_total_tokens = max(
-            [int(record.get("turn_total_tokens", 0) or 0) for record in history] or [0]
-        )
-        avg_completion_tokens = sum(
-            int(record.get("turn_completion_tokens", 0) or 0) for record in history
-        ) / max(len(history), 1)
-        avg_total_tokens = sum(
-            int(record.get("turn_total_tokens", 0) or 0) for record in history
-        ) / max(len(history), 1)
-        term_success = termination_reason in {
-            "success_transfer_pass",
-            "success_transfer_fail",
+
+    def _response_to_tensordict(
+        self, response: ModelResponse, *, reward: float
+    ) -> dict[str, torch.Tensor]:
+        full_ids = list(response.input_tokens) + list(response.output_tokens)
+        output_logprobs = list(response.output_logprobs)
+        if len(output_logprobs) < response.output_len:
+            output_logprobs.extend([0.0] * (response.output_len - len(output_logprobs)))
+        if len(output_logprobs) > response.output_len:
+            output_logprobs = output_logprobs[: response.output_len]
+        output_versions = list(response.output_versions)
+        if len(output_versions) < response.output_len:
+            output_versions.extend([0] * (response.output_len - len(output_versions)))
+        if len(output_versions) > response.output_len:
+            output_versions = output_versions[: response.output_len]
+        return {
+            "input_ids": torch.tensor(full_ids, dtype=torch.long).unsqueeze(0),
+            "logprobs": torch.tensor(
+                [0.0] * response.input_len + output_logprobs,
+                dtype=torch.float32,
+            ).unsqueeze(0),
+            "loss_mask": torch.tensor(
+                [0] * response.input_len + [1] * response.output_len,
+                dtype=torch.long,
+            ).unsqueeze(0),
+            "versions": torch.tensor(
+                [-1] * response.input_len + output_versions,
+                dtype=torch.long,
+            ).unsqueeze(0),
+            "attention_mask": torch.ones(len(full_ids), dtype=torch.bool).unsqueeze(0),
+            "rewards": torch.tensor([float(reward)], dtype=torch.float32),
         }
-        _safe_scalar(
-            reward=total_reward,
-            num_turns=len(history),
-            leak_count=leak_count,
-            pre_success=float(termination_reason == "pre_solved"),
-            term_success=float(term_success),
-            transfer_success=float(transfer_success),
-            term_budget=float(termination_reason == "episode_total_token_budget"),
-            term_max_turns=float(termination_reason == "max_turns"),
-            term_continue=float(termination_reason == "continue"),
-            length_penalty_rate=float(length_penalty_count > 0),
-            length_penalty_count=length_penalty_count,
-            length_penalty_sum=length_penalty_sum,
-            avg_completion_tokens=avg_completion_tokens,
-            avg_total_tokens=avg_total_tokens,
-            max_completion_tokens=max_completion_tokens,
-            max_total_tokens=max_total_tokens,
-            term_reward_sum=term_reward_sum,
-            transfer_bonus_sum=transfer_bonus_sum,
-            success_round=success_rounds[0] if success_rounds else 0,
-            leak_first_round=leak_rounds[0] if leak_rounds else 0,
-        )
 
     async def _run_student(
+        self,
+        state_or_task: StudentTurnState | str,
+        teacher_action: str | None = None,
+        history: list[dict[str, Any]] | None = None,
+    ) -> tuple[str, str | None]:
+        if isinstance(state_or_task, StudentTurnState):
+            prompt = self._build_student_prompt_from_state(state_or_task)
+        else:
+            prompt = self._build_student_prompt(
+                str(state_or_task), teacher_action, history or []
+            )
+        try:
+            return _strip_reasoning_for_context(
+                await self._call_student_prompt(prompt)
+            ), None
+        except Exception as exc:
+            return "", str(exc)
+
+    async def _call_student_prompt(self, prompt: str) -> str:
+        answer = await self.aux_caller.call_text(
+            [
+                {"role": "system", "content": self.student_system_prompt},
+                {"role": "user", "content": prompt},
+            ]
+        )
+        return _strip_reasoning_for_context(answer)
+
+    async def _run_leak_check(
+        self, task: str, ground_truth: str, teacher_action: str
+    ) -> LeakCheckResult:
+        prompt = self._build_leak_check_prompt(
+            task,
+            ground_truth,
+            _strip_reasoning_for_context(teacher_action),
+        )
+        try:
+            raw_output = await self.aux_caller.call_text(
+                [
+                    {"role": "system", "content": self.leak_check_system_prompt},
+                    {"role": "user", "content": prompt},
+                ]
+            )
+        except Exception as exc:
+            return LeakCheckResult("", False, f"Leak check failed: {exc}", str(exc), {})
+        return self._parse_leak_check_result(_strip_reasoning_for_context(raw_output))
+
+    async def _run_progress_judge(
+        self,
+        *,
+        task: str,
+        ground_truth: str,
+        previous_student_answer: str,
+        current_student_answer: str,
+        tutor_visible_output: str,
+    ) -> ProgressJudgment:
+        prompt = self._build_progress_judge_prompt(
+            task=task,
+            ground_truth=ground_truth,
+            previous_student_answer=_strip_reasoning_for_context(previous_student_answer),
+            current_student_answer=_strip_reasoning_for_context(current_student_answer),
+            tutor_visible_output=_strip_reasoning_for_context(tutor_visible_output),
+        )
+        try:
+            raw_output = await self.aux_caller.call_text(
+                [
+                    {"role": "system", "content": self.progress_judge_system_prompt},
+                    {"role": "user", "content": prompt},
+                ]
+            )
+        except Exception as exc:
+            return ProgressJudgment(
+                raw_output="",
+                label="unknown",
+                confidence="low",
+                feedback=f"Progress judge failed: {exc}",
+                parse_error=str(exc),
+                raw_result={},
+            )
+        return self._parse_progress_judgment(_strip_reasoning_for_context(raw_output))
+
+    async def _run_public_summary_update(
+        self,
+        *,
+        old_public_history: PublicHistoryState,
+        previous_student_answer: str,
+        tutor_visible_output: str,
+        current_student_answer: str,
+    ) -> PublicHistoryState:
+        prompt = self._build_summary_prompt(
+            old_public_history=old_public_history,
+            previous_student_answer=_strip_reasoning_for_context(previous_student_answer),
+            tutor_visible_output=_strip_reasoning_for_context(tutor_visible_output),
+            current_student_answer=_strip_reasoning_for_context(current_student_answer),
+        )
+        try:
+            raw_output = await self.aux_caller.call_text(
+                [
+                    {"role": "system", "content": self.summary_system_prompt},
+                    {"role": "user", "content": prompt},
+                ]
+            )
+            summary = self._parse_public_summary(raw_output)
+        except Exception as exc:
+            logger.warning("Public summary update failed: %s", exc)
+            summary = self._fallback_public_summary(
+                old_public_history.summary,
+                previous_student_answer,
+                tutor_visible_output,
+                current_student_answer,
+            )
+        return PublicHistoryState(
+            summary=_strip_reasoning_for_context(summary),
+            turn_count=old_public_history.turn_count + 1,
+        )
+
+    def _build_tutor_prompt(self, state: TutorTurnState) -> str:
+        feedback = state.previous_feedback
+        return render_prompt(
+            TEACHER_STATE_USER_TEMPLATE,
+            task=state.task,
+            ground_truth=state.ground_truth,
+            public_history=state.public_history.summary or "No visible tutoring history yet.",
+            previous_tutor_output=state.previous_tutor_visible_output or "(none yet)",
+            feedback_kind=feedback.kind,
+            student_output=feedback.student_output or "(empty)",
+            judge_correct=feedback.judge_correct,
+            judge_feedback=feedback.judge_feedback or "(empty)",
+            progress_label=feedback.progress_label,
+            progress_feedback=feedback.progress_feedback or "(empty)",
+            leak_feedback=feedback.leak_feedback or "(empty)",
+            current_round=state.turn_idx,
+            max_turns=state.max_turns,
+            remaining_rounds=max(state.max_turns - state.turn_idx + 1, 0),
+        )
+
+    def _build_student_prompt_from_state(self, state: StudentTurnState) -> str:
+        return render_prompt(
+            STUDENT_STATE_USER_TEMPLATE,
+            task=state.task,
+            public_history=state.public_history.summary or "No previous visible tutoring history.",
+            previous_student_output=state.previous_student_output or "(empty)",
+            teacher_feedback=state.latest_tutor_visible_output or "(none)",
+        )
+
+    def _build_student_prompt(
         self,
         task: str,
         teacher_action: str | None,
         history: list[dict[str, Any]],
-    ) -> tuple[str, str | None]:
-        prompt = self._build_student_prompt(task, teacher_action, history)
-        try:
-            answer = await self._call_student_prompt(prompt)
-            return answer, None
-        except Exception as exc:
-            return "", f"Student call failed: {exc}"
+    ) -> str:
+        public_summary = "\n".join(self._student_visible_history_summaries(history))
+        return self._build_student_prompt_from_state(
+            StudentTurnState(
+                task=task,
+                public_history=PublicHistoryState(summary=public_summary),
+                previous_student_output=self._latest_visible_student_answer(history),
+                latest_tutor_visible_output=teacher_action
+                or "(none, produce the first answer attempt)",
+            )
+        )
 
+    def _build_summary_prompt(
+        self,
+        *,
+        old_public_history: PublicHistoryState,
+        previous_student_answer: str,
+        tutor_visible_output: str,
+        current_student_answer: str,
+    ) -> str:
+        return render_prompt(
+            SUMMARY_USER_TEMPLATE,
+            old_public_summary=old_public_history.summary or "(empty)",
+            previous_student_answer=previous_student_answer or "(empty)",
+            tutor_output=tutor_visible_output or "(empty)",
+            current_student_answer=current_student_answer or "(empty)",
+        )
+
+    def _build_progress_judge_prompt(
+        self,
+        *,
+        task: str,
+        ground_truth: str,
+        previous_student_answer: str,
+        current_student_answer: str,
+        tutor_visible_output: str,
+    ) -> str:
+        return render_prompt(
+            PROGRESS_JUDGE_USER_TEMPLATE,
+            task=task,
+            ground_truth=ground_truth,
+            previous_student_answer=previous_student_answer or "(empty)",
+            tutor_output=tutor_visible_output or "(empty)",
+            current_student_answer=current_student_answer or "(empty)",
+        )
+
+    def _build_leak_check_prompt(
+        self, task: str, ground_truth: str, teacher_action: str
+    ) -> str:
+        return render_prompt(
+            LEAK_CHECK_USER_TEMPLATE,
+            task=task,
+            ground_truth=ground_truth,
+            teacher_action=_strip_reasoning_for_context(teacher_action),
+        )
+
+    def _build_initial_public_summary(self, initial_student_answer: str) -> str:
+        return (
+            "Initial student attempt: "
+            f"{_compact_text(_strip_reasoning_for_context(initial_student_answer), 1200)}"
+        )
+
+    def _fallback_public_summary(
+        self,
+        old_summary: str,
+        previous_student_answer: str,
+        tutor_visible_output: str,
+        current_student_answer: str,
+    ) -> str:
+        update = (
+            f"Previous student answer: {_compact_text(previous_student_answer)}\n"
+            f"Tutor guidance shown: {_compact_text(tutor_visible_output)}\n"
+            f"Student reply after guidance: {_compact_text(current_student_answer)}"
+        )
+        if not old_summary:
+            return update
+        return f"{old_summary}\n{update}"
+
+    def _parse_public_summary(self, raw_output: str) -> str:
+        text = _strip_reasoning_for_context(raw_output)
+        parsed, _ = parse_json_dict(text)
+        if isinstance(parsed, dict):
+            parts = []
+            for key in [
+                "student_progress",
+                "visible_tutor_guidance",
+                "student_current_misconception",
+                "latest_student_state",
+            ]:
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    parts.append(f"{key}: {value.strip()}")
+            if parts:
+                return "\n".join(parts)
+        return text.strip()
+
+    def _parse_progress_judgment(self, raw_output: str) -> ProgressJudgment:
+        parsed, parse_error = parse_json_dict(raw_output)
+        if parsed is None:
+            lowered = raw_output.lower()
+            if "improved" in lowered:
+                label: ProgressLabel = "improved"
+            elif "regressed" in lowered or "worse" in lowered:
+                label = "regressed"
+            elif "same" in lowered or "unchanged" in lowered:
+                label = "same"
+            else:
+                label = "unknown"
+            return ProgressJudgment(
+                raw_output=raw_output,
+                label=label,
+                confidence="low",
+                feedback="Failed to parse progress-judge output.",
+                parse_error=parse_error,
+                raw_result={},
+            )
+        label_value = parsed.get("label", parsed.get("progress", "unknown"))
+        if label_value not in {"improved", "same", "regressed", "unknown"}:
+            parse_error = join_errors(
+                parse_error,
+                '"label" must be one of improved, same, regressed, unknown',
+            )
+            label_value = "unknown"
+        confidence_value = parsed.get("confidence", "low")
+        if confidence_value not in {"high", "medium", "low"}:
+            confidence_value = "low"
+        feedback = parsed.get("feedback", "")
+        if not isinstance(feedback, str):
+            feedback = str(feedback)
+        return ProgressJudgment(
+            raw_output=raw_output,
+            label=label_value,
+            confidence=confidence_value,
+            feedback=feedback or "No progress feedback provided.",
+            parse_error=parse_error,
+            raw_result=parsed,
+        )
+
+    def _parse_leak_check_result(self, raw_output: str) -> LeakCheckResult:
+        parsed, parse_error = parse_json_dict(raw_output)
+        if parsed is None:
+            lowered = raw_output.lower()
+            leaked = '"leaked": true' in lowered or re.search(r"\byes\b", lowered) is not None
+            return LeakCheckResult(
+                raw_output=raw_output,
+                leaked=leaked,
+                feedback="Failed to parse leak-check output.",
+                parse_error=parse_error,
+                raw_result={},
+            )
+        leaked = parsed.get("leaked")
+        feedback = parsed.get("feedback", "")
+        if not isinstance(leaked, bool):
+            parse_error = join_errors(parse_error, '"leaked" must be a boolean')
+            leaked = False
+        if not isinstance(feedback, str):
+            parse_error = join_errors(parse_error, '"feedback" must be a string')
+            feedback = str(feedback)
+        return LeakCheckResult(
+            raw_output=raw_output,
+            leaked=leaked,
+            feedback=feedback or (
+                "The teacher revealed the answer directly. The student did not see this turn."
+                if leaked
+                else "No answer leakage detected."
+            ),
+            parse_error=parse_error,
+            raw_result=parsed,
+        )
+
+    def _score_aime_answer(
+        self, task: str, ground_truth: str, student_answer: str
+    ) -> JudgeResult:
+        extracted_answer = _official_extract_aime_answer(student_answer)
+        normalized_prediction = _official_strip_string(extracted_answer) if extracted_answer else ""
+        normalized_target = _official_strip_string(ground_truth)
+        correct = _official_is_equiv(extracted_answer, ground_truth)
+        raw_result = {
+            "method": "lm_eval_aime_exact_match",
+            "task": task,
+            "student_answer": _strip_reasoning_for_context(student_answer),
+            "extracted_answer": extracted_answer,
+            "normalized_prediction": normalized_prediction,
+            "normalized_target": normalized_target,
+        }
+        return JudgeResult(
+            raw_output=json.dumps(
+                {
+                    "correct": correct,
+                    "feedback": "Correct." if correct else "Incorrect.",
+                    "scoring": raw_result,
+                },
+                ensure_ascii=True,
+                indent=2,
+            ),
+            correct=correct,
+            feedback="Correct." if correct else "Incorrect.",
+            parse_error=None,
+            raw_result=raw_result,
+        )
+
+    def _generation_config(self):
+        if self.gconfig is not None and hasattr(self.gconfig, "new"):
+            return self.gconfig.new(
+                n_samples=1,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                max_new_tokens=self.max_completion_tokens,
+            )
+        return self.gconfig
+
+    def _apply_chat_template(self, messages: list[dict[str, str]]) -> list[int]:
+        if self.tokenizer is not None and hasattr(self.tokenizer, "apply_chat_template"):
+            try:
+                return list(
+                    self.tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=True,
+                        add_generation_prompt=True,
+                        enable_thinking=self.enable_thinking,
+                    )
+                )
+            except TypeError:
+                return list(
+                    self.tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=True,
+                        add_generation_prompt=True,
+                    )
+                )
+        text = "\n".join(
+            f"{message.get('role', 'user')}: {message.get('content', '')}"
+            for message in messages
+        )
+        return self._encode_text(text)
+
+    def _decode_output(self, response: ModelResponse) -> str:
+        tokenizer = response.tokenizer or self.tokenizer
+        if tokenizer is not None and hasattr(tokenizer, "decode"):
+            try:
+                return tokenizer.decode(response.output_tokens, skip_special_tokens=False).replace(
+                    "<|im_end|>", ""
+                )
+            except TypeError:
+                return tokenizer.decode(response.output_tokens).replace("<|im_end|>", "")
+        return "".join(chr(max(0, int(token))) for token in response.output_tokens)
+
+    def _encode_text(self, text: str) -> list[int]:
+        if self.tokenizer is not None and hasattr(self.tokenizer, "encode"):
+            return list(self.tokenizer.encode(text, add_special_tokens=False))
+        return [ord(ch) for ch in text]
+
+    def _trace_to_history_record(
+        self,
+        trace: TurnTrace,
+        leak_result: LeakCheckResult | None,
+        student_error: str | None = None,
+    ) -> dict[str, Any]:
+        record: dict[str, Any] = {
+            "round_idx": trace.turn_idx,
+            "teacher_raw_output": trace.tutor_raw_output,
+            "teacher_action": trace.tutor_visible_output,
+            "student_answer": trace.student_output,
+            "student_error": student_error,
+            "judge_feedback": trace.judge_feedback,
+            "judge_correct": trace.judge_correct,
+            "progress_label": trace.progress.label,
+            "progress_feedback": trace.progress.feedback,
+            "reward": trace.reward,
+            "reward_components": dict(trace.reward_components),
+            "leak_detected": trace.leaked,
+            "public_history_before": trace.public_history_before,
+            "public_history_after": trace.public_history_after,
+        }
+        if leak_result is not None:
+            record["leak_feedback"] = leak_result.feedback
+        return record
+
+    def _log_rollout_stats(
+        self,
+        *,
+        total_reward: float,
+        history: list[dict[str, Any]],
+        traces: list[TurnTrace],
+        termination_reason: str,
+        pre_success: bool,
+        leak_count: int,
+    ) -> None:
+        progress_counts = {"improved": 0, "same": 0, "regressed": 0, "unknown": 0}
+        for trace in traces:
+            progress_counts[trace.progress.label] += 1
+        success_round = next(
+            (trace.turn_idx for trace in traces if trace.judge_correct and not trace.leaked),
+            0,
+        )
+        _safe_scalar(
+            reward=float(total_reward),
+            num_turns=len(traces),
+            samples_per_episode=len(traces),
+            leak_count=int(leak_count),
+            pre_success=float(pre_success),
+            term_success=float(success_round > 0),
+            success_round=int(success_round),
+            progress_improved=progress_counts["improved"],
+            progress_same=progress_counts["same"],
+            progress_regressed=progress_counts["regressed"],
+            progress_unknown=progress_counts["unknown"],
+            termination_pre_solved=float(termination_reason == "pre_solved"),
+            termination_success=float(termination_reason == "success"),
+            termination_max_turns=float(termination_reason == "max_turns"),
+        )
+
+    def _maybe_dump_debug_trace(
+        self,
+        *,
+        task: str,
+        ground_truth: str,
+        initial_student_answer: str,
+        latest_student_answer: str,
+        total_reward: float,
+        traces: list[TurnTrace],
+        termination_reason: str,
+        pre_success: bool,
+        leak_count: int,
+    ) -> None:
+        if not self.debug_trace_dir:
+            return
+        try:
+            ctx = workflow_context.get()
+            task_id = ctx.task_id
+            if task_id is None:
+                return
+            if task_id % self.debug_trace_every_n_rollouts != 0:
+                return
+            out_dir = Path(self.debug_trace_dir) / ("eval" if ctx.is_eval else "train")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            file_path = out_dir / f"task_{task_id:08d}_{int(time.time() * 1000)}.json"
+            payload = {
+                "task_id": task_id,
+                "is_eval": bool(ctx.is_eval),
+                "termination_reason": termination_reason,
+                "total_reward": float(total_reward),
+                "num_turns": len(traces),
+                "pre_success": bool(pre_success),
+                "leak_count": int(leak_count),
+                "task": task,
+                "ground_truth": ground_truth,
+                "initial_student_answer": initial_student_answer,
+                "latest_student_answer": latest_student_answer,
+                "turns": [self._trace_to_json(trace) for trace in traces],
+            }
+            file_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            logger.info("Tutor debug trace dumped to %s", os.fspath(file_path))
+        except Exception:
+            logger.exception("Failed to dump tutor debug trace.")
+
+    def _trace_to_json(self, trace: TurnTrace) -> dict[str, Any]:
+        data = asdict(trace)
+        data["tutor_state"]["ground_truth"] = trace.tutor_state.ground_truth
+        return data
+
+    def _student_visible_history_summaries(
+        self, history: list[dict[str, Any]]
+    ) -> list[str]:
+        summaries: list[str] = []
+        for record in history:
+            if record.get("leak_detected"):
+                continue
+            summary = record.get("public_history_after") or record.get("student_visible_summary")
+            if isinstance(summary, str) and summary.strip():
+                summaries.append(_strip_reasoning_for_context(summary))
+        return summaries
+
+    def _latest_visible_student_answer(self, history: list[dict[str, Any]]) -> str:
+        for record in reversed(history):
+            if not record.get("leak_detected") and record.get("student_answer"):
+                return _strip_reasoning_for_context(str(record["student_answer"]))
+        return ""
+
+    # Legacy transfer helpers are retained for manual/demo tooling, but training no longer calls them.
     async def _run_transfer_student(
         self,
         *,
@@ -620,34 +1195,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             transfer_task=transfer_task,
         )
         try:
-            answer = await self._call_student_prompt(prompt)
-            return answer, None
+            return _strip_reasoning_for_context(
+                await self._call_student_prompt(prompt)
+            ), None
         except Exception as exc:
-            return "", f"Transfer student call failed: {exc}"
-
-    async def _call_student_prompt(self, prompt: str) -> str:
-        answer = await self.aux_caller.call_text(
-            [
-                {"role": "system", "content": self.student_system_prompt},
-                {"role": "user", "content": prompt},
-            ]
-        )
-        return answer
-
-    async def _run_leak_check(
-        self, task: str, ground_truth: str, teacher_action: str
-    ) -> LeakCheckResult:
-        prompt = self._build_leak_check_prompt(task, ground_truth, teacher_action)
-        try:
-            raw_output = await self.aux_caller.call_text(
-                [
-                    {"role": "system", "content": self.leak_check_system_prompt},
-                    {"role": "user", "content": prompt},
-                ]
-            )
-        except Exception as exc:
-            return LeakCheckResult("", False, f"Leak check failed: {exc}", str(exc), {})
-        return self._parse_leak_check_result(raw_output)
+            return "", str(exc)
 
     async def _run_transfer_round(
         self,
@@ -711,10 +1263,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             task_value = ""
         if not isinstance(gt_value, str):
             if isinstance(gt_value, (int, float)) and not isinstance(gt_value, bool):
-                if isinstance(gt_value, int):
-                    gt_value = str(gt_value)
-                else:
-                    gt_value = str(int(gt_value) if gt_value.is_integer() else gt_value)
+                gt_value = str(int(gt_value) if isinstance(gt_value, int) else gt_value)
             else:
                 parse_error = join_errors(
                     parse_error, '"ground_truth" must be a string or number'
@@ -731,78 +1280,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raw_result=parsed,
         )
 
-    def _build_teacher_initial_prompt(
-        self,
-        task: str,
-        ground_truth: str,
-        initial_student_answer: str,
-        round_idx: int,
-        latest_judge_result: JudgeResult,
-        pre_solved: bool,
-    ) -> str:
-        pre_solved_note = (
-            "The student already solved the task during reset. Your next action will terminate the episode with reward 0."
-            if pre_solved
-            else "The student still needs guidance."
-        )
-        return render_prompt(
-            TEACHER_INITIAL_USER_TEMPLATE,
-            task=task,
-            ground_truth=ground_truth,
-            initial_student_answer=initial_student_answer,
-            initial_correct=latest_judge_result.correct,
-            initial_feedback=latest_judge_result.feedback,
-            current_round=round_idx - 1,
-            max_turns=self.max_turns,
-            remaining_rounds=max(self.max_turns - round_idx + 1, 0),
-            pre_solved=pre_solved,
-            pre_solved_note=pre_solved_note,
-        )
-
-    def _build_teacher_followup_prompt(
-        self,
-        latest_record: dict[str, Any],
-        latest_judge_result: JudgeResult,
-        round_idx: int,
-        pre_solved: bool,
-    ) -> str:
-        leak_feedback = (
-            latest_record.get("leak_feedback")
-            or "The previous teacher turn leaked the answer and the student did not see it."
-        )
-        return render_prompt(
-            TEACHER_FOLLOWUP_USER_TEMPLATE,
-            previous_round_idx=latest_record["round_idx"],
-            current_round=round_idx - 1,
-            max_turns=self.max_turns,
-            remaining_rounds=max(self.max_turns - round_idx + 1, 0),
-            pre_solved=pre_solved,
-            leak_detected=bool(latest_record.get("leak_detected")),
-            leak_feedback=leak_feedback,
-            latest_correct=latest_judge_result.correct,
-            latest_feedback=latest_judge_result.feedback,
-            student_answer=latest_record.get("student_answer", ""),
-            judge_correct=bool(latest_record.get("judge_correct")),
-            judge_feedback=latest_record.get("judge_feedback", ""),
-            transfer_triggered=bool(latest_record.get("transfer_triggered")),
-            transfer_success=bool(latest_record.get("transfer_success")),
-            transfer_judge_feedback=latest_record.get("transfer_judge_feedback", ""),
-            termination_feedback=latest_record.get("termination_feedback", ""),
-        )
-
-    def _build_student_prompt(
-        self,
-        task: str,
-        teacher_action: str | None,
-        history: list[dict[str, Any]],
-    ) -> str:
-        return render_prompt(
-            STUDENT_USER_TEMPLATE,
-            task=task,
-            visible_history=self._student_visible_history_summaries(history),
-            teacher_feedback=teacher_action or "(none, produce the first answer attempt)",
-        )
-
     def _build_transfer_student_prompt(
         self,
         *,
@@ -814,19 +1291,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return render_prompt(
             TRANSFER_STUDENT_USER_TEMPLATE,
             original_task=original_task,
-            initial_student_answer=initial_student_answer,
+            initial_student_answer=_strip_reasoning_for_context(initial_student_answer),
             visible_history=self._student_visible_history_summaries(history),
             transfer_task=transfer_task,
-        )
-
-    def _build_leak_check_prompt(
-        self, task: str, ground_truth: str, teacher_action: str
-    ) -> str:
-        return render_prompt(
-            LEAK_CHECK_USER_TEMPLATE,
-            task=task,
-            ground_truth=ground_truth,
-            teacher_action=teacher_action,
         )
 
     def _build_transfer_generation_prompt(self, task: str, ground_truth: str) -> str:
@@ -836,184 +1303,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ground_truth=ground_truth,
         )
 
-    def _score_aime_answer(
-        self, task: str, ground_truth: str, student_answer: str
-    ) -> JudgeResult:
-        extracted_answer = _official_extract_aime_answer(student_answer)
-        normalized_prediction = _official_strip_string(extracted_answer) if extracted_answer else ""
-        normalized_target = _official_strip_string(ground_truth)
-        correct = _official_is_equiv(extracted_answer, ground_truth)
-        raw_result = {
-            "method": "lm_eval_aime_exact_match",
-            "task": task,
-            "student_answer": student_answer,
-            "extracted_answer": extracted_answer,
-            "normalized_prediction": normalized_prediction,
-            "normalized_target": normalized_target,
-        }
-        return JudgeResult(
-            raw_output=json.dumps(
-                {
-                    "correct": correct,
-                    "feedback": "Correct." if correct else "Incorrect.",
-                    "scoring": raw_result,
-                },
-                ensure_ascii=True,
-                indent=2,
-            ),
-            correct=correct,
-            feedback="Correct." if correct else "Incorrect.",
-            parse_error=None,
-            raw_result=raw_result,
-        )
 
-    def _parse_leak_check_result(self, raw_output: str) -> LeakCheckResult:
-        parsed, parse_error = parse_json_dict(raw_output)
-        if parsed is None:
-            lowered = raw_output.lower()
-            leaked = '"leaked": true' in lowered or re.search(r"\byes\b", lowered) is not None
-            return LeakCheckResult(
-                raw_output=raw_output,
-                leaked=leaked,
-                feedback="Failed to parse leak-check output.",
-                parse_error=parse_error,
-                raw_result={},
-            )
-        leaked = parsed.get("leaked")
-        feedback = parsed.get("feedback", "")
-        if not isinstance(leaked, bool):
-            parse_error = join_errors(parse_error, '"leaked" must be a boolean')
-            leaked = False
-        if not isinstance(feedback, str):
-            parse_error = join_errors(parse_error, '"feedback" must be a string')
-            feedback = str(feedback)
-        return LeakCheckResult(
-            raw_output=raw_output,
-            leaked=leaked,
-            feedback=feedback or (
-                "The teacher revealed the answer directly. The student did not see this turn."
-                if leaked
-                else "No answer leakage detected."
-            ),
-            parse_error=parse_error,
-            raw_result=parsed,
-        )
-
-    def _student_visible_history_summaries(
-        self, history: list[dict[str, Any]]
-    ) -> list[str]:
-        summaries: list[str] = []
-        for record in history:
-            if record.get("leak_detected"):
-                continue
-            summary = record.get("student_visible_summary")
-            if not isinstance(summary, str) or not summary.strip():
-                summary = self._build_student_visible_summary(record)
-            summaries.append(summary)
-        return summaries
-
-    def _build_student_visible_summary(self, record: dict[str, Any]) -> str:
-        teacher_text = _compact_text(record.get("teacher_action", "(empty)"))
-        student_text = _compact_text(record.get("student_answer", "(empty)"))
-        judge_text = _compact_text(record.get("judge_feedback", "(empty)"))
-        return (
-            f"Turn {record['round_idx']}: Teacher guidance: {teacher_text}. "
-            f"Student reply: {student_text}. Judge feedback: {judge_text}."
-        )
-
-    def _maybe_dump_debug_trace(
-        self,
-        *,
-        task: str,
-        ground_truth: str,
-        initial_student_answer: str,
-        latest_student_answer: str,
-        total_reward: float,
-        history: list[dict[str, Any]],
-        termination_reason: str,
-        pre_success: bool,
-        term_success: bool,
-        transfer_success: bool,
-        leak_count: int,
-    ) -> None:
-        if not self.debug_trace_dir:
-            return
-        try:
-            ctx = workflow_context.get()
-            task_id = ctx.task_id
-            if task_id is None:
-                return
-            if task_id % self.debug_trace_every_n_rollouts != 0:
-                return
-
-            out_dir = Path(self.debug_trace_dir) / ("eval" if ctx.is_eval else "train")
-            out_dir.mkdir(parents=True, exist_ok=True)
-            file_path = out_dir / f"task_{task_id:08d}_{int(time.time() * 1000)}.json"
-
-            rounds: list[dict[str, Any]] = []
-            for record in history:
-                rounds.append(
-                    {
-                        "round_idx": int(record.get("round_idx", 0)),
-                        "teacher_action": record.get("teacher_action", ""),
-                        "student_answer": record.get("student_answer", ""),
-                        "student_error": record.get("student_error"),
-                        "judge_feedback": record.get("judge_feedback"),
-                        "judge_correct": bool(record.get("judge_correct", False)),
-                        "reward": float(record.get("reward", 0.0) or 0.0),
-                        "step_factor": record.get("step_factor"),
-                        "term_reward": record.get("term_reward"),
-                        "transfer_bonus_reward": record.get("transfer_bonus_reward"),
-                        "leak_detected": bool(record.get("leak_detected", False)),
-                        "leak_feedback": record.get("leak_feedback"),
-                        "turn_prompt_tokens": int(record.get("turn_prompt_tokens", 0) or 0),
-                        "turn_completion_tokens": int(record.get("turn_completion_tokens", 0) or 0),
-                        "turn_total_tokens": int(record.get("turn_total_tokens", 0) or 0),
-                        "termination_feedback": record.get("termination_feedback"),
-                        "transfer_success": bool(record.get("transfer_success", False)),
-                        "transfer_task": record.get("transfer_task"),
-                        "transfer_student_answer": record.get("transfer_student_answer"),
-                    }
-                )
-
-            payload = {
-                "task_id": task_id,
-                "is_eval": bool(ctx.is_eval),
-                "termination_reason": termination_reason,
-                "total_reward": float(total_reward),
-                "num_turns": len(history),
-                "pre_success": bool(pre_success),
-                "term_success": bool(term_success),
-                "transfer_success": bool(transfer_success),
-                "leak_count": int(leak_count),
-                "term_reward_sum": float(
-                    sum(float(record.get("term_reward", 0.0) or 0.0) for record in history)
-                ),
-                "transfer_bonus_sum": float(
-                    sum(
-                        float(record.get("transfer_bonus_reward", 0.0) or 0.0)
-                        for record in history
-                    )
-                ),
-                "length_penalty_sum": float(
-                    sum(float(record.get("length_penalty", 0.0) or 0.0) for record in history)
-                ),
-                "task": task,
-                "ground_truth": ground_truth,
-                "initial_student_answer": initial_student_answer,
-                "latest_student_answer": latest_student_answer,
-                "rounds": rounds,
-            }
-            file_path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            logger.info("Tutor debug trace dumped to %s", os.fspath(file_path))
-        except Exception:
-            logger.exception("Failed to dump tutor debug trace.")
-
-
-def _strip_think_tags(text: str) -> str:
+def _strip_reasoning_for_context(text: str) -> str:
     text = text or ""
     text = re.sub(
         r"<think\b[^>]*>.*?</think\s*>",
@@ -1030,12 +1321,12 @@ def _strip_think_tags(text: str) -> str:
     return re.sub(r"</?think\b[^>]*>", "", text, flags=re.IGNORECASE).strip()
 
 
-def _is_max_total_tokens_error(exc: Exception) -> bool:
-    return "exceeds max_total_tokens" in str(exc)
+def _strip_think_tags(text: str) -> str:
+    return _strip_reasoning_for_context(text)
 
 
 def _compact_text(text: str, max_chars: int = 240) -> str:
-    compact = " ".join((text or "").split())
+    compact = " ".join(_strip_reasoning_for_context(text).split())
     if not compact:
         return "(empty)"
     if len(compact) <= max_chars:

@@ -5,7 +5,9 @@ from examples.tutor.prompts import (
     DEFAULT_GENERATOR_SYSTEM_PROMPT,
     DEFAULT_JUDGE_SYSTEM_PROMPT,
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
+    DEFAULT_PROGRESS_JUDGE_SYSTEM_PROMPT,
     DEFAULT_STUDENT_SYSTEM_PROMPT,
+    DEFAULT_SUMMARY_SYSTEM_PROMPT,
     DEFAULT_TEACHER_SYSTEM_PROMPT,
 )
 
@@ -37,14 +39,24 @@ class TutorConfig(GRPOConfig):
     max_concurrent_aux_calls: int = field(default=8)
     api_params_config_path: str = field(default="")
     api_params_key: str = field(default="")
+    success_reward: float = field(default=1.0)
+    leak_penalty: float = field(default=-1.0)
+    progress_improved_reward: float = field(default=0.3)
+    progress_same_reward: float = field(default=0.0)
+    progress_regressed_reward: float = field(default=-0.3)
+    progress_unknown_reward: float = field(default=0.0)
     term_success_reward: float = field(default=1.0)
-    transfer_bonus_reward: float = field(default=0.5)
+    transfer_bonus_reward: float = field(default=0.0)
     token_budget_penalty: float = field(default=-1.0)
     teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
     student_system_prompt: str = field(default=DEFAULT_STUDENT_SYSTEM_PROMPT)
     judge_system_prompt: str = field(default=DEFAULT_JUDGE_SYSTEM_PROMPT)
     leak_check_system_prompt: str = field(default=DEFAULT_LEAK_CHECK_SYSTEM_PROMPT)
     generator_system_prompt: str = field(default=DEFAULT_GENERATOR_SYSTEM_PROMPT)
+    summary_system_prompt: str = field(default=DEFAULT_SUMMARY_SYSTEM_PROMPT)
+    progress_judge_system_prompt: str = field(
+        default=DEFAULT_PROGRESS_JUDGE_SYSTEM_PROMPT
+    )
     debug_trace_dir: str = field(
         default="",
         metadata={"help": "Optional directory to dump readable per-rollout tutor traces."},

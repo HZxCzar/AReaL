@@ -37,17 +37,23 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
 
     async def _run_student(
         self,
-        task: str,
-        teacher_action: str | None,
-        history: list[dict[str, Any]],
+        state_or_task,
+        teacher_action: str | None = None,
+        history: list[dict[str, Any]] | None = None,
     ) -> tuple[str, str | None]:
+        if isinstance(state_or_task, tutor_workflow_module.StudentTurnState):
+            task = state_or_task.task
+            prompt = self._build_student_prompt_from_state(state_or_task)
+            teacher_action = state_or_task.latest_tutor_visible_output
+        else:
+            task = str(state_or_task)
+            prompt = self._build_student_prompt(task, teacher_action, history or [])
         if teacher_action is None and task == self.root_task:
             label = "student_init"
         elif teacher_action is None:
             label = "transfer_student"
         else:
             label = "student"
-        prompt = self._build_student_prompt(task, teacher_action, history)
         messages = [
             {"role": "system", "content": self.student_system_prompt},
             {"role": "user", "content": prompt},
@@ -121,6 +127,12 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         max_concurrent_aux_calls=config.max_concurrent_aux_calls,
         api_params_config_path=config.api_params_config_path or None,
         api_params_key=config.api_params_key or None,
+        success_reward=config.success_reward,
+        leak_penalty=config.leak_penalty,
+        progress_improved_reward=config.progress_improved_reward,
+        progress_same_reward=config.progress_same_reward,
+        progress_regressed_reward=config.progress_regressed_reward,
+        progress_unknown_reward=config.progress_unknown_reward,
         term_success_reward=config.term_success_reward,
         transfer_bonus_reward=config.transfer_bonus_reward,
         token_budget_penalty=config.token_budget_penalty,
@@ -129,6 +141,8 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         judge_system_prompt=config.judge_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
         generator_system_prompt=config.generator_system_prompt,
+        summary_system_prompt=config.summary_system_prompt,
+        progress_judge_system_prompt=config.progress_judge_system_prompt,
         max_episode_total_tokens=config.gconfig.max_tokens,
         tokenizer_path=config.tokenizer_path,
         model_context_length=config.sglang.context_length,
@@ -156,9 +170,9 @@ async def _run_one(
         rewards = await workflow.run(row, **teacher_extra_kwargs)
 
     visible_history_summaries = [
-        str(record.get("student_visible_summary", ""))
+        str(record.get("public_history_after", ""))
         for record in workflow.last_history
-        if not record.get("leak_detected") and record.get("student_visible_summary")
+        if not record.get("leak_detected") and record.get("public_history_after")
     ]
     turn_totals = [
         (usage.get("prompt_tokens") or 0) + (usage.get("completion_tokens") or 0)
