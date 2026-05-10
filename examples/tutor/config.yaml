@@ -8,7 +8,7 @@ tokenizer_path: ${actor.path}
 
 workflow: examples.tutor.workflow.TutorAgentWorkflow
 eval_workflow: ${workflow}
-max_turns: 5
+max_turns: 10
 enable_thinking: false
 aux_base_url: http://127.0.0.1:30001/v1
 aux_model: default
@@ -102,7 +102,7 @@ actor:
   reward_scaling: 1.0
   reward_bias: 0.0
   kl_ctl: 0.0
-  ppo_n_minibatches: 1
+  ppo_n_minibatches: 4
   recompute_logprob: true
   use_decoupled_loss: true
   behave_imp_weight_cap: 5.0
