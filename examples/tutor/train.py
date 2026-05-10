@@ -1,5 +1,6 @@
 import pathlib
 import sys
+from datetime import datetime
 
 sys.path.append(str(pathlib.Path(__file__).parent))
 from configs import TutorConfig
@@ -11,6 +12,8 @@ from areal.utils.hf_utils import load_hf_tokenizer
 
 
 def main(args):
+    trial_name = next(line.split(":", 1)[1].strip().strip("'\"") for line in pathlib.Path(args[args.index("--config") + 1]).read_text(encoding="utf-8").splitlines() if line.startswith("trial_name:"))
+    args = [*args, f"trial_name={datetime.now():%Y%m%d_%H%M%S}_{trial_name}"]
     config, _ = load_expr_config(args, TutorConfig)
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
 

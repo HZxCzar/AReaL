@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-CONFIG={$1:-"examples/tutor/config.yaml"}
+CONFIG="${1:-"examples/tutor/config.yaml"}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -16,7 +16,7 @@ N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-4}"
 TUTOR_DATASET_PATH="$ROOT_DIR/examples/tutor/aime_dataset_no_pre_solve"
 
 python examples/tutor/train.py \
-  --config $CONFIG \
+  --config "$CONFIG" \
   scheduler.type=local \
   cluster.n_gpus_per_node="$N_GPUS_PER_NODE" \
   experiment_name="$EXPERIMENT_NAME" \
