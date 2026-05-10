@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+CONFIG={$1:-"examples/tutor/config.yaml"}
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -11,12 +11,12 @@ export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 
 TRIAL_NAME="${TRIAL_NAME:-$(date +%Y%m%d_%H%M%S)}"
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-tutor-grpo}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-tutor}"
 N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-4}"
 TUTOR_DATASET_PATH="$ROOT_DIR/examples/tutor/aime_dataset_no_pre_solve"
 
 python examples/tutor/train.py \
-  --config examples/tutor/config.yaml \
+  --config $CONFIG \
   scheduler.type=local \
   cluster.n_gpus_per_node="$N_GPUS_PER_NODE" \
   experiment_name="$EXPERIMENT_NAME" \
