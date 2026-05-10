@@ -3,12 +3,11 @@ from __future__ import annotations
 import json
 import logging as py_logging
 import os
-import re
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import torch
 
@@ -112,6 +111,37 @@ except Exception:  # pragma: no cover - lightweight local test environments
 from examples.common.chat_budget import ChatContextBudget
 from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig, make_teacher_client
 from examples.common.parsing import join_errors, parse_json_dict
+from examples.tutor.core.aime import score_aime_answer
+from examples.tutor.core.history import (
+    latest_visible_student_answer,
+    student_visible_history_summaries,
+    trace_to_history_record,
+    trace_to_json,
+)
+from examples.tutor.core.parsers import (
+    parse_leak_check_result,
+    parse_progress_judgment,
+    parse_public_summary,
+)
+from examples.tutor.core.rewards import EpisodeRewardComputer, artifact_to_trace
+from examples.tutor.core.tensors import response_to_tensordict
+from examples.tutor.core.text import (
+    compact_text as _compact_text,
+    strip_reasoning_for_context as _strip_reasoning_for_context,
+)
+from examples.tutor.core.types import (
+    EpisodeArtifact,
+    GeneratedProblemResult,
+    JudgeResult,
+    LeakCheckResult,
+    ProgressJudgment,
+    PublicHistoryState,
+    StudentTurnState,
+    TutorPrivateFeedback,
+    TutorTurnState,
+    TurnArtifact,
+    TurnTrace,
+)
 from examples.tutor.prompts import (
     LEAK_CHECK_USER_TEMPLATE,
     PROGRESS_JUDGE_USER_TEMPLATE,
@@ -124,101 +154,6 @@ from examples.tutor.prompts import (
 )
 
 logger = logging.getLogger("TutorWorkflow")
-
-ProgressLabel = Literal["improved", "same", "regressed", "unknown"]
-ConfidenceLabel = Literal["high", "medium", "low"]
-FeedbackKind = Literal["none", "student_judged", "leak"]
-
-
-@dataclass(slots=True)
-class JudgeResult:
-    raw_output: str
-    correct: bool
-    feedback: str
-    parse_error: str | None
-    raw_result: dict[str, Any]
-
-
-@dataclass(slots=True)
-class LeakCheckResult:
-    raw_output: str
-    leaked: bool
-    feedback: str
-    parse_error: str | None
-    raw_result: dict[str, Any]
-
-
-@dataclass(slots=True)
-class GeneratedProblemResult:
-    raw_output: str
-    task: str
-    ground_truth: str
-    similarity_notes: str
-    parse_error: str | None
-    raw_result: dict[str, Any]
-
-
-@dataclass(slots=True)
-class PublicHistoryState:
-    summary: str = ""
-    turn_count: int = 0
-
-
-@dataclass(slots=True)
-class TutorPrivateFeedback:
-    kind: FeedbackKind = "none"
-    student_output: str = ""
-    judge_correct: bool = False
-    judge_feedback: str = ""
-    progress_label: ProgressLabel = "unknown"
-    progress_feedback: str = ""
-    leak_feedback: str = ""
-
-
-@dataclass(slots=True)
-class TutorTurnState:
-    task: str
-    ground_truth: str
-    public_history: PublicHistoryState
-    previous_tutor_visible_output: str
-    previous_feedback: TutorPrivateFeedback
-    turn_idx: int
-    max_turns: int
-
-
-@dataclass(slots=True)
-class StudentTurnState:
-    task: str
-    public_history: PublicHistoryState
-    previous_student_output: str
-    latest_tutor_visible_output: str
-
-
-@dataclass(slots=True)
-class ProgressJudgment:
-    raw_output: str
-    label: ProgressLabel
-    confidence: ConfidenceLabel
-    feedback: str
-    parse_error: str | None = None
-    raw_result: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(slots=True)
-class TurnTrace:
-    turn_idx: int
-    tutor_state: TutorTurnState
-    tutor_raw_output: str
-    tutor_visible_output: str
-    leaked: bool
-    student_output: str
-    judge_correct: bool
-    judge_feedback: str
-    progress: ProgressJudgment
-    reward: float
-    reward_components: dict[str, float]
-    public_history_before: str
-    public_history_after: str
 
 
 def _safe_scalar(**metrics: Any) -> None:
@@ -357,9 +292,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
 
         task = str(data["task"])
         ground_truth = str(data["ground_truth"])
-        results: list[dict[str, torch.Tensor]] = []
-        traces: list[TurnTrace] = []
-        history: list[dict[str, Any]] = []
+        turn_artifacts: list[TurnArtifact] = []
         leak_count = 0
         termination_reason = "max_turns"
 
@@ -372,30 +305,44 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         )
         initial_student_answer = _strip_reasoning_for_context(initial_student_answer)
-        judge_result = self._score_aime_answer(task, ground_truth, initial_student_answer)
-        if judge_result.correct:
+        initial_judge_result = self._score_aime_answer(
+            task, ground_truth, initial_student_answer
+        )
+        if initial_judge_result.correct:
             self.last_history = []
             self.last_traces = []
             self.last_total_reward = 0.0
             termination_reason = "pre_solved"
+            episode_artifact = EpisodeArtifact(
+                task=task,
+                ground_truth=ground_truth,
+                initial_student_answer=initial_student_answer,
+                initial_student_error=initial_student_error,
+                initial_judge_result=initial_judge_result,
+                turns=[],
+                termination_reason=termination_reason,
+                pre_success=True,
+                leak_count=0,
+                latest_student_answer=initial_student_answer,
+            )
             self._log_rollout_stats(
                 total_reward=0.0,
                 history=[],
                 traces=[],
-                termination_reason=termination_reason,
-                pre_success=True,
-                leak_count=0,
+                termination_reason=episode_artifact.termination_reason,
+                pre_success=episode_artifact.pre_success,
+                leak_count=episode_artifact.leak_count,
             )
             self._maybe_dump_debug_trace(
-                task=task,
-                ground_truth=ground_truth,
-                initial_student_answer=initial_student_answer,
-                latest_student_answer=initial_student_answer,
+                task=episode_artifact.task,
+                ground_truth=episode_artifact.ground_truth,
+                initial_student_answer=episode_artifact.initial_student_answer,
+                latest_student_answer=episode_artifact.latest_student_answer,
                 total_reward=0.0,
                 traces=[],
-                termination_reason=termination_reason,
-                pre_success=True,
-                leak_count=0,
+                termination_reason=episode_artifact.termination_reason,
+                pre_success=episode_artifact.pre_success,
+                leak_count=episode_artifact.leak_count,
             )
             return None
 
@@ -409,7 +356,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             kind="student_judged",
             student_output=initial_student_answer,
             judge_correct=False,
-            judge_feedback=judge_result.feedback,
+            judge_feedback=initial_judge_result.feedback,
             progress_label="unknown",
             progress_feedback="Initial student attempt was incorrect.",
         )
@@ -437,31 +384,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
             if leak_result.leaked:
                 leak_count += 1
-                reward = self.leak_penalty
-                results.append(self._response_to_tensordict(response, reward=reward))
-                progress = ProgressJudgment(
-                    raw_output="",
-                    label="unknown",
-                    confidence="low",
-                    feedback="Skipped because the tutor message leaked private answer information.",
+                turn_artifacts.append(
+                    TurnArtifact(
+                        turn_idx=turn_idx,
+                        tutor_state=tutor_state,
+                        tutor_prompt=self._build_tutor_prompt(tutor_state),
+                        tutor_response=response,
+                        tutor_raw_output=tutor_raw_output,
+                        tutor_visible_output=tutor_visible_output,
+                        leak_result=leak_result,
+                        public_history_before=public_before,
+                        public_history_after=public_before,
+                    )
                 )
-                trace = TurnTrace(
-                    turn_idx=turn_idx,
-                    tutor_state=tutor_state,
-                    tutor_raw_output=tutor_raw_output,
-                    tutor_visible_output=tutor_visible_output,
-                    leaked=True,
-                    student_output="",
-                    judge_correct=False,
-                    judge_feedback="",
-                    progress=progress,
-                    reward=reward,
-                    reward_components={"leak": reward},
-                    public_history_before=public_before,
-                    public_history_after=public_before,
-                )
-                traces.append(trace)
-                history.append(self._trace_to_history_record(trace, leak_result))
                 previous_feedback = TutorPrivateFeedback(
                     kind="leak",
                     leak_feedback=leak_result.feedback,
@@ -476,56 +411,40 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 previous_student_output=previous_student_output,
                 latest_tutor_visible_output=tutor_visible_output,
             )
+            student_prompt = self._build_student_prompt_from_state(student_state)
             student_answer, student_error = await self._run_student(student_state)
             student_answer = _strip_reasoning_for_context(student_answer)
             judge_result = self._score_aime_answer(task, ground_truth, student_answer)
 
             if judge_result.correct:
-                progress = ProgressJudgment(
-                    raw_output="",
-                    label="improved",
-                    confidence="high",
-                    feedback="The student reached the correct final answer.",
-                )
-                reward = self.success_reward
-                reward_components = {"success": self.success_reward}
                 termination_reason = "success"
             else:
-                progress = await self._run_progress_judge(
-                    task=task,
-                    ground_truth=ground_truth,
-                    previous_student_answer=previous_student_output,
-                    current_student_answer=student_answer,
-                    tutor_visible_output=tutor_visible_output,
-                )
-                reward = self.progress_rewards.get(progress.label, 0.0)
-                reward_components = {f"progress_{progress.label}": reward}
                 termination_reason = "max_turns" if turn_idx == self.max_turns else "continue"
 
-            results.append(self._response_to_tensordict(response, reward=reward))
             next_public_history = await self._run_public_summary_update(
                 old_public_history=public_history,
                 previous_student_answer=previous_student_output,
                 tutor_visible_output=tutor_visible_output,
                 current_student_answer=student_answer,
             )
-            trace = TurnTrace(
-                turn_idx=turn_idx,
-                tutor_state=tutor_state,
-                tutor_raw_output=tutor_raw_output,
-                tutor_visible_output=tutor_visible_output,
-                leaked=False,
-                student_output=student_answer,
-                judge_correct=judge_result.correct,
-                judge_feedback=judge_result.feedback,
-                progress=progress,
-                reward=reward,
-                reward_components=reward_components,
-                public_history_before=public_before,
-                public_history_after=next_public_history.summary,
+            turn_artifacts.append(
+                TurnArtifact(
+                    turn_idx=turn_idx,
+                    tutor_state=tutor_state,
+                    tutor_prompt=self._build_tutor_prompt(tutor_state),
+                    tutor_response=response,
+                    tutor_raw_output=tutor_raw_output,
+                    tutor_visible_output=tutor_visible_output,
+                    leak_result=leak_result,
+                    public_history_before=public_before,
+                    public_history_after=next_public_history.summary,
+                    student_state=student_state,
+                    student_prompt=student_prompt,
+                    student_output=student_answer,
+                    student_error=student_error,
+                    judge_result=judge_result,
+                )
             )
-            traces.append(trace)
-            history.append(self._trace_to_history_record(trace, None, student_error))
 
             public_history = next_public_history
             previous_tutor_visible_output = tutor_visible_output
@@ -535,13 +454,51 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_output=student_answer,
                 judge_correct=judge_result.correct,
                 judge_feedback=judge_result.feedback,
-                progress_label=progress.label,
-                progress_feedback=progress.feedback,
+                progress_label="unknown",
+                progress_feedback="",
             )
             if judge_result.correct:
                 break
 
-        total_reward = float(sum(trace.reward for trace in traces))
+        episode_artifact = EpisodeArtifact(
+            task=task,
+            ground_truth=ground_truth,
+            initial_student_answer=initial_student_answer,
+            initial_student_error=initial_student_error,
+            initial_judge_result=initial_judge_result,
+            turns=turn_artifacts,
+            termination_reason=termination_reason,
+            pre_success=False,
+            leak_count=leak_count,
+            latest_student_answer=previous_student_output,
+        )
+        reward_computer = EpisodeRewardComputer(
+            success_reward=self.success_reward,
+            leak_penalty=self.leak_penalty,
+            progress_rewards=self.progress_rewards,
+            progress_judge=self._run_progress_judge_from_values,
+        )
+        assignments = await reward_computer.compute(episode_artifact)
+        traces = [
+            artifact_to_trace(artifact, assignment)
+            for artifact, assignment in zip(turn_artifacts, assignments, strict=True)
+        ]
+        history = [
+            trace_to_history_record(
+                trace,
+                artifact.leak_result if artifact.leak_result.leaked else None,
+                artifact.student_error,
+            )
+            for artifact, trace in zip(turn_artifacts, traces, strict=True)
+        ]
+        results = [
+            response_to_tensordict(
+                artifact.tutor_response,
+                reward=assignment.reward,
+            )
+            for artifact, assignment in zip(turn_artifacts, assignments, strict=True)
+        ]
+        total_reward = float(sum(assignment.reward for assignment in assignments))
         self.last_history = history
         self.last_traces = traces
         self.last_total_reward = total_reward
@@ -549,20 +506,20 @@ class TutorAgentWorkflow(RolloutWorkflow):
             total_reward=total_reward,
             history=history,
             traces=traces,
-            termination_reason=termination_reason,
-            pre_success=False,
-            leak_count=leak_count,
+            termination_reason=episode_artifact.termination_reason,
+            pre_success=episode_artifact.pre_success,
+            leak_count=episode_artifact.leak_count,
         )
         self._maybe_dump_debug_trace(
-            task=task,
-            ground_truth=ground_truth,
-            initial_student_answer=initial_student_answer,
-            latest_student_answer=previous_student_output,
+            task=episode_artifact.task,
+            ground_truth=episode_artifact.ground_truth,
+            initial_student_answer=episode_artifact.initial_student_answer,
+            latest_student_answer=episode_artifact.latest_student_answer,
             total_reward=total_reward,
             traces=traces,
-            termination_reason=termination_reason,
-            pre_success=False,
-            leak_count=leak_count,
+            termination_reason=episode_artifact.termination_reason,
+            pre_success=episode_artifact.pre_success,
+            leak_count=episode_artifact.leak_count,
         )
         if not results:
             return None
@@ -615,38 +572,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raw_output,
         )
 
-    def _response_to_tensordict(
-        self, response: ModelResponse, *, reward: float
-    ) -> dict[str, torch.Tensor]:
-        full_ids = list(response.input_tokens) + list(response.output_tokens)
-        output_logprobs = list(response.output_logprobs)
-        if len(output_logprobs) < response.output_len:
-            output_logprobs.extend([0.0] * (response.output_len - len(output_logprobs)))
-        if len(output_logprobs) > response.output_len:
-            output_logprobs = output_logprobs[: response.output_len]
-        output_versions = list(response.output_versions)
-        if len(output_versions) < response.output_len:
-            output_versions.extend([0] * (response.output_len - len(output_versions)))
-        if len(output_versions) > response.output_len:
-            output_versions = output_versions[: response.output_len]
-        return {
-            "input_ids": torch.tensor(full_ids, dtype=torch.long).unsqueeze(0),
-            "logprobs": torch.tensor(
-                [0.0] * response.input_len + output_logprobs,
-                dtype=torch.float32,
-            ).unsqueeze(0),
-            "loss_mask": torch.tensor(
-                [0] * response.input_len + [1] * response.output_len,
-                dtype=torch.long,
-            ).unsqueeze(0),
-            "versions": torch.tensor(
-                [-1] * response.input_len + output_versions,
-                dtype=torch.long,
-            ).unsqueeze(0),
-            "attention_mask": torch.ones(len(full_ids), dtype=torch.bool).unsqueeze(0),
-            "rewards": torch.tensor([float(reward)], dtype=torch.float32),
-        }
-
     async def _run_student(
         self,
         state_or_task: StudentTurnState | str,
@@ -692,7 +617,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         except Exception as exc:
             return LeakCheckResult("", False, f"Leak check failed: {exc}", str(exc), {})
-        return self._parse_leak_check_result(_strip_reasoning_for_context(raw_output))
+        return parse_leak_check_result(_strip_reasoning_for_context(raw_output))
 
     async def _run_progress_judge(
         self,
@@ -726,7 +651,23 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 parse_error=str(exc),
                 raw_result={},
             )
-        return self._parse_progress_judgment(_strip_reasoning_for_context(raw_output))
+        return parse_progress_judgment(_strip_reasoning_for_context(raw_output))
+
+    async def _run_progress_judge_from_values(
+        self,
+        task: str,
+        ground_truth: str,
+        previous_student_answer: str,
+        current_student_answer: str,
+        tutor_visible_output: str,
+    ) -> ProgressJudgment:
+        return await self._run_progress_judge(
+            task=task,
+            ground_truth=ground_truth,
+            previous_student_answer=previous_student_answer,
+            current_student_answer=current_student_answer,
+            tutor_visible_output=tutor_visible_output,
+        )
 
     async def _run_public_summary_update(
         self,
@@ -749,7 +690,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     {"role": "user", "content": prompt},
                 ]
             )
-            summary = self._parse_public_summary(raw_output)
+            summary = parse_public_summary(raw_output)
         except Exception as exc:
             logger.warning("Public summary update failed: %s", exc)
             summary = self._fallback_public_summary(
@@ -798,12 +739,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_action: str | None,
         history: list[dict[str, Any]],
     ) -> str:
-        public_summary = "\n".join(self._student_visible_history_summaries(history))
+        public_summary = "\n".join(student_visible_history_summaries(history))
         return self._build_student_prompt_from_state(
             StudentTurnState(
                 task=task,
                 public_history=PublicHistoryState(summary=public_summary),
-                previous_student_output=self._latest_visible_student_answer(history),
+                previous_student_output=latest_visible_student_answer(history),
                 latest_tutor_visible_output=teacher_action
                 or "(none, produce the first answer attempt)",
             )
@@ -875,128 +816,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
             return update
         return f"{old_summary}\n{update}"
 
-    def _parse_public_summary(self, raw_output: str) -> str:
-        text = _strip_reasoning_for_context(raw_output)
-        parsed, _ = parse_json_dict(text)
-        if isinstance(parsed, dict):
-            parts = []
-            for key in [
-                "student_progress",
-                "visible_tutor_guidance",
-                "student_current_misconception",
-                "latest_student_state",
-            ]:
-                value = parsed.get(key)
-                if isinstance(value, str) and value.strip():
-                    parts.append(f"{key}: {value.strip()}")
-            if parts:
-                return "\n".join(parts)
-        return text.strip()
-
-    def _parse_progress_judgment(self, raw_output: str) -> ProgressJudgment:
-        parsed, parse_error = parse_json_dict(raw_output)
-        if parsed is None:
-            lowered = raw_output.lower()
-            if "improved" in lowered:
-                label: ProgressLabel = "improved"
-            elif "regressed" in lowered or "worse" in lowered:
-                label = "regressed"
-            elif "same" in lowered or "unchanged" in lowered:
-                label = "same"
-            else:
-                label = "unknown"
-            return ProgressJudgment(
-                raw_output=raw_output,
-                label=label,
-                confidence="low",
-                feedback="Failed to parse progress-judge output.",
-                parse_error=parse_error,
-                raw_result={},
-            )
-        label_value = parsed.get("label", parsed.get("progress", "unknown"))
-        if label_value not in {"improved", "same", "regressed", "unknown"}:
-            parse_error = join_errors(
-                parse_error,
-                '"label" must be one of improved, same, regressed, unknown',
-            )
-            label_value = "unknown"
-        confidence_value = parsed.get("confidence", "low")
-        if confidence_value not in {"high", "medium", "low"}:
-            confidence_value = "low"
-        feedback = parsed.get("feedback", "")
-        if not isinstance(feedback, str):
-            feedback = str(feedback)
-        return ProgressJudgment(
-            raw_output=raw_output,
-            label=label_value,
-            confidence=confidence_value,
-            feedback=feedback or "No progress feedback provided.",
-            parse_error=parse_error,
-            raw_result=parsed,
-        )
-
-    def _parse_leak_check_result(self, raw_output: str) -> LeakCheckResult:
-        parsed, parse_error = parse_json_dict(raw_output)
-        if parsed is None:
-            lowered = raw_output.lower()
-            leaked = '"leaked": true' in lowered or re.search(r"\byes\b", lowered) is not None
-            return LeakCheckResult(
-                raw_output=raw_output,
-                leaked=leaked,
-                feedback="Failed to parse leak-check output.",
-                parse_error=parse_error,
-                raw_result={},
-            )
-        leaked = parsed.get("leaked")
-        feedback = parsed.get("feedback", "")
-        if not isinstance(leaked, bool):
-            parse_error = join_errors(parse_error, '"leaked" must be a boolean')
-            leaked = False
-        if not isinstance(feedback, str):
-            parse_error = join_errors(parse_error, '"feedback" must be a string')
-            feedback = str(feedback)
-        return LeakCheckResult(
-            raw_output=raw_output,
-            leaked=leaked,
-            feedback=feedback or (
-                "The teacher revealed the answer directly. The student did not see this turn."
-                if leaked
-                else "No answer leakage detected."
-            ),
-            parse_error=parse_error,
-            raw_result=parsed,
-        )
-
     def _score_aime_answer(
         self, task: str, ground_truth: str, student_answer: str
     ) -> JudgeResult:
-        extracted_answer = _official_extract_aime_answer(student_answer)
-        normalized_prediction = _official_strip_string(extracted_answer) if extracted_answer else ""
-        normalized_target = _official_strip_string(ground_truth)
-        correct = _official_is_equiv(extracted_answer, ground_truth)
-        raw_result = {
-            "method": "lm_eval_aime_exact_match",
-            "task": task,
-            "student_answer": _strip_reasoning_for_context(student_answer),
-            "extracted_answer": extracted_answer,
-            "normalized_prediction": normalized_prediction,
-            "normalized_target": normalized_target,
-        }
-        return JudgeResult(
-            raw_output=json.dumps(
-                {
-                    "correct": correct,
-                    "feedback": "Correct." if correct else "Incorrect.",
-                    "scoring": raw_result,
-                },
-                ensure_ascii=True,
-                indent=2,
-            ),
-            correct=correct,
-            feedback="Correct." if correct else "Incorrect.",
-            parse_error=None,
-            raw_result=raw_result,
-        )
+        return score_aime_answer(task, ground_truth, student_answer)
 
     def _generation_config(self):
         if self.gconfig is not None and hasattr(self.gconfig, "new"):
@@ -1048,32 +871,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if self.tokenizer is not None and hasattr(self.tokenizer, "encode"):
             return list(self.tokenizer.encode(text, add_special_tokens=False))
         return [ord(ch) for ch in text]
-
-    def _trace_to_history_record(
-        self,
-        trace: TurnTrace,
-        leak_result: LeakCheckResult | None,
-        student_error: str | None = None,
-    ) -> dict[str, Any]:
-        record: dict[str, Any] = {
-            "round_idx": trace.turn_idx,
-            "teacher_raw_output": trace.tutor_raw_output,
-            "teacher_action": trace.tutor_visible_output,
-            "student_answer": trace.student_output,
-            "student_error": student_error,
-            "judge_feedback": trace.judge_feedback,
-            "judge_correct": trace.judge_correct,
-            "progress_label": trace.progress.label,
-            "progress_feedback": trace.progress.feedback,
-            "reward": trace.reward,
-            "reward_components": dict(trace.reward_components),
-            "leak_detected": trace.leaked,
-            "public_history_before": trace.public_history_before,
-            "public_history_after": trace.public_history_after,
-        }
-        if leak_result is not None:
-            record["leak_feedback"] = leak_result.feedback
-        return record
 
     def _log_rollout_stats(
         self,
@@ -1146,7 +943,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "ground_truth": ground_truth,
                 "initial_student_answer": initial_student_answer,
                 "latest_student_answer": latest_student_answer,
-                "turns": [self._trace_to_json(trace) for trace in traces],
+                "turns": [trace_to_json(trace) for trace in traces],
             }
             file_path.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2),
@@ -1155,29 +952,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             logger.info("Tutor debug trace dumped to %s", os.fspath(file_path))
         except Exception:
             logger.exception("Failed to dump tutor debug trace.")
-
-    def _trace_to_json(self, trace: TurnTrace) -> dict[str, Any]:
-        data = asdict(trace)
-        data["tutor_state"]["ground_truth"] = trace.tutor_state.ground_truth
-        return data
-
-    def _student_visible_history_summaries(
-        self, history: list[dict[str, Any]]
-    ) -> list[str]:
-        summaries: list[str] = []
-        for record in history:
-            if record.get("leak_detected"):
-                continue
-            summary = record.get("public_history_after") or record.get("student_visible_summary")
-            if isinstance(summary, str) and summary.strip():
-                summaries.append(_strip_reasoning_for_context(summary))
-        return summaries
-
-    def _latest_visible_student_answer(self, history: list[dict[str, Any]]) -> str:
-        for record in reversed(history):
-            if not record.get("leak_detected") and record.get("student_answer"):
-                return _strip_reasoning_for_context(str(record["student_answer"]))
-        return ""
 
     # Legacy transfer helpers are retained for manual/demo tooling, but training no longer calls them.
     async def _run_transfer_student(
@@ -1292,7 +1066,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             TRANSFER_STUDENT_USER_TEMPLATE,
             original_task=original_task,
             initial_student_answer=_strip_reasoning_for_context(initial_student_answer),
-            visible_history=self._student_visible_history_summaries(history),
+            visible_history=student_visible_history_summaries(history),
             transfer_task=transfer_task,
         )
 
@@ -1302,153 +1076,3 @@ class TutorAgentWorkflow(RolloutWorkflow):
             task=task,
             ground_truth=ground_truth,
         )
-
-
-def _strip_reasoning_for_context(text: str) -> str:
-    text = text or ""
-    text = re.sub(
-        r"<think\b[^>]*>.*?</think\s*>",
-        "",
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    text = re.sub(
-        r"<think\b[^>]*>.*$",
-        "",
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    return re.sub(r"</?think\b[^>]*>", "", text, flags=re.IGNORECASE).strip()
-
-
-def _strip_think_tags(text: str) -> str:
-    return _strip_reasoning_for_context(text)
-
-
-def _compact_text(text: str, max_chars: int = 240) -> str:
-    compact = " ".join(_strip_reasoning_for_context(text).split())
-    if not compact:
-        return "(empty)"
-    if len(compact) <= max_chars:
-        return compact
-    return compact[: max_chars - 3].rstrip() + "..."
-
-
-def _fix_fracs(string):
-    substrs = string.split("\\frac")
-    new_str = substrs[0]
-    if len(substrs) > 1:
-        substrs = substrs[1:]
-        for substr in substrs:
-            new_str += "\\frac"
-            if len(substr) > 0 and substr[0] == "{":
-                new_str += substr
-            else:
-                try:
-                    assert len(substr) >= 2
-                except AssertionError:
-                    return string
-                a = substr[0]
-                b = substr[1]
-                if b != "{":
-                    if len(substr) > 2:
-                        post_substr = substr[2:]
-                        new_str += "{" + a + "}{" + b + "}" + post_substr
-                    else:
-                        new_str += "{" + a + "}{" + b + "}"
-                else:
-                    if len(substr) > 2:
-                        post_substr = substr[2:]
-                        new_str += "{" + a + "}" + b + post_substr
-                    else:
-                        new_str += "{" + a + "}" + b
-    string = new_str
-    return string
-
-
-def _fix_a_slash_b(string):
-    if len(string.split("/")) != 2:
-        return string
-    a = string.split("/")[0]
-    b = string.split("/")[1]
-    try:
-        a = int(a)
-        b = int(b)
-        assert string == f"{a}/{b}"
-        new_string = "\\frac{" + str(a) + "}{" + str(b) + "}"
-        return new_string
-    except Exception:
-        return string
-
-
-def _remove_right_units(string):
-    if "\\text{ " in string:
-        splits = string.split("\\text{ ")
-        return splits[0]
-    return string
-
-
-def _fix_sqrt(string):
-    if "\\sqrt" not in string:
-        return string
-    splits = string.split("\\sqrt")
-    new_string = splits[0]
-    for split in splits[1:]:
-        if not split:
-            new_string += "\\sqrt"
-            continue
-        if split[0] != "{":
-            a = split[0]
-            new_string += "\\sqrt{" + a + "}" + split[1:]
-        else:
-            new_string += "\\sqrt" + split
-    return new_string
-
-
-def _strip_string(string):
-    string = string.replace("\n", "")
-    string = string.replace("\\!", "")
-    string = string.replace("\\\\", "\\")
-    string = string.replace("tfrac", "frac")
-    string = string.replace("dfrac", "frac")
-    string = string.replace("\\left", "")
-    string = string.replace("\\right", "")
-    string = string.replace("^{\\circ}", "")
-    string = string.replace("^\\circ", "")
-    string = string.replace("\\$", "")
-    string = _remove_right_units(string)
-    string = string.replace("\\%", "")
-    string = string.replace("\\%", "")
-    string = string.replace(" .", " 0.")
-    string = string.replace("{.", "{0.")
-    if len(string) == 0:
-        return string
-    if string[0] == ".":
-        string = "0" + string
-    if len(string.split("=")) == 2:
-        if len(string.split("=")[0]) <= 2:
-            string = string.split("=")[1]
-    string = _fix_sqrt(string)
-    string = string.replace(" ", "")
-    string = _fix_fracs(string)
-    if string == "0.5":
-        string = "\\frac{1}{2}"
-    string = _fix_a_slash_b(string)
-    return string
-
-
-def _official_strip_string(string: str) -> str:
-    return _strip_string(string)
-
-
-def _official_is_equiv(prediction: str, reference: str) -> bool:
-    return _official_strip_string(prediction) == _official_strip_string(reference)
-
-
-def _official_extract_aime_answer(response: str) -> str:
-    matches = list(
-        re.finditer(r"(?:^|[^0-9])([0-9]{1,4})(?:[^0-9]|$)", response or "")
-    )
-    if not matches:
-        return (response or "").strip()
-    return matches[-1].group(1)
