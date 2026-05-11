@@ -24,6 +24,8 @@ _REPO_ROOT = _THIS_DIR.parents[1]
 sys.path.append(str(_THIS_DIR))
 sys.path.append(str(_REPO_ROOT))
 
+from examples.tutor.core.types import PublicHistoryState, StudentTurnState
+
 
 @dataclass(slots=True)
 class ClassifiedRow:
@@ -148,9 +150,15 @@ async def classify_row(
     task = str(row["task"])
     ground_truth = str(row["ground_truth"])
     attempt_rows: list[dict[str, Any]] = []
+
     for attempt_idx in range(1, attempts + 1):
         answer, error = await workflow._run_student(
-            task, teacher_action=None, history=[]
+            StudentTurnState(
+                task=task,
+                public_history=PublicHistoryState(),
+                previous_student_output="",
+                latest_tutor_visible_output="(none, produce the first answer attempt)",
+            )
         )
         judge_result = workflow._score_aime_answer(task, ground_truth, answer)
         attempt_rows.append(
@@ -201,7 +209,7 @@ async def classify_split(
 ) -> list[ClassifiedRow]:
     size = len(dataset) if limit <= 0 else min(limit, len(dataset))
     processed = 0
-    progress_lock = asyncio.Lock()
+    log_lock = asyncio.Lock()
 
     async def _run(index: int) -> ClassifiedRow:
         nonlocal processed
@@ -212,7 +220,7 @@ async def classify_split(
             attempts=attempts,
             keep_on_error=keep_on_error,
         )
-        async with progress_lock:
+        async with log_lock:
             processed += 1
             if processed == size or processed % max(1, log_every) == 0:
                 logger.info(

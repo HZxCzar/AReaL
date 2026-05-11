@@ -37,21 +37,15 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
 
     async def _run_student(
         self,
-        state_or_task,
-        teacher_action: str | None = None,
-        history: list[dict[str, Any]] | None = None,
+        state: tutor_workflow_module.StudentTurnState,
     ) -> tuple[str, str | None]:
-        if isinstance(state_or_task, tutor_workflow_module.StudentTurnState):
-            task = state_or_task.task
-            prompt = self._build_student_prompt_from_state(state_or_task)
-            teacher_action = state_or_task.latest_tutor_visible_output
-        else:
-            task = str(state_or_task)
-            prompt = self._build_student_prompt(task, teacher_action, history or [])
-        if teacher_action is None and task == self.root_task:
+        prompt = self._build_student_prompt_from_state(state)
+        if (
+            state.task == self.root_task
+            and not state.previous_student_output
+            and not state.public_history.summary
+        ):
             label = "student_init"
-        elif teacher_action is None:
-            label = "transfer_student"
         else:
             label = "student"
         messages = [
@@ -81,26 +75,12 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
         self.trace_sink.append("leak_check", result.raw_output or result.feedback)
         return result
 
-    async def _run_transfer_generation(self, task: str, ground_truth: str):
-        prompt = self._build_transfer_generation_prompt(task, ground_truth)
-        messages = [
-            {"role": "system", "content": self.generator_system_prompt},
-            {"role": "user", "content": prompt},
-        ]
-        self.trace_sink.append_messages("transfer_generator_input", messages)
-        result = await super()._run_transfer_generation(task, ground_truth)
-        self.trace_sink.append(
-            "transfer_generator", result.raw_output or result.parse_error or "(empty)"
-        )
-        return result
-
     def _score_aime_answer(self, task: str, ground_truth: str, student_answer: str):
         result = super()._score_aime_answer(task, ground_truth, student_answer)
-        label = "judge" if task == self.root_task else "transfer_judge"
-        self.trace_sink.append(label, result.raw_output)
+        self.trace_sink.append("judge", result.raw_output)
         self.last_judge_outputs.append(
             {
-                "label": label,
+                "label": "judge",
                 "correct": result.correct,
                 "feedback": result.feedback,
                 "raw_result": result.raw_result,
@@ -129,20 +109,18 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         api_params_key=config.api_params_key or None,
         success_reward=config.success_reward,
         leak_penalty=config.leak_penalty,
-        progress_improved_reward=config.progress_improved_reward,
-        progress_same_reward=config.progress_same_reward,
-        progress_regressed_reward=config.progress_regressed_reward,
-        progress_unknown_reward=config.progress_unknown_reward,
-        term_success_reward=config.term_success_reward,
-        transfer_bonus_reward=config.transfer_bonus_reward,
+        outcome_prior_turn_weight=config.outcome_prior_turn_weight,
+        outcome_credit_gamma=config.outcome_credit_gamma,
+        early_success_bonus=config.early_success_bonus,
+        turn_penalty=config.turn_penalty,
+        length_penalty_threshold_chars=config.length_penalty_threshold_chars,
+        length_penalty_per_100_chars=config.length_penalty_per_100_chars,
+        length_penalty_min=config.length_penalty_min,
         token_budget_penalty=config.token_budget_penalty,
         teacher_system_prompt=config.teacher_system_prompt,
         student_system_prompt=config.student_system_prompt,
-        judge_system_prompt=config.judge_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
-        generator_system_prompt=config.generator_system_prompt,
         summary_system_prompt=config.summary_system_prompt,
-        progress_judge_system_prompt=config.progress_judge_system_prompt,
         max_episode_total_tokens=config.gconfig.max_tokens,
         tokenizer_path=config.tokenizer_path,
         model_context_length=config.sglang.context_length,

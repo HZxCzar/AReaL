@@ -2,10 +2,7 @@ from dataclasses import dataclass, field
 
 from areal.api.cli_args import GRPOConfig
 from examples.tutor.prompts import (
-    DEFAULT_GENERATOR_SYSTEM_PROMPT,
-    DEFAULT_JUDGE_SYSTEM_PROMPT,
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
-    DEFAULT_PROGRESS_JUDGE_SYSTEM_PROMPT,
     DEFAULT_STUDENT_SYSTEM_PROMPT,
     DEFAULT_SUMMARY_SYSTEM_PROMPT,
     DEFAULT_TEACHER_SYSTEM_PROMPT,
@@ -41,22 +38,18 @@ class TutorConfig(GRPOConfig):
     api_params_key: str = field(default="")
     success_reward: float = field(default=1.0)
     leak_penalty: float = field(default=-1.0)
-    progress_improved_reward: float = field(default=0.3)
-    progress_same_reward: float = field(default=0.0)
-    progress_regressed_reward: float = field(default=-0.3)
-    progress_unknown_reward: float = field(default=0.0)
-    term_success_reward: float = field(default=1.0)
-    transfer_bonus_reward: float = field(default=0.0)
+    outcome_prior_turn_weight: float = field(default=0.1)
+    outcome_credit_gamma: float = field(default=0.9)
+    early_success_bonus: float = field(default=0.3)
+    turn_penalty: float = field(default=-0.01)
+    length_penalty_threshold_chars: int = field(default=1200)
+    length_penalty_per_100_chars: float = field(default=-0.005)
+    length_penalty_min: float = field(default=-0.1)
     token_budget_penalty: float = field(default=-1.0)
     teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
     student_system_prompt: str = field(default=DEFAULT_STUDENT_SYSTEM_PROMPT)
-    judge_system_prompt: str = field(default=DEFAULT_JUDGE_SYSTEM_PROMPT)
     leak_check_system_prompt: str = field(default=DEFAULT_LEAK_CHECK_SYSTEM_PROMPT)
-    generator_system_prompt: str = field(default=DEFAULT_GENERATOR_SYSTEM_PROMPT)
     summary_system_prompt: str = field(default=DEFAULT_SUMMARY_SYSTEM_PROMPT)
-    progress_judge_system_prompt: str = field(
-        default=DEFAULT_PROGRESS_JUDGE_SYSTEM_PROMPT
-    )
     debug_trace_dir: str = field(
         default="",
         metadata={"help": "Optional directory to dump readable per-rollout tutor traces."},

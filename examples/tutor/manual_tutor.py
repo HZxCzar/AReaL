@@ -69,11 +69,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Send your tutor messages to the student even if they reveal the answer.",
     )
-    parser.add_argument(
-        "--transfer-check",
-        action="store_true",
-        help="After the original task is solved, also run the workflow transfer check.",
-    )
     parser.add_argument("overrides", nargs="*")
     return parser.parse_args()
 
@@ -145,47 +140,7 @@ def resolve_local_tokenizer_path(tokenizer_path: str | None) -> str | None:
 def build_workflow(config: Any, max_turns: int) -> Any:
     from workflow import TutorAgentWorkflow
 
-    class ManualTutorWorkflow(TutorAgentWorkflow):
-        async def _run_transfer_round(
-            self,
-            *,
-            task: str,
-            ground_truth: str,
-            initial_student_answer: str,
-            history: list[dict[str, Any]],
-        ) -> dict[str, Any]:
-            generation = await self._run_transfer_generation(task, ground_truth)
-            payload: dict[str, Any] = {
-                "transfer_triggered": True,
-                "transfer_task": generation.task,
-                "transfer_ground_truth": generation.ground_truth,
-                "transfer_generation_error": generation.parse_error,
-                "transfer_generation_raw_output": generation.raw_output,
-                "transfer_similarity_notes": generation.similarity_notes,
-                "transfer_success": False,
-            }
-            if not generation.task or not generation.ground_truth:
-                return payload
-            answer, answer_error = await self._run_transfer_student(
-                original_task=task,
-                initial_student_answer=initial_student_answer,
-                history=history,
-                transfer_task=generation.task,
-            )
-            judge_result = self._score_aime_answer(
-                generation.task, generation.ground_truth, answer
-            )
-            payload.update(
-                {
-                    "transfer_student_answer": answer,
-                    "transfer_student_error": answer_error,
-                    "transfer_judge_feedback": judge_result.feedback,
-                    "transfer_success": judge_result.correct,
-                }
-            )
-            return payload
-
-    return ManualTutorWorkflow(
+    return TutorAgentWorkflow(
         temperature=config.gconfig.temperature,
         top_p=config.gconfig.top_p,
         max_completion_tokens=config.gconfig.max_new_tokens,
@@ -203,20 +158,18 @@ def build_workflow(config: Any, max_turns: int) -> Any:
         api_params_key=config.api_params_key or None,
         success_reward=config.success_reward,
         leak_penalty=config.leak_penalty,
-        progress_improved_reward=config.progress_improved_reward,
-        progress_same_reward=config.progress_same_reward,
-        progress_regressed_reward=config.progress_regressed_reward,
-        progress_unknown_reward=config.progress_unknown_reward,
-        term_success_reward=config.term_success_reward,
-        transfer_bonus_reward=config.transfer_bonus_reward,
+        outcome_prior_turn_weight=config.outcome_prior_turn_weight,
+        outcome_credit_gamma=config.outcome_credit_gamma,
+        early_success_bonus=config.early_success_bonus,
+        turn_penalty=config.turn_penalty,
+        length_penalty_threshold_chars=config.length_penalty_threshold_chars,
+        length_penalty_per_100_chars=config.length_penalty_per_100_chars,
+        length_penalty_min=config.length_penalty_min,
         token_budget_penalty=config.token_budget_penalty,
         teacher_system_prompt=config.teacher_system_prompt,
         student_system_prompt=config.student_system_prompt,
-        judge_system_prompt=config.judge_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
-        generator_system_prompt=config.generator_system_prompt,
         summary_system_prompt=config.summary_system_prompt,
-        progress_judge_system_prompt=config.progress_judge_system_prompt,
         debug_trace_dir="",
         max_episode_total_tokens=config.gconfig.max_tokens,
         tokenizer_path=resolve_local_tokenizer_path(config.tokenizer_path),
@@ -267,6 +220,7 @@ def read_tutor_message(turn_idx: int) -> str | None:
 async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
     from areal.api.cli_args import load_expr_config
     from configs import TutorConfig
+    from examples.tutor.core.types import PublicHistoryState, StudentTurnState
 
     config_args = ["--config", args.config, *args.overrides]
     config, _ = load_expr_config(config_args, TutorConfig)
@@ -292,7 +246,6 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
         "row": row,
         "max_turns": max_turns,
         "skip_leak_check": bool(args.skip_leak_check),
-        "transfer_check": bool(args.transfer_check),
         "rounds": history,
     }
 
@@ -311,7 +264,12 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
 
     print("\nCalling current student for the initial answer...")
     initial_answer, initial_error = await workflow._run_student(
-        task, teacher_action=None, history=[]
+        StudentTurnState(
+            task=task,
+            public_history=PublicHistoryState(),
+            previous_student_output="",
+            latest_tutor_visible_output="(none, produce the first answer attempt)",
+        )
     )
     initial_judge = workflow._score_aime_answer(task, ground_truth, initial_answer)
     transcript["initial_student_answer"] = initial_answer
@@ -327,12 +285,15 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
         print("\nThe current student solved this row before tutoring.")
         return transcript
 
+    public_history = PublicHistoryState(
+        summary=workflow._build_initial_public_summary(initial_answer),
+        turn_count=0,
+    )
     termination_reason = "max_turns"
     latest_answer = initial_answer
+    previous_student_answer = initial_answer
     for turn_idx in range(1, max_turns + 1):
-        visible_history = workflow._student_visible_history_summaries(history)
-        if visible_history:
-            print_block("Student-Visible History", "\n".join(visible_history))
+        print_block("Student-Visible State", public_history.summary)
         tutor_message = read_tutor_message(turn_idx)
         if tutor_message is None:
             termination_reason = "user_quit"
@@ -340,6 +301,7 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
         record: dict[str, Any] = {
             "round_idx": turn_idx,
             "teacher_action": tutor_message,
+            "public_history_before": public_history.summary,
         }
 
         if not args.skip_leak_check:
@@ -357,30 +319,43 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
                 record["leak_detected"] = True
                 record["student_answer"] = ""
                 record["judge_correct"] = False
+                record["student_visible"] = False
+                record["public_history_after"] = public_history.summary
                 history.append(record)
                 print("\nLeak check: LEAKED. The student will not see this turn.")
                 print(f"Feedback: {leak_result.feedback}")
                 continue
 
-        student_answer, student_error = await workflow._run_student(
-            task, tutor_message, history=history
+        student_state = StudentTurnState(
+            task=task,
+            public_history=public_history,
+            previous_student_output=previous_student_answer,
+            latest_tutor_visible_output=tutor_message,
+        )
+        student_answer, student_error = await workflow._run_student(student_state)
+        next_public_history = await workflow._run_public_summary_update(
+            old_public_history=public_history,
+            previous_student_answer=previous_student_answer,
+            tutor_visible_output=tutor_message,
+            current_student_answer=student_answer,
         )
         judge_result = workflow._score_aime_answer(task, ground_truth, student_answer)
         latest_answer = student_answer
         record.update(
             {
                 "leak_detected": False,
+                "student_visible": True,
                 "student_answer": student_answer,
                 "student_error": student_error,
                 "judge_correct": judge_result.correct,
                 "judge_feedback": judge_result.feedback,
                 "judge_raw_result": judge_result.raw_result,
+                "public_history_after": next_public_history.summary,
             }
         )
-        record["student_visible_summary"] = workflow._build_student_visible_summary(
-            record
-        )
         history.append(record)
+        public_history = next_public_history
+        previous_student_answer = student_answer
 
         print_block(f"Student Answer After Turn {turn_idx}", student_answer)
         if student_error:
@@ -389,37 +364,6 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
 
         if judge_result.correct:
             termination_reason = "success"
-            if args.transfer_check:
-                print("\nRunning transfer check with the same workflow logic...")
-                transfer_result = await workflow._run_transfer_round(
-                    task=task,
-                    ground_truth=ground_truth,
-                    initial_student_answer=initial_answer,
-                    history=history,
-                )
-                record.update(transfer_result)
-                print_block(
-                    "Transfer Task", str(transfer_result.get("transfer_task", ""))
-                )
-                print_block(
-                    "Transfer Student Answer",
-                    str(transfer_result.get("transfer_student_answer", "")),
-                )
-                generation_error = transfer_result.get("transfer_generation_error")
-                if generation_error:
-                    print_block("Transfer Generation Error", str(generation_error))
-                    print_block(
-                        "Transfer Generator Raw Output",
-                        str(
-                            transfer_result.get(
-                                "transfer_generation_raw_output", ""
-                            )
-                        ),
-                    )
-                print(
-                    "\nTransfer success: "
-                    f"{bool(transfer_result.get('transfer_success', False))}"
-                )
             break
 
     transcript["latest_student_answer"] = latest_answer

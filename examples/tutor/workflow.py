@@ -110,17 +110,13 @@ except Exception:  # pragma: no cover - lightweight local test environments
 
 from examples.common.chat_budget import ChatContextBudget
 from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig, make_teacher_client
-from examples.common.parsing import join_errors, parse_json_dict
 from examples.tutor.core.aime import score_aime_answer
 from examples.tutor.core.history import (
-    latest_visible_student_answer,
-    student_visible_history_summaries,
     trace_to_history_record,
     trace_to_json,
 )
 from examples.tutor.core.parsers import (
     parse_leak_check_result,
-    parse_progress_judgment,
     parse_public_summary,
 )
 from examples.tutor.core.rewards import EpisodeRewardComputer, artifact_to_trace
@@ -131,10 +127,8 @@ from examples.tutor.core.text import (
 )
 from examples.tutor.core.types import (
     EpisodeArtifact,
-    GeneratedProblemResult,
     JudgeResult,
     LeakCheckResult,
-    ProgressJudgment,
     PublicHistoryState,
     StudentTurnState,
     TutorPrivateFeedback,
@@ -144,12 +138,9 @@ from examples.tutor.core.types import (
 )
 from examples.tutor.prompts import (
     LEAK_CHECK_USER_TEMPLATE,
-    PROGRESS_JUDGE_USER_TEMPLATE,
     STUDENT_STATE_USER_TEMPLATE,
     SUMMARY_USER_TEMPLATE,
     TEACHER_STATE_USER_TEMPLATE,
-    TRANSFER_GENERATION_USER_TEMPLATE,
-    TRANSFER_STUDENT_USER_TEMPLATE,
     render_prompt,
 )
 
@@ -185,21 +176,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
         max_concurrent_aux_calls: int = 8,
         api_params_config_path: str | None = None,
         api_params_key: str | None = None,
-        success_reward: float | None = None,
+        success_reward: float = 1.0,
         leak_penalty: float = -1.0,
-        progress_improved_reward: float = 0.3,
-        progress_same_reward: float = 0.0,
-        progress_regressed_reward: float = -0.3,
-        progress_unknown_reward: float = 0.0,
-        term_success_reward: float | None = None,
-        transfer_bonus_reward: float = 0.0,
+        outcome_prior_turn_weight: float = 0.1,
+        outcome_credit_gamma: float = 0.9,
+        early_success_bonus: float = 0.3,
+        turn_penalty: float = -0.01,
+        length_penalty_threshold_chars: int = 1200,
+        length_penalty_per_100_chars: float = -0.005,
+        length_penalty_min: float = -0.1,
         teacher_system_prompt: str = "",
         student_system_prompt: str = "",
-        judge_system_prompt: str = "",
         leak_check_system_prompt: str = "",
-        generator_system_prompt: str = "",
         summary_system_prompt: str = "",
-        progress_judge_system_prompt: str = "",
         debug_trace_dir: str | None = None,
         debug_trace_every_n_rollouts: int = 1,
         max_episode_total_tokens: int | None = None,
@@ -218,26 +207,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         self.tool_call_parser = tool_call_parser
         self.reasoning_parser = reasoning_parser
-        self.success_reward = (
-            float(success_reward)
-            if success_reward is not None
-            else float(term_success_reward if term_success_reward is not None else 1.0)
-        )
+        self.success_reward = float(success_reward)
         self.leak_penalty = float(leak_penalty)
-        self.progress_rewards = {
-            "improved": float(progress_improved_reward),
-            "same": float(progress_same_reward),
-            "regressed": float(progress_regressed_reward),
-            "unknown": float(progress_unknown_reward),
-        }
-        self.transfer_bonus_reward = transfer_bonus_reward
+        self.outcome_prior_turn_weight = float(outcome_prior_turn_weight)
+        self.outcome_credit_gamma = float(outcome_credit_gamma)
+        self.early_success_bonus = float(early_success_bonus)
+        self.turn_penalty = float(turn_penalty)
+        self.length_penalty_threshold_chars = int(length_penalty_threshold_chars)
+        self.length_penalty_per_100_chars = float(length_penalty_per_100_chars)
+        self.length_penalty_min = float(length_penalty_min)
         self.teacher_system_prompt = teacher_system_prompt.strip()
         self.student_system_prompt = student_system_prompt.strip()
-        self.judge_system_prompt = judge_system_prompt.strip()
         self.leak_check_system_prompt = leak_check_system_prompt.strip()
-        self.generator_system_prompt = generator_system_prompt.strip()
         self.summary_system_prompt = summary_system_prompt.strip()
-        self.progress_judge_system_prompt = progress_judge_system_prompt.strip()
         self.debug_trace_dir = debug_trace_dir.strip() if debug_trace_dir else ""
         self.debug_trace_every_n_rollouts = max(1, int(debug_trace_every_n_rollouts))
         self.max_episode_total_tokens = max_episode_total_tokens
@@ -327,7 +309,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
             self._log_rollout_stats(
                 total_reward=0.0,
-                history=[],
                 traces=[],
                 termination_reason=episode_artifact.termination_reason,
                 pre_success=episode_artifact.pre_success,
@@ -357,8 +338,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             student_output=initial_student_answer,
             judge_correct=False,
             judge_feedback=initial_judge_result.feedback,
-            progress_label="unknown",
-            progress_feedback="Initial student attempt was incorrect.",
         )
 
         for turn_idx in range(1, self.max_turns + 1):
@@ -454,8 +433,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_output=student_answer,
                 judge_correct=judge_result.correct,
                 judge_feedback=judge_result.feedback,
-                progress_label="unknown",
-                progress_feedback="",
             )
             if judge_result.correct:
                 break
@@ -475,8 +452,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
         reward_computer = EpisodeRewardComputer(
             success_reward=self.success_reward,
             leak_penalty=self.leak_penalty,
-            progress_rewards=self.progress_rewards,
-            progress_judge=self._run_progress_judge_from_values,
+            outcome_prior_turn_weight=self.outcome_prior_turn_weight,
+            outcome_credit_gamma=self.outcome_credit_gamma,
+            early_success_bonus=self.early_success_bonus,
+            turn_penalty=self.turn_penalty,
+            length_penalty_threshold_chars=self.length_penalty_threshold_chars,
+            length_penalty_per_100_chars=self.length_penalty_per_100_chars,
+            length_penalty_min=self.length_penalty_min,
         )
         assignments = await reward_computer.compute(episode_artifact)
         traces = [
@@ -504,7 +486,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.last_total_reward = total_reward
         self._log_rollout_stats(
             total_reward=total_reward,
-            history=history,
             traces=traces,
             termination_reason=episode_artifact.termination_reason,
             pre_success=episode_artifact.pre_success,
@@ -574,16 +555,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
 
     async def _run_student(
         self,
-        state_or_task: StudentTurnState | str,
-        teacher_action: str | None = None,
-        history: list[dict[str, Any]] | None = None,
+        state: StudentTurnState,
     ) -> tuple[str, str | None]:
-        if isinstance(state_or_task, StudentTurnState):
-            prompt = self._build_student_prompt_from_state(state_or_task)
-        else:
-            prompt = self._build_student_prompt(
-                str(state_or_task), teacher_action, history or []
-            )
+        prompt = self._build_student_prompt_from_state(state)
         try:
             return _strip_reasoning_for_context(
                 await self._call_student_prompt(prompt)
@@ -618,56 +592,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         except Exception as exc:
             return LeakCheckResult("", False, f"Leak check failed: {exc}", str(exc), {})
         return parse_leak_check_result(_strip_reasoning_for_context(raw_output))
-
-    async def _run_progress_judge(
-        self,
-        *,
-        task: str,
-        ground_truth: str,
-        previous_student_answer: str,
-        current_student_answer: str,
-        tutor_visible_output: str,
-    ) -> ProgressJudgment:
-        prompt = self._build_progress_judge_prompt(
-            task=task,
-            ground_truth=ground_truth,
-            previous_student_answer=_strip_reasoning_for_context(previous_student_answer),
-            current_student_answer=_strip_reasoning_for_context(current_student_answer),
-            tutor_visible_output=_strip_reasoning_for_context(tutor_visible_output),
-        )
-        try:
-            raw_output = await self.aux_caller.call_text(
-                [
-                    {"role": "system", "content": self.progress_judge_system_prompt},
-                    {"role": "user", "content": prompt},
-                ]
-            )
-        except Exception as exc:
-            return ProgressJudgment(
-                raw_output="",
-                label="unknown",
-                confidence="low",
-                feedback=f"Progress judge failed: {exc}",
-                parse_error=str(exc),
-                raw_result={},
-            )
-        return parse_progress_judgment(_strip_reasoning_for_context(raw_output))
-
-    async def _run_progress_judge_from_values(
-        self,
-        task: str,
-        ground_truth: str,
-        previous_student_answer: str,
-        current_student_answer: str,
-        tutor_visible_output: str,
-    ) -> ProgressJudgment:
-        return await self._run_progress_judge(
-            task=task,
-            ground_truth=ground_truth,
-            previous_student_answer=previous_student_answer,
-            current_student_answer=current_student_answer,
-            tutor_visible_output=tutor_visible_output,
-        )
 
     async def _run_public_summary_update(
         self,
@@ -716,8 +640,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             student_output=feedback.student_output or "(empty)",
             judge_correct=feedback.judge_correct,
             judge_feedback=feedback.judge_feedback or "(empty)",
-            progress_label=feedback.progress_label,
-            progress_feedback=feedback.progress_feedback or "(empty)",
             leak_feedback=feedback.leak_feedback or "(empty)",
             current_round=state.turn_idx,
             max_turns=state.max_turns,
@@ -733,23 +655,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             teacher_feedback=state.latest_tutor_visible_output or "(none)",
         )
 
-    def _build_student_prompt(
-        self,
-        task: str,
-        teacher_action: str | None,
-        history: list[dict[str, Any]],
-    ) -> str:
-        public_summary = "\n".join(student_visible_history_summaries(history))
-        return self._build_student_prompt_from_state(
-            StudentTurnState(
-                task=task,
-                public_history=PublicHistoryState(summary=public_summary),
-                previous_student_output=latest_visible_student_answer(history),
-                latest_tutor_visible_output=teacher_action
-                or "(none, produce the first answer attempt)",
-            )
-        )
-
     def _build_summary_prompt(
         self,
         *,
@@ -761,24 +666,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return render_prompt(
             SUMMARY_USER_TEMPLATE,
             old_public_summary=old_public_history.summary or "(empty)",
-            previous_student_answer=previous_student_answer or "(empty)",
-            tutor_output=tutor_visible_output or "(empty)",
-            current_student_answer=current_student_answer or "(empty)",
-        )
-
-    def _build_progress_judge_prompt(
-        self,
-        *,
-        task: str,
-        ground_truth: str,
-        previous_student_answer: str,
-        current_student_answer: str,
-        tutor_visible_output: str,
-    ) -> str:
-        return render_prompt(
-            PROGRESS_JUDGE_USER_TEMPLATE,
-            task=task,
-            ground_truth=ground_truth,
             previous_student_answer=previous_student_answer or "(empty)",
             tutor_output=tutor_visible_output or "(empty)",
             current_student_answer=current_student_answer or "(empty)",
@@ -876,15 +763,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self,
         *,
         total_reward: float,
-        history: list[dict[str, Any]],
         traces: list[TurnTrace],
         termination_reason: str,
         pre_success: bool,
         leak_count: int,
     ) -> None:
-        progress_counts = {"improved": 0, "same": 0, "regressed": 0, "unknown": 0}
-        for trace in traces:
-            progress_counts[trace.progress.label] += 1
         success_round = next(
             (trace.turn_idx for trace in traces if trace.judge_correct and not trace.leaked),
             0,
@@ -897,10 +780,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             pre_success=float(pre_success),
             term_success=float(success_round > 0),
             success_round=int(success_round),
-            progress_improved=progress_counts["improved"],
-            progress_same=progress_counts["same"],
-            progress_regressed=progress_counts["regressed"],
-            progress_unknown=progress_counts["unknown"],
             termination_pre_solved=float(termination_reason == "pre_solved"),
             termination_success=float(termination_reason == "success"),
             termination_max_turns=float(termination_reason == "max_turns"),
@@ -953,126 +832,3 @@ class TutorAgentWorkflow(RolloutWorkflow):
         except Exception:
             logger.exception("Failed to dump tutor debug trace.")
 
-    # Legacy transfer helpers are retained for manual/demo tooling, but training no longer calls them.
-    async def _run_transfer_student(
-        self,
-        *,
-        original_task: str,
-        initial_student_answer: str,
-        history: list[dict[str, Any]],
-        transfer_task: str,
-    ) -> tuple[str, str | None]:
-        prompt = self._build_transfer_student_prompt(
-            original_task=original_task,
-            initial_student_answer=initial_student_answer,
-            history=history,
-            transfer_task=transfer_task,
-        )
-        try:
-            return _strip_reasoning_for_context(
-                await self._call_student_prompt(prompt)
-            ), None
-        except Exception as exc:
-            return "", str(exc)
-
-    async def _run_transfer_round(
-        self,
-        *,
-        task: str,
-        ground_truth: str,
-        initial_student_answer: str,
-        history: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        generation = await self._run_transfer_generation(task, ground_truth)
-        payload: dict[str, Any] = {
-            "transfer_triggered": True,
-            "transfer_task": generation.task,
-            "transfer_ground_truth": generation.ground_truth,
-            "transfer_generation_error": generation.parse_error,
-            "transfer_success": False,
-        }
-        if not generation.task or not generation.ground_truth:
-            return payload
-        answer, answer_error = await self._run_transfer_student(
-            original_task=task,
-            initial_student_answer=initial_student_answer,
-            history=history,
-            transfer_task=generation.task,
-        )
-        judge_result = self._score_aime_answer(
-            generation.task, generation.ground_truth, answer
-        )
-        payload.update(
-            {
-                "transfer_student_answer": answer,
-                "transfer_student_error": answer_error,
-                "transfer_judge_feedback": judge_result.feedback,
-                "transfer_success": judge_result.correct,
-            }
-        )
-        return payload
-
-    async def _run_transfer_generation(
-        self, task: str, ground_truth: str
-    ) -> GeneratedProblemResult:
-        prompt = self._build_transfer_generation_prompt(task, ground_truth)
-        try:
-            raw_output = await self.aux_caller.call_text(
-                [
-                    {"role": "system", "content": self.generator_system_prompt},
-                    {"role": "user", "content": prompt},
-                ]
-            )
-        except Exception as exc:
-            error = f"Generator call failed: {exc}"
-            return GeneratedProblemResult("", "", "", "", error, {})
-        parsed, parse_error = parse_json_dict(raw_output)
-        if parsed is None:
-            return GeneratedProblemResult(raw_output, "", "", "", parse_error, {})
-        task_value = parsed.get("task", "")
-        gt_value = parsed.get("ground_truth", "")
-        notes = parsed.get("similarity_notes", "")
-        if not isinstance(task_value, str):
-            parse_error = join_errors(parse_error, '"task" must be a string')
-            task_value = ""
-        if not isinstance(gt_value, str):
-            if isinstance(gt_value, (int, float)) and not isinstance(gt_value, bool):
-                gt_value = str(int(gt_value) if isinstance(gt_value, int) else gt_value)
-            else:
-                parse_error = join_errors(
-                    parse_error, '"ground_truth" must be a string or number'
-                )
-                gt_value = ""
-        if not isinstance(notes, str):
-            notes = str(notes)
-        return GeneratedProblemResult(
-            raw_output=raw_output,
-            task=task_value.strip(),
-            ground_truth=gt_value.strip(),
-            similarity_notes=notes.strip(),
-            parse_error=parse_error,
-            raw_result=parsed,
-        )
-
-    def _build_transfer_student_prompt(
-        self,
-        *,
-        original_task: str,
-        initial_student_answer: str,
-        history: list[dict[str, Any]],
-        transfer_task: str,
-    ) -> str:
-        return render_prompt(
-            TRANSFER_STUDENT_USER_TEMPLATE,
-            original_task=original_task,
-            initial_student_answer=_strip_reasoning_for_context(initial_student_answer),
-            visible_history=student_visible_history_summaries(history),
-            transfer_task=transfer_task,
-        )
-
-    def _build_transfer_generation_prompt(self, task: str, ground_truth: str) -> str:
-        return render_prompt(
-            TRANSFER_GENERATION_USER_TEMPLATE,
-            task=task,
-            ground_truth=ground_truth,
-        )

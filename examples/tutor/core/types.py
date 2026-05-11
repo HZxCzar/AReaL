@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
-ProgressLabel = Literal["improved", "same", "regressed", "unknown"]
-ConfidenceLabel = Literal["high", "medium", "low"]
 FeedbackKind = Literal["none", "student_judged", "leak"]
 
 
@@ -27,16 +25,6 @@ class LeakCheckResult:
 
 
 @dataclass(slots=True)
-class GeneratedProblemResult:
-    raw_output: str
-    task: str
-    ground_truth: str
-    similarity_notes: str
-    parse_error: str | None
-    raw_result: dict[str, Any]
-
-
-@dataclass(slots=True)
 class PublicHistoryState:
     summary: str = ""
     turn_count: int = 0
@@ -48,8 +36,6 @@ class TutorPrivateFeedback:
     student_output: str = ""
     judge_correct: bool = False
     judge_feedback: str = ""
-    progress_label: ProgressLabel = "unknown"
-    progress_feedback: str = ""
     leak_feedback: str = ""
 
 
@@ -70,16 +56,6 @@ class StudentTurnState:
     public_history: PublicHistoryState
     previous_student_output: str
     latest_tutor_visible_output: str
-
-
-@dataclass(slots=True)
-class ProgressJudgment:
-    raw_output: str
-    label: ProgressLabel
-    confidence: ConfidenceLabel
-    feedback: str
-    parse_error: str | None = None
-    raw_result: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -116,7 +92,6 @@ class EpisodeArtifact:
 
 @dataclass(slots=True)
 class RewardAssignment:
-    progress: ProgressJudgment
     reward: float
     reward_components: dict[str, float]
 
@@ -131,7 +106,6 @@ class TurnTrace:
     student_output: str
     judge_correct: bool
     judge_feedback: str
-    progress: ProgressJudgment
     reward: float
     reward_components: dict[str, float]
     public_history_before: str

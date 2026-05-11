@@ -5,7 +5,7 @@ import re
 from examples.common.parsing import join_errors, parse_json_dict
 
 from .text import strip_reasoning_for_context
-from .types import LeakCheckResult, ProgressJudgment, ProgressLabel
+from .types import LeakCheckResult
 
 
 def parse_public_summary(raw_output: str) -> str:
@@ -25,49 +25,6 @@ def parse_public_summary(raw_output: str) -> str:
         if parts:
             return "\n".join(parts)
     return text.strip()
-
-
-def parse_progress_judgment(raw_output: str) -> ProgressJudgment:
-    parsed, parse_error = parse_json_dict(raw_output)
-    if parsed is None:
-        lowered = raw_output.lower()
-        if "improved" in lowered:
-            label: ProgressLabel = "improved"
-        elif "regressed" in lowered or "worse" in lowered:
-            label = "regressed"
-        elif "same" in lowered or "unchanged" in lowered:
-            label = "same"
-        else:
-            label = "unknown"
-        return ProgressJudgment(
-            raw_output=raw_output,
-            label=label,
-            confidence="low",
-            feedback="Failed to parse progress-judge output.",
-            parse_error=parse_error,
-            raw_result={},
-        )
-    label_value = parsed.get("label", parsed.get("progress", "unknown"))
-    if label_value not in {"improved", "same", "regressed", "unknown"}:
-        parse_error = join_errors(
-            parse_error,
-            '"label" must be one of improved, same, regressed, unknown',
-        )
-        label_value = "unknown"
-    confidence_value = parsed.get("confidence", "low")
-    if confidence_value not in {"high", "medium", "low"}:
-        confidence_value = "low"
-    feedback = parsed.get("feedback", "")
-    if not isinstance(feedback, str):
-        feedback = str(feedback)
-    return ProgressJudgment(
-        raw_output=raw_output,
-        label=label_value,
-        confidence=confidence_value,
-        feedback=feedback or "No progress feedback provided.",
-        parse_error=parse_error,
-        raw_result=parsed,
-    )
 
 
 def parse_leak_check_result(raw_output: str) -> LeakCheckResult:
