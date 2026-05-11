@@ -220,7 +220,12 @@ def read_tutor_message(turn_idx: int) -> str | None:
 async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
     from areal.api.cli_args import load_expr_config
     from configs import TutorConfig
-    from examples.tutor.core.types import PublicHistoryState, StudentTurnState
+    from examples.tutor.core.types import (
+        PublicHistoryState,
+        StudentTurnState,
+        TutorPrivateFeedback,
+        TutorTurnState,
+    )
 
     config_args = ["--config", args.config, *args.overrides]
     config, _ = load_expr_config(config_args, TutorConfig)
@@ -292,8 +297,26 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
     termination_reason = "max_turns"
     latest_answer = initial_answer
     previous_student_answer = initial_answer
+    previous_tutor_visible_output = ""
+    previous_feedback = TutorPrivateFeedback(
+        kind="student_judged",
+        student_output=initial_answer,
+        judge_correct=False,
+        judge_feedback=initial_judge.feedback,
+    )
     for turn_idx in range(1, max_turns + 1):
         print_block("Student-Visible State", public_history.summary)
+        tutor_state = TutorTurnState(
+            task=task,
+            ground_truth=ground_truth,
+            public_history=public_history,
+            previous_tutor_visible_output=previous_tutor_visible_output,
+            previous_feedback=previous_feedback,
+            turn_idx=turn_idx,
+            max_turns=max_turns,
+        )
+        tutor_prompt = workflow._build_tutor_prompt(tutor_state)
+        print_block("Full Tutor Input", tutor_prompt)
         tutor_message = read_tutor_message(turn_idx)
         if tutor_message is None:
             termination_reason = "user_quit"
@@ -301,6 +324,7 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
         record: dict[str, Any] = {
             "round_idx": turn_idx,
             "teacher_action": tutor_message,
+            "tutor_prompt": tutor_prompt,
             "public_history_before": public_history.summary,
         }
 
@@ -322,6 +346,11 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
                 record["student_visible"] = False
                 record["public_history_after"] = public_history.summary
                 history.append(record)
+                previous_tutor_visible_output = tutor_message
+                previous_feedback = TutorPrivateFeedback(
+                    kind="leak",
+                    leak_feedback=leak_result.feedback,
+                )
                 print("\nLeak check: LEAKED. The student will not see this turn.")
                 print(f"Feedback: {leak_result.feedback}")
                 continue
@@ -356,6 +385,13 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
         history.append(record)
         public_history = next_public_history
         previous_student_answer = student_answer
+        previous_tutor_visible_output = tutor_message
+        previous_feedback = TutorPrivateFeedback(
+            kind="student_judged",
+            student_output=student_answer,
+            judge_correct=judge_result.correct,
+            judge_feedback=judge_result.feedback,
+        )
 
         print_block(f"Student Answer After Turn {turn_idx}", student_answer)
         if student_error:
