@@ -1,0 +1,87 @@
+Python: 3.10 or 3.11
+OS: Linux server with CUDA-capable GPU for vLLM/LoRA training; CPU is enough for data generation and memory-baseline smoke tests.
+
+Recommended setup:
+
+conda create -n hidden-rule-game python=3.10 -y
+conda activate hidden-rule-game
+pip install -r requirements.txt
+
+For vLLM, install a wheel matching your CUDA/PyTorch environment if the default install fails:
+https://docs.vllm.ai/en/latest/getting_started/installation.html
+
+Example quick run without a GPU model:
+
+python -m hidden_rule_game.data_generator --out data/examples.jsonl --rules 20 --examples-per-rule 40
+python -m hidden_rule_game.game --student memory --rounds 8 --episodes 3
+
+Example vLLM inference:
+
+python -m hidden_rule_game.game \
+  --student llm \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --rounds 8 \
+  --episodes 3
+
+Example LoRA SFT training:
+
+python -m hidden_rule_game.data_generator --out data/train.jsonl --rules 200 --examples-per-rule 80
+python -m hidden_rule_game.trainer \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --train-file data/train.jsonl \
+  --out-dir outputs/lora-student
+
+Complete scripted runs:
+
+# Full two-model setup:
+# 1. STUDENT_MODEL is the base model to train.
+# 2. TEACHER_MODEL is the tutor model used during interactive evaluation.
+# 3. STUDENT_LORA_PATH is optional; set it to continue training or reuse an adapter.
+# 4. STUDENT=lora and SKIP_TRAIN=0 starts LoRA training.
+STUDENT=lora SKIP_TRAIN=0 \
+  STUDENT_MODEL=/models/student-base \
+  TEACHER_MODEL=/models/teacher-instruct \
+  OUT_DIR=runs/my_student_lora/outputs/lora-student \
+  bash scripts/run_complete_game.sh
+
+# Evaluate an existing student LoRA without training:
+STUDENT=lora SKIP_TRAIN=1 \
+  STUDENT_MODEL=/models/student-base \
+  STUDENT_LORA_PATH=/models/adapters/student-lora \
+  TEACHER_MODEL=/models/teacher-instruct \
+  bash scripts/run_complete_game.sh
+
+# CPU smoke test
+QUICK=1 STUDENT=memory bash scripts/run_complete_game.sh
+
+# Base vLLM interactive evaluation
+STUDENT=llm MODEL=meta-llama/Llama-3.1-8B-Instruct bash scripts/run_complete_game.sh
+
+# Base vLLM interactive evaluation with a local downloaded model
+STUDENT=llm MODEL=/models/Llama-3.1-8B-Instruct bash scripts/run_complete_game.sh
+
+# Generate data, train LoRA, then evaluate the LoRA student with vLLM
+STUDENT=lora MODEL=meta-llama/Llama-3.1-8B-Instruct bash scripts/run_complete_game.sh
+
+# Reuse an existing LoRA adapter directory and only rerun evaluation
+STUDENT=lora SKIP_TRAIN=1 MODEL=meta-llama/Llama-3.1-8B-Instruct \
+  OUT_DIR=runs/my_run/outputs/lora-student bash scripts/run_complete_game.sh
+
+Equivalent direct Python entry point:
+
+python -m hidden_rule_game.run_complete_game --student memory --quick
+
+W&B logging:
+
+WANDB_PROJECT=hidden-rule-game WANDB_RUN_NAME=my-run \
+  STUDENT=lora MODEL=/models/Llama-3.1-8B-Instruct bash scripts/run_complete_game.sh
+
+Use WANDB_MODE=online for cloud logging, or keep the launch-script default WANDB_MODE=offline.
+
+Optional vLLM OpenAI-compatible server:
+
+MODEL=/models/Llama-3.1-8B-Instruct SERVED_MODEL_NAME=student-base \
+  bash scripts/start_vllm_server.sh
+
+MODEL=/models/Llama-3.1-8B-Instruct LORA_PATH=runs/my_run/outputs/lora-student \
+  SERVED_MODEL_NAME=student-lora bash scripts/start_vllm_server.sh

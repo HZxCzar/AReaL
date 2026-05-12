@@ -1,0 +1,34 @@
+num_turns: 300
+max_episode_turns: 6
+seed: 1
+output_path: examples/kuhn-tutor/outputs/teacher_eval.json
+
+teacher_model:
+  base_url: http://127.0.0.1:30000/v1
+  api_key: EMPTY
+  model: default
+  temperature: 0.2
+  top_p: 1.0
+  max_tokens: 1024
+  timeout: 120
+
+student_model:
+  base_url: http://127.0.0.1:30001/v1
+  api_key: EMPTY
+  model: default
+  temperature: 0.7
+  top_p: 0.95
+  max_tokens: 1024
+  timeout: 120
+
+icl_simulation:
+  enabled: true
+  turns: 5
+  compress_every: 5
+
+env_kwargs:
+  player_id: 0
+  built_in_opponent: cfr
+  opponent_player: 1
+  include_opponent_turn: action
+  cfr_iterations: 1000
