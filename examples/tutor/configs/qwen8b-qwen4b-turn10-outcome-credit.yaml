@@ -1,5 +1,5 @@
 experiment_name: tutor-grpo
-trial_name: qwen8b-qwen4b-turn10-outcome-credit
+trial_name: qwen8b-qwen4b-turn10-outcome-credit-ep200
 
 seed: 1
 enable_offload: false
