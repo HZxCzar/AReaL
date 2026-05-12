@@ -92,6 +92,7 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
 def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[str, Any]:
     return dict(
         trace_sink=trace_sink,
+        tokenizer=config.tokenizer_path,
         temperature=config.gconfig.temperature,
         top_p=config.gconfig.top_p,
         max_completion_tokens=config.gconfig.max_new_tokens,
@@ -116,12 +117,11 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         length_penalty_threshold_chars=config.length_penalty_threshold_chars,
         length_penalty_per_100_chars=config.length_penalty_per_100_chars,
         length_penalty_min=config.length_penalty_min,
-        token_budget_penalty=config.token_budget_penalty,
         teacher_system_prompt=config.teacher_system_prompt,
         student_system_prompt=config.student_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
         summary_system_prompt=config.summary_system_prompt,
-        max_episode_total_tokens=config.gconfig.max_tokens,
+        max_train_sample_tokens=config.gconfig.max_tokens,
         tokenizer_path=config.tokenizer_path,
         model_context_length=config.sglang.context_length,
     )
@@ -180,7 +180,7 @@ async def _run_one(
             "max_turns": config.max_turns,
             "enable_thinking": config.enable_thinking,
             "max_completion_tokens": config.gconfig.max_new_tokens,
-            "max_episode_total_tokens": config.gconfig.max_tokens,
+            "max_train_sample_tokens": config.gconfig.max_tokens,
             "aux_base_url": config.aux_base_url,
             "aux_model": config.aux_model,
         },

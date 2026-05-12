@@ -111,18 +111,21 @@ except Exception:  # pragma: no cover - lightweight local test environments
 from examples.common.chat_budget import ChatContextBudget
 from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig, make_teacher_client
 from examples.tutor.core.aime import score_aime_answer
+from examples.tutor.core.generation_budget import (
+    CONTEXT_BUDGET_TERMINATION_REASON,
+    ContextBudgetLimitExceeded,
+    ensure_response_within_train_sample_budget,
+    prepare_train_sample_generation_config,
+    raise_if_over_budget,
+)
 from examples.tutor.core.history import (
     trace_to_history_record,
     trace_to_json,
 )
-from examples.tutor.core.parsers import (
-    parse_leak_check_result,
-    parse_public_summary,
-)
+from examples.tutor.core.parsers import parse_leak_check_result
 from examples.tutor.core.rewards import EpisodeRewardComputer, artifact_to_trace
 from examples.tutor.core.tensors import response_to_tensordict
 from examples.tutor.core.text import (
-    compact_text as _compact_text,
     strip_reasoning_for_context as _strip_reasoning_for_context,
 )
 from examples.tutor.core.types import (
@@ -139,7 +142,6 @@ from examples.tutor.core.types import (
 from examples.tutor.prompts import (
     LEAK_CHECK_USER_TEMPLATE,
     STUDENT_STATE_USER_TEMPLATE,
-    SUMMARY_USER_TEMPLATE,
     TEACHER_STATE_USER_TEMPLATE,
     render_prompt,
 )
@@ -191,8 +193,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         summary_system_prompt: str = "",
         debug_trace_dir: str | None = None,
         debug_trace_every_n_rollouts: int = 1,
-        max_episode_total_tokens: int | None = None,
-        token_budget_penalty: float = -1.0,
+        max_train_sample_tokens: int | None = None,
         tokenizer_path: str | None = None,
         model_context_length: int | None = None,
         context_window_margin: int = 256,
@@ -222,8 +223,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.summary_system_prompt = summary_system_prompt.strip()
         self.debug_trace_dir = debug_trace_dir.strip() if debug_trace_dir else ""
         self.debug_trace_every_n_rollouts = max(1, int(debug_trace_every_n_rollouts))
-        self.max_episode_total_tokens = max_episode_total_tokens
-        self.token_budget_penalty = token_budget_penalty
+        self.max_train_sample_tokens = max_train_sample_tokens
         self.last_history: list[dict[str, Any]] = []
         self.last_traces: list[TurnTrace] = []
         self.last_total_reward = 0.0
@@ -350,11 +350,20 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 turn_idx=turn_idx,
                 max_turns=self.max_turns,
             )
-            response, tutor_raw_output = await self._generate_tutor_response(
-                tutor_state,
-                engine=engine,
-                external_client=external_client,
-            )
+            try:
+                response, tutor_raw_output = await self._generate_tutor_response(
+                    tutor_state,
+                    engine=engine,
+                    external_client=external_client,
+                )
+            except ContextBudgetLimitExceeded as exc:
+                logger.info(
+                    "Terminating tutor episode at turn %s due to context budget: %s",
+                    turn_idx,
+                    exc,
+                )
+                termination_reason = CONTEXT_BUDGET_TERMINATION_REASON
+                break
             tutor_visible_output = _strip_reasoning_for_context(tutor_raw_output)
             public_before = public_history.summary
 
@@ -518,21 +527,37 @@ class TutorAgentWorkflow(RolloutWorkflow):
             {"role": "user", "content": self._build_tutor_prompt(tutor_state)},
         ]
         input_ids = self._apply_chat_template(messages)
+        budget = prepare_train_sample_generation_config(
+            input_ids=input_ids,
+            gconfig=self._generation_config(),
+            max_completion_tokens=int(self.max_completion_tokens),
+            max_train_sample_tokens=self.max_train_sample_tokens,
+        )
+        raise_if_over_budget(budget)
         if engine is not None:
             req = ModelRequest(
                 rid=f"tutor-{int(time.time() * 1000)}-{tutor_state.turn_idx}",
                 input_ids=input_ids,
-                gconfig=self._generation_config(),
+                gconfig=budget.gconfig,
                 tokenizer=self.tokenizer,
             )
             response = await engine.agenerate(req)
+            ensure_response_within_train_sample_budget(
+                input_len=response.input_len,
+                output_len=response.output_len,
+                max_train_sample_tokens=self.max_train_sample_tokens,
+            )
             raw_output = self._decode_output(response)
             return response, raw_output
 
         safe_max_completion_tokens, _ = self.teacher_context_budget.clamp_max_completion_tokens(
             messages,
-            int(self.max_completion_tokens),
+            int(budget.max_new_tokens),
         )
+        if safe_max_completion_tokens <= 0:
+            raise ContextBudgetLimitExceeded(
+                "tutor prompt exceeded external client context budget"
+            )
         response_obj = await external_client.chat.completions.create(
             model="default",
             messages=messages,
@@ -542,6 +567,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         raw_output = response_obj.choices[0].message.content or ""
         output_tokens = self._encode_text(raw_output)
+        ensure_response_within_train_sample_budget(
+            input_len=len(input_ids),
+            output_len=len(output_tokens),
+            max_train_sample_tokens=self.max_train_sample_tokens,
+        )
         return (
             ModelResponse(
                 input_tokens=list(input_ids),
@@ -601,30 +631,31 @@ class TutorAgentWorkflow(RolloutWorkflow):
         tutor_visible_output: str,
         current_student_answer: str,
     ) -> PublicHistoryState:
-        prompt = self._build_summary_prompt(
-            old_public_history=old_public_history,
-            previous_student_answer=_strip_reasoning_for_context(previous_student_answer),
-            tutor_visible_output=_strip_reasoning_for_context(tutor_visible_output),
-            current_student_answer=_strip_reasoning_for_context(current_student_answer),
-        )
-        try:
-            raw_output = await self.aux_caller.call_text(
-                [
-                    {"role": "system", "content": self.summary_system_prompt},
-                    {"role": "user", "content": prompt},
-                ]
-            )
-            summary = parse_public_summary(raw_output)
-        except Exception as exc:
-            logger.warning("Public summary update failed: %s", exc)
-            summary = self._fallback_public_summary(
-                old_public_history.summary,
-                previous_student_answer,
+        entries = []
+        existing_history = old_public_history.summary.strip()
+        if existing_history:
+            entries.append(existing_history)
+        else:
+            entries.append(self._build_initial_public_summary(previous_student_answer))
+
+        tutor_round = old_public_history.turn_count + 1
+        student_round = old_public_history.turn_count + 2
+        entries.append(
+            self._format_public_history_entry(
+                "Tutor",
+                tutor_round,
                 tutor_visible_output,
+            )
+        )
+        entries.append(
+            self._format_public_history_entry(
+                "Student",
+                student_round,
                 current_student_answer,
             )
+        )
         return PublicHistoryState(
-            summary=_strip_reasoning_for_context(summary),
+            summary="\n\n".join(entry for entry in entries if entry),
             turn_count=old_public_history.turn_count + 1,
         )
 
@@ -655,22 +686,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             teacher_feedback=state.latest_tutor_visible_output or "(none)",
         )
 
-    def _build_summary_prompt(
-        self,
-        *,
-        old_public_history: PublicHistoryState,
-        previous_student_answer: str,
-        tutor_visible_output: str,
-        current_student_answer: str,
-    ) -> str:
-        return render_prompt(
-            SUMMARY_USER_TEMPLATE,
-            old_public_summary=old_public_history.summary or "(empty)",
-            previous_student_answer=previous_student_answer or "(empty)",
-            tutor_output=tutor_visible_output or "(empty)",
-            current_student_answer=current_student_answer or "(empty)",
-        )
-
     def _build_leak_check_prompt(
         self, task: str, ground_truth: str, teacher_action: str
     ) -> str:
@@ -682,26 +697,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
 
     def _build_initial_public_summary(self, initial_student_answer: str) -> str:
-        return (
-            "Initial student attempt: "
-            f"{_compact_text(_strip_reasoning_for_context(initial_student_answer), 1200)}"
-        )
+        return self._format_public_history_entry("Student", 1, initial_student_answer)
 
-    def _fallback_public_summary(
-        self,
-        old_summary: str,
-        previous_student_answer: str,
-        tutor_visible_output: str,
-        current_student_answer: str,
+    def _format_public_history_entry(
+        self, speaker: str, round_idx: int, text: str
     ) -> str:
-        update = (
-            f"Previous student answer: {_compact_text(previous_student_answer)}\n"
-            f"Tutor guidance shown: {_compact_text(tutor_visible_output)}\n"
-            f"Student reply after guidance: {_compact_text(current_student_answer)}"
-        )
-        if not old_summary:
-            return update
-        return f"{old_summary}\n{update}"
+        visible_text = _strip_reasoning_for_context(text)
+        return f"{speaker} round {round_idx}:\n{visible_text}"
 
     def _score_aime_answer(
         self, task: str, ground_truth: str, student_answer: str
@@ -783,6 +785,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             termination_pre_solved=float(termination_reason == "pre_solved"),
             termination_success=float(termination_reason == "success"),
             termination_max_turns=float(termination_reason == "max_turns"),
+            termination_context_budget_limit=float(
+                termination_reason == CONTEXT_BUDGET_TERMINATION_REASON
+            ),
         )
 
     def _maybe_dump_debug_trace(

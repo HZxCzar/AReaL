@@ -1,5 +1,5 @@
 experiment_name: tutor-grpo
-trial_name: 20260414_085601
+trial_name: qwen8b-qwen4b-turn10-outcome-credit-short-output-ep200
 
 seed: 1
 enable_offload: false
@@ -14,7 +14,7 @@ aux_base_url: http://127.0.0.1:30001/v1
 aux_model: default
 aux_api_key: EMPTY
 aux_timeout: 120
-aux_max_tokens: 2048
+aux_max_tokens: 1024
 aux_temperature: 0.7
 aux_top_p: null
 max_concurrent_aux_calls: 4
@@ -68,7 +68,7 @@ rollout:
 gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 1024
+  max_new_tokens: 768
   # Total prompt + response budget for the tutor rollout model.
   max_tokens: 20478
   greedy: false

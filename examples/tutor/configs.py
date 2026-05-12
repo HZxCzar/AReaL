@@ -45,7 +45,6 @@ class TutorConfig(GRPOConfig):
     length_penalty_threshold_chars: int = field(default=1200)
     length_penalty_per_100_chars: float = field(default=-0.005)
     length_penalty_min: float = field(default=-0.1)
-    token_budget_penalty: float = field(default=-1.0)
     teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
     student_system_prompt: str = field(default=DEFAULT_STUDENT_SYSTEM_PROMPT)
     leak_check_system_prompt: str = field(default=DEFAULT_LEAK_CHECK_SYSTEM_PROMPT)

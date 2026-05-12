@@ -15,6 +15,10 @@ _REPO_ROOT = _THIS_DIR.parents[1]
 sys.path.append(str(_THIS_DIR))
 sys.path.append(str(_REPO_ROOT))
 
+from examples.tutor.core.text import (  # noqa: E402
+    strip_reasoning_for_context as _strip_reasoning_for_context,
+)
+
 
 DEFAULT_FILTERED_DATASET = _THIS_DIR / "aime_dataset_no_pre_solve"
 
@@ -165,13 +169,12 @@ def build_workflow(config: Any, max_turns: int) -> Any:
         length_penalty_threshold_chars=config.length_penalty_threshold_chars,
         length_penalty_per_100_chars=config.length_penalty_per_100_chars,
         length_penalty_min=config.length_penalty_min,
-        token_budget_penalty=config.token_budget_penalty,
         teacher_system_prompt=config.teacher_system_prompt,
         student_system_prompt=config.student_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
         summary_system_prompt=config.summary_system_prompt,
         debug_trace_dir="",
-        max_episode_total_tokens=config.gconfig.max_tokens,
+        max_train_sample_tokens=config.gconfig.max_tokens,
         tokenizer_path=resolve_local_tokenizer_path(config.tokenizer_path),
         model_context_length=config.sglang.context_length,
     )
@@ -215,6 +218,10 @@ def read_tutor_message(turn_idx: int) -> str | None:
         if command == ".":
             return "\n".join(lines).strip()
         lines.append(line)
+
+
+def to_visible_tutor_message(tutor_message: str) -> str:
+    return _strip_reasoning_for_context(tutor_message)
 
 
 async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
@@ -321,9 +328,11 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
         if tutor_message is None:
             termination_reason = "user_quit"
             break
+        tutor_visible_message = to_visible_tutor_message(tutor_message)
         record: dict[str, Any] = {
             "round_idx": turn_idx,
-            "teacher_action": tutor_message,
+            "teacher_raw_output": tutor_message,
+            "teacher_action": tutor_visible_message,
             "tutor_prompt": tutor_prompt,
             "public_history_before": public_history.summary,
         }
@@ -331,7 +340,7 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
         if not args.skip_leak_check:
             print("\nRunning leak check before sending this message to the student...")
             leak_result = await workflow._run_leak_check(
-                task, ground_truth, tutor_message
+                task, ground_truth, tutor_visible_message
             )
             record["leak_check"] = {
                 "leaked": leak_result.leaked,
@@ -346,7 +355,7 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
                 record["student_visible"] = False
                 record["public_history_after"] = public_history.summary
                 history.append(record)
-                previous_tutor_visible_output = tutor_message
+                previous_tutor_visible_output = tutor_visible_message
                 previous_feedback = TutorPrivateFeedback(
                     kind="leak",
                     leak_feedback=leak_result.feedback,
@@ -359,13 +368,13 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
             task=task,
             public_history=public_history,
             previous_student_output=previous_student_answer,
-            latest_tutor_visible_output=tutor_message,
+            latest_tutor_visible_output=tutor_visible_message,
         )
         student_answer, student_error = await workflow._run_student(student_state)
         next_public_history = await workflow._run_public_summary_update(
             old_public_history=public_history,
             previous_student_answer=previous_student_answer,
-            tutor_visible_output=tutor_message,
+            tutor_visible_output=tutor_visible_message,
             current_student_answer=student_answer,
         )
         judge_result = workflow._score_aime_answer(task, ground_truth, student_answer)
@@ -385,7 +394,7 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
         history.append(record)
         public_history = next_public_history
         previous_student_answer = student_answer
-        previous_tutor_visible_output = tutor_message
+        previous_tutor_visible_output = tutor_visible_message
         previous_feedback = TutorPrivateFeedback(
             kind="student_judged",
             student_output=student_answer,

@@ -41,7 +41,7 @@ Task:
 Private ground truth / answer key:
 {{ ground_truth }}
 
-Public history summary shown to both tutor and student:
+Public conversation history shown to both tutor and student:
 {{ public_history }}
 
 Previous tutor output:
@@ -70,7 +70,7 @@ STUDENT_STATE_USER_TEMPLATE = """\
 Task:
 {{ task }}
 
-Public history summary:
+Public conversation history:
 {{ public_history }}
 
 Your previous answer:

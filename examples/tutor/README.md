@@ -1,8 +1,9 @@
 # Tutor AgentWorkflow
 
 This example ports the old `agentenv-tutor` logic into an AReaL-native `AgentWorkflow`.
-Only the teacher model is trained. The student, leak checker, and public-history
-summarizer are external auxiliary calls.
+Only the teacher model is trained. The student and leak checker are external
+auxiliary calls; public history is maintained locally as visible student/tutor
+transcript text.
 
 ## Dataset
 
@@ -72,8 +73,8 @@ python3 examples/tutor/train.py \
   scheduler.type=local
 ```
 
-Update `aux_base_url` and `aux_model` in the config to point at the external student,
-leak-check, and public-history summarizer service.
+Update `aux_base_url` and `aux_model` in the config to point at the external student
+and leak-check service.
 
 The example reads shared endpoint parameters from:
 
