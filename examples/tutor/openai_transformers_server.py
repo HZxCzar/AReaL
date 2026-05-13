@@ -49,7 +49,15 @@ def torch_dtype(name: str) -> torch.dtype | str:
 def build_prompt(tokenizer: Any, messages: list[ChatMessage]) -> str:
     payload = [{"role": msg.role, "content": msg.content} for msg in messages]
     if getattr(tokenizer, "chat_template", None):
-        return tokenizer.apply_chat_template(payload, tokenize=False, add_generation_prompt=True)
+        try:
+            return tokenizer.apply_chat_template(
+                payload,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+        except TypeError:
+            return tokenizer.apply_chat_template(payload, tokenize=False, add_generation_prompt=True)
     return "\n".join(f"{msg.role}: {msg.content}" for msg in messages) + "\nassistant:"
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,43 @@ def _clip_text(text: str, limit: int = 3000) -> str:
     return text[-limit:]
 
 
+THINK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+FINAL_RE = re.compile(r"final_rule:\s*(.*)", re.IGNORECASE | re.DOTALL)
+
+
+def _strip_thinking(text: str) -> str:
+    cleaned = THINK_RE.sub("", text).strip()
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def _as_tentative_reply(text: str) -> str:
+    cleaned = _strip_thinking(text)
+    match = FINAL_RE.search(cleaned)
+    hypothesis = (match.group(1) if match else cleaned).strip()
+    hypothesis = hypothesis.splitlines()[0].strip("` ").strip()
+    if not hypothesis:
+        hypothesis = "a simple property of the string such as length, vowels, repeated letters, or a special character"
+    return (
+        f"Tentative hypothesis: {hypothesis}\n"
+        "I need labeled examples that could refute this guess, especially a positive and a negative case "
+        "near the same length."
+    )
+
+
+def _needs_student_fallback(reply: str, example_count: int) -> bool:
+    lowered = reply.lower()
+    if example_count == 0 and "hypothesis" not in lowered and "guess" not in lowered:
+        return True
+    return "tell me the rule" in lowered or "let me know what the rule is" in lowered
+
+
+def _format_transcript(transcript: list[dict[str, str]]) -> str:
+    return "\n".join(
+        f"Student: {_strip_thinking(turn['student'])}\nTutor: {_strip_thinking(turn['tutor'])}"
+        for turn in transcript
+    )
+
+
 class OpenAIStudent:
     def __init__(self, cfg: dict[str, Any]):
         self.client = OpenAIChatClient(LLMConfig(**cfg))
@@ -36,21 +74,40 @@ class OpenAIStudent:
         pass
 
     def act(self, observation: str, transcript: list[dict[str, str]]) -> str:
-        if len(extract_examples(transcript)) < 8:
-            return "Please provide more labeled examples and share any patterns you notice."
         history = _format_transcript(transcript)
+        example_count = len(extract_examples(transcript))
+        final_rule_instruction = (
+            "You have enough evidence to use `FINAL_RULE:` only if you are genuinely confident."
+            if example_count >= 12
+            else "Do not use `FINAL_RULE:` yet; make a tentative guess and request discriminating labeled tests."
+        )
         prompt = (
             "You are a student trying to infer a hidden Boolean rule over strings.\n"
-            "Ask for more labeled examples when uncertain. When confident, reply with exactly one "
-            "line starting with `FINAL_RULE:` followed by your hypothesized rule.\n\n"
+            "Do your own reasoning. The tutor is not allowed to solve the rule for you.\n"
+            "If you are uncertain, state your current tentative hypothesis, why it might fit, "
+            "and ask for specific additional labeled examples or tests that would distinguish it "
+            "from alternatives. Do not merely ask the tutor to share patterns.\n"
+            f"{final_rule_instruction} Keep the reply concise. Do not include hidden reasoning or <think> blocks.\n\n"
+            f"Parsed labeled examples so far: {example_count}\n\n"
             f"Dialogue so far:\n{_clip_text(history) or 'None'}\n\n"
             f"Latest tutor message:\n{observation}\n\n"
             "Student reply:"
         )
-        return self.client._complete_blocking(
+        reply = self.client._complete_blocking(
             normalize_messages("You are a careful rule-induction student.", prompt),
             max_tokens=self.client.cfg.max_tokens,
-        ).strip()
+        )
+        reply = _strip_thinking(reply)
+        if example_count < 12 and FINAL_RE.search(reply):
+            reply = _as_tentative_reply(reply)
+        if _needs_student_fallback(reply, example_count):
+            reply = (
+                "Tentative hypothesis: validity depends on a simple surface feature such as vowel count, "
+                "string length, repeated letters, or a special character.\n"
+                "Please show a small labeled batch that includes both valid and invalid strings if possible, "
+                "so I can rule out at least one of those alternatives."
+            )
+        return _clip_text(reply, 1200)
 
     def observe(self, message: str, reply: str) -> None:
         pass
@@ -61,10 +118,15 @@ class OpenAIStudent:
             "Reply with one sentence starting with `A string is valid if`.\n\n"
             f"{_clip_text(_format_transcript(transcript))}"
         )
-        return self.client._complete_blocking(
+        reply = self.client._complete_blocking(
             normalize_messages("You infer concise hidden string rules.", prompt),
             max_tokens=self.client.cfg.max_tokens,
-        ).strip()
+        )
+        reply = _strip_thinking(reply)
+        match = FINAL_RE.search(reply)
+        if match:
+            reply = match.group(1).strip()
+        return reply.strip()
 
     def predict_label(
         self,
@@ -103,6 +165,8 @@ class OpenAITeacher:
             f"{item['x']} -> {'valid' if item['y'] else 'invalid'}"
             for item in labeled_examples
         )
+        if not self.knows_rule:
+            return self._safe_evidence_reply(examples_text)
         recent = "\n".join(
             f"Student: {turn['student']}\nTutor: {turn['tutor']}"
             for turn in transcript[-self.icl_turns :]
@@ -115,17 +179,22 @@ class OpenAITeacher:
         else:
             role_context = (
                 "You do not know the hidden Boolean string rule. Work it out together with the "
-                "student from the labeled examples and dialogue. Be explicit about hypotheses, "
-                "uncertainty, and what evidence would distinguish competing rules.\n"
+                "student from the labeled examples and dialogue. Do not solve the task for the "
+                "student, do not state a final rule, and do not give a polished hypothesis for them "
+                "to copy. Instead, provide labeled evidence, ask focused questions, point out "
+                "contrasts between examples, and suggest what kind of test would be informative. "
+                "Never say the student's guess is correct or incorrect, and never write phrases like "
+                "`the rule is`, `you identified`, or `FINAL_RULE`.\n"
             )
         prompt = (
             "You are being evaluated as a collaborative hidden-rule tutor.\n"
             "Goal: help the student infer the Boolean string rule with as few examples as possible.\n"
-            "Provide useful labeled examples, compare hypotheses, and suggest next tests.\n\n"
+            "Keep replies concise. The student must make the guesses; your job is to scaffold their "
+            "reasoning without doing the final inference for them.\n\n"
             f"{role_context}\n"
             f"Compressed memory:\n{_clip_text(self.compressed_memory, 1200) or 'None'}\n\n"
             f"Recent dialogue:\n{_clip_text(recent) or 'None'}\n\n"
-            f"Student message: {student_message}\n\n"
+            f"Student message: {_clip_text(_strip_thinking(student_message), 1200)}\n\n"
             "Fresh labeled examples you may show exactly:\n"
             f"{examples_text}\n\n"
             "Tutor reply:"
@@ -133,9 +202,10 @@ class OpenAITeacher:
         reply = self.client._complete_blocking(
             normalize_messages("You are a concise teacher.", prompt),
             max_tokens=self.client.cfg.max_tokens,
-        ).strip()
-        if not any(str(item["x"]) in reply for item in labeled_examples):
-            reply = "Here are labeled examples:\n" + examples_text + "\nLook for the shared pattern."
+        )
+        reply = _strip_thinking(reply)
+        if self._needs_safe_fallback(reply, labeled_examples):
+            reply = self._safe_evidence_reply(examples_text)
         return reply
 
     def _compress(self, transcript: list[dict[str, str]]) -> None:
@@ -153,12 +223,37 @@ class OpenAITeacher:
             normalize_messages("You compress tutoring state.", prompt),
             max_tokens=min(512, self.client.cfg.max_tokens),
         ).strip()
+        self.compressed_memory = _strip_thinking(self.compressed_memory)
 
+    def _needs_safe_fallback(
+        self,
+        reply: str,
+        labeled_examples: list[dict[str, object]],
+    ) -> bool:
+        lowered = reply.lower()
+        forbidden = [
+            "final_rule",
+            "the rule is",
+            "you are correct",
+            "you're correct",
+            "correctly identified",
+            "you identified",
+            "your rule is",
+            "valid password",
+        ]
+        return (
+            not any(str(item["x"]) in reply for item in labeled_examples)
+            or any(token in lowered for token in forbidden)
+        )
 
-def _format_transcript(transcript: list[dict[str, str]]) -> str:
-    return "\n".join(
-        f"Student: {turn['student']}\nTutor: {turn['tutor']}" for turn in transcript
-    )
+    @staticmethod
+    def _safe_evidence_reply(examples_text: str) -> str:
+        return (
+            "Here are labeled examples:\n"
+            f"{examples_text}\n"
+            "Use only these labels to revise your own hypothesis. "
+            "What single test example would best separate your current guess from an alternative?"
+        )
 
 
 def _predict_from_rule_text(text: str, rule: str) -> bool:
