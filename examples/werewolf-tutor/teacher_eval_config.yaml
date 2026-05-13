@@ -2,14 +2,22 @@ num_turns: 120
 max_episode_turns: 40
 seed: 1
 output_path: examples/werewolf-tutor/outputs/teacher_eval.json
+use_privileged_teacher_observation: false
+sanitize_teacher_guidance: true
+force_safe_teacher_guidance: true
+teacher_guidance_safe_fallback: >
+  Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives
+  before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and
+  consider what public evidence would change your mind.
 teacher_guidance_policy: >
-  You may use privileged information only to avoid harmful or misleading pedagogy, but you must not
-  reveal essential hidden role or status information. Do not name a player's hidden role, faction,
-  night status, protection/poison/death status, or any private knowledge that the acting player
-  could not infer from public dialogue. Do not tell the acting player exactly what action to take or
-  whom to vote, kill, accuse, protect, inspect, or poison. Give non-directive strategic guidance:
-  point out public evidence to weigh, risks to consider, uncertainty, and questions the player
-  should ask themselves. Keep advice concise and avoid imperative commands.
+  Use only the acting player's observation and public dialogue. Do not infer from or reveal hidden
+  roles, factions, night statuses, protection/poison/death status, or any private information.
+  Do not name any player as a werewolf, villager, witch, foreseer, hunter, protected player,
+  poisoned player, or night target unless that claim appears in public dialogue. Do not tell the
+  acting player exactly what action to take or whom to vote, kill, accuse, protect, inspect, or
+  poison. Do not include "Action:", "Recommendation:", or a sample utterance/action. Give
+  non-directive strategic guidance only: mention public evidence to weigh, uncertainty, risks, and
+  questions the player should ask themselves. Keep advice concise and avoid imperative commands.
 
 teacher_model:
   base_url: http://127.0.0.1:30000/v1

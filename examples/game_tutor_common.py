@@ -191,6 +191,29 @@ def normalize_messages(system: str, user: str) -> list[dict[str, str]]:
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
+def sanitize_teacher_guidance(text: str, config: dict[str, Any]) -> str:
+    if not bool(config.get("sanitize_teacher_guidance", False)):
+        return text
+    patterns = [
+        r"\byou are (?:player\s*)?\d*,?\s*(?:a|an|the)?\s*(?:werewolf|villager|witch|foreseer|hunter)\b",
+        r"\bplayer\s*\d+\s+is\s+(?:a|an|the)?\s*(?:werewolf|villager|witch|foreseer|hunter)\b",
+        r"\b(?:vote|kill|poison|protect|inspect)\s+(?:for\s+)?player\s*\d+\b",
+        r"^\s*(?:action|recommendation)\s*:",
+        r"\byou should\s+(?:vote|kill|poison|protect|inspect|accuse)\b",
+        r"\bmust\s+(?:vote|kill|poison|protect|inspect|accuse)\b",
+    ]
+    if any(re.search(pattern, text or "", flags=re.IGNORECASE | re.MULTILINE) for pattern in patterns):
+        return str(
+            config.get("teacher_guidance_safe_fallback")
+            or (
+                "Use only public discussion and the current phase rules. Weigh consistency, timing, "
+                "and incentives before acting. Keep uncertainty explicit, avoid relying on private "
+                "role/status assumptions, and consider what public evidence would change your mind."
+            )
+        )
+    return text
+
+
 @dataclass
 class EvalResult:
     total_score: float
@@ -265,22 +288,40 @@ class TeacherEvaluator:
             while not done and turns_left > 0 and episode_turns < self.max_episode_turns:
                 memory_text = memory.render()
                 teacher_advice = ""
-                teacher_obs = info.get("teacher_observation", obs) if isinstance(info, dict) else obs
+                use_privileged_teacher_obs = bool(
+                    self.config.get("use_privileged_teacher_observation", True)
+                )
+                teacher_obs = (
+                    info.get("teacher_observation", obs)
+                    if use_privileged_teacher_obs and isinstance(info, dict)
+                    else obs
+                )
                 if use_teacher:
                     teacher_policy = str(self.config.get("teacher_guidance_policy") or "").strip()
-                    teacher_prompt = (
-                        f"{teacher_obs}\n\nCurrent public observation:\n{obs}\n\nGuide:\n{guide}\n\n"
-                        f"{memory_text}\n\nGive concise tutoring guidance for the acting player. "
-                        "Do not choose the action unless necessary; explain the key consideration."
-                    )
-                    if teacher_policy:
-                        teacher_prompt += f"\n\nAdditional tutoring policy:\n{teacher_policy}"
-                    teacher_advice = await self.teacher.complete(
-                        normalize_messages(
-                            "You are a privileged game tutor evaluating how useful your guidance is.",
-                            teacher_prompt,
+                    if bool(self.config.get("force_safe_teacher_guidance", False)):
+                        teacher_advice = str(
+                            self.config.get("teacher_guidance_safe_fallback")
+                            or (
+                                "Use only public discussion and the current phase rules. Weigh consistency, timing, "
+                                "and incentives before acting. Keep uncertainty explicit, avoid relying on private "
+                                "role/status assumptions, and consider what public evidence would change your mind."
+                            )
                         )
-                    )
+                    else:
+                        teacher_prompt = (
+                            f"{teacher_obs}\n\nCurrent public observation:\n{obs}\n\nGuide:\n{guide}\n\n"
+                            f"{memory_text}\n\nGive concise tutoring guidance for the acting player. "
+                            "Do not choose the action; explain the key consideration."
+                        )
+                        if teacher_policy:
+                            teacher_prompt += f"\n\nAdditional tutoring policy:\n{teacher_policy}"
+                        teacher_advice = await self.teacher.complete(
+                            normalize_messages(
+                                "You are a game tutor. Follow the tutoring policy exactly and never reveal hidden information.",
+                                teacher_prompt,
+                            )
+                        )
+                        teacher_advice = sanitize_teacher_guidance(teacher_advice, self.config)
 
                 action_prompt = self.prompt_builder(env, obs, guide, teacher_advice, memory_text)
                 action_text = await self.student.complete(

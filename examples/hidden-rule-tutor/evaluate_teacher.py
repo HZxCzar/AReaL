@@ -164,8 +164,6 @@ class OpenAITeacher:
             f"{item['x']} -> {'valid' if item['y'] else 'invalid'}"
             for item in labeled_examples
         )
-        if not self.knows_rule:
-            return self._safe_evidence_reply(examples_text)
         recent = "\n".join(
             f"Student: {turn['student']}\nTutor: {turn['tutor']}"
             for turn in transcript[-self.icl_turns :]
@@ -177,11 +175,14 @@ class OpenAITeacher:
             )
         else:
             role_context = (
-                "You do not know the hidden Boolean string rule. Work it out together with the "
-                "student from the labeled examples and dialogue. Provide labeled evidence, ask focused questions, point out "
-                "contrasts between examples, and suggest what kind of test would be informative. "
+                "You do not know the hidden Boolean string rule. You and the student only know the "
+                "labeled examples and the dialogue. Give useful tutoring guidance based on the "
+                "student's latest hypothesis and the current evidence: identify which examples "
+                "stress or support parts of the hypothesis, point out contrasts, name uncertainty, "
+                "and suggest one discriminating next test. Do not solve the task for the student, "
+                "do not state a final rule, and do not give a polished hypothesis for them to copy. "
                 "Never say the student's guess is correct or incorrect, and never write phrases like "
-                "`the rule is`, `I guess`, or `FINAL_RULE`.\n"
+                "`the rule is`, `you identified`, `I guess`, or `FINAL_RULE`.\n"
             )
         prompt = (
             "You are a collaborative hidden-rule guess game tutor.\n"
@@ -194,6 +195,7 @@ class OpenAITeacher:
             f"Student message:\n{_clip_text(_strip_thinking(student_message), 2000)}\n\n"
             "Fresh labeled examples you may show exactly:\n"
             f"{examples_text}\n\n"
+            "Tutor reply. Include the fresh labeled examples, then give guidance without naming a final rule:"
         )
         reply = self.client._complete_blocking(
             normalize_messages("You are a concise teacher.", prompt),
@@ -230,6 +232,7 @@ class OpenAITeacher:
         forbidden = [
             "final_rule",
             "the rule is",
+            "a string is valid if",
             "you are correct",
             "you're correct",
             "correctly identified",
@@ -247,8 +250,9 @@ class OpenAITeacher:
         return (
             "Here are labeled examples:\n"
             f"{examples_text}\n"
-            "Use only these labels to revise your own hypothesis. "
-            "What single test example would best separate your current guess from an alternative?"
+            "Use these labels to check one part of your current hypothesis. Compare a valid and an "
+            "invalid string that are similar in length or letters, then propose a test that would "
+            "separate your guess from another plausible pattern."
         )
 
 
