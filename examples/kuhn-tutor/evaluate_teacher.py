@@ -27,13 +27,17 @@ except Exception:  # pragma: no cover - fallback for lightweight local envs.
 class KuhnTutorEnv:
     def __init__(self, **env_kwargs):
         self.player_id = int(env_kwargs.get("player_id", 0))
+        self.last_returns = [0.0, 0.0]
         if KuhnPokerConfig is None or KuhnPokerEnv is None:
             self._fallback = SimpleKuhnTutorEnv(**env_kwargs)
             return
         self._fallback = None
         env_kwargs.pop("player_id", None)
-        self.env = KuhnPokerEnv(KuhnPokerConfig(**env_kwargs))
-        self.last_returns = [0.0, 0.0]
+        try:
+            self.env = KuhnPokerEnv(KuhnPokerConfig(**env_kwargs))
+        except Exception:
+            self._fallback = SimpleKuhnTutorEnv(player_id=self.player_id, **env_kwargs)
+            return
 
     async def sreset(self, seed=None):
         if self._fallback is not None:

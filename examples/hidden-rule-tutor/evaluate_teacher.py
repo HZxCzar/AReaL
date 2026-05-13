@@ -18,14 +18,74 @@ from game_tutor_common import (  # noqa: E402
     write_report,
 )
 from hidden_rule_game.env import HiddenRuleEnv  # noqa: E402
-from hidden_rule_game.rules import Rule  # noqa: E402
-from hidden_rule_game.students import MemoryStudent  # noqa: E402
+from hidden_rule_game.rules import Rule, count_vowels, has_double_letter  # noqa: E402
+from hidden_rule_game.students import MemoryStudent, extract_examples  # noqa: E402
+
+
+def _clip_text(text: str, limit: int = 3000) -> str:
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+class OpenAIStudent:
+    def __init__(self, cfg: dict[str, Any]):
+        self.client = OpenAIChatClient(LLMConfig(**cfg))
+
+    def reset(self) -> None:
+        pass
+
+    def act(self, observation: str, transcript: list[dict[str, str]]) -> str:
+        if len(extract_examples(transcript)) < 8:
+            return "Please provide more labeled examples and share any patterns you notice."
+        history = _format_transcript(transcript)
+        prompt = (
+            "You are a student trying to infer a hidden Boolean rule over strings.\n"
+            "Ask for more labeled examples when uncertain. When confident, reply with exactly one "
+            "line starting with `FINAL_RULE:` followed by your hypothesized rule.\n\n"
+            f"Dialogue so far:\n{_clip_text(history) or 'None'}\n\n"
+            f"Latest tutor message:\n{observation}\n\n"
+            "Student reply:"
+        )
+        return self.client._complete_blocking(
+            normalize_messages("You are a careful rule-induction student.", prompt),
+            max_tokens=self.client.cfg.max_tokens,
+        ).strip()
+
+    def observe(self, message: str, reply: str) -> None:
+        pass
+
+    def guess_rule(self, transcript: list[dict[str, str]]) -> str:
+        prompt = (
+            "Infer the hidden Boolean string rule from this tutoring dialogue. "
+            "Reply with one sentence starting with `A string is valid if`.\n\n"
+            f"{_clip_text(_format_transcript(transcript))}"
+        )
+        return self.client._complete_blocking(
+            normalize_messages("You infer concise hidden string rules.", prompt),
+            max_tokens=self.client.cfg.max_tokens,
+        ).strip()
+
+    def predict_label(
+        self,
+        text: str,
+        transcript: list[dict[str, str]],
+        guessed_rule: str | None = None,
+    ) -> bool:
+        return _predict_from_rule_text(text, guessed_rule or self.guess_rule(transcript))
 
 
 class OpenAITeacher:
-    def __init__(self, cfg: dict[str, Any], *, icl_turns: int = 5):
+    def __init__(
+        self,
+        cfg: dict[str, Any],
+        *,
+        icl_turns: int = 5,
+        knows_rule: bool = False,
+    ):
         self.client = OpenAIChatClient(LLMConfig(**cfg))
         self.icl_turns = max(1, int(icl_turns))
+        self.knows_rule = knows_rule
         self.compressed_memory = ""
         self.calls = 0
 
@@ -47,13 +107,24 @@ class OpenAITeacher:
             f"Student: {turn['student']}\nTutor: {turn['tutor']}"
             for turn in transcript[-self.icl_turns :]
         )
+        if self.knows_rule:
+            role_context = (
+                "You know the hidden Boolean string rule, but must not reveal it verbatim.\n"
+                f"Private rule: {rule.description}\n"
+            )
+        else:
+            role_context = (
+                "You do not know the hidden Boolean string rule. Work it out together with the "
+                "student from the labeled examples and dialogue. Be explicit about hypotheses, "
+                "uncertainty, and what evidence would distinguish competing rules.\n"
+            )
         prompt = (
-            "You are being evaluated as a hidden-rule tutor.\n"
+            "You are being evaluated as a collaborative hidden-rule tutor.\n"
             "Goal: help the student infer the Boolean string rule with as few examples as possible.\n"
-            "Do not reveal the private rule verbatim. Provide useful labeled examples and short strategic hints.\n\n"
-            f"Private rule, not to reveal verbatim: {rule.description}\n\n"
-            f"Compressed memory:\n{self.compressed_memory or 'None'}\n\n"
-            f"Recent dialogue:\n{recent or 'None'}\n\n"
+            "Provide useful labeled examples, compare hypotheses, and suggest next tests.\n\n"
+            f"{role_context}\n"
+            f"Compressed memory:\n{_clip_text(self.compressed_memory, 1200) or 'None'}\n\n"
+            f"Recent dialogue:\n{_clip_text(recent) or 'None'}\n\n"
             f"Student message: {student_message}\n\n"
             "Fresh labeled examples you may show exactly:\n"
             f"{examples_text}\n\n"
@@ -61,7 +132,7 @@ class OpenAITeacher:
         )
         reply = self.client._complete_blocking(
             normalize_messages("You are a concise teacher.", prompt),
-            max_tokens=512,
+            max_tokens=self.client.cfg.max_tokens,
         ).strip()
         if not any(str(item["x"]) in reply for item in labeled_examples):
             reply = "Here are labeled examples:\n" + examples_text + "\nLook for the shared pattern."
@@ -75,20 +146,51 @@ class OpenAITeacher:
         prompt = (
             "Compress this hidden-rule tutoring dialogue for future tutoring decisions. "
             "Keep the student's hypotheses, examples already shown, and likely misconceptions.\n\n"
-            f"Previous compressed memory:\n{self.compressed_memory or 'None'}\n\n"
-            f"Recent dialogue:\n{recent}"
+            f"Previous compressed memory:\n{_clip_text(self.compressed_memory, 1200) or 'None'}\n\n"
+            f"Recent dialogue:\n{_clip_text(recent)}"
         )
         self.compressed_memory = self.client._complete_blocking(
             normalize_messages("You compress tutoring state.", prompt),
-            max_tokens=512,
+            max_tokens=min(512, self.client.cfg.max_tokens),
         ).strip()
+
+
+def _format_transcript(transcript: list[dict[str, str]]) -> str:
+    return "\n".join(
+        f"Student: {turn['student']}\nTutor: {turn['tutor']}" for turn in transcript
+    )
+
+
+def _predict_from_rule_text(text: str, rule: str) -> bool:
+    lowered = rule.lower()
+    if "even" in lowered and "vowel" in lowered:
+        return count_vowels(text) % 2 == 0
+    if "first" in lowered and "last" in lowered:
+        return len(text) > 0 and text[0] == text[-1]
+    if "same letter twice" in lowered or "double" in lowered or "repeated letter" in lowered:
+        return has_double_letter(text)
+    if "multiple of three" in lowered or "divisible by three" in lowered:
+        return len(text) % 3 == 0
+    if "z or q" in lowered or "z" in lowered and "q" in lowered:
+        return "z" in text or "q" in text
+    if "more consonants" in lowered:
+        return (len(text) - count_vowels(text)) > count_vowels(text)
+    if "non-decreasing" in lowered or "alphabetical order" in lowered or "sorted" in lowered:
+        return all(a <= b for a, b in zip(text, text[1:]))
+    if "third letter" in lowered and "vowel" in lowered:
+        return len(text) >= 3 and text[2] in set("aeiou")
+    return False
 
 
 def run_condition(config: dict[str, Any], *, use_teacher: bool) -> dict[str, Any]:
     icl_cfg = config.get("icl_simulation") or {}
     icl_turns = int(icl_cfg.get("turns", 5))
     teacher = (
-        OpenAITeacher(config["teacher_model"], icl_turns=icl_turns)
+        OpenAITeacher(
+            config["teacher_model"],
+            icl_turns=icl_turns,
+            knows_rule=bool(config.get("tutor_knows_rule", False)),
+        )
         if use_teacher
         else None
     )
@@ -107,7 +209,11 @@ def run_condition(config: dict[str, Any], *, use_teacher: bool) -> dict[str, Any
     examples_used = []
     turns_taken = []
     for idx in range(episodes):
-        student = MemoryStudent()
+        student = (
+            OpenAIStudent(config["student_model"])
+            if config.get("student_model")
+            else MemoryStudent()
+        )
         result = env.run_episode(student, rounds=rounds)
         success = result.heldout_accuracy >= threshold
         row = {
