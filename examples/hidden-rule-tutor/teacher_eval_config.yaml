@@ -1,5 +1,5 @@
-rounds: 2
-num_turns: 16
+rounds: 8             # Number of tutoring rounds (a tutoring round consists of one student message and one teacher message)
+num_turns: 64         # Number of total rounds. Thus, #episodes = num_turns / rounds
 seed: 7
 examples_per_episode: 128
 success_threshold: 0.95

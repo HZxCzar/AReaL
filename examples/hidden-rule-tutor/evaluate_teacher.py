@@ -54,7 +54,7 @@ def _as_tentative_reply(text: str) -> str:
 
 def _needs_student_fallback(reply: str, example_count: int) -> bool:
     lowered = reply.lower()
-    if example_count == 0 and "hypothesis" not in lowered and "guess" not in lowered:
+    if example_count == 0 and "tentative hypothesis:" not in lowered:
         return True
     return "tell me the rule" in lowered or "let me know what the rule is" in lowered
 
@@ -87,11 +87,10 @@ class OpenAIStudent:
             "If you are uncertain, state your current tentative hypothesis, why it might fit, "
             "and ask for specific additional labeled examples or tests that would distinguish it "
             "from alternatives. Do not merely ask the tutor to share patterns.\n"
-            f"{final_rule_instruction} Keep the reply concise. Do not include hidden reasoning or <think> blocks.\n\n"
+            f"{final_rule_instruction} Keep the reply concise.\n\n"
             f"Parsed labeled examples so far: {example_count}\n\n"
             f"Dialogue so far:\n{_clip_text(history) or 'None'}\n\n"
             f"Latest tutor message:\n{observation}\n\n"
-            "Student reply:"
         )
         reply = self.client._complete_blocking(
             normalize_messages("You are a careful rule-induction student.", prompt),
@@ -107,16 +106,16 @@ class OpenAIStudent:
                 "Please show a small labeled batch that includes both valid and invalid strings if possible, "
                 "so I can rule out at least one of those alternatives."
             )
-        return _clip_text(reply, 1200)
+        return _clip_text(reply, 2000)
 
     def observe(self, message: str, reply: str) -> None:
         pass
 
     def guess_rule(self, transcript: list[dict[str, str]]) -> str:
         prompt = (
-            "Infer the hidden Boolean string rule from this tutoring dialogue. "
-            "Reply with one sentence starting with `A string is valid if`.\n\n"
+            "Infer the hidden Boolean string rule from this tutoring dialogue:\n"
             f"{_clip_text(_format_transcript(transcript))}"
+            "Reply with one sentence starting with `A string is valid if`.\n\n"
         )
         reply = self.client._complete_blocking(
             normalize_messages("You infer concise hidden string rules.", prompt),
@@ -179,25 +178,22 @@ class OpenAITeacher:
         else:
             role_context = (
                 "You do not know the hidden Boolean string rule. Work it out together with the "
-                "student from the labeled examples and dialogue. Do not solve the task for the "
-                "student, do not state a final rule, and do not give a polished hypothesis for them "
-                "to copy. Instead, provide labeled evidence, ask focused questions, point out "
+                "student from the labeled examples and dialogue. Provide labeled evidence, ask focused questions, point out "
                 "contrasts between examples, and suggest what kind of test would be informative. "
                 "Never say the student's guess is correct or incorrect, and never write phrases like "
-                "`the rule is`, `you identified`, or `FINAL_RULE`.\n"
+                "`the rule is`, `I guess`, or `FINAL_RULE`.\n"
             )
         prompt = (
-            "You are being evaluated as a collaborative hidden-rule tutor.\n"
+            "You are a collaborative hidden-rule guess game tutor.\n"
             "Goal: help the student infer the Boolean string rule with as few examples as possible.\n"
             "Keep replies concise. The student must make the guesses; your job is to scaffold their "
             "reasoning without doing the final inference for them.\n\n"
             f"{role_context}\n"
-            f"Compressed memory:\n{_clip_text(self.compressed_memory, 1200) or 'None'}\n\n"
+            f"Compressed memory:\n{_clip_text(self.compressed_memory, 2000) or 'None'}\n\n"
             f"Recent dialogue:\n{_clip_text(recent) or 'None'}\n\n"
-            f"Student message: {_clip_text(_strip_thinking(student_message), 1200)}\n\n"
+            f"Student message:\n{_clip_text(_strip_thinking(student_message), 2000)}\n\n"
             "Fresh labeled examples you may show exactly:\n"
             f"{examples_text}\n\n"
-            "Tutor reply:"
         )
         reply = self.client._complete_blocking(
             normalize_messages("You are a concise teacher.", prompt),
@@ -216,11 +212,11 @@ class OpenAITeacher:
         prompt = (
             "Compress this hidden-rule tutoring dialogue for future tutoring decisions. "
             "Keep the student's hypotheses, examples already shown, and likely misconceptions.\n\n"
-            f"Previous compressed memory:\n{_clip_text(self.compressed_memory, 1200) or 'None'}\n\n"
-            f"Recent dialogue:\n{_clip_text(recent)}"
+            f"Previous compressed memory:\n{_clip_text(self.compressed_memory, 2000) or 'None'}\n\n"
+            f"Recent dialogue:\n{_clip_text(recent, 2000)}"
         )
         self.compressed_memory = self.client._complete_blocking(
-            normalize_messages("You compress tutoring state.", prompt),
+            normalize_messages("You compress your memory.", prompt),
             max_tokens=min(512, self.client.cfg.max_tokens),
         ).strip()
         self.compressed_memory = _strip_thinking(self.compressed_memory)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import re
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -51,7 +52,10 @@ class Tutor:
                 lines.append(f"{item['x']} -> {label}")
             return "\n".join(lines)
         if "test:" in lowered:
-            text = student_message.split("test:", 1)[1].strip().split()[0]
+            match = re.search(r"test:\s*([a-z]+)", student_message, flags=re.IGNORECASE)
+            if match is None:
+                return "Please send tests in the form `test: <lowercase-string>`."
+            text = match.group(1).lower()
             return f"{text} -> {'valid' if self.rule(text) else 'invalid'}"
         return "Ask for more examples, propose a rule, or send `test: <string>`."
 
