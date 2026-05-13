@@ -32,7 +32,13 @@ class EpisodeRewardComputer:
         self.length_penalty_per_100_chars = length_penalty_per_100_chars
         self.length_penalty_min = length_penalty_min
 
-    async def compute(self, episode: EpisodeArtifact) -> list[RewardAssignment]:
+    async def compute(
+        self,
+        episode: EpisodeArtifact,
+        *,
+        pairwise_rewards: dict[int, float] | None = None,
+    ) -> list[RewardAssignment]:
+        pairwise_rewards = pairwise_rewards or {}
         success_artifact = self._success_artifact(episode)
         success_credits = self._success_credits(episode.turns, success_artifact)
         assignments: list[RewardAssignment] = []
@@ -48,6 +54,9 @@ class EpisodeRewardComputer:
             length_penalty = self._length_penalty(artifact.tutor_visible_output)
             if length_penalty:
                 components["length_penalty"] = length_penalty
+            pairwise_reward = pairwise_rewards.get(artifact.turn_idx, 0.0)
+            if pairwise_reward:
+                components["pairwise"] = float(pairwise_reward)
 
             reward = float(sum(components.values()))
             assignments.append(

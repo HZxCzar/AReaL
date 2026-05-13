@@ -765,6 +765,18 @@ class RemoteInfEngine(InferenceEngine):
         accumulated_output_logprobs = []
         accumulated_versions = []
         accumulated_routed_experts: list[np.ndarray] = []
+        request_lora_version = None
+        if self.config.use_lora and "lora_version" in req.metadata:
+            try:
+                request_lora_version = int(req.metadata["lora_version"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "ModelRequest.metadata['lora_version'] must be an integer."
+                ) from exc
+            if request_lora_version < 0:
+                raise ValueError(
+                    "ModelRequest.metadata['lora_version'] must be non-negative."
+                )
 
         # A single "rid" shares the same server to allow KV cache reuse
         if req.rid in self.rid_to_address:
@@ -793,11 +805,17 @@ class RemoteInfEngine(InferenceEngine):
             while self.workflow_executor.is_paused():
                 await asyncio.sleep(0.5)
 
+            generation_version = (
+                request_lora_version
+                if request_lora_version is not None
+                else self.get_version()
+            )
+
             # Build request using backend
             http_req = self.backend.build_generation_request(
                 req,
                 with_lora=self.config.use_lora,
-                version=self.get_version(),
+                version=generation_version,
             )
 
             # Loop until the generation is complete
@@ -836,7 +854,7 @@ class RemoteInfEngine(InferenceEngine):
             accumulated_output_tokens.extend(gen_result.output_tokens)
             accumulated_output_logprobs.extend(gen_result.output_logprobs)
             accumulated_versions.extend(
-                [self.get_version()] * len(gen_result.output_tokens)
+                [generation_version] * len(gen_result.output_tokens)
             )
             # Accumulate routed_experts for MoE models
             if gen_result.routed_experts is not None:

@@ -22,6 +22,7 @@ from examples.common.trace_utils import (
     patch_teacher_factory,
 )
 from examples.common.openai_utils import make_teacher_client
+from examples.tutor.core.auxiliary import call_auxiliary_text
 
 
 class DemoTutorWorkflow(TutorAgentWorkflow):
@@ -53,14 +54,12 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
             {"role": "user", "content": prompt},
         ]
         self.trace_sink.append_messages(f"{label}_input", messages)
-        try:
-            answer = await self.aux_caller.call_text(messages)
-            self.trace_sink.append(label, answer)
-            return answer, None
-        except Exception as exc:
-            error = f"Student call failed: {exc}"
-            self.trace_sink.append(label, error)
-            return "", error
+        result = await call_auxiliary_text(self.aux_caller, messages)
+        if result.error:
+            self.trace_sink.append(label, f"Student call failed: {result.error}")
+            return "", result.error
+        self.trace_sink.append(label, result.text)
+        return result.text, None
 
     async def _run_leak_check(
         self, task: str, ground_truth: str, teacher_action: str
@@ -90,6 +89,8 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
 
 
 def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[str, Any]:
+    auxiliary_model = config.auxiliary_model
+    reward = config.reward
     return dict(
         trace_sink=trace_sink,
         tokenizer=config.tokenizer_path,
@@ -98,25 +99,25 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         max_completion_tokens=config.gconfig.max_new_tokens,
         max_turns=config.max_turns,
         enable_thinking=config.enable_thinking,
-        aux_base_url=config.aux_base_url,
-        aux_model=config.aux_model,
-        aux_api_key=config.aux_api_key,
-        aux_timeout=config.aux_timeout,
-        aux_max_tokens=config.aux_max_tokens,
-        aux_temperature=config.aux_temperature,
-        aux_top_p=config.aux_top_p,
-        max_concurrent_aux_calls=config.max_concurrent_aux_calls,
-        api_params_config_path=config.api_params_config_path or None,
-        api_params_key=config.api_params_key or None,
-        success_reward=config.success_reward,
-        leak_penalty=config.leak_penalty,
-        outcome_prior_turn_weight=config.outcome_prior_turn_weight,
-        outcome_credit_gamma=config.outcome_credit_gamma,
-        early_success_bonus=config.early_success_bonus,
-        turn_penalty=config.turn_penalty,
-        length_penalty_threshold_chars=config.length_penalty_threshold_chars,
-        length_penalty_per_100_chars=config.length_penalty_per_100_chars,
-        length_penalty_min=config.length_penalty_min,
+        aux_base_url=auxiliary_model.base_url,
+        aux_model=auxiliary_model.model,
+        aux_api_key=auxiliary_model.api_key,
+        aux_timeout=auxiliary_model.timeout,
+        aux_max_tokens=auxiliary_model.max_tokens,
+        aux_temperature=auxiliary_model.temperature,
+        aux_top_p=auxiliary_model.top_p,
+        max_concurrent_aux_calls=auxiliary_model.max_concurrent_calls,
+        api_params_config_path=auxiliary_model.api_params_config_path or None,
+        api_params_key=auxiliary_model.api_params_key or None,
+        success_reward=reward.success,
+        leak_penalty=reward.leak_penalty,
+        outcome_prior_turn_weight=reward.outcome_prior_turn_weight,
+        outcome_credit_gamma=reward.outcome_credit_gamma,
+        early_success_bonus=reward.early_success_bonus,
+        turn_penalty=reward.turn_penalty,
+        length_penalty_threshold_chars=reward.length_penalty_threshold_chars,
+        length_penalty_per_100_chars=reward.length_penalty_per_100_chars,
+        length_penalty_min=reward.length_penalty_min,
         teacher_system_prompt=config.teacher_system_prompt,
         student_system_prompt=config.student_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
@@ -181,8 +182,8 @@ async def _run_one(
             "enable_thinking": config.enable_thinking,
             "max_completion_tokens": config.gconfig.max_new_tokens,
             "max_train_sample_tokens": config.gconfig.max_tokens,
-            "aux_base_url": config.aux_base_url,
-            "aux_model": config.aux_model,
+            "aux_base_url": config.auxiliary_model.base_url,
+            "aux_model": config.auxiliary_model.model,
         },
     }
     sink.dump_json("history.json", workflow.last_history)
@@ -209,7 +210,12 @@ def main():
     config_args = ["--config", args.config, *args.overrides]
     config, _ = load_expr_config(config_args, TutorConfig)
     rows = load_demo_rows(config.train_dataset.path, args.split, args.num_rollouts)
-    root = Path(args.output_dir or Path(__file__).parent / "demo_output" / datetime.now().strftime("%Y%m%d_%H%M%S"))
+    root = Path(
+        args.output_dir
+        or Path(__file__).parent
+        / "demo_output"
+        / datetime.now().strftime("%Y%m%d_%H%M%S")
+    )
     root.mkdir(parents=True, exist_ok=True)
 
     summaries = []

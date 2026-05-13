@@ -10,6 +10,57 @@ from examples.tutor.prompts import (
 
 
 @dataclass
+class TutorAuxiliaryModelConfig:
+    base_url: str = field(default="http://127.0.0.1:30000/v1")
+    model: str = field(default="qwen-aux")
+    api_key: str = field(default="EMPTY")
+    timeout: int = field(default=120)
+    max_tokens: int = field(default=2048)
+    temperature: float = field(default=0.7)
+    top_p: float | None = field(default=None)
+    max_concurrent_calls: int = field(default=8)
+    api_params_config_path: str = field(default="")
+    api_params_key: str = field(default="")
+
+
+@dataclass
+class TutorPairwiseRewardConfig:
+    enabled: bool = field(
+        default=False,
+        metadata={"help": "Enable post-hoc pairwise tutor reward against lagged LoRA."},
+    )
+    reference_lag_steps: int = field(default=5)
+    scale: float = field(default=0.05)
+    compare_all_turns: bool = field(default=True)
+    judge_base_url: str = field(default="")
+    judge_model: str = field(default="")
+    judge_api_key: str = field(default="")
+    judge_timeout: int | None = field(default=None)
+    judge_max_tokens: int | None = field(default=None)
+    judge_temperature: float | None = field(default=None)
+    judge_top_p: float | None = field(default=None)
+    judge_max_concurrent_calls: int | None = field(default=None)
+    judge_api_params_config_path: str = field(default="")
+    judge_api_params_key: str = field(default="")
+
+
+@dataclass
+class TutorRewardConfig:
+    success: float = field(default=1.0)
+    leak_penalty: float = field(default=-1.0)
+    outcome_prior_turn_weight: float = field(default=0.1)
+    outcome_credit_gamma: float = field(default=0.9)
+    early_success_bonus: float = field(default=0.3)
+    turn_penalty: float = field(default=-0.01)
+    length_penalty_threshold_chars: int = field(default=1200)
+    length_penalty_per_100_chars: float = field(default=-0.005)
+    length_penalty_min: float = field(default=-0.1)
+    pairwise: TutorPairwiseRewardConfig = field(
+        default_factory=TutorPairwiseRewardConfig
+    )
+
+
+@dataclass
 class TutorConfig(GRPOConfig):
     workflow: str = field(
         default="examples.tutor.workflow.TutorAgentWorkflow",
@@ -26,25 +77,10 @@ class TutorConfig(GRPOConfig):
             "help": "Whether to enable thinking mode for the tutor rollout model."
         },
     )
-    aux_base_url: str = field(default="http://127.0.0.1:30000/v1")
-    aux_model: str = field(default="qwen-aux")
-    aux_api_key: str = field(default="EMPTY")
-    aux_timeout: int = field(default=120)
-    aux_max_tokens: int = field(default=2048)
-    aux_temperature: float = field(default=0.7)
-    aux_top_p: float | None = field(default=None)
-    max_concurrent_aux_calls: int = field(default=8)
-    api_params_config_path: str = field(default="")
-    api_params_key: str = field(default="")
-    success_reward: float = field(default=1.0)
-    leak_penalty: float = field(default=-1.0)
-    outcome_prior_turn_weight: float = field(default=0.1)
-    outcome_credit_gamma: float = field(default=0.9)
-    early_success_bonus: float = field(default=0.3)
-    turn_penalty: float = field(default=-0.01)
-    length_penalty_threshold_chars: int = field(default=1200)
-    length_penalty_per_100_chars: float = field(default=-0.005)
-    length_penalty_min: float = field(default=-0.1)
+    auxiliary_model: TutorAuxiliaryModelConfig = field(
+        default_factory=TutorAuxiliaryModelConfig
+    )
+    reward: TutorRewardConfig = field(default_factory=TutorRewardConfig)
     teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
     student_system_prompt: str = field(default=DEFAULT_STUDENT_SYSTEM_PROMPT)
     leak_check_system_prompt: str = field(default=DEFAULT_LEAK_CHECK_SYSTEM_PROMPT)

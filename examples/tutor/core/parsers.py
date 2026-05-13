@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import re
-
 from examples.common.parsing import join_errors, parse_json_dict
 
 from .text import strip_reasoning_for_context
@@ -30,11 +28,9 @@ def parse_public_summary(raw_output: str) -> str:
 def parse_leak_check_result(raw_output: str) -> LeakCheckResult:
     parsed, parse_error = parse_json_dict(raw_output)
     if parsed is None:
-        lowered = raw_output.lower()
-        leaked = '"leaked": true' in lowered or re.search(r"\byes\b", lowered) is not None
         return LeakCheckResult(
             raw_output=raw_output,
-            leaked=leaked,
+            leaked=True,
             feedback="Failed to parse leak-check output.",
             parse_error=parse_error,
             raw_result={},
@@ -43,10 +39,12 @@ def parse_leak_check_result(raw_output: str) -> LeakCheckResult:
     feedback = parsed.get("feedback", "")
     if not isinstance(leaked, bool):
         parse_error = join_errors(parse_error, '"leaked" must be a boolean')
-        leaked = False
+        leaked = True
     if not isinstance(feedback, str):
         parse_error = join_errors(parse_error, '"feedback" must be a string')
         feedback = str(feedback)
+    if parse_error:
+        leaked = True
     return LeakCheckResult(
         raw_output=raw_output,
         leaked=leaked,

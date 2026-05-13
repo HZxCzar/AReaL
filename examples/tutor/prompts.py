@@ -34,6 +34,13 @@ DEFAULT_SUMMARY_SYSTEM_PROMPT = (
     "valid JSON only."
 )
 
+PAIRWISE_STUDENT_COMPARISON_SYSTEM_PROMPT = (
+    "You are a strict math tutoring evaluator. Compare two anonymized student "
+    "replies after different private tutor hints. Judge only the student replies "
+    "and the visible pre-turn state; do not infer from tutor wording. Return valid "
+    "JSON only."
+)
+
 TEACHER_STATE_USER_TEMPLATE = """\
 Task:
 {{ task }}
@@ -123,6 +130,39 @@ Teacher Message:
 Return JSON only with this schema:
 {
   "leaked": false,
+  "feedback": "short explanation"
+}
+"""
+
+PAIRWISE_STUDENT_COMPARISON_USER_TEMPLATE = """\
+Task:
+{{ task }}
+
+Ground Truth:
+{{ ground_truth }}
+
+Visible public history before this turn:
+{{ public_history }}
+
+Student's previous answer before this turn:
+{{ previous_student_output }}
+
+Student Reply A:
+{{ student_reply_a }}
+
+Student Reply B:
+{{ student_reply_b }}
+
+Decide which student reply shows better mathematical progress toward the ground truth.
+Prefer the reply that is exact-correct, fixes a previous error, advances a valid
+intermediate step, or asks a more useful clarifying question. Treat empty,
+off-topic, repeated, or regressed work as worse. If both replies are equivalent
+or impossible to distinguish, choose "tie".
+
+Return JSON only:
+{
+  "winner": "A",
+  "confidence": 0.0,
   "feedback": "short explanation"
 }
 """

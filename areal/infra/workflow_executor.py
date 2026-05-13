@@ -1129,6 +1129,8 @@ class WorkflowExecutor:
                 return None
 
             except Exception as exc:  # pragma: no cover - workflow execution errors
+                if getattr(exc, "_fatal_rollout_error", False):
+                    raise
                 manager.on_rollout_rejected()
                 stats_tracker.get("rollout").scalar(rejected=1)
                 trace_session_event(

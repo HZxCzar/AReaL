@@ -10,25 +10,30 @@ workflow: examples.tutor.workflow.TutorAgentWorkflow
 eval_workflow: ${workflow}
 max_turns: 10
 enable_thinking: false
-aux_base_url: http://127.0.0.1:30001/v1
-aux_model: default
-aux_api_key: EMPTY
-aux_timeout: 120
-aux_max_tokens: 1024
-aux_temperature: 0.7
-aux_top_p: null
-max_concurrent_aux_calls: 4
-api_params_config_path: examples/tutor/api_params_config.json
-api_params_key: "sglang:30001"
-success_reward: 1.0
-leak_penalty: -1.0
-outcome_prior_turn_weight: 0.1
-outcome_credit_gamma: 0.9
-early_success_bonus: 0.3
-turn_penalty: -0.01
-length_penalty_threshold_chars: 1200
-length_penalty_per_100_chars: -0.005
-length_penalty_min: -0.1
+
+auxiliary_model:
+  base_url: http://127.0.0.1:30001/v1
+  model: default
+  api_key: EMPTY
+  timeout: 120
+  max_tokens: 1024
+  temperature: 0.7
+  top_p: null
+  max_concurrent_calls: 4
+  api_params_config_path: examples/tutor/api_params_config.json
+  api_params_key: "sglang:30001"
+
+reward:
+  success: 1.0
+  leak_penalty: -1.0
+  outcome_prior_turn_weight: 0.1
+  outcome_credit_gamma: 0.9
+  early_success_bonus: 0.3
+  turn_penalty: -0.01
+  length_penalty_threshold_chars: 1200
+  length_penalty_per_100_chars: -0.005
+  length_penalty_min: -0.1
+
 debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor/debug_traces/${experiment_name}/${trial_name}
 debug_trace_every_n_rollouts: 10
 
@@ -150,6 +155,7 @@ sglang:
   mem_fraction_static: 0.6
   enable_lora: ${actor.use_lora}
   max_lora_rank: ${actor.lora_rank}
+  max_loaded_loras: 12
 
 train_dataset:
   batch_size: 4

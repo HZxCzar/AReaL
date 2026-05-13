@@ -111,6 +111,7 @@ except Exception:  # pragma: no cover - lightweight local test environments
 from examples.common.chat_budget import ChatContextBudget
 from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig, make_teacher_client
 from examples.tutor.core.aime import score_aime_answer
+from examples.tutor.core.auxiliary import AuxiliaryModelCallResult, call_auxiliary_text
 from examples.tutor.core.generation_budget import (
     CONTEXT_BUDGET_TERMINATION_REASON,
     ContextBudgetLimitExceeded,
@@ -123,6 +124,7 @@ from examples.tutor.core.history import (
     trace_to_json,
 )
 from examples.tutor.core.parsers import parse_leak_check_result
+from examples.tutor.core.pairwise import PairwiseTutorEvaluator
 from examples.tutor.core.rewards import EpisodeRewardComputer, artifact_to_trace
 from examples.tutor.core.tensors import response_to_tensordict
 from examples.tutor.core.text import (
@@ -197,6 +199,20 @@ class TutorAgentWorkflow(RolloutWorkflow):
         tokenizer_path: str | None = None,
         model_context_length: int | None = None,
         context_window_margin: int = 256,
+        pairwise_reward_enabled: bool = False,
+        pairwise_reference_lag_steps: int = 5,
+        pairwise_reward_scale: float = 0.05,
+        pairwise_compare_all_turns: bool = True,
+        pairwise_reward_base_url: str = "",
+        pairwise_reward_model: str = "",
+        pairwise_reward_api_key: str = "",
+        pairwise_reward_timeout: int | None = None,
+        pairwise_reward_max_tokens: int | None = None,
+        pairwise_reward_temperature: float | None = None,
+        pairwise_reward_top_p: float | None = None,
+        pairwise_reward_max_concurrent_calls: int | None = None,
+        pairwise_reward_api_params_config_path: str = "",
+        pairwise_reward_api_params_key: str = "",
     ):
         self.max_turns = max_turns
         self.enable_thinking = enable_thinking
@@ -224,6 +240,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.debug_trace_dir = debug_trace_dir.strip() if debug_trace_dir else ""
         self.debug_trace_every_n_rollouts = max(1, int(debug_trace_every_n_rollouts))
         self.max_train_sample_tokens = max_train_sample_tokens
+        self.pairwise_reward_enabled = bool(pairwise_reward_enabled)
+        self.pairwise_reference_lag_steps = max(0, int(pairwise_reference_lag_steps))
+        self.pairwise_reward_scale = float(pairwise_reward_scale)
+        self.pairwise_compare_all_turns = bool(pairwise_compare_all_turns)
         self.last_history: list[dict[str, Any]] = []
         self.last_traces: list[TurnTrace] = []
         self.last_total_reward = 0.0
@@ -251,6 +271,47 @@ class TutorAgentWorkflow(RolloutWorkflow):
             context_window_margin=context_window_margin,
         )
         self.aux_caller = AsyncLLMCaller(aux_config)
+        self.pairwise_reward_caller: AsyncLLMCaller | None = None
+        if self.pairwise_reward_enabled:
+            pairwise_config = AuxModelConfig(
+                base_url=pairwise_reward_base_url or aux_base_url,
+                model=pairwise_reward_model or aux_model,
+                api_key=pairwise_reward_api_key or aux_api_key,
+                timeout=(
+                    int(pairwise_reward_timeout)
+                    if pairwise_reward_timeout is not None
+                    else aux_timeout
+                ),
+                max_tokens=(
+                    int(pairwise_reward_max_tokens)
+                    if pairwise_reward_max_tokens is not None
+                    else aux_max_tokens
+                ),
+                temperature=(
+                    float(pairwise_reward_temperature)
+                    if pairwise_reward_temperature is not None
+                    else aux_temperature
+                ),
+                top_p=(
+                    float(pairwise_reward_top_p)
+                    if pairwise_reward_top_p is not None
+                    else aux_top_p
+                ),
+                max_concurrency=(
+                    int(pairwise_reward_max_concurrent_calls)
+                    if pairwise_reward_max_concurrent_calls is not None
+                    else max_concurrent_aux_calls
+                ),
+                api_params_config_path=(
+                    pairwise_reward_api_params_config_path
+                    or api_params_config_path
+                ),
+                api_params_key=pairwise_reward_api_params_key or api_params_key,
+                tokenizer_path=tokenizer_path,
+                context_length=model_context_length,
+                context_window_margin=context_window_margin,
+            )
+            self.pairwise_reward_caller = AsyncLLMCaller(pairwise_config)
 
     async def arun_episode(self, engine, data: dict[str, Any]):
         return await self._run_episode(data, engine=engine)
@@ -277,6 +338,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         turn_artifacts: list[TurnArtifact] = []
         leak_count = 0
         termination_reason = "max_turns"
+        episode_lora_version = None
+        if engine is not None and hasattr(engine, "get_version"):
+            episode_lora_version = int(engine.get_version())
 
         initial_student_answer, initial_student_error = await self._run_student(
             StudentTurnState(
@@ -355,6 +419,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     tutor_state,
                     engine=engine,
                     external_client=external_client,
+                    lora_version=episode_lora_version,
                 )
             except ContextBudgetLimitExceeded as exc:
                 logger.info(
@@ -469,7 +534,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
             length_penalty_per_100_chars=self.length_penalty_per_100_chars,
             length_penalty_min=self.length_penalty_min,
         )
-        assignments = await reward_computer.compute(episode_artifact)
+        pairwise_rewards: dict[int, float] = {}
+        if self._should_run_pairwise_reward(engine, turn_artifacts):
+            pairwise_results = await self._run_pairwise_evaluation(
+                episode_artifact, engine, episode_lora_version=episode_lora_version
+            )
+            pairwise_rewards = {
+                result.turn_idx: result.reward
+                for result in pairwise_results
+                if result.reward
+            }
+        assignments = await reward_computer.compute(
+            episode_artifact, pairwise_rewards=pairwise_rewards
+        )
         traces = [
             artifact_to_trace(artifact, assignment)
             for artifact, assignment in zip(turn_artifacts, assignments, strict=True)
@@ -521,6 +598,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         *,
         engine: Any | None,
         external_client: Any | None,
+        lora_version: int | None = None,
+        rid_prefix: str = "tutor",
     ) -> tuple[ModelResponse, str]:
         messages = [
             {"role": "system", "content": self.teacher_system_prompt},
@@ -535,10 +614,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         raise_if_over_budget(budget)
         if engine is not None:
+            metadata: dict[str, Any] = {}
+            if lora_version is not None:
+                metadata["lora_version"] = int(lora_version)
             req = ModelRequest(
-                rid=f"tutor-{int(time.time() * 1000)}-{tutor_state.turn_idx}",
+                rid=f"{rid_prefix}-{int(time.time() * 1000)}-{tutor_state.turn_idx}",
                 input_ids=input_ids,
                 gconfig=budget.gconfig,
+                metadata=metadata,
                 tokenizer=self.tokenizer,
             )
             response = await engine.agenerate(req)
@@ -588,21 +671,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
         state: StudentTurnState,
     ) -> tuple[str, str | None]:
         prompt = self._build_student_prompt_from_state(state)
-        try:
-            return _strip_reasoning_for_context(
-                await self._call_student_prompt(prompt)
-            ), None
-        except Exception as exc:
-            return "", str(exc)
-
-    async def _call_student_prompt(self, prompt: str) -> str:
-        answer = await self.aux_caller.call_text(
-            [
-                {"role": "system", "content": self.student_system_prompt},
-                {"role": "user", "content": prompt},
-            ]
+        result = await self._call_auxiliary_prompt(
+            system_prompt=self.student_system_prompt,
+            user_prompt=prompt,
         )
-        return _strip_reasoning_for_context(answer)
+        if result.error:
+            return "", result.error
+        return result.text, None
 
     async def _run_leak_check(
         self, task: str, ground_truth: str, teacher_action: str
@@ -612,16 +687,34 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ground_truth,
             _strip_reasoning_for_context(teacher_action),
         )
-        try:
-            raw_output = await self.aux_caller.call_text(
-                [
-                    {"role": "system", "content": self.leak_check_system_prompt},
-                    {"role": "user", "content": prompt},
-                ]
+        result = await self._call_auxiliary_prompt(
+            system_prompt=self.leak_check_system_prompt,
+            user_prompt=prompt,
+        )
+        if result.error:
+            return LeakCheckResult(
+                raw_output="",
+                leaked=True,
+                feedback=f"Leak check failed: {result.error}",
+                parse_error=result.error,
+                raw_result={},
             )
-        except Exception as exc:
-            return LeakCheckResult("", False, f"Leak check failed: {exc}", str(exc), {})
-        return parse_leak_check_result(_strip_reasoning_for_context(raw_output))
+        return parse_leak_check_result(result.text)
+
+    async def _call_auxiliary_prompt(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        caller: AsyncLLMCaller | None = None,
+    ) -> AuxiliaryModelCallResult:
+        return await call_auxiliary_text(
+            caller or self.aux_caller,
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
 
     async def _run_public_summary_update(
         self,
@@ -709,6 +802,66 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self, task: str, ground_truth: str, student_answer: str
     ) -> JudgeResult:
         return score_aime_answer(task, ground_truth, student_answer)
+
+    def _should_run_pairwise_reward(
+        self, engine: Any | None, turn_artifacts: list[TurnArtifact]
+    ) -> bool:
+        if not self.pairwise_reward_enabled:
+            return False
+        if engine is None or not turn_artifacts:
+            return False
+        try:
+            ctx = workflow_context.get()
+        except Exception:
+            return True
+        return not bool(getattr(ctx, "is_eval", False))
+
+    async def _run_pairwise_evaluation(
+        self,
+        episode_artifact: EpisodeArtifact,
+        engine: Any,
+        *,
+        episode_lora_version: int | None,
+    ):
+        if self.pairwise_reward_caller is None or episode_lora_version is None:
+            return []
+        reference_version = max(
+            0, int(episode_lora_version) - self.pairwise_reference_lag_steps
+        )
+
+        async def generate_reference_tutor(
+            tutor_state: TutorTurnState, reference_version: int
+        ):
+            return await self._generate_reference_tutor_response(
+                tutor_state,
+                engine=engine,
+                reference_version=reference_version,
+            )
+
+        evaluator = PairwiseTutorEvaluator(
+            reward_scale=self.pairwise_reward_scale,
+            reward_caller=self.pairwise_reward_caller,
+            generate_reference_tutor=generate_reference_tutor,
+            run_student=self._run_student,
+            run_leak_check=self._run_leak_check,
+            score_answer=self._score_aime_answer,
+            compare_all_turns=self.pairwise_compare_all_turns,
+        )
+        results = await evaluator.evaluate(
+            episode_artifact, reference_version=reference_version
+        )
+        return results
+
+    async def _generate_reference_tutor_response(
+        self, tutor_state: TutorTurnState, *, engine: Any, reference_version: int
+    ) -> tuple[ModelResponse, str]:
+        return await self._generate_tutor_response(
+            tutor_state,
+            engine=engine,
+            external_client=None,
+            lora_version=reference_version,
+            rid_prefix="reference-tutor",
+        )
 
     def _generation_config(self):
         if self.gconfig is not None and hasattr(self.gconfig, "new"):

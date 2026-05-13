@@ -12,9 +12,17 @@ from areal.utils.hf_utils import load_hf_tokenizer
 
 
 def main(args):
-    trial_name = next(line.split(":", 1)[1].strip().strip("'\"") for line in pathlib.Path(args[args.index("--config") + 1]).read_text(encoding="utf-8").splitlines() if line.startswith("trial_name:"))
+    config_path = pathlib.Path(args[args.index("--config") + 1])
+    trial_name = next(
+        line.split(":", 1)[1].strip().strip("'\"")
+        for line in config_path.read_text(encoding="utf-8").splitlines()
+        if line.startswith("trial_name:")
+    )
     args = [*args, f"trial_name={datetime.now():%Y%m%d_%H%M%S}_{trial_name}"]
     config, _ = load_expr_config(args, TutorConfig)
+    auxiliary_model = config.auxiliary_model
+    reward = config.reward
+    pairwise = reward.pairwise
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
 
     train_dataset = get_custom_dataset(
@@ -33,25 +41,25 @@ def main(args):
         tokenizer=config.tokenizer_path,
         max_turns=config.max_turns,
         enable_thinking=config.enable_thinking,
-        aux_base_url=config.aux_base_url,
-        aux_model=config.aux_model,
-        aux_api_key=config.aux_api_key,
-        aux_timeout=config.aux_timeout,
-        aux_max_tokens=config.aux_max_tokens,
-        aux_temperature=config.aux_temperature,
-        aux_top_p=config.aux_top_p,
-        max_concurrent_aux_calls=config.max_concurrent_aux_calls,
-        api_params_config_path=config.api_params_config_path or None,
-        api_params_key=config.api_params_key or None,
-        success_reward=config.success_reward,
-        leak_penalty=config.leak_penalty,
-        outcome_prior_turn_weight=config.outcome_prior_turn_weight,
-        outcome_credit_gamma=config.outcome_credit_gamma,
-        early_success_bonus=config.early_success_bonus,
-        turn_penalty=config.turn_penalty,
-        length_penalty_threshold_chars=config.length_penalty_threshold_chars,
-        length_penalty_per_100_chars=config.length_penalty_per_100_chars,
-        length_penalty_min=config.length_penalty_min,
+        aux_base_url=auxiliary_model.base_url,
+        aux_model=auxiliary_model.model,
+        aux_api_key=auxiliary_model.api_key,
+        aux_timeout=auxiliary_model.timeout,
+        aux_max_tokens=auxiliary_model.max_tokens,
+        aux_temperature=auxiliary_model.temperature,
+        aux_top_p=auxiliary_model.top_p,
+        max_concurrent_aux_calls=auxiliary_model.max_concurrent_calls,
+        api_params_config_path=auxiliary_model.api_params_config_path or None,
+        api_params_key=auxiliary_model.api_params_key or None,
+        success_reward=reward.success,
+        leak_penalty=reward.leak_penalty,
+        outcome_prior_turn_weight=reward.outcome_prior_turn_weight,
+        outcome_credit_gamma=reward.outcome_credit_gamma,
+        early_success_bonus=reward.early_success_bonus,
+        turn_penalty=reward.turn_penalty,
+        length_penalty_threshold_chars=reward.length_penalty_threshold_chars,
+        length_penalty_per_100_chars=reward.length_penalty_per_100_chars,
+        length_penalty_min=reward.length_penalty_min,
         teacher_system_prompt=config.teacher_system_prompt,
         student_system_prompt=config.student_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
@@ -61,10 +69,27 @@ def main(args):
         max_train_sample_tokens=config.gconfig.max_tokens,
         tokenizer_path=config.tokenizer_path,
         model_context_length=config.sglang.context_length,
+        pairwise_reward_enabled=pairwise.enabled,
+        pairwise_reference_lag_steps=pairwise.reference_lag_steps,
+        pairwise_reward_scale=pairwise.scale,
+        pairwise_compare_all_turns=pairwise.compare_all_turns,
+        pairwise_reward_base_url=pairwise.judge_base_url,
+        pairwise_reward_model=pairwise.judge_model,
+        pairwise_reward_api_key=pairwise.judge_api_key,
+        pairwise_reward_timeout=pairwise.judge_timeout,
+        pairwise_reward_max_tokens=pairwise.judge_max_tokens,
+        pairwise_reward_temperature=pairwise.judge_temperature,
+        pairwise_reward_top_p=pairwise.judge_top_p,
+        pairwise_reward_max_concurrent_calls=pairwise.judge_max_concurrent_calls,
+        pairwise_reward_api_params_config_path=(
+            pairwise.judge_api_params_config_path
+        ),
+        pairwise_reward_api_params_key=pairwise.judge_api_params_key,
     )
 
     eval_workflow_kwargs = workflow_kwargs.copy()
     eval_workflow_kwargs["gconfig"] = config.gconfig.new(temperature=0.6, n_samples=1)
+    eval_workflow_kwargs["pairwise_reward_enabled"] = False
 
     with PPOTrainer(
         config,

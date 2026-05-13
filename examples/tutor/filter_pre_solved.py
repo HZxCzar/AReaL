@@ -76,7 +76,10 @@ def parse_args() -> argparse.Namespace:
         "--concurrency",
         type=int,
         default=0,
-        help="Maximum concurrent student calls. Defaults to config.max_concurrent_aux_calls.",
+        help=(
+            "Maximum concurrent student calls. Defaults to "
+            "config.auxiliary_model.max_concurrent_calls."
+        ),
     )
     parser.add_argument(
         "--limit",
@@ -101,18 +104,19 @@ def parse_args() -> argparse.Namespace:
 def build_workflow(config: TutorConfig, max_concurrency: int) -> TutorAgentWorkflow:
     from workflow import TutorAgentWorkflow
 
+    auxiliary_model = config.auxiliary_model
     return TutorAgentWorkflow(
         max_turns=config.max_turns,
-        aux_base_url=config.aux_base_url,
-        aux_model=config.aux_model,
-        aux_api_key=config.aux_api_key,
-        aux_timeout=config.aux_timeout,
-        aux_max_tokens=config.aux_max_tokens,
-        aux_temperature=config.aux_temperature,
-        aux_top_p=config.aux_top_p,
+        aux_base_url=auxiliary_model.base_url,
+        aux_model=auxiliary_model.model,
+        aux_api_key=auxiliary_model.api_key,
+        aux_timeout=auxiliary_model.timeout,
+        aux_max_tokens=auxiliary_model.max_tokens,
+        aux_temperature=auxiliary_model.temperature,
+        aux_top_p=auxiliary_model.top_p,
         max_concurrent_aux_calls=max_concurrency,
-        api_params_config_path=config.api_params_config_path or None,
-        api_params_key=config.api_params_key or None,
+        api_params_config_path=auxiliary_model.api_params_config_path or None,
+        api_params_key=auxiliary_model.api_params_key or None,
         student_system_prompt=config.student_system_prompt,
         tokenizer_path=config.tokenizer_path,
         model_context_length=config.sglang.context_length,
@@ -288,7 +292,7 @@ async def main_async(args: argparse.Namespace) -> None:
         1,
         int(args.concurrency)
         if args.concurrency and args.concurrency > 0
-        else int(config.max_concurrent_aux_calls),
+        else int(config.auxiliary_model.max_concurrent_calls),
     )
 
     loaded = load_from_disk(str(input_path))
