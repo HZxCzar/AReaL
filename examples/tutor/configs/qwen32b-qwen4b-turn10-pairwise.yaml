@@ -1,0 +1,219 @@
+experiment_name: tutor-grpo
+trial_name: qwen32b-qwen4b-turn10-pairwise-prm-long-output-ep200
+
+seed: 1
+enable_offload: false
+total_train_epochs: 200
+tokenizer_path: ${actor.path}
+
+workflow: examples.tutor.workflow.TutorAgentWorkflow
+eval_workflow: ${workflow}
+max_turns: 10
+enable_thinking: false
+
+auxiliary_model:
+  base_url: http://127.0.0.1:30001/v1
+  model: default
+  api_key: EMPTY
+  timeout: 120
+  max_tokens: 1024
+  temperature: 0.7
+  top_p: null
+  max_concurrent_calls: 4
+  api_params_config_path: examples/tutor/api_params_config.json
+  api_params_key: "sglang:30001"
+
+reward:
+  success: 1.0
+  leak_penalty: -1.0
+  outcome_prior_turn_weight: 0.1
+  outcome_credit_gamma: 0.9
+  early_success_bonus: 0.3
+  turn_penalty: -0.01
+  length_penalty_threshold_chars: 1200
+  length_penalty_per_100_chars: -0.005
+  length_penalty_min: -0.1
+  pairwise:
+    enabled: true
+    reference_lag_steps: 5
+    scale: 0.05
+    compare_all_turns: true
+    judge_max_tokens: 1024
+    judge_temperature: 0.0
+    judge_top_p: 1.0
+
+debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor/debug_traces/${experiment_name}/${trial_name}
+debug_trace_every_n_rollouts: 10
+
+cluster:
+  n_nodes: 1
+  n_gpus_per_node: 4
+  fileroot: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor
+  name_resolve:
+    type: nfs
+    nfs_record_root: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor/name_resolve
+
+scheduler:
+  type: local
+
+rollout:
+  backend: "sglang:d2p1t1"
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  tokenizer_path: ${tokenizer_path}
+  max_concurrent_rollouts: 2
+  queue_size: null
+  consumer_batch_size: ${train_dataset.batch_size}
+  max_head_offpolicyness: 2
+  enable_rollout_tracing: false
+  scheduling_spec: ${actor.scheduling_spec}
+  use_lora: true
+  dump_to_file: true
+  openai:
+    mode: inline
+    tool_call_parser: qwen25
+    reasoning_parser: qwen3
+    chat_template_type: concat
+    export_style: concat
+    turn_discount: 1.0
+
+gconfig:
+  n_samples: 1
+  min_new_tokens: 0
+  # Tutor actor output budget; includes reasoning tokens if thinking is enabled.
+  max_new_tokens: 16384
+  # Total prompt + response budget, aligned to the Qwen3-32B 40960 context limit.
+  max_tokens: 40960
+  greedy: false
+  temperature: 1.0
+  top_p: 1.0
+  lora_name: default_lora
+
+actor:
+  backend: "fsdp:d2p1t1"
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-32B/snapshots/9216db5781bf21249d130ec9da846c4624c16137
+  init_from_scratch: false
+  disable_dropout: true
+  gradient_checkpointing: true
+  dtype: bfloat16
+  mb_spec:
+    max_tokens_per_mb: 40960
+  optimizer:
+    type: adam
+    lr: 1.70e-5
+    weight_decay: 0.017
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1e-8
+    lr_scheduler_type: constant
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.001
+  eps_clip: 0.4
+  temperature: ${gconfig.temperature}
+  reward_scaling: 1.0
+  reward_bias: 0.0
+  kl_ctl: 0.0
+  ppo_n_minibatches: 4
+  recompute_logprob: true
+  use_decoupled_loss: true
+  behave_imp_weight_cap: 5.0
+  reward_norm: null
+  adv_norm:
+    mean_level: batch
+    std_level: batch
+  weight_update_mode: disk
+  use_lora: ${rollout.use_lora}
+  peft_type: lora
+  lora_rank: 16
+  lora_alpha: 16
+  target_modules: [all-linear]
+  max_new_tokens: ${gconfig.max_new_tokens}
+  scheduling_spec:
+    - task_type: worker
+      port_count: 2
+      gpu: 1
+      cmd: python3 -m areal.infra.rpc.rpc_server
+      env_vars: {}
+
+ref:
+  backend: ${actor.backend}
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${actor.path}
+  init_from_scratch: false
+  disable_dropout: true
+  dtype: ${actor.dtype}
+  mb_spec:
+    max_tokens_per_mb: 40960
+  optimizer: null
+  scheduling_strategy:
+    type: colocation
+    target: actor
+  scheduling_spec: ${actor.scheduling_spec}
+
+sglang:
+  model_path: ${actor.path}
+  random_seed: ${seed}
+  skip_tokenizer_init: true
+  dtype: ${actor.dtype}
+  max_running_requests: 2
+  context_length: 40960
+  mem_fraction_static: 0.6
+  enable_lora: ${actor.use_lora}
+  max_lora_rank: ${actor.lora_rank}
+  max_loaded_loras: 12
+
+train_dataset:
+  batch_size: 4
+  shuffle: true
+  pin_memory: false
+  num_workers: 0
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/aime_dataset
+  type: rl
+  # Per-sample length
+  max_length: 16384
+
+valid_dataset:
+  batch_size: 4
+  pin_memory: false
+  num_workers: 0
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/aime_dataset
+  type: rl
+
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: null
+
+recover:
+  mode: disabled
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: 3600
+
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: null
+
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: offline
+    entity: hz-czar-stanford
+    project: TAgent
+    name: ${trial_name}
