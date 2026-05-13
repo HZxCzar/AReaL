@@ -267,11 +267,14 @@ class TeacherEvaluator:
                 teacher_advice = ""
                 teacher_obs = info.get("teacher_observation", obs) if isinstance(info, dict) else obs
                 if use_teacher:
+                    teacher_policy = str(self.config.get("teacher_guidance_policy") or "").strip()
                     teacher_prompt = (
                         f"{teacher_obs}\n\nCurrent public observation:\n{obs}\n\nGuide:\n{guide}\n\n"
                         f"{memory_text}\n\nGive concise tutoring guidance for the acting player. "
                         "Do not choose the action unless necessary; explain the key consideration."
                     )
+                    if teacher_policy:
+                        teacher_prompt += f"\n\nAdditional tutoring policy:\n{teacher_policy}"
                     teacher_advice = await self.teacher.complete(
                         normalize_messages(
                             "You are a privileged game tutor evaluating how useful your guidance is.",
