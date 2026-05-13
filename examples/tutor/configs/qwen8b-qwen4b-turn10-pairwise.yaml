@@ -1,5 +1,5 @@
 experiment_name: tutor-grpo
-trial_name: qwen8b-qwen4b-turn10-pairwise-ep200
+trial_name: qwen8b-qwen4b-turn10-pairwise-prm-ep200
 
 seed: 1
 enable_offload: false
@@ -16,7 +16,7 @@ auxiliary_model:
   model: default
   api_key: EMPTY
   timeout: 120
-  max_tokens: 2048
+  max_tokens: 1024
   temperature: 0.7
   top_p: null
   max_concurrent_calls: 4
