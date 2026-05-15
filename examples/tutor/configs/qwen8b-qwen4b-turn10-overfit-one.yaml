@@ -1,5 +1,5 @@
 experiment_name: tutor
-trial_name: qwen4b-instruct-turn10-overfit-one-prm-ep200
+trial_name: qwen8b-qwen4b-turn10-overfit-one-prm-ep200
 
 seed: 1
 enable_offload: false
@@ -102,7 +102,7 @@ actor:
   backend: "fsdp:d2p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen3-4B-Instruct
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
