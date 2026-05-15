@@ -27,9 +27,11 @@ def build_prompt(env: WerewolfEnv, obs: str, guide: str, teacher_advice: str, me
     return (
         f"{obs}\n\n"
         f"{memory}\n\n"
-        f"Teacher guidance:\n{teacher_advice or 'No teacher guidance. Decide from your own observation.'}\n\n"
         f"{guide}\n"
-        "Choose exactly one valid action for the current phase."
+        f"Teacher guidance:\n{teacher_advice or 'No teacher guidance. Decide from your own observation.'}\n\n"
+        "Choose exactly one valid action for the current phase. "
+        "Do not answer with skip when a concrete vote, target, or discussion statement is useful. "
+        "Keep the final <answer> concise."
     ).strip()
 
 
