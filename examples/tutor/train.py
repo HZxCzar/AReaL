@@ -88,7 +88,7 @@ def main(args):
     )
 
     eval_workflow_kwargs = workflow_kwargs.copy()
-    eval_workflow_kwargs["gconfig"] = config.gconfig.new(temperature=0.6, n_samples=1)
+    eval_workflow_kwargs["gconfig"] = config.eval_gconfig.new(n_samples=1)
     eval_workflow_kwargs["pairwise_reward_enabled"] = False
 
     with PPOTrainer(

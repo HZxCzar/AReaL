@@ -89,6 +89,16 @@ gconfig:
   top_p: 1.0
   lora_name: default_lora
 
+eval_gconfig:
+  n_samples: 1
+  min_new_tokens: 0
+  max_new_tokens: 1024
+  max_tokens: 20478
+  greedy: false
+  temperature: 0.6
+  top_p: 1.0
+  lora_name: default_lora
+
 actor:
   backend: "fsdp:d2p1t1"
   experiment_name: ${experiment_name}
