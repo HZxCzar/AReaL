@@ -38,12 +38,9 @@ reward:
     reference_lag_steps: 5
     scale: 0.05
     compare_all_turns: true
-    judge_max_tokens: 1024
-    judge_temperature: 0.0
-    judge_top_p: 1.0
 
 debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor/debug_traces/${experiment_name}/${trial_name}
-debug_trace_every_n_rollouts: 1
+debug_trace_every_n_rollouts: 10
 
 cluster:
   n_nodes: 1
@@ -81,8 +78,8 @@ rollout:
 gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 768
-  max_tokens: 8192
+  max_new_tokens: 1024
+  max_tokens: 20478
   greedy: false
   temperature: 0.7
   top_p: 1.0
@@ -91,8 +88,8 @@ gconfig:
 eval_gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 768
-  max_tokens: 8192
+  max_new_tokens: 1024
+  max_tokens: 20478
   greedy: false
   temperature: 0.0
   top_p: 1.0
@@ -108,7 +105,7 @@ actor:
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 40960
+    max_tokens_per_mb: 32768
   optimizer:
     type: adam
     lr: 5.0e-5
@@ -181,7 +178,7 @@ train_dataset:
   num_workers: 0
   path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/aime_dataset_one_sample
   type: rl
-  max_length: 8192
+  max_length: 16384
 
 valid_dataset:
   batch_size: 4
