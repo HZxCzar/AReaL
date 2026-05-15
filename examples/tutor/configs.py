@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Literal
 
 from areal.api.cli_args import GRPOConfig
 from examples.tutor.prompts import (
@@ -11,6 +12,24 @@ from examples.tutor.prompts import (
 
 @dataclass
 class TutorAuxiliaryModelConfig:
+    mode: Literal["api", "self"] = field(
+        default="api",
+        metadata={
+            "help": (
+                "Auxiliary caller backend: 'api' uses base_url, "
+                "'self' uses the actor base model without LoRA."
+            )
+        },
+    )
+    enable_thinking: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to enable thinking mode for self auxiliary calls. "
+                "Only affects mode='self'."
+            )
+        },
+    )
     base_url: str = field(default="http://127.0.0.1:30000/v1")
     model: str = field(default="qwen-aux")
     api_key: str = field(default="EMPTY")
@@ -32,16 +51,6 @@ class TutorPairwiseRewardConfig:
     reference_lag_steps: int = field(default=5)
     scale: float = field(default=0.05)
     compare_all_turns: bool = field(default=True)
-    judge_base_url: str = field(default="")
-    judge_model: str = field(default="")
-    judge_api_key: str = field(default="")
-    judge_timeout: int | None = field(default=None)
-    judge_max_tokens: int | None = field(default=None)
-    judge_temperature: float | None = field(default=None)
-    judge_top_p: float | None = field(default=None)
-    judge_max_concurrent_calls: int | None = field(default=None)
-    judge_api_params_config_path: str = field(default="")
-    judge_api_params_key: str = field(default="")
 
 
 @dataclass

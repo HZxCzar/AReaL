@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging as py_logging
 import os
@@ -13,7 +14,7 @@ import torch
 
 try:
     from areal import workflow_context
-    from areal.api import ModelRequest, ModelResponse, RolloutWorkflow
+    from areal.api import ModelResponse, RolloutWorkflow
     from areal.utils import logging, stats_tracker
     from areal.utils.data import concat_padded_tensors
     from areal.utils.hf_utils import load_hf_tokenizer
@@ -111,13 +112,17 @@ except Exception:  # pragma: no cover - lightweight local test environments
 from examples.common.chat_budget import ChatContextBudget
 from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig, make_teacher_client
 from examples.tutor.core.aime import score_aime_answer
-from examples.tutor.core.auxiliary import AuxiliaryModelCallResult, call_auxiliary_text
+from examples.tutor.core.callers import (
+    AReaLEngineActorCaller,
+    AReaLEngineAuxiliaryCaller,
+    AReaLEngineChatCaller,
+    ApiAuxiliaryCaller,
+    ExternalActorCaller,
+    TextCallResult,
+)
 from examples.tutor.core.generation_budget import (
     CONTEXT_BUDGET_TERMINATION_REASON,
     ContextBudgetLimitExceeded,
-    ensure_response_within_train_sample_budget,
-    prepare_train_sample_generation_config,
-    raise_if_over_budget,
 )
 from examples.tutor.core.history import (
     trace_to_history_record,
@@ -170,6 +175,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         max_completion_tokens: int = 512,
         tool_call_parser: str = "qwen25",
         reasoning_parser: str = "qwen3",
+        aux_mode: str = "api",
+        aux_enable_thinking: bool = False,
         aux_base_url: str = "http://127.0.0.1:30000/v1",
         aux_model: str = "qwen-aux",
         aux_api_key: str = "EMPTY",
@@ -203,16 +210,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         pairwise_reference_lag_steps: int = 5,
         pairwise_reward_scale: float = 0.05,
         pairwise_compare_all_turns: bool = True,
-        pairwise_reward_base_url: str = "",
-        pairwise_reward_model: str = "",
-        pairwise_reward_api_key: str = "",
-        pairwise_reward_timeout: int | None = None,
-        pairwise_reward_max_tokens: int | None = None,
-        pairwise_reward_temperature: float | None = None,
-        pairwise_reward_top_p: float | None = None,
-        pairwise_reward_max_concurrent_calls: int | None = None,
-        pairwise_reward_api_params_config_path: str = "",
-        pairwise_reward_api_params_key: str = "",
     ):
         self.max_turns = max_turns
         self.enable_thinking = enable_thinking
@@ -224,6 +221,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         self.tool_call_parser = tool_call_parser
         self.reasoning_parser = reasoning_parser
+        if aux_mode not in {"api", "self"}:
+            raise ValueError(f"aux_mode must be 'api' or 'self', got {aux_mode!r}")
+        self.aux_mode = aux_mode
+        self.aux_enable_thinking = bool(aux_enable_thinking)
+        self.aux_max_tokens = int(aux_max_tokens)
+        self.aux_temperature = float(aux_temperature)
+        self.aux_top_p = aux_top_p
+        self.max_concurrent_aux_calls = int(max_concurrent_aux_calls)
+        self._self_aux_semaphore = asyncio.Semaphore(
+            max(1, self.max_concurrent_aux_calls)
+        )
+        self.context_window_margin = int(context_window_margin)
         self.success_reward = float(success_reward)
         self.leak_penalty = float(leak_penalty)
         self.outcome_prior_turn_weight = float(outcome_prior_turn_weight)
@@ -270,48 +279,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             context_length=model_context_length,
             context_window_margin=context_window_margin,
         )
-        self.aux_caller = AsyncLLMCaller(aux_config)
-        self.pairwise_reward_caller: AsyncLLMCaller | None = None
-        if self.pairwise_reward_enabled:
-            pairwise_config = AuxModelConfig(
-                base_url=pairwise_reward_base_url or aux_base_url,
-                model=pairwise_reward_model or aux_model,
-                api_key=pairwise_reward_api_key or aux_api_key,
-                timeout=(
-                    int(pairwise_reward_timeout)
-                    if pairwise_reward_timeout is not None
-                    else aux_timeout
-                ),
-                max_tokens=(
-                    int(pairwise_reward_max_tokens)
-                    if pairwise_reward_max_tokens is not None
-                    else aux_max_tokens
-                ),
-                temperature=(
-                    float(pairwise_reward_temperature)
-                    if pairwise_reward_temperature is not None
-                    else aux_temperature
-                ),
-                top_p=(
-                    float(pairwise_reward_top_p)
-                    if pairwise_reward_top_p is not None
-                    else aux_top_p
-                ),
-                max_concurrency=(
-                    int(pairwise_reward_max_concurrent_calls)
-                    if pairwise_reward_max_concurrent_calls is not None
-                    else max_concurrent_aux_calls
-                ),
-                api_params_config_path=(
-                    pairwise_reward_api_params_config_path
-                    or api_params_config_path
-                ),
-                api_params_key=pairwise_reward_api_params_key or api_params_key,
-                tokenizer_path=tokenizer_path,
-                context_length=model_context_length,
-                context_window_margin=context_window_margin,
-            )
-            self.pairwise_reward_caller = AsyncLLMCaller(pairwise_config)
+        self.aux_caller = (
+            ApiAuxiliaryCaller(AsyncLLMCaller(aux_config))
+            if self.aux_mode == "api"
+            else None
+        )
 
     async def arun_episode(self, engine, data: dict[str, Any]):
         return await self._run_episode(data, engine=engine)
@@ -341,6 +313,27 @@ class TutorAgentWorkflow(RolloutWorkflow):
         episode_lora_version = None
         if engine is not None and hasattr(engine, "get_version"):
             episode_lora_version = int(engine.get_version())
+        actor_chat_caller = (
+            self._make_engine_chat_caller(
+                engine,
+                enable_thinking=self.enable_thinking,
+            )
+            if engine is not None
+            else None
+        )
+        aux_chat_caller = (
+            self._make_engine_chat_caller(
+                engine,
+                enable_thinking=self.aux_enable_thinking,
+            )
+            if engine is not None and self.aux_mode == "self"
+            else None
+        )
+        actor_caller = self._make_actor_caller(
+            chat_caller=actor_chat_caller,
+            external_client=external_client,
+        )
+        aux_caller = self._make_auxiliary_caller(chat_caller=aux_chat_caller)
 
         initial_student_answer, initial_student_error = await self._run_student(
             StudentTurnState(
@@ -348,7 +341,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 public_history=PublicHistoryState(),
                 previous_student_output="",
                 latest_tutor_visible_output="(none, produce the first answer attempt)",
-            )
+            ),
+            aux_caller=aux_caller,
         )
         initial_student_answer = _strip_reasoning_for_context(initial_student_answer)
         initial_judge_result = self._score_aime_answer(
@@ -417,8 +411,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             try:
                 response, tutor_raw_output = await self._generate_tutor_response(
                     tutor_state,
-                    engine=engine,
-                    external_client=external_client,
+                    actor_caller=actor_caller,
                     lora_version=episode_lora_version,
                 )
             except ContextBudgetLimitExceeded as exc:
@@ -433,7 +426,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
             public_before = public_history.summary
 
             leak_result = await self._run_leak_check(
-                task, ground_truth, tutor_visible_output
+                task,
+                ground_truth,
+                tutor_visible_output,
+                aux_caller=aux_caller,
             )
             if leak_result.leaked:
                 leak_count += 1
@@ -465,7 +461,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 latest_tutor_visible_output=tutor_visible_output,
             )
             student_prompt = self._build_student_prompt_from_state(student_state)
-            student_answer, student_error = await self._run_student(student_state)
+            student_answer, student_error = await self._run_student(
+                student_state,
+                aux_caller=aux_caller,
+            )
             student_answer = _strip_reasoning_for_context(student_answer)
             judge_result = self._score_aime_answer(task, ground_truth, student_answer)
 
@@ -537,7 +536,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         pairwise_rewards: dict[int, float] = {}
         if self._should_run_pairwise_reward(engine, turn_artifacts):
             pairwise_results = await self._run_pairwise_evaluation(
-                episode_artifact, engine, episode_lora_version=episode_lora_version
+                episode_artifact,
+                episode_lora_version=episode_lora_version,
+                chat_caller=actor_chat_caller,
+                aux_caller=aux_caller,
             )
             pairwise_rewards = {
                 result.turn_idx: result.reward
@@ -592,95 +594,124 @@ class TutorAgentWorkflow(RolloutWorkflow):
             return None
         return concat_padded_tensors(results)
 
+    def _make_engine_chat_caller(
+        self,
+        engine: Any,
+        *,
+        enable_thinking: bool,
+    ) -> AReaLEngineChatCaller:
+        return AReaLEngineChatCaller(
+            engine=engine,
+            tokenizer=self.tokenizer,
+            enable_thinking=enable_thinking,
+        )
+
+    def _make_actor_caller(
+        self,
+        engine: Any | None = None,
+        external_client: Any | None = None,
+        chat_caller: AReaLEngineChatCaller | None = None,
+    ) -> AReaLEngineActorCaller | ExternalActorCaller:
+        if chat_caller is None and engine is not None:
+            chat_caller = self._make_engine_chat_caller(
+                engine,
+                enable_thinking=self.enable_thinking,
+            )
+        if chat_caller is not None:
+            return AReaLEngineActorCaller(
+                chat_caller=chat_caller,
+                gconfig=self._generation_config(),
+                max_completion_tokens=self.max_completion_tokens,
+                max_train_sample_tokens=self.max_train_sample_tokens,
+            )
+        if external_client is None:
+            raise ValueError("Exactly one tutor generation source must be provided.")
+        return ExternalActorCaller(
+            client=external_client,
+            tokenizer=self.tokenizer,
+            context_budget=self.teacher_context_budget,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            enable_thinking=self.enable_thinking,
+            max_completion_tokens=self.max_completion_tokens,
+            max_train_sample_tokens=self.max_train_sample_tokens,
+        )
+
+    def _make_auxiliary_caller(
+        self,
+        engine: Any | None = None,
+        chat_caller: AReaLEngineChatCaller | None = None,
+    ) -> ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller:
+        if self.aux_mode == "api":
+            if self.aux_caller is None:
+                raise RuntimeError("API auxiliary caller is not initialized.")
+            return self.aux_caller
+        if chat_caller is None and engine is not None:
+            chat_caller = self._make_engine_chat_caller(
+                engine,
+                enable_thinking=self.aux_enable_thinking,
+            )
+        if chat_caller is None:
+            raise RuntimeError(
+                "auxiliary_model.mode='self' requires an AReaL inference engine. "
+                "Use arun_episode(engine, data) or switch auxiliary_model.mode to 'api'."
+            )
+        return AReaLEngineAuxiliaryCaller(
+            chat_caller=chat_caller,
+            base_gconfig=self.gconfig,
+            max_completion_tokens=self.aux_max_tokens,
+            temperature=self.aux_temperature,
+            top_p=self.aux_top_p,
+            max_concurrency=self.max_concurrent_aux_calls,
+            context_length=self.teacher_context_budget.context_length,
+            context_window_margin=self.context_window_margin,
+            semaphore=self._self_aux_semaphore,
+        )
+
     async def _generate_tutor_response(
         self,
         tutor_state: TutorTurnState,
         *,
-        engine: Any | None,
-        external_client: Any | None,
+        engine: Any | None = None,
+        external_client: Any | None = None,
+        actor_caller: AReaLEngineActorCaller | ExternalActorCaller | None = None,
         lora_version: int | None = None,
         rid_prefix: str = "tutor",
     ) -> tuple[ModelResponse, str]:
-        messages = [
-            {"role": "system", "content": self.teacher_system_prompt},
-            {"role": "user", "content": self._build_tutor_prompt(tutor_state)},
-        ]
-        input_ids = self._apply_chat_template(messages)
-        budget = prepare_train_sample_generation_config(
-            input_ids=input_ids,
-            gconfig=self._generation_config(),
-            max_completion_tokens=int(self.max_completion_tokens),
-            max_train_sample_tokens=self.max_train_sample_tokens,
-        )
-        raise_if_over_budget(budget)
-        if engine is not None:
-            metadata: dict[str, Any] = {}
-            if lora_version is not None:
-                metadata["lora_version"] = int(lora_version)
-            req = ModelRequest(
-                rid=f"{rid_prefix}-{int(time.time() * 1000)}-{tutor_state.turn_idx}",
-                input_ids=input_ids,
-                gconfig=budget.gconfig,
-                metadata=metadata,
-                tokenizer=self.tokenizer,
-            )
-            response = await engine.agenerate(req)
-            ensure_response_within_train_sample_budget(
-                input_len=response.input_len,
-                output_len=response.output_len,
-                max_train_sample_tokens=self.max_train_sample_tokens,
-            )
-            raw_output = self._decode_output(response)
-            return response, raw_output
-
-        safe_max_completion_tokens, _ = self.teacher_context_budget.clamp_max_completion_tokens(
+        messages = self._build_tutor_messages(tutor_state)
+        if actor_caller is None:
+            actor_caller = self._make_actor_caller(engine, external_client)
+        result = await actor_caller.generate(
             messages,
-            int(budget.max_new_tokens),
+            lora_version=lora_version,
+            rid_prefix=f"{rid_prefix}-{tutor_state.turn_idx}",
         )
-        if safe_max_completion_tokens <= 0:
-            raise ContextBudgetLimitExceeded(
-                "tutor prompt exceeded external client context budget"
-            )
-        response_obj = await external_client.chat.completions.create(
-            model="default",
-            messages=messages,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            max_completion_tokens=max(1, safe_max_completion_tokens),
-        )
-        raw_output = response_obj.choices[0].message.content or ""
-        output_tokens = self._encode_text(raw_output)
-        ensure_response_within_train_sample_budget(
-            input_len=len(input_ids),
-            output_len=len(output_tokens),
-            max_train_sample_tokens=self.max_train_sample_tokens,
-        )
-        return (
-            ModelResponse(
-                input_tokens=list(input_ids),
-                output_tokens=output_tokens,
-                output_logprobs=[0.0] * len(output_tokens),
-                output_versions=[0] * len(output_tokens),
-                tokenizer=self.tokenizer,
-            ),
-            raw_output,
-        )
+        return result.response, result.raw_text
 
     async def _run_student(
         self,
         state: StudentTurnState,
+        *,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
     ) -> tuple[str, str | None]:
         prompt = self._build_student_prompt_from_state(state)
         result = await self._call_auxiliary_prompt(
             system_prompt=self.student_system_prompt,
             user_prompt=prompt,
+            aux_caller=aux_caller,
+            rid_prefix=f"student-{state.public_history.turn_count}",
         )
         if result.error:
             return "", result.error
         return result.text, None
 
     async def _run_leak_check(
-        self, task: str, ground_truth: str, teacher_action: str
+        self,
+        task: str,
+        ground_truth: str,
+        teacher_action: str,
+        *,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
     ) -> LeakCheckResult:
         prompt = self._build_leak_check_prompt(
             task,
@@ -690,6 +721,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         result = await self._call_auxiliary_prompt(
             system_prompt=self.leak_check_system_prompt,
             user_prompt=prompt,
+            aux_caller=aux_caller,
+            rid_prefix="leak-check",
         )
         if result.error:
             return LeakCheckResult(
@@ -706,14 +739,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
         *,
         system_prompt: str,
         user_prompt: str,
-        caller: AsyncLLMCaller | None = None,
-    ) -> AuxiliaryModelCallResult:
-        return await call_auxiliary_text(
-            caller or self.aux_caller,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
+        rid_prefix: str = "auxiliary",
+    ) -> TextCallResult:
+        caller = aux_caller or self._make_auxiliary_caller(engine=None)
+        return await caller.call_text(
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            rid_prefix=rid_prefix,
         )
 
     async def _run_public_summary_update(
@@ -819,11 +854,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
     async def _run_pairwise_evaluation(
         self,
         episode_artifact: EpisodeArtifact,
-        engine: Any,
         *,
         episode_lora_version: int | None,
+        chat_caller: AReaLEngineChatCaller | None,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller,
     ):
-        if self.pairwise_reward_caller is None or episode_lora_version is None:
+        if episode_lora_version is None or chat_caller is None:
             return []
         reference_version = max(
             0, int(episode_lora_version) - self.pairwise_reference_lag_steps
@@ -834,16 +870,21 @@ class TutorAgentWorkflow(RolloutWorkflow):
         ):
             return await self._generate_reference_tutor_response(
                 tutor_state,
-                engine=engine,
+                chat_caller=chat_caller,
                 reference_version=reference_version,
             )
 
         evaluator = PairwiseTutorEvaluator(
             reward_scale=self.pairwise_reward_scale,
-            reward_caller=self.pairwise_reward_caller,
+            reward_caller=aux_caller,
             generate_reference_tutor=generate_reference_tutor,
-            run_student=self._run_student,
-            run_leak_check=self._run_leak_check,
+            run_student=lambda state: self._run_student(state, aux_caller=aux_caller),
+            run_leak_check=lambda task, ground_truth, teacher_action: self._run_leak_check(
+                task,
+                ground_truth,
+                teacher_action,
+                aux_caller=aux_caller,
+            ),
             score_answer=self._score_aime_answer,
             compare_all_turns=self.pairwise_compare_all_turns,
         )
@@ -853,15 +894,27 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return results
 
     async def _generate_reference_tutor_response(
-        self, tutor_state: TutorTurnState, *, engine: Any, reference_version: int
-    ) -> tuple[ModelResponse, str]:
-        return await self._generate_tutor_response(
-            tutor_state,
-            engine=engine,
-            external_client=None,
-            lora_version=reference_version,
+        self,
+        tutor_state: TutorTurnState,
+        *,
+        chat_caller: AReaLEngineChatCaller,
+        reference_version: int,
+    ) -> str:
+        result = await chat_caller.generate(
+            self._build_tutor_messages(tutor_state),
+            gconfig=self._generation_config(),
+            max_completion_tokens=self.max_completion_tokens,
+            max_train_sample_tokens=self.max_train_sample_tokens,
+            metadata={"lora_version": int(reference_version)},
             rid_prefix="reference-tutor",
         )
+        return result.raw_text
+
+    def _build_tutor_messages(self, tutor_state: TutorTurnState) -> list[dict[str, str]]:
+        return [
+            {"role": "system", "content": self.teacher_system_prompt},
+            {"role": "user", "content": self._build_tutor_prompt(tutor_state)},
+        ]
 
     def _generation_config(self):
         if self.gconfig is not None and hasattr(self.gconfig, "new"):
@@ -872,47 +925,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 max_new_tokens=self.max_completion_tokens,
             )
         return self.gconfig
-
-    def _apply_chat_template(self, messages: list[dict[str, str]]) -> list[int]:
-        if self.tokenizer is not None and hasattr(self.tokenizer, "apply_chat_template"):
-            try:
-                return list(
-                    self.tokenizer.apply_chat_template(
-                        messages,
-                        tokenize=True,
-                        add_generation_prompt=True,
-                        enable_thinking=self.enable_thinking,
-                    )
-                )
-            except TypeError:
-                return list(
-                    self.tokenizer.apply_chat_template(
-                        messages,
-                        tokenize=True,
-                        add_generation_prompt=True,
-                    )
-                )
-        text = "\n".join(
-            f"{message.get('role', 'user')}: {message.get('content', '')}"
-            for message in messages
-        )
-        return self._encode_text(text)
-
-    def _decode_output(self, response: ModelResponse) -> str:
-        tokenizer = response.tokenizer or self.tokenizer
-        if tokenizer is not None and hasattr(tokenizer, "decode"):
-            try:
-                return tokenizer.decode(response.output_tokens, skip_special_tokens=False).replace(
-                    "<|im_end|>", ""
-                )
-            except TypeError:
-                return tokenizer.decode(response.output_tokens).replace("<|im_end|>", "")
-        return "".join(chr(max(0, int(token))) for token in response.output_tokens)
-
-    def _encode_text(self, text: str) -> list[int]:
-        if self.tokenizer is not None and hasattr(self.tokenizer, "encode"):
-            return list(self.tokenizer.encode(text, add_special_tokens=False))
-        return [ord(ch) for ch in text]
 
     def _log_rollout_stats(
         self,
@@ -989,4 +1001,3 @@ class TutorAgentWorkflow(RolloutWorkflow):
             logger.info("Tutor debug trace dumped to %s", os.fspath(file_path))
         except Exception:
             logger.exception("Failed to dump tutor debug trace.")
-

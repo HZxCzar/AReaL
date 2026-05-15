@@ -810,11 +810,14 @@ class RemoteInfEngine(InferenceEngine):
                 if request_lora_version is not None
                 else self.get_version()
             )
+            with_lora = self.config.use_lora and not bool(
+                req.metadata.get("disable_lora", False)
+            )
 
             # Build request using backend
             http_req = self.backend.build_generation_request(
                 req,
-                with_lora=self.config.use_lora,
+                with_lora=with_lora,
                 version=generation_version,
             )
 

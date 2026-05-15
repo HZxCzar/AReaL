@@ -22,7 +22,6 @@ from examples.common.trace_utils import (
     patch_teacher_factory,
 )
 from examples.common.openai_utils import make_teacher_client
-from examples.tutor.core.auxiliary import call_auxiliary_text
 
 
 class DemoTutorWorkflow(TutorAgentWorkflow):
@@ -39,6 +38,8 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
     async def _run_student(
         self,
         state: tutor_workflow_module.StudentTurnState,
+        *,
+        aux_caller=None,
     ) -> tuple[str, str | None]:
         prompt = self._build_student_prompt_from_state(state)
         if (
@@ -54,7 +55,10 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
             {"role": "user", "content": prompt},
         ]
         self.trace_sink.append_messages(f"{label}_input", messages)
-        result = await call_auxiliary_text(self.aux_caller, messages)
+        result = await (aux_caller or self._make_auxiliary_caller(engine=None)).call_text(
+            messages,
+            rid_prefix=label,
+        )
         if result.error:
             self.trace_sink.append(label, f"Student call failed: {result.error}")
             return "", result.error
@@ -62,7 +66,12 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
         return result.text, None
 
     async def _run_leak_check(
-        self, task: str, ground_truth: str, teacher_action: str
+        self,
+        task: str,
+        ground_truth: str,
+        teacher_action: str,
+        *,
+        aux_caller=None,
     ):
         prompt = self._build_leak_check_prompt(task, ground_truth, teacher_action)
         messages = [
@@ -70,7 +79,12 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
             {"role": "user", "content": prompt},
         ]
         self.trace_sink.append_messages("leak_check_input", messages)
-        result = await super()._run_leak_check(task, ground_truth, teacher_action)
+        result = await super()._run_leak_check(
+            task,
+            ground_truth,
+            teacher_action,
+            aux_caller=aux_caller,
+        )
         self.trace_sink.append("leak_check", result.raw_output or result.feedback)
         return result
 
@@ -99,6 +113,8 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         max_completion_tokens=config.gconfig.max_new_tokens,
         max_turns=config.max_turns,
         enable_thinking=config.enable_thinking,
+        aux_mode=auxiliary_model.mode,
+        aux_enable_thinking=auxiliary_model.enable_thinking,
         aux_base_url=auxiliary_model.base_url,
         aux_model=auxiliary_model.model,
         aux_api_key=auxiliary_model.api_key,
@@ -171,7 +187,7 @@ async def _run_one(
         "length_exceeded_turns": length_exceeded_turns,
         "student_visible_history": visible_history_summaries,
         "judge_outputs": workflow.last_judge_outputs,
-        "aux_request_config": workflow.aux_caller.request_config,
+        "aux_request_config": getattr(workflow.aux_caller, "request_config", {}),
     }
     meta = {
         "dataset_row": row,
@@ -184,6 +200,8 @@ async def _run_one(
             "max_train_sample_tokens": config.gconfig.max_tokens,
             "aux_base_url": config.auxiliary_model.base_url,
             "aux_model": config.auxiliary_model.model,
+            "aux_mode": config.auxiliary_model.mode,
+            "aux_enable_thinking": config.auxiliary_model.enable_thinking,
         },
     }
     sink.dump_json("history.json", workflow.last_history)

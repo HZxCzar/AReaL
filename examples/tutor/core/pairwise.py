@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from examples.common.parsing import join_errors, parse_json_dict
-from examples.tutor.core.auxiliary import call_auxiliary_text
 from examples.tutor.core.text import strip_reasoning_for_context
 from examples.tutor.core.types import (
     EpisodeArtifact,
@@ -24,7 +23,7 @@ from examples.tutor.prompts import (
 
 PairwiseOutcome = Literal["current", "reference", "tie", "skipped", "failure"]
 
-TutorGenerator = Callable[[TutorTurnState, int], Awaitable[tuple[Any, str]]]
+TutorGenerator = Callable[[TutorTurnState, int], Awaitable[str]]
 StudentRunner = Callable[[StudentTurnState], Awaitable[tuple[str, str | None]]]
 LeakChecker = Callable[[str, str, str], Awaitable[LeakCheckResult]]
 AnswerScorer = Callable[[str, str, str], JudgeResult]
@@ -181,7 +180,7 @@ class PairwiseTutorEvaluator:
             )
 
         try:
-            _, reference_raw_output = await self.generate_reference_tutor(
+            reference_raw_output = await self.generate_reference_tutor(
                 current_turn.tutor_state, reference_version
             )
         except Exception as exc:
@@ -290,8 +289,7 @@ class PairwiseTutorEvaluator:
             student_reply_a=reply_a,
             student_reply_b=reply_b,
         )
-        judge_call = await call_auxiliary_text(
-            self.reward_caller,
+        judge_call = await self.reward_caller.call_text(
             [
                 {
                     "role": "system",
@@ -299,6 +297,7 @@ class PairwiseTutorEvaluator:
                 },
                 {"role": "user", "content": prompt},
             ],
+            rid_prefix="pairwise-judge",
         )
         if judge_call.error:
             return self._failure_result(

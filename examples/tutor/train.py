@@ -41,6 +41,8 @@ def main(args):
         tokenizer=config.tokenizer_path,
         max_turns=config.max_turns,
         enable_thinking=config.enable_thinking,
+        aux_mode=auxiliary_model.mode,
+        aux_enable_thinking=auxiliary_model.enable_thinking,
         aux_base_url=auxiliary_model.base_url,
         aux_model=auxiliary_model.model,
         aux_api_key=auxiliary_model.api_key,
@@ -73,18 +75,6 @@ def main(args):
         pairwise_reference_lag_steps=pairwise.reference_lag_steps,
         pairwise_reward_scale=pairwise.scale,
         pairwise_compare_all_turns=pairwise.compare_all_turns,
-        pairwise_reward_base_url=pairwise.judge_base_url,
-        pairwise_reward_model=pairwise.judge_model,
-        pairwise_reward_api_key=pairwise.judge_api_key,
-        pairwise_reward_timeout=pairwise.judge_timeout,
-        pairwise_reward_max_tokens=pairwise.judge_max_tokens,
-        pairwise_reward_temperature=pairwise.judge_temperature,
-        pairwise_reward_top_p=pairwise.judge_top_p,
-        pairwise_reward_max_concurrent_calls=pairwise.judge_max_concurrent_calls,
-        pairwise_reward_api_params_config_path=(
-            pairwise.judge_api_params_config_path
-        ),
-        pairwise_reward_api_params_key=pairwise.judge_api_params_key,
     )
 
     eval_workflow_kwargs = workflow_kwargs.copy()

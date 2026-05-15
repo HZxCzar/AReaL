@@ -107,6 +107,8 @@ def build_workflow(config: TutorConfig, max_concurrency: int) -> TutorAgentWorkf
     auxiliary_model = config.auxiliary_model
     return TutorAgentWorkflow(
         max_turns=config.max_turns,
+        aux_mode=auxiliary_model.mode,
+        aux_enable_thinking=auxiliary_model.enable_thinking,
         aux_base_url=auxiliary_model.base_url,
         aux_model=auxiliary_model.model,
         aux_api_key=auxiliary_model.api_key,
