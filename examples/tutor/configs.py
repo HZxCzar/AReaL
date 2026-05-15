@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from typing import Literal
 
 from areal.api.cli_args import GRPOConfig
 from examples.tutor.prompts import (
@@ -12,13 +11,14 @@ from examples.tutor.prompts import (
 
 @dataclass
 class TutorAuxiliaryModelConfig:
-    mode: Literal["api", "self"] = field(
+    mode: str = field(
         default="api",
         metadata={
             "help": (
                 "Auxiliary caller backend: 'api' uses base_url, "
                 "'self' uses the actor base model without LoRA."
-            )
+            ),
+            "choices": ["api", "self"],
         },
     )
     enable_thinking: bool = field(
