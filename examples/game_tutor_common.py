@@ -90,6 +90,7 @@ class LLMConfig:
     top_p: float = 1.0
     max_tokens: int = 2048
     timeout: int = 120
+    chat_template_kwargs: dict[str, Any] | None = None
 
 
 class OpenAIChatClient:
@@ -107,6 +108,8 @@ class OpenAIChatClient:
             "top_p": self.cfg.top_p,
             "max_tokens": int(max_tokens or self.cfg.max_tokens),
         }
+        if self.cfg.chat_template_kwargs:
+            payload["chat_template_kwargs"] = self.cfg.chat_template_kwargs
         raw = json.dumps(payload).encode("utf-8")
         url = self.cfg.base_url.rstrip("/") + "/chat/completions"
         req = request.Request(

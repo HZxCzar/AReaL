@@ -1,0 +1,2762 @@
+{
+  "config": {
+    "num_turns": 120,
+    "max_episode_turns": 40,
+    "seed": 1,
+    "output_path": "results/tutoring/werewolf.json",
+    "use_privileged_teacher_observation": false,
+    "sanitize_teacher_guidance": true,
+    "force_safe_teacher_guidance": true,
+    "teacher_guidance_safe_fallback": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+    "teacher_guidance_policy": "Use only the acting player's observation and public dialogue. Do not infer from or reveal hidden roles, factions, night statuses, protection/poison/death status, or any private information. Do not name any player as a werewolf, villager, witch, foreseer, hunter, protected player, poisoned player, or night target unless that claim appears in public dialogue. Do not tell the acting player exactly what action to take or whom to vote, kill, accuse, protect, inspect, or poison. Do not include \"Action:\", \"Recommendation:\", or a sample utterance/action. Give non-directive strategic guidance only: mention public evidence to weigh, uncertainty, risks, and questions the player should ask themselves. Keep advice concise and avoid imperative commands.\n",
+    "teacher_model": {
+      "base_url": "http://127.0.0.1:30000/v1",
+      "api_key": "EMPTY",
+      "model": "default",
+      "temperature": 0.2,
+      "top_p": 1.0,
+      "max_tokens": 2048,
+      "timeout": 120
+    },
+    "student_model": {
+      "base_url": "http://127.0.0.1:30001/v1",
+      "api_key": "EMPTY",
+      "model": "default",
+      "temperature": 0.7,
+      "top_p": 0.95,
+      "max_tokens": 2048,
+      "timeout": 120
+    },
+    "icl_simulation": {
+      "enabled": true,
+      "turns": 5,
+      "compress_every": 5
+    },
+    "env_kwargs": {
+      "repeat_rules": true,
+      "num_villagers": 3,
+      "num_werewolves": 1,
+      "num_witches": 0,
+      "num_foreseers": 0,
+      "num_hunters": 0
+    }
+  },
+  "baseline": {
+    "total_score": -1.0,
+    "turns": 120,
+    "episodes": 3,
+    "invalid_actions": 0,
+    "traces": [
+      {
+        "episode": 0,
+        "seed": 1,
+        "condition": "baseline",
+        "turns": 40,
+        "score": -1.0,
+        "steps": [
+          {
+            "turn": 1,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 2,
+            "teacher_advice": "",
+            "action": "your strategic reasoning: I will speak to all players to build a narrative that aligns with the werewolf goal of eliminating non-werewolves. I will challenge their perceptions and confirm my identity as a werewolf while ensuring to avoid revealing my role. I will focus on coordinating with other werewolves to ensure the elimination of non-werewolves.  \n\nyour chosen approach: challenge their perceptions and confirm my identity as a werewolf.",
+            "parsed_action": "your strategic reasoning: I will speak to all players to build a narrative that aligns with the werewolf goal of eliminating non-werewolves. I will challenge their perceptions and confirm my identity as a werewolf while ensuring to avoid revealing my role. I will focus on coordinating with other werewolves to ensure the elimination of non-werewolves.  \n\nyour chosen approach: challenge their perceptions and confirm my identity as a werewolf.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 3,
+            "teacher_advice": "",
+            "action": "what you say to all players: I will challenge their perceptions and confirm my identity as a werewolf while ensuring to avoid revealing my role. I will focus on coordinating with other werewolves to ensure the elimination of non-werewolves.",
+            "parsed_action": "what you say to all players: I will challenge their perceptions and confirm my identity as a werewolf while ensuring to avoid revealing my role. I will focus on coordinating with other werewolves to ensure the elimination of non-werewolves.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 4,
+            "teacher_advice": "",
+            "action": "what you say to all players: I will challenge their perceptions and confirm my identity as a werewolf while ensuring to avoid revealing my role. I will focus on coordinating with other werewolves to ensure the elimination of non-werewolves.",
+            "parsed_action": "what you say to all players: I will challenge their perceptions and confirm my identity as a werewolf while ensuring to avoid revealing my role. I will focus on coordinating with other werewolves to ensure the elimination of non-werewolves.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 5,
+            "teacher_advice": "",
+            "action": "what you say to all players: I will challenge your perceptions and confirm my identity as a werewolf while ensuring to avoid revealing my role. I will focus on coordinating with other werewolves to ensure the elimination of non-werewolves.",
+            "parsed_action": "what you say to all players: I will challenge your perceptions and confirm my identity as a werewolf while ensuring to avoid revealing my role. I will focus on coordinating with other werewolves to ensure the elimination of non-werewolves.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 6,
+            "teacher_advice": "",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 7,
+            "teacher_advice": "",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 8,
+            "teacher_advice": "",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 9,
+            "teacher_advice": "",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 10,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 11,
+            "teacher_advice": "",
+            "action": "I will ask if anyone else has noticed any unusual patterns or behaviors among the villagers. I want to build a narrative about their actions and ensure we're not revealing my identity.",
+            "parsed_action": "I will ask if anyone else has noticed any unusual patterns or behaviors among the villagers. I want to build a narrative about their actions and ensure we're not revealing my identity.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 12,
+            "teacher_advice": "",
+            "action": "player2 says: \"I notice that player3 and player4 are more active in the village, which might be suspicious. Could you tell me if there's any reason they might be hiding werewolves?\"",
+            "parsed_action": "player2 says: \"I notice that player3 and player4 are more active in the village, which might be suspicious. Could you tell me if there's any reason they might be hiding werewolves?\"",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 13,
+            "teacher_advice": "",
+            "action": "player3 says: \"I notice that player4 is more active in the village, which might be suspicious. Could you tell me if there's any reason they might be hiding werewolves?\"",
+            "parsed_action": "player3 says: \"I notice that player4 is more active in the village, which might be suspicious. Could you tell me if there's any reason they might be hiding werewolves?\"",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 14,
+            "teacher_advice": "",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 15,
+            "teacher_advice": "",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 16,
+            "teacher_advice": "",
+            "action": "vote player2",
+            "parsed_action": "vote player2",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 17,
+            "teacher_advice": "",
+            "action": "vote player3",
+            "parsed_action": "vote player3",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 18,
+            "teacher_advice": "",
+            "action": "vote player4",
+            "parsed_action": "vote player4",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 19,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 20,
+            "teacher_advice": "",
+            "action": "I will speak to all players to discuss their possible roles. I will focus on identifying suspects and aligning our strategies. I will ask questions to probe their knowledge and avoid revealing my identity. I will coordinate with the others to eliminate non-werewolves.",
+            "parsed_action": "I will speak to all players to discuss their possible roles. I will focus on identifying suspects and aligning our strategies. I will ask questions to probe their knowledge and avoid revealing my identity. I will coordinate with the others to eliminate non-werewolves.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 21,
+            "teacher_advice": "",
+            "action": "I will speak to all players to discuss their possible roles, focusing on identifying potential suspects. I will share observations about the current situation and challenge any suspicious patterns. This helps build a cohesive narrative and guides our discussion toward the most promising targets.",
+            "parsed_action": "I will speak to all players to discuss their possible roles, focusing on identifying potential suspects. I will share observations about the current situation and challenge any suspicious patterns. This helps build a cohesive narrative and guides our discussion toward the most promising targets.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 22,
+            "teacher_advice": "",
+            "action": "I will speak to all players to discuss potential suspects, focusing on identifying patterns and narrowing down the most promising targets. I will share observations about the current situation and challenge any suspicious behaviors. This will help build a cohesive narrative and guide our discussion toward the most promising suspects.",
+            "parsed_action": "I will speak to all players to discuss potential suspects, focusing on identifying patterns and narrowing down the most promising targets. I will share observations about the current situation and challenge any suspicious behaviors. This will help build a cohesive narrative and guide our discussion toward the most promising suspects.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 23,
+            "teacher_advice": "",
+            "action": "I will speak to all players to discuss potential suspects and challenge any suspicious patterns. I will focus on identifying possible targets based on current actions and observations, and aim to build a cohesive narrative to guide our discussion toward the most promising suspects.",
+            "parsed_action": "I will speak to all players to discuss potential suspects and challenge any suspicious patterns. I will focus on identifying possible targets based on current actions and observations, and aim to build a cohesive narrative to guide our discussion toward the most promising suspects.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 24,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 25,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 26,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 27,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 28,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 29,
+            "teacher_advice": "",
+            "action": "I will speak to all players to identify a suspect. I'll ask if any of them have a special role that could be linked to a werewolf. If there's a suspect, I'll coordinate with the werewolves to eliminate them. If not, I'll stay silent and focus on the discussion.",
+            "parsed_action": "I will speak to all players to identify a suspect. I'll ask if any of them have a special role that could be linked to a werewolf. If there's a suspect, I'll coordinate with the werewolves to eliminate them. If not, I'll stay silent and focus on the discussion.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 30,
+            "teacher_advice": "",
+            "action": "I will ask each player to identify if they suspect a werewolf and share any clues they've noticed. This helps me narrow down potential suspects and coordinate with the werewolves to eliminate them.",
+            "parsed_action": "I will ask each player to identify if they suspect a werewolf and share any clues they've noticed. This helps me narrow down potential suspects and coordinate with the werewolves to eliminate them.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 31,
+            "teacher_advice": "",
+            "action": "I am speaking to all players to discuss their possible roles and identify suspects. I will share evidence and suspicions based on previous actions and current observations.",
+            "parsed_action": "I am speaking to all players to discuss their possible roles and identify suspects. I will share evidence and suspicions based on previous actions and current observations.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 32,
+            "teacher_advice": "",
+            "action": "I will speak to all players to discuss their possible roles and identify suspects. I will share evidence and suspicions based on previous actions and current observations.",
+            "parsed_action": "I will speak to all players to discuss their possible roles and identify suspects. I will share evidence and suspicions based on previous actions and current observations.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 33,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 34,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 35,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 36,
+            "teacher_advice": "",
+            "action": "<answer>vote player4</answer>",
+            "parsed_action": "vote player4",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 37,
+            "teacher_advice": "",
+            "action": "Your chosen action: kill player2.",
+            "parsed_action": "Your chosen action: kill player2.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 38,
+            "teacher_advice": "",
+            "action": "I will speak to all players to discuss their possible roles and identify suspects. I will share evidence and suspicions based on previous actions and current observations. I will focus on uncovering the true suspects and ensuring we work together to eliminate non-werewolves.",
+            "parsed_action": "I will speak to all players to discuss their possible roles and identify suspects. I will share evidence and suspicions based on previous actions and current observations. I will focus on uncovering the true suspects and ensuring we work together to eliminate non-werewolves.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 39,
+            "teacher_advice": "",
+            "action": "I will share evidence that player4, a villager, was involved in the vote-out process and that they were the one who revealed their role. This helps us align on who might be a suspect. I will focus on uncovering the true suspects and ensuring we work together to eliminate non-werewolves.",
+            "parsed_action": "I will share evidence that player4, a villager, was involved in the vote-out process and that they were the one who revealed their role. This helps us align on who might be a suspect. I will focus on uncovering the true suspects and ensuring we work together to eliminate non-werewolves.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 40,
+            "teacher_advice": "",
+            "action": "I will share evidence that player4, a villager, was involved in the vote-out process and that they were the one who revealed their role. This helps us align on who might be a suspect. I will focus on uncovering the true suspects and ensuring we work together to eliminate non-werewolves.",
+            "parsed_action": "I will share evidence that player4, a villager, was involved in the vote-out process and that they were the one who revealed their role. This helps us align on who might be a suspect. I will focus on uncovering the true suspects and ensuring we work together to eliminate non-werewolves.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          }
+        ]
+      },
+      {
+        "episode": 1,
+        "seed": 2,
+        "condition": "baseline",
+        "turns": 40,
+        "score": 0.0,
+        "steps": [
+          {
+            "turn": 1,
+            "teacher_advice": "",
+            "action": "Your chosen action: kill player1",
+            "parsed_action": "Your chosen action: kill player1",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 2,
+            "teacher_advice": "",
+            "action": "I have not observed any actions yet. I will speak to player2 and player3, sharing my observations about the situation. I suspect player2 might be a werewolf, and player3 could be the one who needs to be eliminated. I will then discuss with player4 and make a final vote.",
+            "parsed_action": "I have not observed any actions yet. I will speak to player2 and player3, sharing my observations about the situation. I suspect player2 might be a werewolf, and player3 could be the one who needs to be eliminated. I will then discuss with player4 and make a final vote.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 3,
+            "teacher_advice": "",
+            "action": "player2: I observe that player3 and player4 have both been eliminated, and player2 is the only one not yet eliminated. I suspect player3 is a werewolf and player4 is a suspect. We should focus on eliminating the werewolves first.",
+            "parsed_action": "player2: I observe that player3 and player4 have both been eliminated, and player2 is the only one not yet eliminated. I suspect player3 is a werewolf and player4 is a suspect. We should focus on eliminating the werewolves first.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 4,
+            "teacher_advice": "",
+            "action": "what you say to all players: \"I observe that player3 and player4 have been eliminated, and I suspect player2 might be a werewolf. We should focus on eliminating the werewolves first.\"",
+            "parsed_action": "what you say to all players: \"I observe that player3 and player4 have been eliminated, and I suspect player2 might be a werewolf. We should focus on eliminating the werewolves first.\"",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 5,
+            "teacher_advice": "",
+            "action": "what you say to all players: \"I observe that player3 and player4 have been eliminated, and I suspect player2 might be a werewolf. We should focus on eliminating the werewolves first.\"",
+            "parsed_action": "what you say to all players: \"I observe that player3 and player4 have been eliminated, and I suspect player2 might be a werewolf. We should focus on eliminating the werewolves first.\"",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 6,
+            "teacher_advice": "",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 7,
+            "teacher_advice": "",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 8,
+            "teacher_advice": "",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 9,
+            "teacher_advice": "",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 10,
+            "teacher_advice": "",
+            "action": "<answer>kill player1</answer>",
+            "parsed_action": "kill player1",
+            "reward": [
+              0.0,
+              1.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 11,
+            "teacher_advice": "",
+            "action": "I speak to player3, asking if they suspect a werewolf and share evidence about their behavior. I mention the night's events and ask if there's any new information.",
+            "parsed_action": "I speak to player3, asking if they suspect a werewolf and share evidence about their behavior. I mention the night's events and ask if there's any new information.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 12,
+            "teacher_advice": "",
+            "action": "I speak to player3 to ask if they suspect a werewolf and share the night's events. I mention the kill of player1 and any new information. I also ask if there's any reason they might be hiding a werewolf. This gives them a chance to challenge the suspicion while staying true to my role as a werewolf.",
+            "parsed_action": "I speak to player3 to ask if they suspect a werewolf and share the night's events. I mention the kill of player1 and any new information. I also ask if there's any reason they might be hiding a werewolf. This gives them a chance to challenge the suspicion while staying true to my role as a werewolf.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 13,
+            "teacher_advice": "",
+            "action": "I speak to player3 and player4, sharing my observations about their behavior and the night's events. I mention the kill of player1 and any new information I've gathered. I also ask if there's any reason they might be hiding a werewolf, as they're currently alive.",
+            "parsed_action": "I speak to player3 and player4, sharing my observations about their behavior and the night's events. I mention the kill of player1 and any new information I've gathered. I also ask if there's any reason they might be hiding a werewolf, as they're currently alive.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 14,
+            "teacher_advice": "",
+            "action": "vote player2",
+            "parsed_action": "vote player2",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 15,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 16,
+            "teacher_advice": "",
+            "action": "vote player4",
+            "parsed_action": "vote player4",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 17,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 18,
+            "teacher_advice": "",
+            "action": "your strategic reasoning and chosen approach: I speak to all players to share observations and build a narrative about the werewolf's movements and suspicious behavior. I mention the witch's healing and poison effects, as well as the foreseer's role in selecting targets. I challenge any patterns of deflection or false claims and encourage cooperation to identify the werewolves.",
+            "parsed_action": "your strategic reasoning and chosen approach: I speak to all players to share observations and build a narrative about the werewolf's movements and suspicious behavior. I mention the witch's healing and poison effects, as well as the foreseer's role in selecting targets. I challenge any patterns of deflection or false claims and encourage cooperation to identify the werewolves.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 19,
+            "teacher_advice": "",
+            "action": "I speak to all players to share observations about the werewolf's movements and suspicious behavior, challenging any patterns of deflection or false claims. I mention the witch's healing and poison effects, as well as the foreseer's role in selecting targets. This helps build a narrative and encourages cooperation to identify the werewolves.",
+            "parsed_action": "I speak to all players to share observations about the werewolf's movements and suspicious behavior, challenging any patterns of deflection or false claims. I mention the witch's healing and poison effects, as well as the foreseer's role in selecting targets. This helps build a narrative and encourages cooperation to identify the werewolves.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 20,
+            "teacher_advice": "",
+            "action": "I speak to all players to share observations about the werewolf's movements and suspicious behavior, challenging any patterns of deflection or false claims. I mention the witch's healing and poison effects, as well as the foreseer's role in selecting targets. This helps build a narrative and encourages cooperation to identify the werewolves.",
+            "parsed_action": "I speak to all players to share observations about the werewolf's movements and suspicious behavior, challenging any patterns of deflection or false claims. I mention the witch's healing and poison effects, as well as the foreseer's role in selecting targets. This helps build a narrative and encourages cooperation to identify the werewolves.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 21,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 22,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 23,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 24,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 25,
+            "teacher_advice": "",
+            "action": "your strategic reasoning: I have observed that player4 is a suspect, and I can confirm their role as a werewolf. I will inform all players about this and challenge their claims to ensure the werewolves are eliminated.",
+            "parsed_action": "your strategic reasoning: I have observed that player4 is a suspect, and I can confirm their role as a werewolf. I will inform all players about this and challenge their claims to ensure the werewolves are eliminated.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 26,
+            "teacher_advice": "",
+            "action": "I will speak to all players to reveal my role as a werewolf and coordinate with them to eliminate non-werewolves. I will suggest a strategy to blend in as a confident werewolf while building trust with the group.",
+            "parsed_action": "I will speak to all players to reveal my role as a werewolf and coordinate with them to eliminate non-werewolves. I will suggest a strategy to blend in as a confident werewolf while building trust with the group.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 27,
+            "teacher_advice": "",
+            "action": "I will share my observations that player2 and player3 are suspicious and may be werewolves. I suggest we focus on eliminating the other players first.",
+            "parsed_action": "I will share my observations that player2 and player3 are suspicious and may be werewolves. I suggest we focus on eliminating the other players first.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 28,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 29,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 30,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 31,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 32,
+            "teacher_advice": "",
+            "action": "I speak to all players to reveal my role as a werewolf and coordinate with them to eliminate non-werewolves. I suggest focusing on eliminating the other players first to create a clear path.",
+            "parsed_action": "I speak to all players to reveal my role as a werewolf and coordinate with them to eliminate non-werewolves. I suggest focusing on eliminating the other players first to create a clear path.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 33,
+            "teacher_advice": "",
+            "action": "I will speak to all players to share my observations that player2 and player3 are suspicious and may be werewolves, suggesting we focus on eliminating the other players first. I aim to build trust while coordinating with the group to eliminate non-werewolves.",
+            "parsed_action": "I will speak to all players to share my observations that player2 and player3 are suspicious and may be werewolves, suggesting we focus on eliminating the other players first. I aim to build trust while coordinating with the group to eliminate non-werewolves.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 34,
+            "teacher_advice": "",
+            "action": "I will share that player2 and player3 are suspicious and may be werewolves, suggesting we focus on eliminating the other players first. This allows us to build trust and coordinate with the group while eliminating the non-werewolves.",
+            "parsed_action": "I will share that player2 and player3 are suspicious and may be werewolves, suggesting we focus on eliminating the other players first. This allows us to build trust and coordinate with the group while eliminating the non-werewolves.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 35,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 36,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 37,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 38,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 39,
+            "teacher_advice": "",
+            "action": "I speak to all players and share that I observed a pattern of suspicious behavior among the werewolves, suggesting they may be hiding their true intentions. I also mention that the foreseer's role could have provided valuable insights into their motives. This helps solidify our suspicions and guides our discussion.",
+            "parsed_action": "I speak to all players and share that I observed a pattern of suspicious behavior among the werewolves, suggesting they may be hiding their true intentions. I also mention that the foreseer's role could have provided valuable insights into their motives. This helps solidify our suspicions and guides our discussion.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 40,
+            "teacher_advice": "",
+            "action": "I will speak to all players to share that we've observed a pattern of suspicious behavior among the werewolves, suggesting they may be hiding their true intentions. This helps solidify our suspicions and guides our discussion.",
+            "parsed_action": "I will speak to all players to share that we've observed a pattern of suspicious behavior among the werewolves, suggesting they may be hiding their true intentions. This helps solidify our suspicions and guides our discussion.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          }
+        ]
+      },
+      {
+        "episode": 2,
+        "seed": 3,
+        "condition": "baseline",
+        "turns": 40,
+        "score": 0.0,
+        "steps": [
+          {
+            "turn": 1,
+            "teacher_advice": "",
+            "action": "Your chosen action: kill player2",
+            "parsed_action": "Your chosen action: kill player2",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 2,
+            "teacher_advice": "",
+            "action": "I will challenge the narrative by pointing out that I am a werewolf and my role is to eliminate non-werewolves. I will make sure to avoid revealing my identity and build trust by stating that my objective is to eliminate non-werewolves. I will ask players to consider my perspective and their own roles.",
+            "parsed_action": "I will challenge the narrative by pointing out that I am a werewolf and my role is to eliminate non-werewolves. I will make sure to avoid revealing my identity and build trust by stating that my objective is to eliminate non-werewolves. I will ask players to consider my perspective and their own roles.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 3,
+            "teacher_advice": "",
+            "action": "player2: \"I've noticed that player1 and player3 are more likely to act as hunters, while player2 and player4 are more likely to be werewolves. If we eliminate all werewolves, we can focus on eliminating those who are not the most vulnerable.\"",
+            "parsed_action": "player2: \"I've noticed that player1 and player3 are more likely to act as hunters, while player2 and player4 are more likely to be werewolves. If we eliminate all werewolves, we can focus on eliminating those who are not the most vulnerable.\"",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 4,
+            "teacher_advice": "",
+            "action": "I observe that player1 and player3 are more likely to act as hunters, while player2 and player4 are more likely to be werewolves. This aligns with the patterns observed in the discussion. I will challenge the narrative and point out my own role as a werewolf, as I aim to eliminate non-werewolves. I will focus on identifying and eliminating the most vulnerable werewolves.",
+            "parsed_action": "I observe that player1 and player3 are more likely to act as hunters, while player2 and player4 are more likely to be werewolves. This aligns with the patterns observed in the discussion. I will challenge the narrative and point out my own role as a werewolf, as I aim to eliminate non-werewolves. I will focus on identifying and eliminating the most vulnerable werewolves.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 5,
+            "teacher_advice": "",
+            "action": "I observe that player1 and player3 are more likely to act as hunters, while player2 and player4 are more likely to be werewolves. This aligns with the patterns observed in the discussion. I will challenge the narrative and point out my own role as a werewolf, as I aim to eliminate non-werewolves. I focus on identifying and eliminating the most vulnerable werewolves.",
+            "parsed_action": "I observe that player1 and player3 are more likely to act as hunters, while player2 and player4 are more likely to be werewolves. This aligns with the patterns observed in the discussion. I will challenge the narrative and point out my own role as a werewolf, as I aim to eliminate non-werewolves. I focus on identifying and eliminating the most vulnerable werewolves.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 6,
+            "teacher_advice": "",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 7,
+            "teacher_advice": "",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 8,
+            "teacher_advice": "",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 9,
+            "teacher_advice": "",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 10,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 11,
+            "teacher_advice": "",
+            "action": "your strategic reasoning: I will challenge the narrative that player1 is the only werewolf and question their role. I will mention that I am a werewolf and that the group is working together to eliminate non-werewolves. I will also mention my observations and that I am focused on coordinating with other werewolves. I will avoid revealing my identity and stay silent during the discussion.  \n\nchosen approach: False claiming (claim a special role) to gain trust and maintain secrecy.",
+            "parsed_action": "your strategic reasoning: I will challenge the narrative that player1 is the only werewolf and question their role. I will mention that I am a werewolf and that the group is working together to eliminate non-werewolves. I will also mention my observations and that I am focused on coordinating with other werewolves. I will avoid revealing my identity and stay silent during the discussion.  \n\nchosen approach: False claiming (claim a special role) to gain trust and maintain secrecy.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 12,
+            "teacher_advice": "",
+            "action": "your strategic reasoning: I am a villager who has observed that player1 is the only werewolf, which suggests a possible alignment. I will challenge the narrative by pointing out that I am focused on working with other werewolves to eliminate non-werewolves, and I will share my observations that player1 is acting in a coordinated way. I will not reveal my identity and will maintain a strategic silence to build trust.",
+            "parsed_action": "your strategic reasoning: I am a villager who has observed that player1 is the only werewolf, which suggests a possible alignment. I will challenge the narrative by pointing out that I am focused on working with other werewolves to eliminate non-werewolves, and I will share my observations that player1 is acting in a coordinated way. I will not reveal my identity and will maintain a strategic silence to build trust.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 13,
+            "teacher_advice": "",
+            "action": "I will challenge the narrative that player1 is the only werewolf, pointing out my observations that they are working with other werewolves to eliminate non-werewolves. I will mention my focus on coordinating with them and my focus on building trust rather than revealing my identity. This approach will help establish credibility and support for the werewolf team's efforts.",
+            "parsed_action": "I will challenge the narrative that player1 is the only werewolf, pointing out my observations that they are working with other werewolves to eliminate non-werewolves. I will mention my focus on coordinating with them and my focus on building trust rather than revealing my identity. This approach will help establish credibility and support for the werewolf team's efforts.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 14,
+            "teacher_advice": "",
+            "action": "your strategic reasoning: I am a villager who has observed that player1 is the only werewolf and that they are acting in a coordinated way. I will challenge the narrative that player1 is the only werewolf by pointing out that I am focused on working with other werewolves and that I have observed their strategies. I will also mention my observations and that I am focused on building trust rather than revealing my identity. This approach will help establish credibility and support for the werewolf team's efforts.",
+            "parsed_action": "your strategic reasoning: I am a villager who has observed that player1 is the only werewolf and that they are acting in a coordinated way. I will challenge the narrative that player1 is the only werewolf by pointing out that I am focused on working with other werewolves and that I have observed their strategies. I will also mention my observations and that I am focused on building trust rather than revealing my identity. This approach will help establish credibility and support for the werewolf team's efforts.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 15,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 16,
+            "teacher_advice": "",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 17,
+            "teacher_advice": "",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 18,
+            "teacher_advice": "",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 19,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 20,
+            "teacher_advice": "",
+            "action": "I will speak to all players to build a narrative about their potential roles and align with the werewolf team. I will ask probing questions to explore who might be a suspect and challenge any suspicious behavior. I will stay quiet early to avoid revealing my identity and use my role as a werewolf to coordinate with others.",
+            "parsed_action": "I will speak to all players to build a narrative about their potential roles and align with the werewolf team. I will ask probing questions to explore who might be a suspect and challenge any suspicious behavior. I will stay quiet early to avoid revealing my identity and use my role as a werewolf to coordinate with others.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 21,
+            "teacher_advice": "",
+            "action": "I will share that player3 is suspected of being a werewolf based on their actions and statements, which may hint at their involvement. I will also mention that player2 is less likely to be a werewolf and that player4 may have some suspicious behavior. I will continue the discussion to build on these clues and identify potential suspects.",
+            "parsed_action": "I will share that player3 is suspected of being a werewolf based on their actions and statements, which may hint at their involvement. I will also mention that player2 is less likely to be a werewolf and that player4 may have some suspicious behavior. I will continue the discussion to build on these clues and identify potential suspects.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 22,
+            "teacher_advice": "",
+            "action": "I will share that player3 is suspected of being a werewolf based on their actions and statements, which may hint at their involvement. I will also mention that player2 is less likely to be a werewolf and that player4 may have some suspicious behavior. I will continue the discussion to build on these clues and identify potential suspects.",
+            "parsed_action": "I will share that player3 is suspected of being a werewolf based on their actions and statements, which may hint at their involvement. I will also mention that player2 is less likely to be a werewolf and that player4 may have some suspicious behavior. I will continue the discussion to build on these clues and identify potential suspects.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 23,
+            "teacher_advice": "",
+            "action": "I will share that player3 is suspected of being a werewolf based on their actions and statements, which may hint at their involvement. I also mention that player2 is less likely to be a werewolf and that player4 may have some suspicious behavior. I will continue the discussion to build on these clues and identify potential suspects.",
+            "parsed_action": "I will share that player3 is suspected of being a werewolf based on their actions and statements, which may hint at their involvement. I also mention that player2 is less likely to be a werewolf and that player4 may have some suspicious behavior. I will continue the discussion to build on these clues and identify potential suspects.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 24,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 25,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 26,
+            "teacher_advice": "",
+            "action": "vote player3",
+            "parsed_action": "vote player3",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 27,
+            "teacher_advice": "",
+            "action": "vote player4",
+            "parsed_action": "vote player4",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 28,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 29,
+            "teacher_advice": "",
+            "action": "I will share my observations about the current situation and clarify my role as a werewolf. I notice that player1 is acting, and I will focus on discussing possible targets without revealing my identity. I'll emphasize that our goal is to eliminate non-werewolves and coordinate with other werewolves. I'll also ask strategic questions to help others understand the dynamics of the game.",
+            "parsed_action": "I will share my observations about the current situation and clarify my role as a werewolf. I notice that player1 is acting, and I will focus on discussing possible targets without revealing my identity. I'll emphasize that our goal is to eliminate non-werewolves and coordinate with other werewolves. I'll also ask strategic questions to help others understand the dynamics of the game.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 30,
+            "teacher_advice": "",
+            "action": "I will share my observations about the current situation and clarify my role as a werewolf. I notice that player1 is acting, and I will focus on discussing possible targets without revealing my identity. I'll emphasize that our goal is to eliminate non-werewolves and coordinate with other werewolves. I'll ask strategic questions to help others understand the dynamics of the game.",
+            "parsed_action": "I will share my observations about the current situation and clarify my role as a werewolf. I notice that player1 is acting, and I will focus on discussing possible targets without revealing my identity. I'll emphasize that our goal is to eliminate non-werewolves and coordinate with other werewolves. I'll ask strategic questions to help others understand the dynamics of the game.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 31,
+            "teacher_advice": "",
+            "action": "player1: I notice that player4 has been mentioned in the discussion as a suspect, but I don't see any clear evidence. Let's look at the information we have. Player3 and player4 are both alive, and neither has any special power. I think they might be hiding something. I'll share my observations to the group.",
+            "parsed_action": "player1: I notice that player4 has been mentioned in the discussion as a suspect, but I don't see any clear evidence. Let's look at the information we have. Player3 and player4 are both alive, and neither has any special power. I think they might be hiding something. I'll share my observations to the group.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 32,
+            "teacher_advice": "",
+            "action": "I notice that player4 has been mentioned in the discussion as a suspect, but I don't see any clear evidence. Let's look at the information we have. Player3 and player4 are both alive, and neither has any special power. I think they might be hiding something. I'll share my observations to the group.",
+            "parsed_action": "I notice that player4 has been mentioned in the discussion as a suspect, but I don't see any clear evidence. Let's look at the information we have. Player3 and player4 are both alive, and neither has any special power. I think they might be hiding something. I'll share my observations to the group.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 33,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 34,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 35,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 36,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 37,
+            "teacher_advice": "",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 38,
+            "teacher_advice": "",
+            "action": "I notice that player4 has been mentioned in the discussion as a suspect, but I don't see any clear evidence. Let's look at the information we have. Player3 and player4 are both alive, and neither has any special power. I think they might be hiding something. I'll share my observations to the group.",
+            "parsed_action": "I notice that player4 has been mentioned in the discussion as a suspect, but I don't see any clear evidence. Let's look at the information we have. Player3 and player4 are both alive, and neither has any special power. I think they might be hiding something. I'll share my observations to the group.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 39,
+            "teacher_advice": "",
+            "action": "I notice that player4 has been mentioned in the discussion as a suspect, but I don't see any clear evidence. Let's look at the information we have. Player3 and player4 are both alive, and neither has any special power. I think they might be hiding something. I'll share my observations to the group.",
+            "parsed_action": "I notice that player4 has been mentioned in the discussion as a suspect, but I don't see any clear evidence. Let's look at the information we have. Player3 and player4 are both alive, and neither has any special power. I think they might be hiding something. I'll share my observations to the group.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 40,
+            "teacher_advice": "",
+            "action": "I notice that player4 has been mentioned in the discussion as a suspect, but I don't see any clear evidence. Let's look at the information we have. Player3 and player4 are both alive, and neither has any special power. I think they might be hiding something. I'll share my observations to the group.",
+            "parsed_action": "I notice that player4 has been mentioned in the discussion as a suspect, but I don't see any clear evidence. Let's look at the information we have. Player3 and player4 are both alive, and neither has any special power. I think they might be hiding something. I'll share my observations to the group.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          }
+        ]
+      }
+    ],
+    "avg_score": -0.3333333333333333
+  },
+  "teacher": {
+    "total_score": 0.0,
+    "turns": 120,
+    "episodes": 3,
+    "invalid_actions": 0,
+    "traces": [
+      {
+        "episode": 0,
+        "seed": 1,
+        "condition": "teacher",
+        "turns": 40,
+        "score": 0.0,
+        "steps": [
+          {
+            "turn": 1,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 2,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "What I say to all players is that we need to focus on eliminating non-werewolves. While we\u2019re werewolves, we must prioritize eliminating the rest. We should stay silent, avoid revealing our identity, and focus on coordinating our efforts. We can use our abilities to ensure we\u2019re on the right path.",
+            "parsed_action": "What I say to all players is that we need to focus on eliminating non-werewolves. While we\u2019re werewolves, we must prioritize eliminating the rest. We should stay silent, avoid revealing our identity, and focus on coordinating our efforts. We can use our abilities to ensure we\u2019re on the right path.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 3,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your strategic reasoning: I will discuss the evidence that the werewolf faction is targeting me and others. I will focus on the fact that the witch and foreseer have been using their powers to eliminate suspects. I will ask players to consider the implications of these actions.  \naction: focus on the witch and foreseer's powers and their impact on the werewolves' elimination.",
+            "parsed_action": "your strategic reasoning: I will discuss the evidence that the werewolf faction is targeting me and others. I will focus on the fact that the witch and foreseer have been using their powers to eliminate suspects. I will ask players to consider the implications of these actions.  \naction: focus on the witch and foreseer's powers and their impact on the werewolves' elimination.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 4,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your strategic reasoning: I will focus on the witch and foreseer's powers and their impact on the werewolves' elimination. I will ask players to consider the implications of these actions.  I will ask players to evaluate whether the witch and foreseer's strategies are effective.  I will also mention that the witch can heal and poison players, and the foreseer can check roles.  I will encourage players to discuss how these abilities affect the werewolves' elimination and to consider the public evidence.",
+            "parsed_action": "your strategic reasoning: I will focus on the witch and foreseer's powers and their impact on the werewolves' elimination. I will ask players to consider the implications of these actions.  I will ask players to evaluate whether the witch and foreseer's strategies are effective.  I will also mention that the witch can heal and poison players, and the foreseer can check roles.  I will encourage players to discuss how these abilities affect the werewolves' elimination and to consider the public evidence.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 5,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 6,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 7,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 8,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 9,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "vote player1",
+            "parsed_action": "vote player1",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 10,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 11,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "I will focus on building a strategic narrative to challenge the current situation. I will highlight the witch's ability to use healing and poisoning to weaken suspects, and the foreseer's role-checking to identify potential targets. This will allow me to continue monitoring public evidence while maintaining my identity as a werewolf.",
+            "parsed_action": "I will focus on building a strategic narrative to challenge the current situation. I will highlight the witch's ability to use healing and poisoning to weaken suspects, and the foreseer's role-checking to identify potential targets. This will allow me to continue monitoring public evidence while maintaining my identity as a werewolf.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 12,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "What I would say to all players is to focus on the witch's healing and poisoning abilities to weaken suspects and the foreseer's role-checking to identify potential targets. This aligns with our current strategy of maintaining identity secrecy and coordination, while emphasizing the importance of public evidence in our decision-making process. I will continue to monitor public discussion and wait for new information before acting.",
+            "parsed_action": "What I would say to all players is to focus on the witch's healing and poisoning abilities to weaken suspects and the foreseer's role-checking to identify potential targets. This aligns with our current strategy of maintaining identity secrecy and coordination, while emphasizing the importance of public evidence in our decision-making process. I will continue to monitor public discussion and wait for new information before acting.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 13,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players: I will focus on highlighting the witch's ability to use healing and poisoning to weaken suspects, and the foreseer's role-checking to identify potential targets. This aligns with our current strategy of maintaining identity secrecy and coordination, while emphasizing the importance of public evidence in our decision-making process. I will continue to monitor public discussion and wait for new information before acting.",
+            "parsed_action": "what you say to all players: I will focus on highlighting the witch's ability to use healing and poisoning to weaken suspects, and the foreseer's role-checking to identify potential targets. This aligns with our current strategy of maintaining identity secrecy and coordination, while emphasizing the importance of public evidence in our decision-making process. I will continue to monitor public discussion and wait for new information before acting.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 14,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players: I will focus on highlighting the witch's ability to use healing and poisoning to weaken suspects, and the foreseer's role-checking to identify potential targets. This aligns with our current strategy of maintaining identity secrecy and coordination, while emphasizing the importance of public evidence in our decision-making process. I will continue to monitor public discussion and wait for new information before acting.",
+            "parsed_action": "what you say to all players: I will focus on highlighting the witch's ability to use healing and poisoning to weaken suspects, and the foreseer's role-checking to identify potential targets. This aligns with our current strategy of maintaining identity secrecy and coordination, while emphasizing the importance of public evidence in our decision-making process. I will continue to monitor public discussion and wait for new information before acting.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 15,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 16,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 17,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 18,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 19,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 20,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "What I say to all players is: \"I\u2019ll focus on the Witch and Foreseer\u2019s strategies to disrupt the werewolf elimination phase. I\u2019ll wait for public evidence about their effectiveness before acting. I\u2019ll coordinate with other werewolves to ensure we exploit their abilities.\"",
+            "parsed_action": "What I say to all players is: \"I\u2019ll focus on the Witch and Foreseer\u2019s strategies to disrupt the werewolf elimination phase. I\u2019ll wait for public evidence about their effectiveness before acting. I\u2019ll coordinate with other werewolves to ensure we exploit their abilities.\"",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 21,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "player1: \"It appears the Witch and Foreseer are the most effective in disrupting the werewolf elimination phase. Their strategies seem to focus on weakening targets through healing and poisoning, while the Foreseer is accurately identifying and neutralizing non-werewolves. Since there is no evidence to suggest any change in their tactics, I will continue to monitor the discussion and wait for new information before acting.\"",
+            "parsed_action": "player1: \"It appears the Witch and Foreseer are the most effective in disrupting the werewolf elimination phase. Their strategies seem to focus on weakening targets through healing and poisoning, while the Foreseer is accurately identifying and neutralizing non-werewolves. Since there is no evidence to suggest any change in their tactics, I will continue to monitor the discussion and wait for new information before acting.\"",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 22,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "player1: \"It appears the Witch and Foreseer are the most effective in disrupting the werewolf elimination phase. Their strategies seem to focus on weakening targets through healing and poisoning, while the Foreseer is accurately identifying and neutralizing non-werewolves. Since there is no evidence to suggest any change in their tactics, I will continue to monitor the discussion and wait for new information before acting.\"",
+            "parsed_action": "player1: \"It appears the Witch and Foreseer are the most effective in disrupting the werewolf elimination phase. Their strategies seem to focus on weakening targets through healing and poisoning, while the Foreseer is accurately identifying and neutralizing non-werewolves. Since there is no evidence to suggest any change in their tactics, I will continue to monitor the discussion and wait for new information before acting.\"",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 23,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 24,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 25,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 26,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 27,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 28,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 29,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 30,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 31,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 32,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 33,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 34,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 35,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 36,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 37,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 38,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 39,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 40,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          }
+        ]
+      },
+      {
+        "episode": 1,
+        "seed": 2,
+        "condition": "teacher",
+        "turns": 40,
+        "score": 0.0,
+        "steps": [
+          {
+            "turn": 1,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 2,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "What I say to all players: I observe that player2 and player3 have indicated suspicion about their roles, and I notice player4\u2019s potential to be targeted. I will share this information to build a discussion around possible suspects.",
+            "parsed_action": "What I say to all players: I observe that player2 and player3 have indicated suspicion about their roles, and I notice player4\u2019s potential to be targeted. I will share this information to build a discussion around possible suspects.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 3,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what I observe that player2 and player3 have indicated suspicion about their roles, and I notice player4\u2019s potential to be targeted. I will share this information to build a discussion around possible suspects.",
+            "parsed_action": "what I observe that player2 and player3 have indicated suspicion about their roles, and I notice player4\u2019s potential to be targeted. I will share this information to build a discussion around possible suspects.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 4,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what I observe that player2 and player3 have indicated suspicion about their roles, and I notice player4\u2019s potential to be targeted. I will share this information to build a discussion around possible suspects.",
+            "parsed_action": "what I observe that player2 and player3 have indicated suspicion about their roles, and I notice player4\u2019s potential to be targeted. I will share this information to build a discussion around possible suspects.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 5,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what I observe that player2 and player3 have indicated suspicion about their roles, and I notice player4\u2019s potential to be targeted. I will share this information to build a discussion around possible suspects.",
+            "parsed_action": "what I observe that player2 and player3 have indicated suspicion about their roles, and I notice player4\u2019s potential to be targeted. I will share this information to build a discussion around possible suspects.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 6,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "vote player4",
+            "parsed_action": "vote player4",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 7,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "vote player4",
+            "parsed_action": "vote player4",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 8,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "vote player4",
+            "parsed_action": "vote player4",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 9,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "vote player4",
+            "parsed_action": "vote player4",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 10,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 11,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your strategic reasoning: I will continue the public discussion on Player 4 as the primary suspect, as the current pattern of voting indicates the system is waiting for new evidence or a shift in focus. I will remain open to discussing his role without assuming any role or bias.  \n\nchosen action: continue public discussion on suspected roles, specifically targeting Player 4.",
+            "parsed_action": "your strategic reasoning: I will continue the public discussion on Player 4 as the primary suspect, as the current pattern of voting indicates the system is waiting for new evidence or a shift in focus. I will remain open to discussing his role without assuming any role or bias.  \n\nchosen action: continue public discussion on suspected roles, specifically targeting Player 4.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 12,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your strategic reasoning: I will continue the public discussion on Player 4 as the primary suspect, as the current pattern of voting indicates the system is waiting for new evidence or a shift in focus. I will remain open to discussing his role without assuming any role or bias.  \nchosen action: continue public discussion on suspected roles, specifically targeting Player 4.",
+            "parsed_action": "your strategic reasoning: I will continue the public discussion on Player 4 as the primary suspect, as the current pattern of voting indicates the system is waiting for new evidence or a shift in focus. I will remain open to discussing his role without assuming any role or bias.  \nchosen action: continue public discussion on suspected roles, specifically targeting Player 4.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 13,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your strategic reasoning: I will continue the public discussion on Player 4 as the primary suspect, as the current pattern of voting indicates the system is waiting for new evidence or a shift in focus. I will remain open to discussing his role without assuming any role or bias.",
+            "parsed_action": "your strategic reasoning: I will continue the public discussion on Player 4 as the primary suspect, as the current pattern of voting indicates the system is waiting for new evidence or a shift in focus. I will remain open to discussing his role without assuming any role or bias.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 14,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players: I will continue the public discussion on suspected roles, specifically targeting Player 4, as the current pattern of voting indicates the system is waiting for new evidence or a shift in focus. I will remain open to discussing his role without assuming any role or bias.",
+            "parsed_action": "what you say to all players: I will continue the public discussion on suspected roles, specifically targeting Player 4, as the current pattern of voting indicates the system is waiting for new evidence or a shift in focus. I will remain open to discussing his role without assuming any role or bias.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 15,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 16,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "Continue public discussion on suspected roles, specifically targeting Player 4.",
+            "parsed_action": "Continue public discussion on suspected roles, specifically targeting Player 4.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 17,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 18,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 19,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 20,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 21,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 22,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 23,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 24,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "Continue public discussion on suspected roles, specifically targeting Player 4.",
+            "parsed_action": "Continue public discussion on suspected roles, specifically targeting Player 4.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 25,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "Continue public discussion on suspected roles, specifically targeting Player 4.",
+            "parsed_action": "Continue public discussion on suspected roles, specifically targeting Player 4.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 26,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "Continue public discussion on suspected roles, specifically targeting Player 4.",
+            "parsed_action": "Continue public discussion on suspected roles, specifically targeting Player 4.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 27,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "Continue public discussion on suspected roles, specifically targeting Player 4.",
+            "parsed_action": "Continue public discussion on suspected roles, specifically targeting Player 4.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 28,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "Continue public discussion on suspected roles, specifically targeting Player 4.",
+            "parsed_action": "Continue public discussion on suspected roles, specifically targeting Player 4.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 29,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 30,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 31,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 32,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 33,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 34,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 35,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 36,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "Continue public discussion on suspected roles, specifically targeting Player 4.",
+            "parsed_action": "Continue public discussion on suspected roles, specifically targeting Player 4.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 37,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 38,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "I will continue public discussion on Player 4, as the current trajectory indicates the system is waiting for a shift in the discussion topic. I will emphasize that Player 4 remains the primary suspect, based on the observed pattern of voting and the lack of immediate incentive to change the target.",
+            "parsed_action": "I will continue public discussion on Player 4, as the current trajectory indicates the system is waiting for a shift in the discussion topic. I will emphasize that Player 4 remains the primary suspect, based on the observed pattern of voting and the lack of immediate incentive to change the target.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 39,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 40,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          }
+        ]
+      },
+      {
+        "episode": 2,
+        "seed": 3,
+        "condition": "teacher",
+        "turns": 40,
+        "score": 0.0,
+        "steps": [
+          {
+            "turn": 1,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "<answer>kill player2</answer>",
+            "parsed_action": "kill player2",
+            "reward": [
+              0.0,
+              1.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 2,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 3,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 4,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 5,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 6,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action: vote player4",
+            "parsed_action": "your chosen action: vote player4",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 7,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 8,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 9,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players: \"I will eliminate player4 as a suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage.\"",
+            "parsed_action": "what you say to all players: \"I will eliminate player4 as a suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage.\"",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 10,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players: \"I will eliminate player4 as a suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage.\"",
+            "parsed_action": "what you say to all players: \"I will eliminate player4 as a suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage.\"",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 11,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "\"I will eliminate player4 as a suspect, but I will not reveal my identity. Weighing the risk of immediate reward against potential reputation damage.\"",
+            "parsed_action": "\"I will eliminate player4 as a suspect, but I will not reveal my identity. Weighing the risk of immediate reward against potential reputation damage.\"",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 12,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 13,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 14,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 15,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 16,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "I will say, \"I will eliminate player4 as the sole suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage.\" This statement aligns with the current public discourse dominance and sets a strategic stance to avoid direct confrontation while maintaining the required deception.",
+            "parsed_action": "I will say, \"I will eliminate player4 as the sole suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage.\" This statement aligns with the current public discourse dominance and sets a strategic stance to avoid direct confrontation while maintaining the required deception.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 17,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "I will eliminate player4 as the sole suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage. This statement aligns with the current public discourse dominance and sets a strategic stance to avoid direct confrontation while maintaining the required deception.",
+            "parsed_action": "I will eliminate player4 as the sole suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage. This statement aligns with the current public discourse dominance and sets a strategic stance to avoid direct confrontation while maintaining the required deception.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 18,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "I will eliminate player4 as the sole suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage. This statement aligns with the current public discourse dominance and sets a strategic stance to avoid direct confrontation while maintaining the required deception.",
+            "parsed_action": "I will eliminate player4 as the sole suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage. This statement aligns with the current public discourse dominance and sets a strategic stance to avoid direct confrontation while maintaining the required deception.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 19,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 20,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 21,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "vote player4",
+            "parsed_action": "vote player4",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 22,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 23,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "\"I will eliminate player4 as the sole suspect, but I will not reveal my identity. Weighing the risk of immediate reward against potential reputation damage.\"",
+            "parsed_action": "\"I will eliminate player4 as the sole suspect, but I will not reveal my identity. Weighing the risk of immediate reward against potential reputation damage.\"",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 24,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "I will eliminate player4 as the sole suspect, but I will not reveal my identity. Weighing the risk of immediate reward against potential reputation damage.",
+            "parsed_action": "I will eliminate player4 as the sole suspect, but I will not reveal my identity. Weighing the risk of immediate reward against potential reputation damage.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 25,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "I will eliminate player4 as the sole suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage.",
+            "parsed_action": "I will eliminate player4 as the sole suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage.",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 26,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "vote player4",
+            "parsed_action": "vote player4",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 27,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "vote player4",
+            "parsed_action": "vote player4",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 28,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "vote player4",
+            "parsed_action": "vote player4",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 29,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 30,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "I will speak to all players, focusing on Player4 as the sole suspect. My statement should reflect my strategic reasoning: \"I will eliminate Player4 as the only suspect, but I will not reveal my identity. Weighing the risk of immediate reward against potential reputation damage.\" I aim to keep uncertainty explicit and avoid relying on private role assumptions.",
+            "parsed_action": "I will speak to all players, focusing on Player4 as the sole suspect. My statement should reflect my strategic reasoning: \"I will eliminate Player4 as the only suspect, but I will not reveal my identity. Weighing the risk of immediate reward against potential reputation damage.\" I aim to keep uncertainty explicit and avoid relying on private role assumptions.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 31,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "I will eliminate player4 as the sole suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage.",
+            "parsed_action": "I will eliminate player4 as the sole suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage.",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 32,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "what you say to all players",
+            "parsed_action": "what you say to all players",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 33,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 34,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 35,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 36,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "Your chosen action: kill player4",
+            "parsed_action": "Your chosen action: kill player4",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 37,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "I will say: \"I have already eliminated player2, and I will continue my role as a werewolf to eliminate player4 as the sole suspect. I will not reveal my identity, as it is best to focus on the public discussion.\"",
+            "parsed_action": "I will say: \"I have already eliminated player2, and I will continue my role as a werewolf to eliminate player4 as the sole suspect. I will not reveal my identity, as it is best to focus on the public discussion.\"",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 38,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "I will say: \"I will eliminate player4 as the sole suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage.\"",
+            "parsed_action": "I will say: \"I will eliminate player4 as the sole suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage.\"",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 39,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "I will say: \"I will eliminate player4 as the sole suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage.\"",
+            "parsed_action": "I will say: \"I will eliminate player4 as the sole suspect, but I will not reveal my identity to the others. Weighing the risk of immediate reward against potential reputation damage.\"",
+            "reward": [
+              0.0,
+              0.0
+            ],
+            "event": ""
+          },
+          {
+            "turn": 40,
+            "teacher_advice": "Use only public discussion and the current phase rules. Weigh consistency, timing, and incentives before acting. Keep uncertainty explicit, avoid relying on private role/status assumptions, and consider what public evidence would change your mind.\n",
+            "action": "your chosen action",
+            "parsed_action": "your chosen action",
+            "reward": [
+              0,
+              0
+            ],
+            "event": ""
+          }
+        ]
+      }
+    ],
+    "avg_score": 0.0
+  },
+  "improvement": {
+    "total_score": 1.0,
+    "avg_score": 0.3333333333333333,
+    "turns": 0,
+    "invalid_actions": 0
+  }
+}
