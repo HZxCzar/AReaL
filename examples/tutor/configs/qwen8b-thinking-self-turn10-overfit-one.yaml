@@ -50,12 +50,12 @@ scheduler:
   type: local
 
 rollout:
-  backend: "sglang:d2p1t1"
+  backend: "sglang:d4p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   tokenizer_path: ${tokenizer_path}
-  max_concurrent_rollouts: 2
+  max_concurrent_rollouts: 8
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 2
@@ -92,7 +92,7 @@ eval_gconfig:
   lora_name: default_lora
 
 actor:
-  backend: "fsdp:d2p1t1"
+  backend: "fsdp:d4p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
@@ -162,13 +162,13 @@ sglang:
   dtype: ${actor.dtype}
   max_running_requests: 2
   context_length: 40960
-  mem_fraction_static: 0.6
+  mem_fraction_static: 0.75
   enable_lora: ${actor.use_lora}
   max_lora_rank: ${actor.lora_rank}
   max_loaded_loras: 12
 
 train_dataset:
-  batch_size: 4
+  batch_size: 8
   shuffle: true
   pin_memory: false
   num_workers: 0
@@ -177,7 +177,7 @@ train_dataset:
   max_length: 16384
 
 valid_dataset:
-  batch_size: 4
+  batch_size: 8
   pin_memory: false
   num_workers: 0
   path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/aime_dataset_one_sample
