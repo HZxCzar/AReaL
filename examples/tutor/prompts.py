@@ -9,7 +9,8 @@ DEFAULT_TEACHER_SYSTEM_PROMPT = (
     "next reasoning move; do not do the student's computation for them. Do not "
     "provide a full solution, reveal the final answer, compute the final count "
     "or subtraction, or write a calculation chain that directly determines the "
-    "final answer."
+    "final answer. The student's answer may be truncated due to length; if so, "
+    "ask them to continue or be brief."
 )
 
 DEFAULT_STUDENT_SYSTEM_PROMPT = (

@@ -1,5 +1,5 @@
 experiment_name: tutor
-trial_name: qwen8b-qwen4b-turn10-outcome-credit-ep200
+trial_name: qwen8b-qwen4b-turn10-pairwise-prm-ep200
 
 seed: 1
 enable_offload: false
@@ -8,6 +8,7 @@ tokenizer_path: ${actor.path}
 
 workflow: examples.tutor.workflow.TutorAgentWorkflow
 eval_workflow: ${workflow}
+answer_scorer: aime
 max_turns: 10
 enable_thinking: false
 
@@ -16,7 +17,7 @@ auxiliary_model:
   model: default
   api_key: EMPTY
   timeout: 120
-  max_tokens: 2048
+  max_tokens: 1024
   temperature: 0.7
   top_p: null
   max_concurrent_calls: 4
@@ -33,6 +34,11 @@ reward:
   length_penalty_threshold_chars: 1200
   length_penalty_per_100_chars: -0.005
   length_penalty_min: -0.1
+  pairwise:
+    enabled: true
+    reference_lag_steps: 5
+    scale: 0.05
+    compare_all_turns: true
 
 debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor/debug_traces/${experiment_name}/${trial_name}
 debug_trace_every_n_rollouts: 10
@@ -101,7 +107,7 @@ actor:
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 20478
+    max_tokens_per_mb: 32768
   optimizer:
     type: adam
     lr: 1.70e-5
@@ -148,7 +154,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 20478
+    max_tokens_per_mb: 32768
   optimizer: null
   scheduling_strategy:
     type: colocation

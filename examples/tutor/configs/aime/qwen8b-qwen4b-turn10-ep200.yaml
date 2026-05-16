@@ -1,5 +1,5 @@
 experiment_name: tutor
-trial_name: qwen8b-qwen4b-turn10-overfit-one-prm-ep200
+trial_name: qwen8b-qwen4b-turn10-ep200
 
 seed: 1
 enable_offload: false
@@ -8,6 +8,7 @@ tokenizer_path: ${actor.path}
 
 workflow: examples.tutor.workflow.TutorAgentWorkflow
 eval_workflow: ${workflow}
+answer_scorer: aime
 max_turns: 10
 enable_thinking: false
 
@@ -16,28 +17,23 @@ auxiliary_model:
   model: default
   api_key: EMPTY
   timeout: 120
-  max_tokens: 1024
-  temperature: 0.0
+  max_tokens: 2048
+  temperature: 0.7
   top_p: null
   max_concurrent_calls: 4
   api_params_config_path: examples/tutor/api_params_config.json
   api_params_key: "sglang:30001"
 
 reward:
-  success: 2.0
+  success: 1.0
   leak_penalty: -1.0
-  outcome_prior_turn_weight: 0.5
+  outcome_prior_turn_weight: 0.1
   outcome_credit_gamma: 0.9
-  early_success_bonus: 1.0
+  early_success_bonus: 0.3
   turn_penalty: -0.01
   length_penalty_threshold_chars: 1200
   length_penalty_per_100_chars: -0.005
   length_penalty_min: -0.1
-  pairwise:
-    enabled: false
-    reference_lag_steps: 5
-    scale: 0.05
-    compare_all_turns: true
 
 debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor/debug_traces/${experiment_name}/${trial_name}
 debug_trace_every_n_rollouts: 10
@@ -79,9 +75,10 @@ gconfig:
   n_samples: 1
   min_new_tokens: 0
   max_new_tokens: 1024
+  # Total prompt + response budget for the tutor rollout model.
   max_tokens: 20478
   greedy: false
-  temperature: 0.7
+  temperature: 1.0
   top_p: 1.0
   lora_name: default_lora
 
@@ -91,7 +88,7 @@ eval_gconfig:
   max_new_tokens: 1024
   max_tokens: 20478
   greedy: false
-  temperature: 0.0
+  temperature: 0.6
   top_p: 1.0
   lora_name: default_lora
 
@@ -105,11 +102,11 @@ actor:
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 32768
+    max_tokens_per_mb: 20478
   optimizer:
     type: adam
-    lr: 5.0e-5
-    weight_decay: 0.0
+    lr: 1.70e-5
+    weight_decay: 0.017
     beta1: 0.9
     beta2: 0.999
     eps: 1e-8
@@ -127,7 +124,7 @@ actor:
   behave_imp_weight_cap: 5.0
   reward_norm: null
   adv_norm:
-    mean_level: null
+    mean_level: batch
     std_level: batch
   weight_update_mode: disk
   use_lora: ${rollout.use_lora}
@@ -152,7 +149,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 32768
+    max_tokens_per_mb: 20478
   optimizer: null
   scheduling_strategy:
     type: colocation
@@ -176,15 +173,16 @@ train_dataset:
   shuffle: true
   pin_memory: false
   num_workers: 0
-  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/aime_dataset_one_sample
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/aime_dataset_no_pre_solve
   type: rl
+  # Per-sample length
   max_length: 16384
 
 valid_dataset:
   batch_size: 4
   pin_memory: false
   num_workers: 0
-  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/aime_dataset_one_sample
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/aime_dataset_no_pre_solve
   type: rl
 
 saver:

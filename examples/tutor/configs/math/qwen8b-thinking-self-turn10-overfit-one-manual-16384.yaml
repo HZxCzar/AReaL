@@ -1,5 +1,5 @@
 experiment_name: tutor
-trial_name: qwen8b-qwen4b-turn10-ep200
+trial_name: qwen8b-thinking-self-turn10-overfit-one-prm-ep200-manual
 
 seed: 1
 enable_offload: false
@@ -8,38 +8,44 @@ tokenizer_path: ${actor.path}
 
 workflow: examples.tutor.workflow.TutorAgentWorkflow
 eval_workflow: ${workflow}
+answer_scorer: math
 max_turns: 10
-enable_thinking: false
+enable_thinking: true
 
 auxiliary_model:
   base_url: http://127.0.0.1:30001/v1
   model: default
   api_key: EMPTY
   timeout: 120
-  max_tokens: 2048
-  temperature: 0.7
+  max_tokens: 16384
+  temperature: 0.0
   top_p: null
   max_concurrent_calls: 4
   api_params_config_path: examples/tutor/api_params_config.json
   api_params_key: "sglang:30001"
 
 reward:
-  success: 1.0
+  success: 2.0
   leak_penalty: -1.0
-  outcome_prior_turn_weight: 0.1
+  outcome_prior_turn_weight: 0.5
   outcome_credit_gamma: 0.9
-  early_success_bonus: 0.3
+  early_success_bonus: 1.0
   turn_penalty: -0.01
   length_penalty_threshold_chars: 1200
   length_penalty_per_100_chars: -0.005
   length_penalty_min: -0.1
+  pairwise:
+    enabled: false
+    reference_lag_steps: 5
+    scale: 0.05
+    compare_all_turns: true
 
 debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor/debug_traces/${experiment_name}/${trial_name}
 debug_trace_every_n_rollouts: 10
 
 cluster:
   n_nodes: 1
-  n_gpus_per_node: 4
+  n_gpus_per_node: 8
   fileroot: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor
   name_resolve:
     type: nfs
@@ -49,12 +55,12 @@ scheduler:
   type: local
 
 rollout:
-  backend: "sglang:d2p1t1"
+  backend: "sglang:d4p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   tokenizer_path: ${tokenizer_path}
-  max_concurrent_rollouts: 2
+  max_concurrent_rollouts: 8
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 2
@@ -73,26 +79,25 @@ rollout:
 gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 1024
-  # Total prompt + response budget for the tutor rollout model.
-  max_tokens: 20478
+  max_new_tokens: 16384
+  max_tokens: 32768
   greedy: false
-  temperature: 1.0
+  temperature: 0.6
   top_p: 1.0
   lora_name: default_lora
 
 eval_gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 1024
-  max_tokens: 20478
+  max_new_tokens: 16384
+  max_tokens: 32768
   greedy: false
   temperature: 0.6
   top_p: 1.0
   lora_name: default_lora
 
 actor:
-  backend: "fsdp:d2p1t1"
+  backend: "fsdp:d4p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
@@ -101,11 +106,11 @@ actor:
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 20478
+    max_tokens_per_mb: 40960
   optimizer:
     type: adam
-    lr: 1.70e-5
-    weight_decay: 0.017
+    lr: 5.0e-5
+    weight_decay: 0.0
     beta1: 0.9
     beta2: 0.999
     eps: 1e-8
@@ -148,7 +153,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 20478
+    max_tokens_per_mb: 32768
   optimizer: null
   scheduling_strategy:
     type: colocation
@@ -162,26 +167,25 @@ sglang:
   dtype: ${actor.dtype}
   max_running_requests: 2
   context_length: 40960
-  mem_fraction_static: 0.6
+  mem_fraction_static: 0.75
   enable_lora: ${actor.use_lora}
   max_lora_rank: ${actor.lora_rank}
-  max_loaded_loras: 12
+  max_loaded_loras: 16
 
 train_dataset:
-  batch_size: 4
+  batch_size: 8
   shuffle: true
   pin_memory: false
   num_workers: 0
-  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/aime_dataset_no_pre_solve
+  path: examples/tutor/data/math_dataset_no_pre_solve_4096
   type: rl
-  # Per-sample length
   max_length: 16384
 
 valid_dataset:
-  batch_size: 4
+  batch_size: 8
   pin_memory: false
   num_workers: 0
-  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/aime_dataset_no_pre_solve
+  path: examples/tutor/data/math_dataset_no_pre_solve_4096
   type: rl
 
 saver:

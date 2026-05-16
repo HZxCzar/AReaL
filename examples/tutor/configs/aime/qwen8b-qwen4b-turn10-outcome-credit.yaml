@@ -1,5 +1,5 @@
 experiment_name: tutor
-trial_name: qwen32b-thinking-qwen4b-turn10-pairwise-prm-ep200
+trial_name: qwen8b-qwen4b-turn10-outcome-credit-ep200
 
 seed: 1
 enable_offload: false
@@ -8,15 +8,16 @@ tokenizer_path: ${actor.path}
 
 workflow: examples.tutor.workflow.TutorAgentWorkflow
 eval_workflow: ${workflow}
+answer_scorer: aime
 max_turns: 10
-enable_thinking: true
+enable_thinking: false
 
 auxiliary_model:
   base_url: http://127.0.0.1:30001/v1
   model: default
   api_key: EMPTY
   timeout: 120
-  max_tokens: 1024
+  max_tokens: 2048
   temperature: 0.7
   top_p: null
   max_concurrent_calls: 4
@@ -33,11 +34,6 @@ reward:
   length_penalty_threshold_chars: 1200
   length_penalty_per_100_chars: -0.005
   length_penalty_min: -0.1
-  pairwise:
-    enabled: true
-    reference_lag_steps: 5
-    scale: 0.05
-    compare_all_turns: true
 
 debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor/debug_traces/${experiment_name}/${trial_name}
 debug_trace_every_n_rollouts: 10
@@ -78,10 +74,9 @@ rollout:
 gconfig:
   n_samples: 1
   min_new_tokens: 0
-  # Tutor actor output budget; includes reasoning tokens if thinking is enabled.
-  max_new_tokens: 16384
-  # Total prompt + response budget, aligned to the Qwen3-32B 40960 context limit.
-  max_tokens: 32768
+  max_new_tokens: 1024
+  # Total prompt + response budget for the tutor rollout model.
+  max_tokens: 20478
   greedy: false
   temperature: 1.0
   top_p: 1.0
@@ -90,8 +85,8 @@ gconfig:
 eval_gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 16384
-  max_tokens: 32768
+  max_new_tokens: 1024
+  max_tokens: 20478
   greedy: false
   temperature: 0.6
   top_p: 1.0
@@ -101,13 +96,13 @@ actor:
   backend: "fsdp:d2p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-32B/snapshots/9216db5781bf21249d130ec9da846c4624c16137
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 40960
+    max_tokens_per_mb: 20478
   optimizer:
     type: adam
     lr: 1.70e-5
@@ -154,7 +149,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 40960
+    max_tokens_per_mb: 20478
   optimizer: null
   scheduling_strategy:
     type: colocation
