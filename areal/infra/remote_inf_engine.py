@@ -11,10 +11,9 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future
-from contextlib import asynccontextmanager
 from datetime import datetime
 from logging import Logger
-from threading import Condition, Lock
+from threading import Lock
 from typing import TYPE_CHECKING, Any, Protocol
 
 import aiohttp
@@ -363,8 +362,6 @@ class RemoteInfEngine(InferenceEngine):
         self._version = 0
 
         self.lock = Lock()
-        self._active_generation_count = 0
-        self._active_generation_cv = Condition()
 
         self._workflow_executor: WorkflowExecutor | None = None
         self._initialized = False
@@ -829,16 +826,15 @@ class RemoteInfEngine(InferenceEngine):
             )
 
             # Loop until the generation is complete
-            async with self._track_generation_request():
-                result = await arequest_with_retry(
-                    session=session,
-                    addr=server_addr,
-                    endpoint=http_req.endpoint,
-                    payload=http_req.payload,
-                    method=http_req.method,
-                    max_retries=self.config.request_retries,
-                    timeout=self.config.request_timeout,
-                )
+            result = await arequest_with_retry(
+                session=session,
+                addr=server_addr,
+                endpoint=http_req.endpoint,
+                payload=http_req.payload,
+                method=http_req.method,
+                max_retries=self.config.request_retries,
+                timeout=self.config.request_timeout,
+            )
 
             # Assert response is JSON dict (not text/binary from error pages)
             if not isinstance(result, dict):
@@ -911,22 +907,6 @@ class RemoteInfEngine(InferenceEngine):
             routed_experts=accumulated_routed_experts,
         )
         return response
-
-    @asynccontextmanager
-    async def _track_generation_request(self):
-        with self._active_generation_cv:
-            self._active_generation_count += 1
-        try:
-            yield
-        finally:
-            with self._active_generation_cv:
-                self._active_generation_count -= 1
-                self._active_generation_cv.notify_all()
-
-    def _wait_active_generations_done(self):
-        with self._active_generation_cv:
-            while self._active_generation_count > 0:
-                self._active_generation_cv.wait(timeout=0.5)
 
     def init_weights_update_group(
         self, meta: WeightUpdateMeta, xccl_group_ranks: list[int] | None = None
@@ -1288,7 +1268,6 @@ class RemoteInfEngine(InferenceEngine):
         """Pause request submission for async rollout."""
         pause_req = self.backend.get_pause_request()
         self._run_request_on_all_servers(pause_req)
-        self._wait_active_generations_done()
 
         # The above http request may require some time to be scheduled and executed.
         # The following line waits until all requests are indeed dropped.
