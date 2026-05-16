@@ -151,6 +151,7 @@ def build_workflow(config: Any, max_turns: int) -> Any:
         top_p=config.gconfig.top_p,
         max_completion_tokens=config.gconfig.max_new_tokens,
         max_turns=max_turns,
+        answer_scorer=config.answer_scorer,
         enable_thinking=config.enable_thinking,
         aux_mode=auxiliary_model.mode,
         aux_enable_thinking=auxiliary_model.enable_thinking,
@@ -287,7 +288,7 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
             latest_tutor_visible_output="(none, produce the first answer attempt)",
         )
     )
-    initial_judge = workflow._score_aime_answer(task, ground_truth, initial_answer)
+    initial_judge = workflow._score_answer(task, ground_truth, initial_answer)
     transcript["initial_student_answer"] = initial_answer
     transcript["initial_student_error"] = initial_error
     transcript["initial_judge"] = initial_judge.raw_result
@@ -381,7 +382,7 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
             tutor_visible_output=tutor_visible_message,
             current_student_answer=student_answer,
         )
-        judge_result = workflow._score_aime_answer(task, ground_truth, student_answer)
+        judge_result = workflow._score_answer(task, ground_truth, student_answer)
         latest_answer = student_answer
         record.update(
             {

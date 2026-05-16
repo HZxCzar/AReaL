@@ -107,6 +107,7 @@ def build_workflow(config: TutorConfig, max_concurrency: int) -> TutorAgentWorkf
     auxiliary_model = config.auxiliary_model
     return TutorAgentWorkflow(
         max_turns=config.max_turns,
+        answer_scorer=config.answer_scorer,
         aux_mode=auxiliary_model.mode,
         aux_enable_thinking=auxiliary_model.enable_thinking,
         aux_base_url=auxiliary_model.base_url,
@@ -166,7 +167,7 @@ async def classify_row(
                 latest_tutor_visible_output="(none, produce the first answer attempt)",
             )
         )
-        judge_result = workflow._score_aime_answer(task, ground_truth, answer)
+        judge_result = workflow._score_answer(task, ground_truth, answer)
         attempt_rows.append(
             {
                 "attempt": attempt_idx,

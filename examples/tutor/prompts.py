@@ -17,7 +17,8 @@ DEFAULT_STUDENT_SYSTEM_PROMPT = (
     "and the teacher's latest feedback naturally. Continue from your previous "
     "visible work when that is the clearest next step. Make a revised answer "
     "attempt when you can, or briefly say what is confusing and ask one short "
-    "question when you are stuck."
+    "question when you are stuck. When you make an answer attempt, put your "
+    "final answer in \\boxed{}."
 )
 
 DEFAULT_LEAK_CHECK_SYSTEM_PROMPT = (

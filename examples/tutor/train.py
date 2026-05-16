@@ -39,6 +39,7 @@ def main(args):
     workflow_kwargs = dict(
         gconfig=config.gconfig,
         tokenizer=config.tokenizer_path,
+        answer_scorer=config.answer_scorer,
         max_turns=config.max_turns,
         enable_thinking=config.enable_thinking,
         aux_mode=auxiliary_model.mode,

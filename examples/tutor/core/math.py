@@ -2,23 +2,23 @@ from __future__ import annotations
 
 import json
 
-from .math import last_boxed_only_string, remove_boxed
 from .text import strip_reasoning_for_context
 from .types import JudgeResult
 
 
-def score_aime_answer(task: str, ground_truth: str, student_answer: str) -> JudgeResult:
-    extracted_answer = official_extract_aime_answer(student_answer)
-    normalized_prediction = (
-        official_strip_string(extracted_answer) if extracted_answer else ""
-    )
-    normalized_target = official_strip_string(ground_truth)
-    correct = official_is_equiv(extracted_answer, ground_truth)
+def score_math_answer(task: str, ground_truth: str, student_answer: str) -> JudgeResult:
+    visible_answer = strip_reasoning_for_context(student_answer)
+    extracted_answer = extract_math_answer(visible_answer)
+    target_answer = extract_ground_truth_answer(ground_truth)
+    normalized_prediction = strip_string(extracted_answer)
+    normalized_target = strip_string(target_answer)
+    correct = is_equiv(extracted_answer, target_answer)
     raw_result = {
-        "method": "lm_eval_aime_exact_match",
+        "method": "lm_eval_hendrycks_math_exact_match",
         "task": task,
-        "student_answer": strip_reasoning_for_context(student_answer),
+        "student_answer": visible_answer,
         "extracted_answer": extracted_answer,
+        "target_answer": target_answer,
         "normalized_prediction": normalized_prediction,
         "normalized_target": normalized_target,
     }
@@ -39,14 +39,81 @@ def score_aime_answer(task: str, ground_truth: str, student_answer: str) -> Judg
     )
 
 
-def _fix_fracs(string: str) -> str:
+def extract_math_answer(response: str) -> str:
+    boxed = last_boxed_only_string(response)
+    if boxed is not None:
+        return remove_boxed(boxed)
+    return ""
+
+
+def extract_ground_truth_answer(ground_truth: str) -> str:
+    boxed = last_boxed_only_string(ground_truth)
+    if boxed is not None:
+        return remove_boxed(boxed)
+    return str(ground_truth)
+
+
+def is_equiv(str1: str | None, str2: str | None) -> bool:
+    if str1 is None and str2 is None:
+        return True
+    if str1 is None or str2 is None:
+        return False
+    try:
+        return strip_string(str1) == strip_string(str2)
+    except Exception:
+        return str1 == str2
+
+
+def remove_boxed(s: str) -> str:
+    if "\\boxed " in s:
+        left = "\\boxed "
+        if not s.startswith(left):
+            return s
+        return s[len(left) :]
+    left = "\\boxed{"
+    if s.startswith(left) and s.endswith("}"):
+        return s[len(left) : -1]
+    left = "\\fbox{"
+    if s.startswith(left) and s.endswith("}"):
+        return s[len(left) : -1]
+    return s
+
+
+def last_boxed_only_string(string: str) -> str | None:
+    string = string or ""
+    idx = string.rfind("\\boxed")
+    if "\\boxed " in string:
+        return "\\boxed " + string.split("\\boxed ")[-1].split("$")[0]
+    if idx < 0:
+        idx = string.rfind("\\fbox")
+    if idx < 0:
+        return None
+
+    i = idx
+    right_brace_idx = None
+    num_left_braces_open = 0
+    while i < len(string):
+        if string[i] == "{":
+            num_left_braces_open += 1
+        if string[i] == "}":
+            num_left_braces_open -= 1
+            if num_left_braces_open == 0:
+                right_brace_idx = i
+                break
+        i += 1
+    if right_brace_idx is None:
+        return None
+    return string[idx : right_brace_idx + 1]
+
+
+def fix_fracs(string: str) -> str:
     substrs = string.split("\\frac")
     new_str = substrs[0]
     if len(substrs) > 1:
         substrs = substrs[1:]
         for substr in substrs:
             new_str += "\\frac"
-            if len(substr) > 0 and substr[0] == "{":
+            if substr and substr[0] == "{":
                 new_str += substr
             else:
                 try:
@@ -70,7 +137,7 @@ def _fix_fracs(string: str) -> str:
     return new_str
 
 
-def _fix_a_slash_b(string: str) -> str:
+def fix_a_slash_b(string: str) -> str:
     if len(string.split("/")) != 2:
         return string
     a = string.split("/")[0]
@@ -84,14 +151,14 @@ def _fix_a_slash_b(string: str) -> str:
         return string
 
 
-def _remove_right_units(string: str) -> str:
+def remove_right_units(string: str) -> str:
     if "\\text{ " in string:
         splits = string.split("\\text{ ")
         return splits[0]
     return string
 
 
-def _fix_sqrt(string: str) -> str:
+def fix_sqrt(string: str) -> str:
     if "\\sqrt" not in string:
         return string
     splits = string.split("\\sqrt")
@@ -101,14 +168,14 @@ def _fix_sqrt(string: str) -> str:
             new_string += "\\sqrt"
             continue
         if split[0] != "{":
-            a = split[0]
-            new_string += "\\sqrt{" + a + "}" + split[1:]
+            new_substr = "\\sqrt{" + split[0] + "}" + split[1:]
         else:
-            new_string += "\\sqrt" + split
+            new_substr = "\\sqrt" + split
+        new_string += new_substr
     return new_string
 
 
-def _strip_string(string: str) -> str:
+def strip_string(string: str) -> str:
     string = string.replace("\n", "")
     string = string.replace("\\!", "")
     string = string.replace("\\\\", "\\")
@@ -119,37 +186,21 @@ def _strip_string(string: str) -> str:
     string = string.replace("^{\\circ}", "")
     string = string.replace("^\\circ", "")
     string = string.replace("\\$", "")
-    string = _remove_right_units(string)
+    string = remove_right_units(string)
     string = string.replace("\\%", "")
-    string = string.replace("\\%", "")
+    string = string.replace(r"\%", "")
     string = string.replace(" .", " 0.")
     string = string.replace("{.", "{0.")
     if len(string) == 0:
         return string
     if string[0] == ".":
         string = "0" + string
-    if len(string.split("=")) == 2:
-        if len(string.split("=")[0]) <= 2:
-            string = string.split("=")[1]
-    string = _fix_sqrt(string)
+    if len(string.split("=")) == 2 and len(string.split("=")[0]) <= 2:
+        string = string.split("=")[1]
+    string = fix_sqrt(string)
     string = string.replace(" ", "")
-    string = _fix_fracs(string)
+    string = fix_fracs(string)
     if string == "0.5":
         string = "\\frac{1}{2}"
-    string = _fix_a_slash_b(string)
+    string = fix_a_slash_b(string)
     return string
-
-
-def official_strip_string(string: str) -> str:
-    return _strip_string(string)
-
-
-def official_is_equiv(prediction: str, reference: str) -> bool:
-    return official_strip_string(prediction) == official_strip_string(reference)
-
-
-def official_extract_aime_answer(response: str) -> str:
-    boxed = last_boxed_only_string(strip_reasoning_for_context(response or ""))
-    if boxed is None:
-        return ""
-    return remove_boxed(boxed)

@@ -7,10 +7,11 @@ transcript text.
 
 ## Dataset
 
-Prepare a HuggingFace dataset on disk from a manifest:
+Prepare a HuggingFace dataset on disk from an AIME manifest:
 
 ```bash
 python3 examples/tutor/prepare_dataset.py \
+  --format aime \
   --manifest /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AgentGym-RL/examples/tutor/aime_manifest.json \
   --train-ids /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AgentGym-RL/AgentGym-RL/AgentItemId/tutor_train.json \
   --test-ids /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AgentGym-RL/AgentGym-RL/AgentItemId/tutor_test.json \
@@ -27,6 +28,34 @@ Each dataset sample contains:
 If `--train-ids` and `--test-ids` are provided, the split follows the old
 `AgentItemId/tutor_train.json` and `AgentItemId/tutor_test.json` files instead of using
 the last `N` samples as test data.
+
+To convert the checked-in MATH JSONL files under `examples/tutor/raw_data/`:
+
+```bash
+python3 examples/tutor/prepare_dataset.py \
+  --format math \
+  --train-jsonl examples/tutor/raw_data/math_train.jsonl \
+  --test-jsonl examples/tutor/raw_data/math_test.jsonl \
+  --output examples/tutor/data/math_dataset
+```
+
+Then point training/eval at that saved dataset and switch the answer scorer:
+
+```bash
+python3 examples/tutor/train.py \
+  --config examples/tutor/config.yaml \
+  answer_scorer=math \
+  train_dataset.path=examples/tutor/data/math_dataset \
+  valid_dataset.path=examples/tutor/data/math_dataset \
+  scheduler.type=local
+```
+
+`answer_scorer=aime` uses the AIME exact-match scorer, while `answer_scorer=math`
+uses the lm-eval/Hendrycks MATH boxed-answer extraction and string-normalized exact
+match. Both scorers extract the student's final answer from the last `\boxed{...}` or
+`\fbox{...}` in the student response.
+Pass the same `answer_scorer=math` and dataset path overrides to
+`filter_pre_solved.py`, `manual_tutor.py`, or `demo_run.py` when using MATH rows.
 
 ## Filter pre-solved tasks
 
@@ -60,7 +89,7 @@ python3 examples/tutor/manual_tutor.py \
   --random
 ```
 
-The script prints the task, the student's initial answer, and the exact-match judge
+The script prints the task, the student's initial answer, and the configured judge
 result. Each tutor turn is checked for answer leakage by default; leaked turns are not
 shown to the student, matching the training workflow. Pass `--skip-leak-check` only when
 you want to test whether the student can copy or use direct answer disclosure.

@@ -111,7 +111,6 @@ except Exception:  # pragma: no cover - lightweight local test environments
 
 from examples.common.chat_budget import ChatContextBudget
 from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig, make_teacher_client
-from examples.tutor.core.aime import score_aime_answer
 from examples.tutor.core.callers import (
     AReaLEngineActorCaller,
     AReaLEngineAuxiliaryCaller,
@@ -131,6 +130,7 @@ from examples.tutor.core.history import (
 from examples.tutor.core.parsers import parse_leak_check_result
 from examples.tutor.core.pairwise import PairwiseTutorEvaluator
 from examples.tutor.core.rewards import EpisodeRewardComputer, artifact_to_trace
+from examples.tutor.core.scoring import AnswerScorer, get_answer_scorer
 from examples.tutor.core.tensors import response_to_tensordict
 from examples.tutor.core.text import (
     strip_reasoning_for_context as _strip_reasoning_for_context,
@@ -168,6 +168,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self,
         gconfig: Any | None = None,
         tokenizer: str | Any | None = None,
+        answer_scorer: str = "aime",
         max_turns: int = 6,
         enable_thinking: bool = False,
         temperature: float = 1.0,
@@ -212,6 +213,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         pairwise_compare_all_turns: bool = True,
     ):
         self.max_turns = max_turns
+        self.answer_scorer_name = answer_scorer
+        self.answer_scorer: AnswerScorer = get_answer_scorer(answer_scorer)
         self.enable_thinking = enable_thinking
         self.gconfig = gconfig
         self.temperature = gconfig.temperature if gconfig is not None else temperature
@@ -345,7 +348,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             aux_caller=aux_caller,
         )
         initial_student_answer = _strip_reasoning_for_context(initial_student_answer)
-        initial_judge_result = self._score_aime_answer(
+        initial_judge_result = self._score_answer(
             task, ground_truth, initial_student_answer
         )
         if initial_judge_result.correct:
@@ -466,7 +469,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 aux_caller=aux_caller,
             )
             student_answer = _strip_reasoning_for_context(student_answer)
-            judge_result = self._score_aime_answer(task, ground_truth, student_answer)
+            judge_result = self._score_answer(task, ground_truth, student_answer)
 
             if judge_result.correct:
                 termination_reason = "success"
@@ -833,10 +836,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         visible_text = _strip_reasoning_for_context(text)
         return f"{speaker} round {round_idx}:\n{visible_text}"
 
-    def _score_aime_answer(
+    def _score_answer(
         self, task: str, ground_truth: str, student_answer: str
     ) -> JudgeResult:
-        return score_aime_answer(task, ground_truth, student_answer)
+        return self.answer_scorer(task, ground_truth, student_answer)
 
     def _should_run_pairwise_reward(
         self, engine: Any | None, turn_artifacts: list[TurnArtifact]
@@ -885,7 +888,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 teacher_action,
                 aux_caller=aux_caller,
             ),
-            score_answer=self._score_aime_answer,
+            score_answer=self._score_answer,
             compare_all_turns=self.pairwise_compare_all_turns,
         )
         results = await evaluator.evaluate(

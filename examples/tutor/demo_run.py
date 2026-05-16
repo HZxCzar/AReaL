@@ -88,8 +88,8 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
         self.trace_sink.append("leak_check", result.raw_output or result.feedback)
         return result
 
-    def _score_aime_answer(self, task: str, ground_truth: str, student_answer: str):
-        result = super()._score_aime_answer(task, ground_truth, student_answer)
+    def _score_answer(self, task: str, ground_truth: str, student_answer: str):
+        result = super()._score_answer(task, ground_truth, student_answer)
         self.trace_sink.append("judge", result.raw_output)
         self.last_judge_outputs.append(
             {
@@ -112,6 +112,7 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         top_p=config.gconfig.top_p,
         max_completion_tokens=config.gconfig.max_new_tokens,
         max_turns=config.max_turns,
+        answer_scorer=config.answer_scorer,
         enable_thinking=config.enable_thinking,
         aux_mode=auxiliary_model.mode,
         aux_enable_thinking=auxiliary_model.enable_thinking,
@@ -202,6 +203,7 @@ async def _run_one(
             "aux_model": config.auxiliary_model.model,
             "aux_mode": config.auxiliary_model.mode,
             "aux_enable_thinking": config.auxiliary_model.enable_thinking,
+            "answer_scorer": config.answer_scorer,
         },
     }
     sink.dump_json("history.json", workflow.last_history)
