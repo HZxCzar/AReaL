@@ -15,10 +15,10 @@ student_api_key: EMPTY
 student_timeout: 120
 student_max_tokens: 4096
 student_temperature: 0.7
-student_top_p: null
+student_top_p: 0.8
 max_concurrent_students: 4
-api_params_config_path: examples/codecoach/api_params_config.json
-api_params_key: "sglang:30001"
+student_request_params:
+  seed: 42
 work_dir_root: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/codecoach/artifacts
 
 cluster:

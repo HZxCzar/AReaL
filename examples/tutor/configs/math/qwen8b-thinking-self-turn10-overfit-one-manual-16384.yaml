@@ -19,10 +19,10 @@ auxiliary_model:
   timeout: 120
   max_tokens: 16384
   temperature: 0.0
-  top_p: null
+  top_p: 0.8
   max_concurrent_calls: 4
-  api_params_config_path: examples/tutor/api_params_config.json
-  api_params_key: "sglang:30001"
+  request_params:
+    seed: 42
 
 reward:
   success: 2.0

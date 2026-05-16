@@ -118,8 +118,7 @@ def build_workflow(config: TutorConfig, max_concurrency: int) -> TutorAgentWorkf
         aux_temperature=auxiliary_model.temperature,
         aux_top_p=auxiliary_model.top_p,
         max_concurrent_aux_calls=max_concurrency,
-        api_params_config_path=auxiliary_model.api_params_config_path or None,
-        api_params_key=auxiliary_model.api_params_key or None,
+        aux_request_params=auxiliary_model.request_params,
         student_system_prompt=config.student_system_prompt,
         tokenizer_path=config.tokenizer_path,
         model_context_length=config.sglang.context_length,
@@ -141,8 +140,7 @@ def auxiliary_report_config(
         "top_p": auxiliary_model.top_p,
         "max_concurrent_calls": auxiliary_model.max_concurrent_calls,
         "effective_max_concurrent_calls": max_concurrency,
-        "api_params_config_path": auxiliary_model.api_params_config_path,
-        "api_params_key": auxiliary_model.api_params_key,
+        "request_params": auxiliary_model.request_params,
     }
     request_config = getattr(
         getattr(workflow, "aux_caller", None), "request_config", None

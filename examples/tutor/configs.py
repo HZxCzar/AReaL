@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Any
 
 from areal.api.cli_args import GRPOConfig
 from examples.tutor.prompts import (
@@ -38,8 +39,15 @@ class TutorAuxiliaryModelConfig:
     temperature: float = field(default=0.7)
     top_p: float | None = field(default=None)
     max_concurrent_calls: int = field(default=8)
-    api_params_config_path: str = field(default="")
-    api_params_key: str = field(default="")
+    request_params: dict[str, Any] = field(
+        default_factory=dict,
+        metadata={
+            "help": (
+                "Additional OpenAI chat.completions.create keyword arguments for "
+                "mode='api'. Use extra_body for backend-specific parameters."
+            )
+        },
+    )
 
 
 @dataclass

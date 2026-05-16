@@ -123,14 +123,7 @@ python3 examples/tutor/train.py \
 Update `aux_base_url` and `aux_model` in the config to point at the external student
 and leak-check service.
 
-The example reads shared endpoint parameters from:
-
-- `examples/tutor/api_params_config.json`
-
-If needed, override:
-
-- `api_params_config_path`
-- optional `api_params_key`
-
-The resolution order matches the old tutor filter script:
-`default` -> inferred or explicit endpoint key -> workflow fields.
+Set auxiliary API call parameters directly under `auxiliary_model` in YAML. Common
+parameters use dedicated fields such as `max_tokens`, `temperature`, and `top_p`; put
+additional OpenAI request kwargs under `request_params`, including backend-specific
+`extra_body` values.

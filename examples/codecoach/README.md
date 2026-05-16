@@ -42,13 +42,7 @@ python3 examples/codecoach/train.py \
 Update `student_base_url` and `student_model` in the config to point at the external
 student service.
 
-The example reads shared endpoint parameters from:
-
-- `examples/codecoach/api_params_config.json`
-
-If needed, override:
-
-- `api_params_config_path`
-- optional `api_params_key`
-
-The workflow will merge `default` and endpoint-specific entries, including `extra_body`.
+Set student API call parameters directly in YAML. Common parameters use dedicated
+fields such as `student_max_tokens`, `student_temperature`, and `student_top_p`; put
+additional OpenAI request kwargs under `student_request_params`, including
+backend-specific `extra_body` values.

@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlparse
 
 from examples.common.chat_budget import ChatContextBudget
 
@@ -26,97 +23,30 @@ class AuxModelConfig:
     temperature: float | None = None
     top_p: float | None = None
     max_concurrency: int = 8
-    api_params_config_path: str | None = None
-    api_params_key: str | None = None
+    request_params: dict[str, Any] = field(default_factory=dict)
     tokenizer_path: str | None = None
     context_length: int | None = None
     context_window_margin: int = 256
 
 
-def load_api_params_config(path: str | Path | None) -> dict[str, Any]:
-    if path is None:
-        return {}
-    resolved = Path(path).resolve()
-    with resolved.open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    if not isinstance(data, dict):
-        raise ValueError(
-            f"Expected api params config to be a JSON object, got: {type(data)!r}"
-        )
-    return data
-
-
-def infer_api_params_key(base_url: str, model: str) -> str | None:
-    parsed = urlparse(base_url)
-    host = (parsed.hostname or "").lower()
-    port = parsed.port
-    if host in {"127.0.0.1", "localhost", "0.0.0.0"} and port is not None:
-        return f"sglang:{port}"
-    if "openrouter.ai" in host:
-        return f"openrouter:{model}"
-    if host in {"api.openai.com", "openai.com"}:
-        return f"openai:{model}"
-    if "api.together.xyz" in host:
-        return f"together:{model}"
-    if "api.sambanova.ai" in host:
-        return f"sambanova:{model}"
-    if "ark.cn-beijing.volces.com" in host:
-        return f"doubao:{model}"
-    return None
-
-
-def split_endpoint_config(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    base = dict(entry)
-    extra_body = base.pop("extra_body", {})
-    if extra_body is None:
-        extra_body = {}
-    if not isinstance(extra_body, dict):
+def resolve_request_config(config: AuxModelConfig) -> dict[str, Any]:
+    resolved = dict(config.request_params)
+    extra_body = resolved.get("extra_body")
+    if extra_body is not None and not isinstance(extra_body, dict):
         raise ValueError(f"Expected extra_body to be a dict, got: {type(extra_body)!r}")
-    return base, dict(extra_body)
-
-
-def resolve_endpoint_request_config(config: AuxModelConfig) -> dict[str, Any]:
-    api_params_config = load_api_params_config(config.api_params_config_path)
-    resolved: dict[str, Any] = {
-        "temperature": 0.0,
-        "top_p": 1.0,
-        "max_tokens": 32768,
-    }
-    resolved_extra_body: dict[str, Any] = {}
-    applied_keys: list[str] = []
-
-    default_entry = api_params_config.get("default")
-    if isinstance(default_entry, dict):
-        default_base, default_extra = split_endpoint_config(default_entry)
-        resolved.update(default_base)
-        resolved_extra_body.update(default_extra)
-        applied_keys.append("default")
-
-    endpoint_key = config.api_params_key or infer_api_params_key(config.base_url, config.model)
-    endpoint_entry = api_params_config.get(endpoint_key) if endpoint_key else None
-    if isinstance(endpoint_entry, dict):
-        endpoint_base, endpoint_extra = split_endpoint_config(endpoint_entry)
-        resolved.update(endpoint_base)
-        resolved_extra_body.update(endpoint_extra)
-        applied_keys.append(endpoint_key)
-
     if config.temperature is not None:
         resolved["temperature"] = config.temperature
     if config.top_p is not None:
         resolved["top_p"] = config.top_p
     if config.max_tokens is not None:
         resolved["max_tokens"] = config.max_tokens
-
-    resolved["extra_body"] = resolved_extra_body
-    resolved["resolved_api_params_key"] = endpoint_key
-    resolved["applied_api_params_keys"] = applied_keys
     return resolved
 
 
 class AsyncLLMCaller:
     def __init__(self, config: AuxModelConfig):
         self.config = config
-        self.request_config = resolve_endpoint_request_config(config)
+        self.request_config = resolve_request_config(config)
         self.context_budget = ChatContextBudget(
             tokenizer_path=config.tokenizer_path,
             context_length=config.context_length,
@@ -138,17 +68,19 @@ class AsyncLLMCaller:
         request_kwargs = {
             key: value
             for key, value in self.request_config.items()
-            if key
-            not in {"extra_body", "resolved_api_params_key", "applied_api_params_keys"}
-            and value is not None
+            if key != "extra_body" and value is not None
         }
         if "max_tokens" in request_kwargs:
-            request_kwargs["max_completion_tokens"] = int(request_kwargs.pop("max_tokens"))
+            request_kwargs["max_completion_tokens"] = int(
+                request_kwargs.pop("max_tokens")
+            )
         requested_max_completion_tokens = request_kwargs.get("max_completion_tokens")
         if requested_max_completion_tokens is not None:
-            safe_max_completion_tokens, prompt_tokens = self.context_budget.clamp_max_completion_tokens(
-                messages,
-                int(requested_max_completion_tokens),
+            (
+                safe_max_completion_tokens,
+                prompt_tokens,
+            ) = self.context_budget.clamp_max_completion_tokens(
+                messages, int(requested_max_completion_tokens)
             )
             if safe_max_completion_tokens <= 0:
                 raise RuntimeError(
