@@ -126,6 +126,32 @@ def build_workflow(config: TutorConfig, max_concurrency: int) -> TutorAgentWorkf
     )
 
 
+def auxiliary_report_config(
+    config: TutorConfig, workflow: TutorAgentWorkflow, max_concurrency: int
+) -> dict[str, Any]:
+    auxiliary_model = config.auxiliary_model
+    report = {
+        "mode": auxiliary_model.mode,
+        "enable_thinking": auxiliary_model.enable_thinking,
+        "base_url": auxiliary_model.base_url,
+        "model": auxiliary_model.model,
+        "timeout": auxiliary_model.timeout,
+        "max_tokens": auxiliary_model.max_tokens,
+        "temperature": auxiliary_model.temperature,
+        "top_p": auxiliary_model.top_p,
+        "max_concurrent_calls": auxiliary_model.max_concurrent_calls,
+        "effective_max_concurrent_calls": max_concurrency,
+        "api_params_config_path": auxiliary_model.api_params_config_path,
+        "api_params_key": auxiliary_model.api_params_key,
+    }
+    request_config = getattr(
+        getattr(workflow, "aux_caller", None), "request_config", None
+    )
+    if request_config is not None:
+        report["resolved_request_config"] = request_config
+    return report
+
+
 def resolve_splits(requested: list[str], dataset: DatasetDict) -> list[str]:
     if "all" in requested:
         return list(dataset.keys())
@@ -308,6 +334,8 @@ async def main_async(args: argparse.Namespace) -> None:
         "input": str(input_path),
         "output": str(output_path) if output_path is not None else None,
         "config": str(Path(args.config).resolve()),
+        "answer_scorer": config.answer_scorer,
+        "auxiliary_model": auxiliary_report_config(config, workflow, max_concurrency),
         "splits": {},
         "attempts": attempts,
         "keep_on_error": bool(args.keep_on_error),

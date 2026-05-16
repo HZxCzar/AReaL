@@ -72,10 +72,28 @@ python3 examples/tutor/filter_pre_solved.py \
   --overwrite
 ```
 
+For MATH rows, use the MATH dataset path and scorer. The filter calls the auxiliary
+student with `auxiliary_model` settings from the resolved config (`base_url`, `model`,
+`max_tokens`, `temperature`, `top_p`, timeout, API params, and concurrency):
+
+```bash
+python3 examples/tutor/filter_pre_solved.py \
+  --config examples/tutor/config.yaml \
+  --input examples/tutor/data/math_dataset \
+  --output examples/tutor/data/math_dataset_no_pre_solve \
+  --splits train \
+  --attempts 1 \
+  --overwrite \
+  answer_scorer=math \
+  train_dataset.path=examples/tutor/data/math_dataset \
+  valid_dataset.path=examples/tutor/data/math_dataset
+```
+
 The output dataset keeps unselected splits unchanged, so both `train_dataset.path` and
 `valid_dataset.path` can point to the filtered dataset directory. Increase `--attempts`
 to drop a row if any sampled initial student attempt solves it. The script also writes a
-`*_pre_solve_filter_report.json` file with kept, dropped, and error ids.
+`*_pre_solve_filter_report.json` file with kept, dropped, and error ids, plus the
+resolved answer scorer and auxiliary request config used for the run.
 
 ## Manual human tutor probe
 

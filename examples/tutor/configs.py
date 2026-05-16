@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from typing import Literal
 
 from areal.api.cli_args import GRPOConfig
 from examples.tutor.prompts import (
@@ -80,7 +79,7 @@ class TutorConfig(GRPOConfig):
         default="examples.tutor.workflow.TutorAgentWorkflow",
         metadata={"help": "Evaluation workflow import path."},
     )
-    answer_scorer: Literal["aime", "math"] = field(
+    answer_scorer: str = field(
         default="aime",
         metadata={
             "help": "Answer scorer used by tutor workflow.",

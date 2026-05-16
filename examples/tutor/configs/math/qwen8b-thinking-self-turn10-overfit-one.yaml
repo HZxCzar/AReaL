@@ -1,5 +1,5 @@
 experiment_name: tutor
-trial_name: qwen8b-thinking-self-turn10-overfit-one-prm-ep200
+trial_name: qwen8b-thinking-self-turn10-overfit-one-prm-ep200-manual
 
 seed: 1
 enable_offload: false
@@ -8,16 +8,21 @@ tokenizer_path: ${actor.path}
 
 workflow: examples.tutor.workflow.TutorAgentWorkflow
 eval_workflow: ${workflow}
+answer_scorer: math
 max_turns: 10
 enable_thinking: true
 
 auxiliary_model:
-  mode: self
-  enable_thinking: false
+  base_url: http://127.0.0.1:30001/v1
+  model: default
+  api_key: EMPTY
+  timeout: 120
   max_tokens: 1024
   temperature: 0.0
   top_p: null
   max_concurrent_calls: 4
+  api_params_config_path: examples/tutor/api_params_config.json
+  api_params_key: "sglang:30001"
 
 reward:
   success: 2.0
@@ -36,7 +41,7 @@ reward:
     compare_all_turns: true
 
 debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor/debug_traces/${experiment_name}/${trial_name}
-debug_trace_every_n_rollouts: 1
+debug_trace_every_n_rollouts: 10
 
 cluster:
   n_nodes: 1
@@ -172,7 +177,7 @@ train_dataset:
   shuffle: true
   pin_memory: false
   num_workers: 0
-  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/aime_dataset_one_sample
+  path: examples/tutor/data/math_dataset
   type: rl
   max_length: 16384
 
@@ -180,7 +185,7 @@ valid_dataset:
   batch_size: 8
   pin_memory: false
   num_workers: 0
-  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/aime_dataset_one_sample
+  path: examples/tutor/data/math_dataset
   type: rl
 
 saver:
