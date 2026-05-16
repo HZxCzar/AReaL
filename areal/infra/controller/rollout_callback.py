@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import time
 from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any
@@ -9,6 +10,10 @@ import requests
 from areal.api import ParamSpec, WeightUpdateMeta
 from areal.infra.rpc.serialization import serialize_value
 from areal.infra.utils.concurrent import get_executor
+from areal.infra.utils.weight_update_debug import (
+    exception_fields,
+    log_weight_update_debug,
+)
 from areal.utils import logging
 
 logger = logging.getLogger(__name__)
@@ -47,6 +52,14 @@ class RolloutCallback:
             Response JSON from controller
         """
         url = f"http://{self.controller_addr}{endpoint}"
+        tik = time.perf_counter()
+        log_weight_update_debug(
+            "rollout_callback.post.start",
+            endpoint=endpoint,
+            url=url,
+            timeout=self.request_timeout,
+            payload_keys=sorted((payload or {}).keys()),
+        )
         try:
             resp = requests.post(
                 url,
@@ -54,8 +67,24 @@ class RolloutCallback:
                 timeout=self.request_timeout,
             )
             resp.raise_for_status()
-            return resp.json()
+            result = resp.json()
+            log_weight_update_debug(
+                "rollout_callback.post.done",
+                endpoint=endpoint,
+                url=url,
+                elapsed=time.perf_counter() - tik,
+                status_code=resp.status_code,
+                result=result,
+            )
+            return result
         except requests.RequestException as e:
+            log_weight_update_debug(
+                "rollout_callback.post.error",
+                endpoint=endpoint,
+                url=url,
+                elapsed=time.perf_counter() - tik,
+                **exception_fields(e),
+            )
             logger.error(f"Callback to {url} failed: {e}")
             raise
 
@@ -164,6 +193,7 @@ class RolloutCallback:
         Future[None]
             Future that completes when controller finishes loading weights
         """
+        log_weight_update_debug("rollout_callback.update_weights_from_disk.submit", meta=meta)
         payload = {"meta": serialize_value(meta)}
         return self._post_nowait_void("/callback/update_weights_disk", payload)
 

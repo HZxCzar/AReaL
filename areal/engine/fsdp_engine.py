@@ -84,6 +84,10 @@ from areal.engine.fsdp_utils.optimizer import AnyPrecisionAdamW, PerLayerOptimWr
 from areal.engine.fsdp_utils.parallel import ParallelHelper, parallelize_model
 from areal.infra.dist_rollout import DistRolloutCoordinator
 from areal.infra.platforms import current_platform
+from areal.infra.utils.weight_update_debug import (
+    exception_fields,
+    log_weight_update_debug,
+)
 from areal.models.fsdp.ulysses import (
     set_ulysses_sequence_parallel_group,
     ulysses_pad,
@@ -1323,31 +1327,211 @@ class FSDPEngine(TrainEngine):
 
     @trace_perf("fsdp_engine.update_weights_from_disk", category="io")
     def _update_weights_from_disk(self, meta: WeightUpdateMeta):
+        tik = time.perf_counter()
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        log_weight_update_debug(
+            "fsdp.update_weights_from_disk.start",
+            meta=meta,
+            experiment_name=self.config.experiment_name,
+            trial_name=self.config.trial_name,
+            rank=rank,
+            world_size=world_size,
+            model_version=self.get_version(),
+        )
         fut = Future()
 
-        if dist.get_rank() == 0:
-            self.rollout_engine.pause_generation()
-            fut = self.rollout_engine.update_weights_from_disk(meta)
+        try:
+            if rank == 0:
+                pause_tik = time.perf_counter()
+                log_weight_update_debug(
+                    "fsdp.update_weights_from_disk.pause_generation.start",
+                    meta=meta,
+                    experiment_name=self.config.experiment_name,
+                    trial_name=self.config.trial_name,
+                    rank=rank,
+                )
+                self.rollout_engine.pause_generation()
+                log_weight_update_debug(
+                    "fsdp.update_weights_from_disk.pause_generation.done",
+                    meta=meta,
+                    experiment_name=self.config.experiment_name,
+                    trial_name=self.config.trial_name,
+                    rank=rank,
+                    elapsed=time.perf_counter() - pause_tik,
+                )
 
-        assert meta.path is not None
-        self._save_model_to_hf(meta.path, self.tokenizer, self.processor)
-        # dist.barrier() are called when _save_model_to_hf finished
+                submit_tik = time.perf_counter()
+                log_weight_update_debug(
+                    "fsdp.update_weights_from_disk.rollout_submit.start",
+                    meta=meta,
+                    experiment_name=self.config.experiment_name,
+                    trial_name=self.config.trial_name,
+                    rank=rank,
+                )
+                fut = self.rollout_engine.update_weights_from_disk(meta)
+                log_weight_update_debug(
+                    "fsdp.update_weights_from_disk.rollout_submit.done",
+                    meta=meta,
+                    experiment_name=self.config.experiment_name,
+                    trial_name=self.config.trial_name,
+                    rank=rank,
+                    elapsed=time.perf_counter() - submit_tik,
+                )
 
-        if dist.get_rank() == 0:
-            update_name = names.update_weights_from_disk(
-                self.config.experiment_name,
-                self.config.trial_name,
-                self.get_version(),
+            assert meta.path is not None
+            save_tik = time.perf_counter()
+            log_weight_update_debug(
+                "fsdp.update_weights_from_disk.save_hf.start",
+                meta=meta,
+                experiment_name=self.config.experiment_name,
+                trial_name=self.config.trial_name,
+                rank=rank,
+                path=meta.path,
             )
-            name_resolve.add(
-                update_name, str(datetime.now().timestamp()), keepalive_ttl=120
+            self._save_model_to_hf(meta.path, self.tokenizer, self.processor)
+            log_weight_update_debug(
+                "fsdp.update_weights_from_disk.save_hf.done",
+                meta=meta,
+                experiment_name=self.config.experiment_name,
+                trial_name=self.config.trial_name,
+                rank=rank,
+                path=meta.path,
+                elapsed=time.perf_counter() - save_tik,
+            )
+            # dist.barrier() are called when _save_model_to_hf finished
+
+            if rank == 0:
+                update_name = names.update_weights_from_disk(
+                    self.config.experiment_name,
+                    self.config.trial_name,
+                    self.get_version(),
+                )
+                log_weight_update_debug(
+                    "fsdp.update_weights_from_disk.name_resolve_add.start",
+                    meta=meta,
+                    experiment_name=self.config.experiment_name,
+                    trial_name=self.config.trial_name,
+                    rank=rank,
+                    update_name=update_name,
+                )
+                name_resolve.add(
+                    update_name, str(datetime.now().timestamp()), keepalive_ttl=120
+                )
+                log_weight_update_debug(
+                    "fsdp.update_weights_from_disk.name_resolve_add.done",
+                    meta=meta,
+                    experiment_name=self.config.experiment_name,
+                    trial_name=self.config.trial_name,
+                    rank=rank,
+                    update_name=update_name,
+                )
+
+                wait_tik = time.perf_counter()
+                log_weight_update_debug(
+                    "fsdp.update_weights_from_disk.rollout_future_wait.start",
+                    meta=meta,
+                    experiment_name=self.config.experiment_name,
+                    trial_name=self.config.trial_name,
+                    rank=rank,
+                    update_name=update_name,
+                )
+                try:
+                    fut.result()
+                except Exception as exc:
+                    log_weight_update_debug(
+                        "fsdp.update_weights_from_disk.rollout_future_wait.error",
+                        meta=meta,
+                        experiment_name=self.config.experiment_name,
+                        trial_name=self.config.trial_name,
+                        rank=rank,
+                        update_name=update_name,
+                        elapsed=time.perf_counter() - wait_tik,
+                        **exception_fields(exc),
+                    )
+                    raise
+                log_weight_update_debug(
+                    "fsdp.update_weights_from_disk.rollout_future_wait.done",
+                    meta=meta,
+                    experiment_name=self.config.experiment_name,
+                    trial_name=self.config.trial_name,
+                    rank=rank,
+                    update_name=update_name,
+                    elapsed=time.perf_counter() - wait_tik,
+                )
+
+                continue_tik = time.perf_counter()
+                log_weight_update_debug(
+                    "fsdp.update_weights_from_disk.continue_generation.start",
+                    meta=meta,
+                    experiment_name=self.config.experiment_name,
+                    trial_name=self.config.trial_name,
+                    rank=rank,
+                )
+                self.rollout_engine.continue_generation()
+                log_weight_update_debug(
+                    "fsdp.update_weights_from_disk.continue_generation.done",
+                    meta=meta,
+                    experiment_name=self.config.experiment_name,
+                    trial_name=self.config.trial_name,
+                    rank=rank,
+                    elapsed=time.perf_counter() - continue_tik,
+                )
+
+            sync_tik = time.perf_counter()
+            log_weight_update_debug(
+                "fsdp.update_weights_from_disk.platform_synchronize.start",
+                meta=meta,
+                experiment_name=self.config.experiment_name,
+                trial_name=self.config.trial_name,
+                rank=rank,
+            )
+            current_platform.synchronize()
+            log_weight_update_debug(
+                "fsdp.update_weights_from_disk.platform_synchronize.done",
+                meta=meta,
+                experiment_name=self.config.experiment_name,
+                trial_name=self.config.trial_name,
+                rank=rank,
+                elapsed=time.perf_counter() - sync_tik,
             )
 
-            fut.result()
-            self.rollout_engine.continue_generation()
-
-        current_platform.synchronize()
-        dist.barrier(group=self.cpu_group)
+            barrier_tik = time.perf_counter()
+            log_weight_update_debug(
+                "fsdp.update_weights_from_disk.barrier.start",
+                meta=meta,
+                experiment_name=self.config.experiment_name,
+                trial_name=self.config.trial_name,
+                rank=rank,
+            )
+            dist.barrier(group=self.cpu_group)
+            log_weight_update_debug(
+                "fsdp.update_weights_from_disk.barrier.done",
+                meta=meta,
+                experiment_name=self.config.experiment_name,
+                trial_name=self.config.trial_name,
+                rank=rank,
+                elapsed=time.perf_counter() - barrier_tik,
+            )
+            log_weight_update_debug(
+                "fsdp.update_weights_from_disk.done",
+                meta=meta,
+                experiment_name=self.config.experiment_name,
+                trial_name=self.config.trial_name,
+                rank=rank,
+                elapsed=time.perf_counter() - tik,
+            )
+        except Exception as exc:
+            log_weight_update_debug(
+                "fsdp.update_weights_from_disk.error",
+                meta=meta,
+                experiment_name=self.config.experiment_name,
+                trial_name=self.config.trial_name,
+                rank=rank,
+                elapsed=time.perf_counter() - tik,
+                **exception_fields(exc),
+            )
+            raise
 
     def _save_model_to_hf(
         self,

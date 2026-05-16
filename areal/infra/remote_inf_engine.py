@@ -46,6 +46,10 @@ from areal.infra.utils.concurrent import get_executor
 from areal.infra.utils.http import arequest_with_retry, get_default_connector
 from areal.infra.utils.launcher import wait_llm_server_addrs
 from areal.infra.utils.proc import kill_process_tree
+from areal.infra.utils.weight_update_debug import (
+    exception_fields,
+    log_weight_update_debug,
+)
 from areal.utils import logging, name_resolve, names
 from areal.utils.data import concat_padded_tensors
 from areal.utils.dynamic_import import import_from_string
@@ -1010,6 +1014,16 @@ class RemoteInfEngine(InferenceEngine):
                 "Experiment and trial names must be set for disk-based weight updates."
             )
 
+        log_weight_update_debug(
+            "remote_inf.update_weights_from_disk.submit",
+            meta=meta,
+            experiment_name=self.config.experiment_name,
+            trial_name=self.config.trial_name,
+            model_version=self.get_version(),
+            addresses=self.addresses,
+            request_retries=self.config.request_retries,
+            request_timeout=self.config.request_timeout,
+        )
         fut = get_executor().submit(
             _update_weights_from_disk,
             self.backend,
@@ -1023,14 +1037,47 @@ class RemoteInfEngine(InferenceEngine):
         )
 
         def callback(fut):
-            respond_time = fut.result()
+            try:
+                respond_time = fut.result()
+            except Exception as exc:
+                log_weight_update_debug(
+                    "remote_inf.update_weights_from_disk.callback_error",
+                    meta=meta,
+                    experiment_name=self.config.experiment_name,
+                    trial_name=self.config.trial_name,
+                    elapsed=time.perf_counter() - tik,
+                    **exception_fields(exc),
+                )
+                raise
             self.logger.info(
                 f"Loading weights from disk done "
                 f"in {(time.perf_counter() - tik):.2f}s. "
                 f"Respond time: {respond_time:.2f}s."
             )
+            log_weight_update_debug(
+                "remote_inf.update_weights_from_disk.callback_done",
+                meta=meta,
+                experiment_name=self.config.experiment_name,
+                trial_name=self.config.trial_name,
+                elapsed=time.perf_counter() - tik,
+                respond_time=respond_time,
+            )
             if meta.clear_checkpoint_after_load:
+                log_weight_update_debug(
+                    "remote_inf.update_weights_from_disk.cleanup_start",
+                    meta=meta,
+                    experiment_name=self.config.experiment_name,
+                    trial_name=self.config.trial_name,
+                    path=meta.path,
+                )
                 shutil.rmtree(meta.path, ignore_errors=True)
+                log_weight_update_debug(
+                    "remote_inf.update_weights_from_disk.cleanup_done",
+                    meta=meta,
+                    experiment_name=self.config.experiment_name,
+                    trial_name=self.config.trial_name,
+                    path=meta.path,
+                )
 
         fut.add_done_callback(callback)
         return fut
@@ -1334,16 +1381,74 @@ def _update_weights_from_disk(
     request_timeout: float,
 ):
     """Helper to update weights from disk in a separate process."""
+    log_weight_update_debug(
+        "remote_inf.update_weights_from_disk.worker.start",
+        meta=meta,
+        experiment_name=experiment_name,
+        trial_name=trial_name,
+        model_version=model_version,
+        addresses=addresses,
+        request_retries=request_retries,
+        request_timeout=request_timeout,
+    )
 
     async def _fn():
+        tik = time.perf_counter()
         update_name = names.update_weights_from_disk(
             experiment_name, trial_name, model_version
         )
-        save_timestamp = float(name_resolve.wait(update_name, timeout=120))
+        log_weight_update_debug(
+            "remote_inf.update_weights_from_disk.wait_save.start",
+            meta=meta,
+            experiment_name=experiment_name,
+            trial_name=trial_name,
+            model_version=model_version,
+            update_name=update_name,
+        )
+        try:
+            save_timestamp = float(name_resolve.wait(update_name, timeout=120))
+        except Exception as exc:
+            log_weight_update_debug(
+                "remote_inf.update_weights_from_disk.wait_save.error",
+                meta=meta,
+                experiment_name=experiment_name,
+                trial_name=trial_name,
+                model_version=model_version,
+                update_name=update_name,
+                elapsed=time.perf_counter() - tik,
+                **exception_fields(exc),
+            )
+            raise
         load_timestamp = datetime.now().timestamp()
+        log_weight_update_debug(
+            "remote_inf.update_weights_from_disk.wait_save.done",
+            meta=meta,
+            experiment_name=experiment_name,
+            trial_name=trial_name,
+            model_version=model_version,
+            update_name=update_name,
+            save_timestamp=save_timestamp,
+            wait_elapsed=time.perf_counter() - tik,
+        )
 
         # Get requests from backend with version for LoRA name
         weight_reqs = backend.build_disk_weight_update_requests(meta)
+        log_weight_update_debug(
+            "remote_inf.update_weights_from_disk.requests_built",
+            meta=meta,
+            experiment_name=experiment_name,
+            trial_name=trial_name,
+            model_version=model_version,
+            addresses=addresses,
+            requests=[
+                {
+                    "endpoint": req.endpoint,
+                    "method": req.method,
+                    "payload": req.payload,
+                }
+                for req in weight_reqs.requests
+            ],
+        )
 
         # Execute all requests
         async with aiohttp.ClientSession(
@@ -1351,7 +1456,20 @@ def _update_weights_from_disk(
             read_bufsize=1024 * 1024 * 10,
             connector=get_default_connector(),
         ) as session:
-            for http_req in weight_reqs.requests:
+            for req_idx, http_req in enumerate(weight_reqs.requests):
+                req_tik = time.perf_counter()
+                log_weight_update_debug(
+                    "remote_inf.update_weights_from_disk.request_batch.start",
+                    meta=meta,
+                    experiment_name=experiment_name,
+                    trial_name=trial_name,
+                    model_version=model_version,
+                    request_index=req_idx,
+                    endpoint=http_req.endpoint,
+                    method=http_req.method,
+                    payload=http_req.payload,
+                    addresses=addresses,
+                )
                 jobs = [
                     arequest_with_retry(
                         session=session,
@@ -1361,14 +1479,62 @@ def _update_weights_from_disk(
                         method=http_req.method,
                         max_retries=request_retries,
                         timeout=request_timeout,
+                        debug_label=f"disk_weight_update:{req_idx}",
+                        debug_meta=meta,
                     )
                     for addr in addresses
                 ]
-                await asyncio.gather(*jobs)
+                try:
+                    results = await asyncio.gather(*jobs)
+                except Exception as exc:
+                    log_weight_update_debug(
+                        "remote_inf.update_weights_from_disk.request_batch.error",
+                        meta=meta,
+                        experiment_name=experiment_name,
+                        trial_name=trial_name,
+                        model_version=model_version,
+                        request_index=req_idx,
+                        endpoint=http_req.endpoint,
+                        elapsed=time.perf_counter() - req_tik,
+                        **exception_fields(exc),
+                    )
+                    raise
+                log_weight_update_debug(
+                    "remote_inf.update_weights_from_disk.request_batch.done",
+                    meta=meta,
+                    experiment_name=experiment_name,
+                    trial_name=trial_name,
+                    model_version=model_version,
+                    request_index=req_idx,
+                    endpoint=http_req.endpoint,
+                    elapsed=time.perf_counter() - req_tik,
+                    result_types=[type(result).__name__ for result in results],
+                )
 
+        log_weight_update_debug(
+            "remote_inf.update_weights_from_disk.worker.done",
+            meta=meta,
+            experiment_name=experiment_name,
+            trial_name=trial_name,
+            model_version=model_version,
+            elapsed=time.perf_counter() - tik,
+            respond_time=load_timestamp - save_timestamp,
+        )
         return load_timestamp - save_timestamp
 
-    return uvloop.run(_fn())
+    try:
+        return uvloop.run(_fn())
+    except Exception as exc:
+        log_weight_update_debug(
+            "remote_inf.update_weights_from_disk.worker.error",
+            meta=meta,
+            experiment_name=experiment_name,
+            trial_name=trial_name,
+            model_version=model_version,
+            addresses=addresses,
+            **exception_fields(exc),
+        )
+        raise
 
 
 def _init_weights_update_group_remote(
