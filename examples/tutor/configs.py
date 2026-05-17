@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-from areal.api.cli_args import GRPOConfig
+from areal.api.cli_args import EvaluatorConfig, GRPOConfig
 from examples.tutor.prompts import (
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
     DEFAULT_STUDENT_SYSTEM_PROMPT,
@@ -62,6 +62,19 @@ class TutorPairwiseRewardConfig:
 
 
 @dataclass
+class TutorEvaluatorConfig(EvaluatorConfig):
+    max_samples: int | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Maximum number of validation samples to evaluate. "
+                "None or non-positive values evaluate the full validation set."
+            )
+        },
+    )
+
+
+@dataclass
 class TutorRewardConfig:
     success: float = field(default=1.0)
     leak_penalty: float = field(default=-1.0)
@@ -104,6 +117,7 @@ class TutorConfig(GRPOConfig):
     auxiliary_model: TutorAuxiliaryModelConfig = field(
         default_factory=TutorAuxiliaryModelConfig
     )
+    evaluator: TutorEvaluatorConfig = field(default_factory=TutorEvaluatorConfig)
     reward: TutorRewardConfig = field(default_factory=TutorRewardConfig)
     teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
     student_system_prompt: str = field(default=DEFAULT_STUDENT_SYSTEM_PROMPT)

@@ -1,5 +1,7 @@
 import pathlib
+import random
 import sys
+from copy import deepcopy
 from datetime import datetime
 
 sys.path.append(str(pathlib.Path(__file__).parent))
@@ -30,11 +32,25 @@ def main(args):
         dataset_config=config.train_dataset,
         tokenizer=tokenizer,
     )
+    valid_dataset_config = config.valid_dataset
+    eval_max_samples = config.evaluator.max_samples
+    if eval_max_samples is not None:
+        eval_max_samples = int(eval_max_samples)
+        if eval_max_samples <= 0:
+            eval_max_samples = None
+    if eval_max_samples is not None and valid_dataset_config is not None:
+        valid_dataset_config = deepcopy(valid_dataset_config)
+        valid_dataset_config.scheduling_spec = None
+
     valid_dataset = get_custom_dataset(
         split="test",
-        dataset_config=config.valid_dataset,
+        dataset_config=valid_dataset_config,
         tokenizer=tokenizer,
     )
+    if eval_max_samples is not None and eval_max_samples < len(valid_dataset):
+        rng = random.Random(config.seed)
+        eval_indices = sorted(rng.sample(range(len(valid_dataset)), k=eval_max_samples))
+        valid_dataset = valid_dataset.select(eval_indices)
 
     workflow_kwargs = dict(
         gconfig=config.gconfig,

@@ -204,9 +204,10 @@ evaluator:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
-  freq_epochs: 10
-  freq_steps: null
+  freq_epochs: null
+  freq_steps: 50
   freq_secs: null
+  max_samples: 32
 
 stats_logger:
   experiment_name: ${experiment_name}
