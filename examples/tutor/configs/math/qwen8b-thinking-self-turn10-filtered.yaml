@@ -1,7 +1,7 @@
-experiment_name: tutor
-trial_name: qwen8b-thinking-self-turn10-overfit-one-prm-ep200-manual
+experiment_name: tutor-math
+trial_name: qwen8b-thinking-self-turn10-filtered-ep200
 
-seed: 1
+seed: 42
 enable_offload: false
 total_train_epochs: 200
 tokenizer_path: ${actor.path}
@@ -13,16 +13,11 @@ max_turns: 10
 enable_thinking: true
 
 auxiliary_model:
-  base_url: http://127.0.0.1:30001/v1
-  model: default
-  api_key: EMPTY
-  timeout: 120
-  max_tokens: 16384
+  mode: self
+  enable_thinking: false
+  max_tokens: 1024
   temperature: 0.0
-  top_p: 0.8
   max_concurrent_calls: 4
-  request_params:
-    seed: 42
 
 reward:
   success: 2.0
@@ -122,7 +117,7 @@ actor:
   reward_scaling: 1.0
   reward_bias: 0.0
   kl_ctl: 0.0
-  ppo_n_minibatches: 4
+  ppo_n_minibatches: 2
   recompute_logprob: true
   use_decoupled_loss: true
   behave_imp_weight_cap: 5.0
@@ -170,14 +165,14 @@ sglang:
   mem_fraction_static: 0.75
   enable_lora: ${actor.use_lora}
   max_lora_rank: ${actor.lora_rank}
-  max_loaded_loras: 16
+  max_loaded_loras: 32
 
 train_dataset:
   batch_size: 8
   shuffle: true
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_no_pre_solve_4096
+  path: examples/tutor/data/math_dataset_8b_filter_16384_clean
   type: rl
   max_length: 16384
 
@@ -185,7 +180,7 @@ valid_dataset:
   batch_size: 8
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_no_pre_solve_4096
+  path: examples/tutor/data/math_dataset_8b_filter_16384_clean
   type: rl
 
 saver:

@@ -10,7 +10,8 @@ DEFAULT_TEACHER_SYSTEM_PROMPT = (
     "provide a full solution, reveal the final answer, compute the final count "
     "or subtraction, or write a calculation chain that directly determines the "
     "final answer. The student's answer may be truncated due to length; if so, "
-    "ask them to continue or be brief."
+    "ask them to continue or be brief. The judge extracts the final answer from "
+    "the last \\boxed{...} and checks exact match with the answer key after normalization."
 )
 
 DEFAULT_STUDENT_SYSTEM_PROMPT = (

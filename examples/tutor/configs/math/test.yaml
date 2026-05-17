@@ -1,7 +1,7 @@
-experiment_name: tutor
-trial_name: qwen8b-thinking-self-turn10-overfit-one-prm-ep200-manual
+experiment_name: tutor-math
+trial_name: test
 
-seed: 1
+seed: 42
 enable_offload: false
 total_train_epochs: 200
 tokenizer_path: ${actor.path}
@@ -13,16 +13,18 @@ max_turns: 10
 enable_thinking: true
 
 auxiliary_model:
-  base_url: http://127.0.0.1:30001/v1
+  base_url: http://127.0.0.1:30009/v1
   model: default
   api_key: EMPTY
   timeout: 120
   max_tokens: 1024
   temperature: 0.0
-  top_p: 0.8
   max_concurrent_calls: 4
   request_params:
     seed: 42
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
 
 reward:
   success: 2.0

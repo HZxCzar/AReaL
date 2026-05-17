@@ -1,7 +1,7 @@
-experiment_name: tutor
+experiment_name: tutor-aime
 trial_name: qwen8b-thinking-qwen4b-turn10-pairwise-prm-ep200
 
-seed: 1
+seed: 42
 enable_offload: false
 total_train_epochs: 200
 tokenizer_path: ${actor.path}
