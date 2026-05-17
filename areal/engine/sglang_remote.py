@@ -32,7 +32,6 @@ from areal.api.io_struct import (
 from areal.infra import RemoteInfEngine, RolloutController, WorkflowExecutor
 from areal.infra.platforms import current_platform
 from areal.infra.utils.launcher import TRITON_CACHE_PATH
-from areal.infra.utils.weight_update_debug import log_weight_update_debug
 from areal.utils import perf_tracer, stats_tracker
 from areal.utils.network import format_host_for_url
 
@@ -143,50 +142,20 @@ class SGLangBackend:
                     payload={"lora_name": lora_name, "lora_path": str(meta.path)},
                 )
             ]
-            log_weight_update_debug(
-                "sglang.build_disk_weight_update_requests",
-                meta=meta,
-                mode="lora",
-                endpoint="/load_lora_adapter",
-                lora_name=lora_name,
-                lora_path=str(meta.path),
-                requests=[
-                    {
-                        "endpoint": req.endpoint,
-                        "method": req.method,
-                        "payload": req.payload,
-                    }
-                    for req in requests
-                ],
-            )
             return WeightUpdateRequests(requests=requests)
         else:
             # Full model update
-            requests = [
-                HttpRequest(
-                    endpoint="/update_weights_from_disk",
-                    payload={
-                        "model_path": str(meta.path),
-                        "abort_all_requests": True,
-                    },
-                )
-            ]
-            log_weight_update_debug(
-                "sglang.build_disk_weight_update_requests",
-                meta=meta,
-                mode="full_model",
-                endpoint="/update_weights_from_disk",
-                model_path=str(meta.path),
+            return WeightUpdateRequests(
                 requests=[
-                    {
-                        "endpoint": req.endpoint,
-                        "method": req.method,
-                        "payload": req.payload,
-                    }
-                    for req in requests
-                ],
+                    HttpRequest(
+                        endpoint="/update_weights_from_disk",
+                        payload={
+                            "model_path": str(meta.path),
+                            "abort_all_requests": True,
+                        },
+                    )
+                ]
             )
-            return WeightUpdateRequests(requests=requests)
 
     def build_distributed_weight_update_requests(
         self, meta: WeightUpdateMeta, param_specs: list[ParamSpec]

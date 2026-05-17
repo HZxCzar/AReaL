@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import shutil
 import threading
-import time
 import traceback
 from collections import defaultdict
 from collections.abc import Callable
@@ -38,10 +37,6 @@ from areal.api.cli_args import (
 )
 from areal.infra.rpc.serialization import deserialize_value
 from areal.infra.utils.concurrent import run_async_task
-from areal.infra.utils.weight_update_debug import (
-    exception_fields,
-    log_weight_update_debug,
-)
 from areal.utils import logging, perf_tracer
 from areal.utils.data import cycle_dataloader
 from areal.utils.dynamic_import import import_from_string
@@ -696,95 +691,17 @@ class RolloutController:
         *args,
         **kwargs,
     ) -> list[Any]:
-        meta = kwargs.get("meta")
-        debug_meta = meta if isinstance(meta, WeightUpdateMeta) else None
         tasks = [
-            self._collective_rpc_one(
-                method,
-                worker,
-                rank,
-                engine_name_fn(rank),
-                debug_meta,
+            self.scheduler.async_call_engine(
+                worker_id=worker.id,
+                method=method,
+                engine_name=engine_name_fn(rank),
                 *args,
                 **kwargs,
             )
             for rank, worker in enumerate(workers)
         ]
-        log_weight_update_debug(
-            "rollout_controller.collective.start",
-            meta=debug_meta,
-            method=method,
-            workers=[worker.id for worker in workers],
-        )
-        try:
-            results = await asyncio.gather(*tasks)
-            log_weight_update_debug(
-                "rollout_controller.collective.done",
-                meta=debug_meta,
-                method=method,
-                workers=[worker.id for worker in workers],
-            )
-            return results
-        except Exception as exc:
-            log_weight_update_debug(
-                "rollout_controller.collective.error",
-                meta=debug_meta,
-                method=method,
-                workers=[worker.id for worker in workers],
-                **exception_fields(exc),
-            )
-            raise
-
-    async def _collective_rpc_one(
-        self,
-        method: str,
-        worker: Worker,
-        rank: int,
-        engine_name: str,
-        debug_meta: WeightUpdateMeta | None,
-        *args,
-        **kwargs,
-    ) -> Any:
-        tik = time.perf_counter()
-        log_weight_update_debug(
-            "rollout_controller.collective.rank.start",
-            meta=debug_meta,
-            method=method,
-            rank=rank,
-            worker_id=worker.id,
-            engine_name=engine_name,
-        )
-        try:
-            result = await self.scheduler.async_call_engine(
-                worker_id=worker.id,
-                method=method,
-                engine_name=engine_name,
-                *args,
-                **kwargs,
-            )
-            log_weight_update_debug(
-                "rollout_controller.collective.rank.done",
-                meta=debug_meta,
-                method=method,
-                rank=rank,
-                worker_id=worker.id,
-                engine_name=engine_name,
-                elapsed=time.perf_counter() - tik,
-                result_type=type(result).__name__,
-            )
-            return result
-        except Exception as exc:
-            log_weight_update_debug(
-                "rollout_controller.collective.rank.error",
-                meta=debug_meta,
-                method=method,
-                rank=rank,
-                worker_id=worker.id,
-                engine_name=engine_name,
-                elapsed=time.perf_counter() - tik,
-                **exception_fields(exc),
-            )
-            raise
+        return await asyncio.gather(*tasks)
 
     def _choose_worker(self) -> tuple[Worker, int]:
         """Choose a worker for the next request using round-robin scheduling.
@@ -1112,35 +1029,9 @@ class RolloutController:
         )
 
     async def update_weights_from_disk(self, meta: WeightUpdateMeta):
-        tik = time.perf_counter()
-        log_weight_update_debug(
-            "rollout_controller.update_weights_from_disk.start",
-            meta=meta,
-            workers=[worker.id for worker in self.workers],
-        )
         meta.clear_checkpoint_after_load = False
-        try:
-            await self._collective_rpc_async("update_weights_from_disk", meta=meta)
-            log_weight_update_debug(
-                "rollout_controller.update_weights_from_disk.collective_done",
-                meta=meta,
-                elapsed=time.perf_counter() - tik,
-            )
-            shutil.rmtree(meta.path, ignore_errors=True)
-            log_weight_update_debug(
-                "rollout_controller.update_weights_from_disk.cleanup_done",
-                meta=meta,
-                elapsed=time.perf_counter() - tik,
-                removed_path=meta.path,
-            )
-        except Exception as exc:
-            log_weight_update_debug(
-                "rollout_controller.update_weights_from_disk.error",
-                meta=meta,
-                elapsed=time.perf_counter() - tik,
-                **exception_fields(exc),
-            )
-            raise
+        await self._collective_rpc_async("update_weights_from_disk", meta=meta)
+        shutil.rmtree(meta.path, ignore_errors=True)
 
     async def pause_generation(self):
         await self._collective_rpc_async("pause_generation")

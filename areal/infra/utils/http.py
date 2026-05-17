@@ -6,11 +6,6 @@ from typing import Any
 
 import aiohttp
 
-from areal.api import WeightUpdateMeta
-from areal.infra.utils.weight_update_debug import (
-    exception_fields,
-    log_weight_update_debug,
-)
 from areal.utils import logging
 from areal.utils.network import format_hostport, split_hostport
 
@@ -35,8 +30,6 @@ async def arequest_with_retry(
     timeout: float | None = None,
     retry_delay: float = 1.0,
     verbose=False,
-    debug_label: str | None = None,
-    debug_meta: WeightUpdateMeta | None = None,
 ) -> dict | str | bytes:
     if timeout is None:
         timeout = DEFAULT_REQUEST_TIMEOUT
@@ -48,10 +41,6 @@ async def arequest_with_retry(
     except ValueError:
         base_url = f"http://{addr}"
     url = f"{base_url}{endpoint}"
-    debug_enabled = debug_label is not None or endpoint in {
-        "/load_lora_adapter",
-        "/update_weights_from_disk",
-    }
 
     timeo = aiohttp.ClientTimeout(
         total=timeout,
@@ -68,21 +57,6 @@ async def arequest_with_retry(
         _session = session
 
     for attempt in range(max_retries):
-        attempt_tik = asyncio.get_running_loop().time()
-        if debug_enabled:
-            log_weight_update_debug(
-                "http.request.start",
-                meta=debug_meta,
-                label=debug_label,
-                addr=addr,
-                endpoint=endpoint,
-                url=url,
-                method=method,
-                attempt=attempt + 1,
-                max_retries=max_retries,
-                timeout=timeout,
-                payload=payload,
-            )
         try:
             if verbose:
                 logger.info("enter client session, start sending requests")
@@ -109,38 +83,10 @@ async def arequest_with_retry(
                     res = await response.read()
                 if verbose:
                     logger.info("get http result")
-                if debug_enabled:
-                    log_weight_update_debug(
-                        "http.request.done",
-                        meta=debug_meta,
-                        label=debug_label,
-                        addr=addr,
-                        endpoint=endpoint,
-                        url=url,
-                        method=method,
-                        attempt=attempt + 1,
-                        elapsed=asyncio.get_running_loop().time() - attempt_tik,
-                        content_type=ctype,
-                        result_type=type(res).__name__,
-                    )
                 if session is None:
                     await _session.close()
                 return res
         except (TimeoutError, aiohttp.ClientError, aiohttp.ClientResponseError) as e:
-            if debug_enabled:
-                log_weight_update_debug(
-                    "http.request.error",
-                    meta=debug_meta,
-                    label=debug_label,
-                    addr=addr,
-                    endpoint=endpoint,
-                    url=url,
-                    method=method,
-                    attempt=attempt + 1,
-                    elapsed=asyncio.get_running_loop().time() - attempt_tik,
-                    timeout=timeout,
-                    **exception_fields(e),
-                )
             if isinstance(e, asyncio.TimeoutError):
                 logger.warning(
                     "HTTP request to %s%s timed out after %.2fs (attempt %d/%d)",
