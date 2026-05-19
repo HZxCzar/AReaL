@@ -5,15 +5,18 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+import re
 import shutil
 import subprocess
 import time
 import uuid
+from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import Future
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from logging import Logger
-from threading import Lock
+from threading import Condition, Lock
 from typing import TYPE_CHECKING, Any, Protocol
 
 import aiohttp
@@ -263,6 +266,12 @@ class RemoteInfBackendProtocol(Protocol):
         """
         ...
 
+    def build_lora_unload_request(
+        self, meta: WeightUpdateMeta, version: int
+    ) -> HttpRequest:
+        """Build request to unload a versioned LoRA adapter."""
+        ...
+
     def get_health_check_request(self) -> HttpRequest:
         """Get the health check request.
 
@@ -358,6 +367,15 @@ class RemoteInfEngine(InferenceEngine):
         self._version = 0
 
         self.lock = Lock()
+        self._generation_pause_cond = Condition()
+        self._generation_paused = False
+        self._lora_cond = Condition()
+        self._active_lora_versions: Counter[int] = Counter()
+        self._active_lora_workflows = 0
+        self._loaded_lora_versions: set[int] = set()
+        self._unloading_lora_versions: set[int] = set()
+        self._max_loaded_loras: int | None = None
+        self._warned_unknown_lora_capacity = False
 
         self._workflow_executor: WorkflowExecutor | None = None
         self._initialized = False
@@ -389,6 +407,72 @@ class RemoteInfEngine(InferenceEngine):
             return response.status_code == 200
         except requests.exceptions.RequestException:
             return False
+
+    @staticmethod
+    def _parse_versioned_lora_name(lora_name: str) -> int | None:
+        match = re.search(r"-v(\d+)$", lora_name)
+        return int(match.group(1)) if match is not None else None
+
+    def _record_lora_server_args(self, server_args: dict[str, Any]) -> None:
+        max_loaded_loras = server_args.get("max_loaded_loras")
+        if max_loaded_loras is not None:
+            self._max_loaded_loras = int(max_loaded_loras)
+
+        lora_paths = server_args.get("lora_paths") or []
+        loaded_versions: set[int] = set()
+        for lora_spec in lora_paths:
+            lora_name = str(lora_spec).split("=", 1)[0]
+            version = self._parse_versioned_lora_name(lora_name)
+            if version is not None:
+                loaded_versions.add(version)
+
+        if loaded_versions:
+            with self._lora_cond:
+                self._loaded_lora_versions.update(loaded_versions)
+                self._lora_cond.notify_all()
+
+    def _log_lora_capacity_warning_once(self) -> None:
+        if self._warned_unknown_lora_capacity:
+            return
+        self._warned_unknown_lora_capacity = True
+        self.logger.warning(
+            "LoRA capacity is unknown for this inference engine; "
+            "AReaL will load new LoRA adapters without proactive unload."
+        )
+
+    @contextmanager
+    def lora_version_lease(self, version: int, *, workflow: bool = False):
+        """Keep a LoRA version loaded while a request or workflow may use it."""
+        if not self.config.use_lora:
+            yield
+            return
+
+        with self._lora_cond:
+            self._active_lora_versions[int(version)] += 1
+            if workflow:
+                self._active_lora_workflows += 1
+            self._lora_cond.notify_all()
+        try:
+            yield
+        finally:
+            with self._lora_cond:
+                version = int(version)
+                self._active_lora_versions[version] -= 1
+                if self._active_lora_versions[version] <= 0:
+                    del self._active_lora_versions[version]
+                if workflow:
+                    self._active_lora_workflows -= 1
+                    assert self._active_lora_workflows >= 0
+                self._lora_cond.notify_all()
+
+    def _set_generation_paused(self, paused: bool) -> None:
+        with self._generation_pause_cond:
+            self._generation_paused = paused
+            self._generation_pause_cond.notify_all()
+
+    def is_generation_paused(self) -> bool:
+        with self._generation_pause_cond:
+            return self._generation_paused
 
     def initialize(
         self,
@@ -766,6 +850,7 @@ class RemoteInfEngine(InferenceEngine):
         accumulated_versions = []
         accumulated_routed_experts: list[np.ndarray] = []
         request_lora_version = None
+        request_disable_lora = bool(req.metadata.get("disable_lora", False))
         if self.config.use_lora and "lora_version" in req.metadata:
             try:
                 request_lora_version = int(req.metadata["lora_version"])
@@ -777,6 +862,10 @@ class RemoteInfEngine(InferenceEngine):
                 raise ValueError(
                     "ModelRequest.metadata['lora_version'] must be non-negative."
                 )
+        elif self.config.use_lora and not request_disable_lora:
+            context_lora_version = workflow_context.get().lora_version
+            if context_lora_version is not None:
+                request_lora_version = int(context_lora_version)
 
         # A single "rid" shares the same server to allow KV cache reuse
         if req.rid in self.rid_to_address:
@@ -793,16 +882,16 @@ class RemoteInfEngine(InferenceEngine):
         # Get the shared session from workflow context
         session = await workflow_context.get_aiohttp_session()
 
-        # Deal with rollout interruption
+        # Deal with generation interruption
         stop_reason = None
         ori_max_new_tokens = gconfig.max_new_tokens
         while (
             stop_reason not in ["stop", "tool_calls", "length"]
             and len(accumulated_output_tokens) < ori_max_new_tokens
         ):
-            # Request is interrupted, wait for some time to avoid interfering
-            # with update weights requests
-            while self.workflow_executor.is_paused():
+            # Generation is interrupted, wait for some time to avoid interfering
+            # with full-model weight update requests.
+            while self.is_generation_paused():
                 await asyncio.sleep(0.5)
 
             generation_version = (
@@ -810,9 +899,7 @@ class RemoteInfEngine(InferenceEngine):
                 if request_lora_version is not None
                 else self.get_version()
             )
-            with_lora = self.config.use_lora and not bool(
-                req.metadata.get("disable_lora", False)
-            )
+            with_lora = self.config.use_lora and not request_disable_lora
 
             # Build request using backend
             http_req = self.backend.build_generation_request(
@@ -822,15 +909,21 @@ class RemoteInfEngine(InferenceEngine):
             )
 
             # Loop until the generation is complete
-            result = await arequest_with_retry(
-                session=session,
-                addr=server_addr,
-                endpoint=http_req.endpoint,
-                payload=http_req.payload,
-                method=http_req.method,
-                max_retries=self.config.request_retries,
-                timeout=self.config.request_timeout,
+            lora_lease = (
+                self.lora_version_lease(generation_version)
+                if with_lora
+                else nullcontext()
             )
+            with lora_lease:
+                result = await arequest_with_retry(
+                    session=session,
+                    addr=server_addr,
+                    endpoint=http_req.endpoint,
+                    payload=http_req.payload,
+                    method=http_req.method,
+                    max_retries=self.config.request_retries,
+                    timeout=self.config.request_timeout,
+                )
 
             # Assert response is JSON dict (not text/binary from error pages)
             if not isinstance(result, dict):
@@ -1010,17 +1103,26 @@ class RemoteInfEngine(InferenceEngine):
                 "Experiment and trial names must be set for disk-based weight updates."
             )
 
-        fut = get_executor().submit(
-            _update_weights_from_disk,
-            self.backend,
-            self.config.experiment_name,
-            self.config.trial_name,
-            self.get_version(),
-            self.addresses,
-            meta,
-            self.config.request_retries,
-            self.config.request_timeout,
-        )
+        if meta.use_lora:
+            fut = get_executor().submit(
+                self._update_lora_weights_from_disk,
+                self.config.experiment_name,
+                self.config.trial_name,
+                self.get_version(),
+                meta,
+            )
+        else:
+            fut = get_executor().submit(
+                _update_weights_from_disk,
+                self.backend,
+                self.config.experiment_name,
+                self.config.trial_name,
+                self.get_version(),
+                self.addresses,
+                meta,
+                self.config.request_retries,
+                self.config.request_timeout,
+            )
 
         def callback(fut):
             respond_time = fut.result()
@@ -1034,6 +1136,116 @@ class RemoteInfEngine(InferenceEngine):
 
         fut.add_done_callback(callback)
         return fut
+
+    def _select_inactive_lora_to_unload(
+        self, new_version: int, deadline: float
+    ) -> int | None:
+        while True:
+            with self._lora_cond:
+                if new_version in self._loaded_lora_versions:
+                    return None
+
+                if self._max_loaded_loras is None:
+                    self._log_lora_capacity_warning_once()
+                    return None
+
+                if len(self._loaded_lora_versions) < self._max_loaded_loras:
+                    return None
+
+                candidates = [
+                    version
+                    for version in sorted(self._loaded_lora_versions)
+                    if version not in self._active_lora_versions
+                    and version not in self._unloading_lora_versions
+                    and self._active_lora_workflows == 0
+                ]
+                if candidates:
+                    version = candidates[0]
+                    self._unloading_lora_versions.add(version)
+                    return version
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    active_versions = dict(self._active_lora_versions)
+                    raise TimeoutError(
+                        "Timed out waiting for an inactive LoRA adapter slot. "
+                        f"loaded_versions={sorted(self._loaded_lora_versions)}, "
+                        f"active_versions={active_versions}, "
+                        f"active_workflows={self._active_lora_workflows}, "
+                        f"max_loaded_loras={self._max_loaded_loras}."
+                    )
+                self._lora_cond.wait(timeout=min(1.0, remaining))
+
+    def _run_requests_on_all_servers(self, requests: list[HttpRequest]) -> None:
+        async def _fn():
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self.config.request_timeout),
+                read_bufsize=1024 * 1024 * 10,
+                connector=get_default_connector(),
+            ) as session:
+                for http_req in requests:
+                    jobs = [
+                        arequest_with_retry(
+                            session=session,
+                            addr=addr,
+                            endpoint=http_req.endpoint,
+                            payload=http_req.payload,
+                            method=http_req.method,
+                            max_retries=self.config.request_retries,
+                            timeout=self.config.request_timeout,
+                        )
+                        for addr in self.addresses
+                    ]
+                    await asyncio.gather(*jobs)
+
+        uvloop.run(_fn())
+
+    def _unload_lora_version(self, meta: WeightUpdateMeta, version: int) -> None:
+        unload_req = self.backend.build_lora_unload_request(meta, version)
+        try:
+            self._run_requests_on_all_servers([unload_req])
+        except Exception:
+            with self._lora_cond:
+                self._unloading_lora_versions.discard(version)
+                self._lora_cond.notify_all()
+            raise
+
+        with self._lora_cond:
+            self._loaded_lora_versions.discard(version)
+            self._unloading_lora_versions.discard(version)
+            self._lora_cond.notify_all()
+
+    def _update_lora_weights_from_disk(
+        self,
+        experiment_name: str,
+        trial_name: str,
+        model_version: int,
+        meta: WeightUpdateMeta,
+    ):
+        if meta.version is None:
+            raise ValueError("Version is required for LoRA update.")
+
+        update_name = names.update_weights_from_disk(
+            experiment_name, trial_name, model_version
+        )
+        save_timestamp = float(name_resolve.wait(update_name, timeout=120))
+        load_timestamp = datetime.now().timestamp()
+
+        deadline = time.monotonic() + self.config.request_timeout
+        version_to_unload = self._select_inactive_lora_to_unload(
+            meta.version, deadline
+        )
+        if version_to_unload is not None:
+            self._unload_lora_version(meta, version_to_unload)
+
+        weight_reqs = self.backend.build_disk_weight_update_requests(meta)
+        self._run_requests_on_all_servers(weight_reqs.requests)
+
+        with self._lora_cond:
+            self._loaded_lora_versions.add(meta.version)
+            self._lora_cond.notify_all()
+
+        return load_timestamp - save_timestamp
 
     def submit(
         self,
@@ -1219,8 +1431,13 @@ class RemoteInfEngine(InferenceEngine):
     @trace_perf("remote_inf_engine.pause_generation", category="misc")
     def pause_generation(self):
         """Pause request submission for async rollout."""
-        pause_req = self.backend.get_pause_request()
-        self._run_request_on_all_servers(pause_req)
+        self._set_generation_paused(True)
+        try:
+            pause_req = self.backend.get_pause_request()
+            self._run_request_on_all_servers(pause_req)
+        except Exception:
+            self._set_generation_paused(False)
+            raise
 
         # The above http request may require some time to be scheduled and executed.
         # The following line waits until all requests are indeed dropped.
@@ -1229,8 +1446,11 @@ class RemoteInfEngine(InferenceEngine):
     @trace_perf("remote_inf_engine.continue_generation", category="misc")
     def continue_generation(self):
         """Resume request submission for async rollout."""
-        resume_req = self.backend.get_resume_request()
-        self._run_request_on_all_servers(resume_req)
+        try:
+            resume_req = self.backend.get_resume_request()
+            self._run_request_on_all_servers(resume_req)
+        finally:
+            self._set_generation_paused(False)
 
     def pause(self):
         """Pause request submission for async rollout.
@@ -1278,6 +1498,7 @@ class RemoteInfEngine(InferenceEngine):
 
     def launch_server(self, server_args: dict[str, Any]) -> LocalInfServerInfo:
         """Launch a local inference server."""
+        self._record_lora_server_args(server_args)
         server_args["host"] = gethostip()
         server_args["port"] = find_free_ports(1)[0]
         process = self.backend.launch_server(server_args)

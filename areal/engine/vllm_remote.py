@@ -193,6 +193,17 @@ class VLLMBackend:
             ]
         )
 
+    def build_lora_unload_request(
+        self, meta: WeightUpdateMeta, version: int
+    ) -> HttpRequest:
+        """Build vLLM LoRA unload request."""
+        if not meta.lora_name:
+            raise ValueError("LoRA name is required for LoRA unload.")
+        return HttpRequest(
+            endpoint="/v1/unload_lora_adapter",
+            payload={"lora_name": get_versioned_lora_name(meta.lora_name, version)},
+        )
+
     def build_init_weights_group_request(
         self, addr: str, server_idx: int, meta: WeightUpdateMeta
     ) -> HttpRequest:

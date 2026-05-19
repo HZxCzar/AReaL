@@ -7,35 +7,36 @@ import os
 import random
 import threading
 import time
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, Protocol
-from collections.abc import Generator
 from collections import deque
-import torch
-import requests
-import torch.distributed as dist
+from collections.abc import Awaitable, Callable, Generator
+from contextlib import nullcontext
+from dataclasses import dataclass
+from logging import Logger
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 import aiofiles
 import aiofiles.os
+import requests
+import torch
+import torch.distributed as dist
 from torchdata.stateful_dataloader import StatefulDataLoader
 
-from areal.api.cli_args import InferenceEngineConfig
 from areal.api import RolloutWorkflow
+from areal.api.cli_args import InferenceEngineConfig
+from areal.experimental.openai.types import InteractionWithTokenLogpReward
+from areal.infra import workflow_context
+from areal.infra.utils.concurrent import get_executor
+from areal.utils import logging, perf_tracer, stats_tracker
+from areal.utils.data import concat_padded_tensors, cycle_dataloader
+from areal.utils.perf_tracer import trace_perf, trace_session_event
+
 from .async_task_runner import (
     AsyncTaskRunner,
     TaskQueueFullError,
     TimedResult,
 )
 from .staleness_manager import StalenessManager
-from areal.infra import workflow_context
 from .workflow_context import WorkflowContext
-from areal.experimental.openai.types import InteractionWithTokenLogpReward
-from areal.utils import logging, perf_tracer, stats_tracker
-from areal.infra.utils.concurrent import get_executor
-from areal.utils.data import concat_padded_tensors, cycle_dataloader
-from areal.utils.perf_tracer import trace_perf, trace_session_event
-from logging import Logger
 
 if TYPE_CHECKING:
     from .remote_inf_engine import RemoteInfEngine
@@ -1035,9 +1036,17 @@ class WorkflowExecutor:
             # Set task_id in ContextVar before entering arun_episode
             perf_tracer.set_task_id(task_id)
 
+            workflow_lora_version = (
+                self.inference_engine.get_version() if self.config.use_lora else None
+            )
+
             # Set workflow execution context
             workflow_context.set(
-                WorkflowContext(is_eval=pending_task.is_eval, task_id=task_id)
+                WorkflowContext(
+                    is_eval=pending_task.is_eval,
+                    task_id=task_id,
+                    lora_version=workflow_lora_version,
+                )
             )
 
             manager = self.staleness_manager
@@ -1047,9 +1056,17 @@ class WorkflowExecutor:
             reason: str | None = None
 
             try:
-                traj = await pending_task.workflow.arun_episode(
-                    self.inference_engine, pending_task.data
+                lora_lease = (
+                    self.inference_engine.lora_version_lease(
+                        workflow_lora_version, workflow=True
+                    )
+                    if workflow_lora_version is not None
+                    else nullcontext()
                 )
+                with lora_lease:
+                    traj = await pending_task.workflow.arun_episode(
+                        self.inference_engine, pending_task.data
+                    )
 
                 # Trajectory format checking
                 if self.config.check_trajectory_format and traj is not None:
