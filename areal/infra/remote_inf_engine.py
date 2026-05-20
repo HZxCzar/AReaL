@@ -11,7 +11,7 @@ import subprocess
 import time
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future
 from contextlib import contextmanager, nullcontext
 from datetime import datetime
@@ -82,6 +82,16 @@ class GroupedRolloutWorkflow(RolloutWorkflow):
         self.workflow = workflow
         self.group_size = group_size
         self.logger = logger
+
+    def get_lora_versions_for_episode(
+        self,
+        engine: InferenceEngine,
+        data: dict[str, Any],
+        current_lora_version: int | None,
+    ) -> Iterable[int]:
+        return self.workflow.get_lora_versions_for_episode(
+            engine, data, current_lora_version
+        )
 
     async def arun_episode(
         self, engine: InferenceEngine, data: dict[str, Any]
@@ -371,7 +381,6 @@ class RemoteInfEngine(InferenceEngine):
         self._generation_paused = False
         self._lora_cond = Condition()
         self._active_lora_versions: Counter[int] = Counter()
-        self._active_lora_workflows = 0
         self._loaded_lora_versions: set[int] = set()
         self._unloading_lora_versions: set[int] = set()
         self._max_loaded_loras: int | None = None
@@ -442,15 +451,17 @@ class RemoteInfEngine(InferenceEngine):
 
     @contextmanager
     def lora_version_lease(self, version: int, *, workflow: bool = False):
-        """Keep a LoRA version loaded while a request or workflow may use it."""
+        """Keep a LoRA version loaded while a request or workflow may use it.
+
+        ``workflow`` documents the caller scope. Unload safety is per LoRA
+        version, not global across all active workflows.
+        """
         if not self.config.use_lora:
             yield
             return
 
         with self._lora_cond:
             self._active_lora_versions[int(version)] += 1
-            if workflow:
-                self._active_lora_workflows += 1
             self._lora_cond.notify_all()
         try:
             yield
@@ -460,9 +471,6 @@ class RemoteInfEngine(InferenceEngine):
                 self._active_lora_versions[version] -= 1
                 if self._active_lora_versions[version] <= 0:
                     del self._active_lora_versions[version]
-                if workflow:
-                    self._active_lora_workflows -= 1
-                    assert self._active_lora_workflows >= 0
                 self._lora_cond.notify_all()
 
     def _set_generation_paused(self, paused: bool) -> None:
@@ -1157,7 +1165,6 @@ class RemoteInfEngine(InferenceEngine):
                     for version in sorted(self._loaded_lora_versions)
                     if version not in self._active_lora_versions
                     and version not in self._unloading_lora_versions
-                    and self._active_lora_workflows == 0
                 ]
                 if candidates:
                     version = candidates[0]
@@ -1171,7 +1178,7 @@ class RemoteInfEngine(InferenceEngine):
                         "Timed out waiting for an inactive LoRA adapter slot. "
                         f"loaded_versions={sorted(self._loaded_lora_versions)}, "
                         f"active_versions={active_versions}, "
-                        f"active_workflows={self._active_lora_workflows}, "
+                        f"unloading_versions={sorted(self._unloading_lora_versions)}, "
                         f"max_loaded_loras={self._max_loaded_loras}."
                     )
                 self._lora_cond.wait(timeout=min(1.0, remaining))

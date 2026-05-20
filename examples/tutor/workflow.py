@@ -286,6 +286,29 @@ class TutorAgentWorkflow(RolloutWorkflow):
             else None
         )
 
+    def get_lora_versions_for_episode(
+        self,
+        engine: Any,
+        data: dict[str, Any],
+        current_lora_version: int | None,
+    ) -> set[int]:
+        del engine, data
+        if current_lora_version is None:
+            return set()
+
+        actor_version = int(current_lora_version)
+        versions = {actor_version}
+        try:
+            is_eval = bool(getattr(workflow_context.get(), "is_eval", False))
+        except Exception:
+            is_eval = False
+
+        if self.pairwise_reward_enabled and not is_eval:
+            versions.add(
+                max(0, actor_version - int(self.pairwise_reference_lag_steps))
+            )
+        return versions
+
     async def arun_episode(self, engine, data: dict[str, Any]):
         return await self._run_episode(data, engine=engine)
 
@@ -312,8 +335,17 @@ class TutorAgentWorkflow(RolloutWorkflow):
         leak_count = 0
         termination_reason = "max_turns"
         episode_lora_version = None
-        if engine is not None and hasattr(engine, "get_version"):
-            episode_lora_version = int(engine.get_version())
+        if engine is not None:
+            try:
+                context_lora_version = getattr(
+                    workflow_context.get(), "lora_version", None
+                )
+            except Exception:
+                context_lora_version = None
+            if context_lora_version is not None:
+                episode_lora_version = int(context_lora_version)
+            elif hasattr(engine, "get_version"):
+                episode_lora_version = int(engine.get_version())
         actor_chat_caller = (
             self._make_engine_chat_caller(
                 engine,

@@ -8,8 +8,8 @@ import random
 import threading
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Generator
-from contextlib import nullcontext
+from collections.abc import Awaitable, Callable, Generator, Iterable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from logging import Logger
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
@@ -239,6 +239,59 @@ class _RolloutTaskInput:
 class _RolloutResult:
     task_id: int
     trajectory: dict[str, Any]
+
+
+def _coerce_lora_version(version: Any, *, source: str) -> int:
+    if isinstance(version, bool):
+        raise ValueError(f"{source} must be a non-negative integer, got {version!r}.")
+    try:
+        value = int(version)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{source} must be a non-negative integer, got {version!r}."
+        ) from exc
+    if isinstance(version, float) and not version.is_integer():
+        raise ValueError(f"{source} must be a non-negative integer, got {version!r}.")
+    if value < 0:
+        raise ValueError(f"{source} must be non-negative, got {value}.")
+    return value
+
+
+def _get_episode_lora_versions(
+    workflow: RolloutWorkflow,
+    engine: Any,
+    data: dict[str, Any],
+    current_lora_version: int | None,
+) -> tuple[int, ...]:
+    versions: set[int] = set()
+    if current_lora_version is not None:
+        versions.add(
+            _coerce_lora_version(
+                current_lora_version,
+                source="current_lora_version",
+            )
+        )
+
+    hook = getattr(workflow, "get_lora_versions_for_episode", None)
+    if hook is None:
+        return tuple(sorted(versions))
+
+    raw_versions = hook(engine, data, current_lora_version)
+    if raw_versions is None:
+        raise ValueError("get_lora_versions_for_episode must return an iterable.")
+    if isinstance(raw_versions, (str, bytes)) or not isinstance(
+        raw_versions, Iterable
+    ):
+        raise ValueError("get_lora_versions_for_episode must return an iterable.")
+
+    for idx, version in enumerate(raw_versions):
+        versions.add(
+            _coerce_lora_version(
+                version,
+                source=f"get_lora_versions_for_episode()[{idx}]",
+            )
+        )
+    return tuple(sorted(versions))
 
 
 # Batch size for fetching from the async task runner
@@ -1056,14 +1109,23 @@ class WorkflowExecutor:
             reason: str | None = None
 
             try:
-                lora_lease = (
-                    self.inference_engine.lora_version_lease(
-                        workflow_lora_version, workflow=True
+                episode_lora_versions = (
+                    _get_episode_lora_versions(
+                        pending_task.workflow,
+                        self.inference_engine,
+                        pending_task.data,
+                        workflow_lora_version,
                     )
-                    if workflow_lora_version is not None
-                    else nullcontext()
+                    if self.config.use_lora
+                    else ()
                 )
-                with lora_lease:
+                with ExitStack() as lora_stack:
+                    for lora_version in episode_lora_versions:
+                        lora_stack.enter_context(
+                            self.inference_engine.lora_version_lease(
+                                lora_version, workflow=True
+                            )
+                        )
                     traj = await pending_task.workflow.arun_episode(
                         self.inference_engine, pending_task.data
                     )

@@ -3,6 +3,7 @@
 from __future__ import annotations  # noqa
 
 from abc import ABC, ABCMeta, abstractmethod
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Union
 
 
@@ -12,6 +13,19 @@ if TYPE_CHECKING:
 
 
 class RolloutWorkflow(ABC):
+    def get_lora_versions_for_episode(
+        self,
+        engine: InferenceEngine,
+        data: dict[str, Any],
+        current_lora_version: int | None,
+    ) -> Iterable[int]:
+        """Return extra LoRA versions this episode may use.
+
+        The workflow executor always protects ``current_lora_version`` when LoRA
+        is enabled, so workflows only need to report additional planned versions.
+        """
+        return ()
+
     @abstractmethod
     async def arun_episode(
         self, engine: InferenceEngine, data: dict[str, Any]
