@@ -74,6 +74,12 @@ def apply_fsdp2(model, fsdp_kwargs, wrap_policy):
 
     if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
         fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
+    else:
+        fsdp_transformer_layer_cls_to_wrap = sorted(
+            name
+            for name in fsdp_transformer_layer_cls_to_wrap
+            if name is not None
+        )
 
     assert (
         len(fsdp_transformer_layer_cls_to_wrap) > 0

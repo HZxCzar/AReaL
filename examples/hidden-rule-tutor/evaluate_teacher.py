@@ -47,8 +47,8 @@ def _as_tentative_reply(text: str) -> str:
         hypothesis = "a simple property of the string such as length, vowels, repeated letters, or a special character"
     return (
         f"Tentative hypothesis: {hypothesis}\n"
-        "I need labeled examples that could refute this guess, especially a positive and a negative case "
-        "near the same length."
+        "I need a contrastive labeled mini-batch that tests this guess against at least two alternatives, "
+        "especially examples matched for length while changing letters, vowel pattern, repetition, or order."
     )
 
 
@@ -84,9 +84,14 @@ class OpenAIStudent:
         prompt = (
             "You are a student trying to infer a hidden Boolean rule over strings.\n"
             "Do your own reasoning. The tutor is not allowed to solve the rule for you.\n"
-            "If you are uncertain, state your current tentative hypothesis, why it might fit, "
-            "and ask for specific additional labeled examples or tests that would distinguish it "
-            "from alternatives. Do not merely ask the tutor to share patterns.\n"
+            "Use systematic rule induction: maintain 2-4 competing simple hypotheses, compare them "
+            "against the labeled examples, and prefer the simplest hypothesis that explains both "
+            "valid and invalid cases. Pay attention to length, vowels/consonants, repeated adjacent "
+            "letters, special letters, first/last letters, letter order, and letter position, but do "
+            "not assume any one of these must be the rule.\n"
+            "If you are uncertain, state your current tentative hypothesis, one or two alternatives, "
+            "which examples support or contradict them, and ask for specific additional labeled tests "
+            "that would distinguish them. Do not merely ask the tutor to share patterns.\n"
             f"{final_rule_instruction} Keep the reply concise.\n\n"
             f"Parsed labeled examples so far: {example_count}\n\n"
             f"Dialogue so far:\n{_clip_text(history) or 'None'}\n\n"
@@ -115,6 +120,12 @@ class OpenAIStudent:
         prompt = (
             "Infer the hidden Boolean string rule from this tutoring dialogue:\n"
             f"{_clip_text(_format_transcript(transcript))}"
+            "Choose one simple, testable property that best explains both valid and invalid examples. "
+            "Avoid compound rules with multiple conditions unless each condition is directly supported. "
+            "Use precise measurable wording: say adjacent repeated letters for doubles, first and last "
+            "letters for endpoint rules, third letter for position rules, multiple of three for length "
+            "rules, alphabetical/non-decreasing for order rules, and more consonants than vowels for "
+            "vowel/consonant balance rules when those ideas fit the evidence. "
             "Reply with one sentence starting with `A string is valid if`.\n\n"
         )
         reply = self.client._complete_blocking(
@@ -176,11 +187,14 @@ class OpenAITeacher:
         else:
             role_context = (
                 "You do not know the hidden Boolean string rule. You and the student only know the "
-                "labeled examples and the dialogue. Give useful tutoring guidance based on the "
-                "student's latest hypothesis and the current evidence: identify which examples "
-                "stress or support parts of the hypothesis, point out contrasts, name uncertainty, "
-                "and suggest one discriminating next test. Do not solve the task for the student, "
-                "do not state a final rule, and do not give a polished hypothesis for them to copy. "
+                "labeled examples and the dialogue. Give useful process guidance based on the "
+                "student's latest hypothesis and the current evidence. First show the fresh labeled "
+                "examples exactly. Then help the student audit their own hypothesis: name one feature "
+                "dimension to compare, point to specific examples that are useful contrasts, and suggest "
+                "one discriminating next test or request. You may mention broad feature dimensions such "
+                "as length, vowels, repeated letters, special letters, first/last letters, order, or "
+                "position, but do not pick a final one for the student. Do not solve the task for the "
+                "student, do not state a final rule, and do not give a polished hypothesis for them to copy. "
                 "Never say the student's guess is correct or incorrect, and never write phrases like "
                 "`the rule is`, `you identified`, `I guess`, or `FINAL_RULE`.\n"
             )
@@ -250,9 +264,9 @@ class OpenAITeacher:
         return (
             "Here are labeled examples:\n"
             f"{examples_text}\n"
-            "Use these labels to check one part of your current hypothesis. Compare a valid and an "
-            "invalid string that are similar in length or letters, then propose a test that would "
-            "separate your guess from another plausible pattern."
+            "Use these labels to audit your current hypothesis against alternatives. Pick two examples "
+            "that are similar in length or letters but have different labels, compare one feature "
+            "dimension at a time, and ask for a targeted test that changes only one suspected feature."
         )
 
 

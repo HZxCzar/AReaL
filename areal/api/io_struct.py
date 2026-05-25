@@ -42,6 +42,31 @@ class ModelRequest:
     # vlm+vllm:
     vision_msg_vllm: list | None = None
 
+    def __post_init__(self):
+        self.input_ids = self._normalize_input_ids(self.input_ids)
+
+    @staticmethod
+    def _normalize_input_ids(input_ids: Any) -> list[int]:
+        """Convert tokenizer containers to the JSON-serializable token list."""
+        if input_ids is None:
+            return []
+        if isinstance(input_ids, torch.Tensor):
+            input_ids = input_ids.detach().cpu().tolist()
+        elif isinstance(input_ids, dict) and "input_ids" in input_ids:
+            input_ids = input_ids["input_ids"]
+        elif hasattr(input_ids, "input_ids"):
+            input_ids = input_ids.input_ids
+
+        if isinstance(input_ids, torch.Tensor):
+            input_ids = input_ids.detach().cpu().tolist()
+        if (
+            isinstance(input_ids, list)
+            and len(input_ids) == 1
+            and isinstance(input_ids[0], (list, tuple))
+        ):
+            input_ids = input_ids[0]
+        return [int(token_id) for token_id in input_ids]
+
     def copy(self):
         return ModelRequest(
             rid=self.rid,

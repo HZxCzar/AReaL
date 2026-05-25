@@ -22,6 +22,26 @@ class VLLMWorkerExtension:
     Iherited from vllm codebase
     """
 
+    def _areal_get_parameter_names(self) -> set[str]:
+        names = getattr(self, "_areal_parameter_names", None)
+        if names is None:
+            names = {name for name, _ in self.model_runner.model.named_parameters()}
+            self._areal_parameter_names = names
+        return names
+
+    def _areal_resolve_weight_name(self, name: str) -> str:
+        if name.startswith(("model.", "lm_head.")):
+            return f"language_model.{name}"
+
+        parameter_names = self._areal_get_parameter_names()
+        candidates = [name]
+        if name.startswith("language_model."):
+            candidates.append(name.removeprefix("language_model."))
+        for candidate in candidates:
+            if candidate in parameter_names:
+                return candidate
+        return name
+
     def sync(self):
         current_platform.synchronize()
         torch.distributed.barrier()
@@ -143,7 +163,9 @@ class VLLMWorkerExtension:
                     group=group,
                     async_op=False,
                 )
-                self.model_runner.model.load_weights(weights=[(name, tensor)])
+                self.model_runner.model.load_weights(
+                    weights=[(self._areal_resolve_weight_name(name), tensor)]
+                )
             self.sync()
             return True, "Success"
         except Exception as e:

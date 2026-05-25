@@ -181,11 +181,12 @@ cuda-train = [
     "areal[megatron]",
     "areal[kernels]",
 ]
-# Full CUDA setup: training packages + vLLM inference + flash-attn
+# Full CUDA setup: training packages + vLLM inference.
+# Install `areal[flash-attn]` separately when a matching prebuilt wheel is
+# available, or when you intentionally want to build it from source.
 cuda = [
     "areal[cuda-train]",
     "areal[vllm]",
-    "areal[flash-attn]",
     "torch; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchaudio; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -224,6 +225,9 @@ dev = [
 module-root = ""
 
 [tool.uv]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
     "sys_platform == 'linux' and platform_machine == 'aarch64'",
@@ -240,6 +244,10 @@ override-dependencies = [
 
     # Version conflicts with megatron-bridge (resorting to the existing version)
     "megatron-core==0.16.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # Newer nvidia-resiliency-ext wheels require manylinux_2_39, but this host
+    # is glibc 2.35. 0.4.1 ships a manylinux_2_31 wheel and satisfies
+    # megatron-bridge's unpinned dependency.
+    "nvidia-resiliency-ext==0.4.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "hydra-core==1.4.0.dev1",
     "timm==1.0.16",
 ]
