@@ -59,6 +59,11 @@ class HiddenRuleTeacherGRPOConfig(GRPOConfig):
     teacher_policy: str = ""
 
 
+# Workers deserialize dataclasses by import path. When this file is executed as a
+# script, classes would otherwise serialize as __main__.* and become plain dicts.
+HiddenRuleTeacherGRPOConfig.__module__ = "train_teacher_grpo"
+
+
 def _labeled_examples_text(batch: list[dict[str, object]]) -> str:
     return "\n".join(f"{item['x']} -> {'valid' if item['y'] else 'invalid'}" for item in batch)
 
@@ -224,6 +229,9 @@ class HiddenRuleTeacherWorkflow(RolloutWorkflow):
         return concat_padded_tensors(tensors, pad_value=0.0)
 
 
+HiddenRuleTeacherWorkflow.__module__ = "train_teacher_grpo"
+
+
 async def asyncio_to_thread(fn, *args):
     import asyncio
 
@@ -267,7 +275,7 @@ def main(args: list[str]) -> None:
     )
     with PPOTrainer(config, train_dataset=train_dataset) as trainer:
         trainer.train(
-            workflow=HiddenRuleTeacherWorkflow,
+            workflow="train_teacher_grpo.HiddenRuleTeacherWorkflow",
             workflow_kwargs=workflow_kwargs,
         )
 

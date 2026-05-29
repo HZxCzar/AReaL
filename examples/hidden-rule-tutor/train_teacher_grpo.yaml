@@ -16,9 +16,9 @@ rounds: 8
 examples_per_episode: 48
 success_threshold: 0.95
 turn_discount: 0.98
-consistency_coef: 0.15
-reasoning_coef: 0.10
-leakage_coef: 0.50
+consistency_coef: 0.25
+reasoning_coef: 1.00
+leakage_coef: 0.7
 task_reward_coef: 3.0
 teacher_policy: >
   Include fresh labels exactly, then teach by contrasts and next tests. Never
@@ -65,7 +65,7 @@ actor:
     max_tokens_per_mb: 16384
   optimizer:
     type: adam
-    lr: 2e-6
+    lr: 3e-6
     beta1: 0.9
     beta2: 0.999
     eps: 1e-8
@@ -124,7 +124,7 @@ vllm:
   max_model_len: 16384
   gpu_memory_utilization: 0.72
 train_dataset:
-  batch_size: 4
+  batch_size: 8
   pin_memory: true
   num_workers: 1
   path: /home/xmy/AReaL/examples/tutor_teacher_train_seeds.jsonl
