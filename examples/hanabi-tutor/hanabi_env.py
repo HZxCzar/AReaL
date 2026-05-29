@@ -460,9 +460,18 @@ class HanabiEnv(EnvironmentService):
         import re
 
         match = re.findall(r"<answer>(.*?)</answer>", text, re.DOTALL)
-        if match:
-            return match[-1].strip().lower()
-        return ""
+        raw = match[-1] if match else text
+        raw = raw.strip().lower()
+        raw = re.sub(r"^(?:your\s+chosen\s+action|chosen\s+action|action|answer)\s*:\s*", "", raw)
+        for pattern in (
+            r"\b(play\s+[a-z][0-9])\b",
+            r"\b(discard\s+[a-z][0-9])\b",
+            r"\b(hint\s+\w+\s+(?:color|rank)\s+\w+)\b",
+        ):
+            found = re.search(pattern, raw)
+            if found:
+                return found.group(1).strip()
+        return raw
 
     def _advance_player(self) -> None:
         self.current_player_idx = (self.current_player_idx + 1) % self.num_players
