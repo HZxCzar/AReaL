@@ -21,6 +21,7 @@ from game_tutor_common import (  # noqa: E402
 from hidden_rule_game.env import HiddenRuleEnv  # noqa: E402
 from hidden_rule_game.rules import Rule, count_vowels, has_double_letter  # noqa: E402
 from hidden_rule_game.students import MemoryStudent, extract_examples  # noqa: E402
+from hidden_rule_metrics import summarize_episode  # noqa: E402
 
 
 def _clip_text(text: str, limit: int = 3000) -> str:
@@ -317,6 +318,9 @@ def run_condition(config: dict[str, Any], *, use_teacher: bool) -> dict[str, Any
     successes = []
     examples_used = []
     turns_taken = []
+    tutoring_scores = []
+    tutor_qualities = []
+    leakage_penalties = []
     for idx in range(episodes):
         student = (
             OpenAIStudent(config["student_model"])
@@ -324,6 +328,7 @@ def run_condition(config: dict[str, Any], *, use_teacher: bool) -> dict[str, Any
             else MemoryStudent()
         )
         result = env.run_episode(student, rounds=rounds)
+        metrics = summarize_episode(result, rounds=rounds)
         success = result.heldout_accuracy >= threshold
         row = {
             "episode": idx,
@@ -336,6 +341,9 @@ def run_condition(config: dict[str, Any], *, use_teacher: bool) -> dict[str, Any
             "turns_taken": result.turns_taken,
             "examples_used": result.examples_used,
             "rule_matched": result.rule_matched,
+            "tutoring_score": metrics["tutoring_score"],
+            "tutor_quality": metrics["tutor_quality"],
+            "leakage_penalty": metrics["leakage_penalty"],
             "transcript": result.transcript,
         }
         rows.append(row)
@@ -344,13 +352,19 @@ def run_condition(config: dict[str, Any], *, use_teacher: bool) -> dict[str, Any
         successes.append(float(success))
         examples_used.append(result.examples_used)
         turns_taken.append(result.turns_taken)
+        tutoring_scores.append(metrics["tutoring_score"])
+        tutor_qualities.append(metrics["tutor_quality"])
+        leakage_penalties.append(metrics["leakage_penalty"])
     return {
         "episodes": episodes,
+        "mean_tutoring_score": sum(tutoring_scores) / max(1, len(tutoring_scores)),
         "mean_reward": sum(rewards) / max(1, len(rewards)),
         "mean_heldout_accuracy": sum(accuracies) / max(1, len(accuracies)),
         "success_rate": sum(successes) / max(1, len(successes)),
         "avg_examples_used": sum(examples_used) / max(1, len(examples_used)),
         "avg_turns_taken": sum(turns_taken) / max(1, len(turns_taken)),
+        "avg_tutor_quality": sum(tutor_qualities) / max(1, len(tutor_qualities)),
+        "avg_leakage_penalty": sum(leakage_penalties) / max(1, len(leakage_penalties)),
         "traces": rows,
     }
 
@@ -367,11 +381,14 @@ def main() -> None:
         "baseline": baseline,
         "teacher": teacher,
         "improvement": {
+            "mean_tutoring_score": teacher["mean_tutoring_score"] - baseline["mean_tutoring_score"],
             "mean_reward": teacher["mean_reward"] - baseline["mean_reward"],
             "mean_heldout_accuracy": teacher["mean_heldout_accuracy"] - baseline["mean_heldout_accuracy"],
             "success_rate": teacher["success_rate"] - baseline["success_rate"],
             "avg_examples_used": teacher["avg_examples_used"] - baseline["avg_examples_used"],
             "avg_turns_taken": teacher["avg_turns_taken"] - baseline["avg_turns_taken"],
+            "avg_tutor_quality": teacher["avg_tutor_quality"] - baseline["avg_tutor_quality"],
+            "avg_leakage_penalty": teacher["avg_leakage_penalty"] - baseline["avg_leakage_penalty"],
         },
     }
     output_path = config.get("output_path", "examples/hidden-rule-tutor/outputs/teacher_eval.json")

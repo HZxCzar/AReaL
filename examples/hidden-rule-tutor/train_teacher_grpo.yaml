@@ -17,9 +17,10 @@ examples_per_episode: 48
 success_threshold: 0.95
 turn_discount: 0.98
 consistency_coef: 0.25
-reasoning_coef: 1.00
-leakage_coef: 0.7
-task_reward_coef: 3.0
+reasoning_coef: 0.20
+tutor_quality_coef: 0.80
+leakage_coef: 1.2
+task_reward_coef: 2.0
 teacher_policy: >
   Include fresh labels exactly, then teach by contrasts and next tests. Never
   state the final rule, never mark a hypothesis correct, and never use FINAL_RULE.

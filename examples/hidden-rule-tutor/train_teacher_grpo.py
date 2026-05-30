@@ -20,23 +20,12 @@ from areal.utils import stats_tracker
 from areal.utils.data import concat_padded_tensors
 from areal.utils.hf_utils import load_hf_tokenizer
 
-from game_tutor_teacher_training import _reasoning_score, _response_to_tensor
+from game_tutor_teacher_training import _response_to_tensor
 from hidden_rule_game.env import _rough_rule_match
 from hidden_rule_game.rules import iter_rule_cycle, sample_examples
 
 from evaluate_teacher import OpenAIStudent, _clip_text, _format_transcript, _strip_thinking
-
-
-FORBIDDEN = [
-    "final_rule",
-    "the rule is",
-    "a string is valid if",
-    "you are correct",
-    "you're correct",
-    "correctly identified",
-    "you identified",
-    "your rule is",
-]
+from hidden_rule_metrics import hidden_rule_tutoring_score, tutor_leakage_penalty, tutor_turn_quality
 
 
 @dataclass
@@ -54,6 +43,7 @@ class HiddenRuleTeacherGRPOConfig(GRPOConfig):
     turn_discount: float = 1.0
     consistency_coef: float = 0.15
     reasoning_coef: float = 0.10
+    tutor_quality_coef: float = 0.50
     leakage_coef: float = 0.50
     task_reward_coef: float = 1.0
     teacher_policy: str = ""
@@ -100,15 +90,6 @@ def _consistency_score(reply: str, student_next_message: str) -> float:
     return min(1.0, len((reply_tokens | teaching_terms) & student_tokens) / max(1, len(student_tokens)))
 
 
-def _leakage_penalty(reply: str, batch: list[dict[str, object]]) -> float:
-    lowered = reply.lower()
-    if any(token in lowered for token in FORBIDDEN):
-        return 1.0
-    if not any(str(item["x"]) in reply for item in batch):
-        return 0.5
-    return 0.0
-
-
 class HiddenRuleTeacherWorkflow(RolloutWorkflow):
     def __init__(
         self,
@@ -127,6 +108,7 @@ class HiddenRuleTeacherWorkflow(RolloutWorkflow):
         turn_discount: float = 1.0,
         consistency_coef: float = 0.15,
         reasoning_coef: float = 0.10,
+        tutor_quality_coef: float = 0.50,
         leakage_coef: float = 0.50,
         task_reward_coef: float = 1.0,
         teacher_policy: str = "",
@@ -148,6 +130,7 @@ class HiddenRuleTeacherWorkflow(RolloutWorkflow):
         self.turn_discount = float(turn_discount)
         self.consistency_coef = float(consistency_coef)
         self.reasoning_coef = float(reasoning_coef)
+        self.tutor_quality_coef = float(tutor_quality_coef)
         self.leakage_coef = float(leakage_coef)
         self.task_reward_coef = float(task_reward_coef)
         self.teacher_policy = teacher_policy
@@ -187,15 +170,16 @@ class HiddenRuleTeacherWorkflow(RolloutWorkflow):
             student.observe(student_msg, reply)
             observation = reply
             consistency = _consistency_score(reply, student_msg)
-            reasoning = _reasoning_score(reply)
-            leakage = _leakage_penalty(reply, batch)
+            quality = tutor_turn_quality(reply, batch)
+            leakage = tutor_leakage_penalty(reply, batch)
             shaped = (
                 self.consistency_coef * consistency
-                + self.reasoning_coef * reasoning
+                + self.reasoning_coef * quality
+                + self.tutor_quality_coef * quality
                 - self.leakage_coef * leakage
             )
             responses.append((resp, shaped, turn_idx))
-            components.append((consistency, reasoning, leakage))
+            components.append((consistency, quality, leakage))
             if "final_rule:" in student_msg.lower():
                 break
 
@@ -206,7 +190,19 @@ class HiddenRuleTeacherWorkflow(RolloutWorkflow):
         labels = [bool(item["y"]) for item in heldout]
         accuracy = sum(p == y for p, y in zip(predictions, labels)) / max(1, len(labels))
         matched = _rough_rule_match(guessed_rule, rule.description)
-        task_reward = accuracy + (0.25 if matched else 0.0)
+        avg_quality = sum(item[1] for item in components) / max(1, len(components))
+        avg_leakage = sum(item[2] for item in components) / max(1, len(components))
+        tutoring_score = hidden_rule_tutoring_score(
+            heldout_accuracy=accuracy,
+            rule_matched=matched,
+            examples_used=min(self.rounds * 4, len(transcript) * 4),
+            max_examples=self.rounds * 4,
+            turns_taken=len(transcript),
+            max_turns=self.rounds,
+            tutor_quality=avg_quality,
+            leakage_penalty=avg_leakage,
+        )
+        task_reward = 2.0 * (tutoring_score - 0.5)
         task_reward = max(-1.0, min(1.0, task_reward))
 
         tensors = []
@@ -219,10 +215,11 @@ class HiddenRuleTeacherWorkflow(RolloutWorkflow):
             avg = lambda idx: sum(item[idx] for item in components) / len(components)
             stats_tracker.get(workflow_context.stat_scope()).scalar(
                 hidden_rule_accuracy=accuracy,
+                hidden_rule_tutoring_score=tutoring_score,
                 hidden_rule_task_reward=task_reward,
                 hidden_rule_matched=float(matched),
                 teacher_consistency=avg(0),
-                teacher_reasoning=avg(1),
+                teacher_quality=avg(1),
                 teacher_leakage=avg(2),
             )
 
@@ -269,6 +266,7 @@ def main(args: list[str]) -> None:
         turn_discount=config.turn_discount,
         consistency_coef=config.consistency_coef,
         reasoning_coef=config.reasoning_coef,
+        tutor_quality_coef=config.tutor_quality_coef,
         leakage_coef=config.leakage_coef,
         task_reward_coef=config.task_reward_coef,
         teacher_policy=config.teacher_policy,
