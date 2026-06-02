@@ -1,13 +1,14 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-from areal.api.cli_args import EvaluatorConfig, GRPOConfig
 from examples.tutor.prompts import (
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
     DEFAULT_STUDENT_SYSTEM_PROMPT,
     DEFAULT_SUMMARY_SYSTEM_PROMPT,
     DEFAULT_TEACHER_SYSTEM_PROMPT,
 )
+
+from areal.api.cli_args import EvaluatorConfig, GRPOConfig
 
 
 @dataclass
@@ -59,6 +60,16 @@ class TutorPairwiseRewardConfig:
     reference_lag_steps: int = field(default=5)
     scale: float = field(default=0.05)
     compare_all_turns: bool = field(default=True)
+    judge_both_incorrect: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Use the pairwise judge when both current and reference student "
+                "answers are exact-incorrect. If false, assign zero pairwise "
+                "reward for those turns."
+            )
+        },
+    )
 
 
 @dataclass
@@ -125,7 +136,9 @@ class TutorConfig(GRPOConfig):
     summary_system_prompt: str = field(default=DEFAULT_SUMMARY_SYSTEM_PROMPT)
     debug_trace_dir: str = field(
         default="",
-        metadata={"help": "Optional directory to dump readable per-rollout tutor traces."},
+        metadata={
+            "help": "Optional directory to dump readable per-rollout tutor traces."
+        },
     )
     debug_trace_every_n_rollouts: int = field(
         default=10,

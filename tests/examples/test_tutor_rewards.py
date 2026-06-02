@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
-import sys
 
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.append(str(_REPO_ROOT))
-
+from examples.tutor.core.pairwise import PairwiseTutorEvaluator
 from examples.tutor.core.rewards import EpisodeRewardComputer
 from examples.tutor.core.types import (
     EpisodeArtifact,
@@ -16,9 +12,9 @@ from examples.tutor.core.types import (
     LeakCheckResult,
     PublicHistoryState,
     StudentTurnState,
+    TurnArtifact,
     TutorPrivateFeedback,
     TutorTurnState,
-    TurnArtifact,
 )
 
 
@@ -170,3 +166,52 @@ def test_length_penalty_is_capped():
 
     assert assignments[0].reward_components == {"length_penalty": -0.1}
     assert assignments[0].reward == pytest.approx(-0.1)
+
+
+def test_pairwise_can_skip_judge_when_both_answers_are_incorrect():
+    class RewardCaller:
+        calls = 0
+
+        async def call_text(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError("pairwise judge should not be called")
+
+    async def generate_reference_tutor(tutor_state, reference_version):
+        del tutor_state, reference_version
+        return "reference hint"
+
+    async def run_student(state):
+        del state
+        return "reference student answer", None
+
+    async def run_leak_check(task, ground_truth, teacher_action):
+        del task, ground_truth, teacher_action
+        return _leak(False)
+
+    def score_answer(task, ground_truth, student_output):
+        del task, ground_truth, student_output
+        return _judge(False)
+
+    reward_caller = RewardCaller()
+    evaluator = PairwiseTutorEvaluator(
+        reward_scale=0.05,
+        reward_caller=reward_caller,
+        generate_reference_tutor=generate_reference_tutor,
+        run_student=run_student,
+        run_leak_check=run_leak_check,
+        score_answer=score_answer,
+        judge_both_incorrect=False,
+    )
+    turn = _turn(1, correct=False)
+    result = asyncio.run(
+        evaluator.evaluate_turn(
+            _episode([turn], termination_reason="max_turns"),
+            turn,
+            reference_version=0,
+        )
+    )
+
+    assert result.outcome == "tie"
+    assert result.reason == "both_incorrect"
+    assert result.reward == pytest.approx(0.0)
+    assert reward_caller.calls == 0

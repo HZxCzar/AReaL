@@ -12,8 +12,8 @@ from examples.tutor.core.types import (
     JudgeResult,
     LeakCheckResult,
     StudentTurnState,
-    TutorTurnState,
     TurnArtifact,
+    TutorTurnState,
 )
 from examples.tutor.prompts import (
     PAIRWISE_STUDENT_COMPARISON_SYSTEM_PROMPT,
@@ -90,7 +90,9 @@ def parse_pairwise_judge_result(raw_output: str) -> PairwiseJudgeResult:
             winner = "tie"
         else:
             winner = "invalid"
-            parse_error = join_errors(parse_error, '"winner" must be "A", "B", or "tie"')
+            parse_error = join_errors(
+                parse_error, '"winner" must be "A", "B", or "tie"'
+            )
     else:
         winner = "invalid"
         parse_error = join_errors(parse_error, '"winner" must be a string')
@@ -123,6 +125,7 @@ class PairwiseTutorEvaluator:
         run_leak_check: LeakChecker,
         score_answer: AnswerScorer,
         compare_all_turns: bool = True,
+        judge_both_incorrect: bool = True,
         rng: random.Random | None = None,
     ) -> None:
         self.reward_scale = float(reward_scale)
@@ -132,6 +135,7 @@ class PairwiseTutorEvaluator:
         self.run_leak_check = run_leak_check
         self.score_answer = score_answer
         self.compare_all_turns = compare_all_turns
+        self.judge_both_incorrect = bool(judge_both_incorrect)
         self.rng = rng or random.Random()
 
     async def evaluate(
@@ -146,9 +150,7 @@ class PairwiseTutorEvaluator:
             ]
             turns = comparable_turns[-1:] if comparable_turns else []
         return [
-            await self.evaluate_turn(
-                episode, turn, reference_version=reference_version
-            )
+            await self.evaluate_turn(episode, turn, reference_version=reference_version)
             for turn in turns
         ]
 
@@ -246,6 +248,18 @@ class PairwiseTutorEvaluator:
                 reference_version,
                 outcome="current" if current_correct else "reference",
                 reason="exact_correctness",
+                reference=reference,
+            )
+        if (
+            not current_correct
+            and not reference_correct
+            and not self.judge_both_incorrect
+        ):
+            return self._winner_result(
+                current_turn,
+                reference_version,
+                outcome="tie",
+                reason="both_incorrect",
                 reference=reference,
             )
 

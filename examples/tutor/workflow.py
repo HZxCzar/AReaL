@@ -19,6 +19,7 @@ try:
     from areal.utils.data import concat_padded_tensors
     from areal.utils.hf_utils import load_hf_tokenizer
 except Exception:  # pragma: no cover - lightweight local test environments
+
     class _DummyWorkflowContext:
         @staticmethod
         def stat_scope():
@@ -93,7 +94,9 @@ except Exception:  # pragma: no cover - lightweight local test environments
                 padded = []
                 for value in values:
                     pad = []
-                    for current, target in reversed(list(zip(value.shape[1:], max_shape[1:]))):
+                    for current, target in reversed(
+                        list(zip(value.shape[1:], max_shape[1:]))
+                    ):
                         pad.extend([0, target - current])
                     pv = 0.0 if key == "attention_mask" else pad_value
                     padded.append(torch.nn.functional.pad(value, pad, value=pv))
@@ -109,13 +112,18 @@ except Exception:  # pragma: no cover - lightweight local test environments
     def load_hf_tokenizer(path):  # type: ignore[no-redef]
         return path
 
+
 from examples.common.chat_budget import ChatContextBudget
-from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig, make_teacher_client
+from examples.common.openai_utils import (
+    AsyncLLMCaller,
+    AuxModelConfig,
+    make_teacher_client,
+)
 from examples.tutor.core.callers import (
+    ApiAuxiliaryCaller,
     AReaLEngineActorCaller,
     AReaLEngineAuxiliaryCaller,
     AReaLEngineChatCaller,
-    ApiAuxiliaryCaller,
     ExternalActorCaller,
     TextCallResult,
 )
@@ -127,8 +135,8 @@ from examples.tutor.core.history import (
     trace_to_history_record,
     trace_to_json,
 )
-from examples.tutor.core.parsers import parse_leak_check_result
 from examples.tutor.core.pairwise import PairwiseTutorEvaluator
+from examples.tutor.core.parsers import parse_leak_check_result
 from examples.tutor.core.rewards import EpisodeRewardComputer, artifact_to_trace
 from examples.tutor.core.scoring import AnswerScorer, get_answer_scorer
 from examples.tutor.core.tensors import response_to_tensordict
@@ -141,10 +149,10 @@ from examples.tutor.core.types import (
     LeakCheckResult,
     PublicHistoryState,
     StudentTurnState,
-    TutorPrivateFeedback,
-    TutorTurnState,
     TurnArtifact,
     TurnTrace,
+    TutorPrivateFeedback,
+    TutorTurnState,
 )
 from examples.tutor.prompts import (
     LEAK_CHECK_USER_TEMPLATE,
@@ -210,6 +218,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         pairwise_reference_lag_steps: int = 5,
         pairwise_reward_scale: float = 0.05,
         pairwise_compare_all_turns: bool = True,
+        pairwise_judge_both_incorrect: bool = True,
     ):
         self.max_turns = max_turns
         self.answer_scorer_name = answer_scorer
@@ -255,6 +264,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.pairwise_reference_lag_steps = max(0, int(pairwise_reference_lag_steps))
         self.pairwise_reward_scale = float(pairwise_reward_scale)
         self.pairwise_compare_all_turns = bool(pairwise_compare_all_turns)
+        self.pairwise_judge_both_incorrect = bool(pairwise_judge_both_incorrect)
         self.last_history: list[dict[str, Any]] = []
         self.last_traces: list[TurnTrace] = []
         self.last_total_reward = 0.0
@@ -304,9 +314,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             is_eval = False
 
         if self.pairwise_reward_enabled and not is_eval:
-            versions.add(
-                max(0, actor_version - int(self.pairwise_reference_lag_steps))
-            )
+            versions.add(max(0, actor_version - int(self.pairwise_reference_lag_steps)))
         return versions
 
     async def arun_episode(self, engine, data: dict[str, Any]):
@@ -484,7 +492,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     leak_feedback=leak_result.feedback,
                 )
                 previous_tutor_visible_output = tutor_visible_output
-                termination_reason = "max_turns" if turn_idx == self.max_turns else "continue"
+                termination_reason = (
+                    "max_turns" if turn_idx == self.max_turns else "continue"
+                )
                 continue
 
             student_state = StudentTurnState(
@@ -504,7 +514,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if judge_result.correct:
                 termination_reason = "success"
             else:
-                termination_reason = "max_turns" if turn_idx == self.max_turns else "continue"
+                termination_reason = (
+                    "max_turns" if turn_idx == self.max_turns else "continue"
+                )
 
             next_public_history = await self._run_public_summary_update(
                 old_public_history=public_history,
@@ -826,7 +838,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             TEACHER_STATE_USER_TEMPLATE,
             task=state.task,
             ground_truth=state.ground_truth,
-            public_history=state.public_history.summary or "No visible tutoring history yet.",
+            public_history=state.public_history.summary
+            or "No visible tutoring history yet.",
             previous_tutor_output=state.previous_tutor_visible_output or "(none yet)",
             feedback_kind=feedback.kind,
             student_output=feedback.student_output or "(empty)",
@@ -842,7 +855,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return render_prompt(
             STUDENT_STATE_USER_TEMPLATE,
             task=state.task,
-            public_history=state.public_history.summary or "No previous visible tutoring history.",
+            public_history=state.public_history.summary
+            or "No previous visible tutoring history.",
             previous_student_output=state.previous_student_output or "(empty)",
             teacher_feedback=state.latest_tutor_visible_output or "(none)",
         )
@@ -912,7 +926,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             reward_caller=aux_caller,
             generate_reference_tutor=generate_reference_tutor,
             run_student=lambda state: self._run_student(state, aux_caller=aux_caller),
-            run_leak_check=lambda task, ground_truth, teacher_action: self._run_leak_check(
+            run_leak_check=lambda task,
+            ground_truth,
+            teacher_action: self._run_leak_check(
                 task,
                 ground_truth,
                 teacher_action,
@@ -920,6 +936,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
             score_answer=self._score_answer,
             compare_all_turns=self.pairwise_compare_all_turns,
+            judge_both_incorrect=self.pairwise_judge_both_incorrect,
         )
         results = await evaluator.evaluate(
             episode_artifact, reference_version=reference_version
@@ -943,7 +960,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         return result.raw_text
 
-    def _build_tutor_messages(self, tutor_state: TutorTurnState) -> list[dict[str, str]]:
+    def _build_tutor_messages(
+        self, tutor_state: TutorTurnState
+    ) -> list[dict[str, str]]:
         return [
             {"role": "system", "content": self.teacher_system_prompt},
             {"role": "user", "content": self._build_tutor_prompt(tutor_state)},
@@ -969,7 +988,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         leak_count: int,
     ) -> None:
         success_round = next(
-            (trace.turn_idx for trace in traces if trace.judge_correct and not trace.leaked),
+            (
+                trace.turn_idx
+                for trace in traces
+                if trace.judge_correct and not trace.leaked
+            ),
             0,
         )
         _safe_scalar(

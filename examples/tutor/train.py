@@ -91,6 +91,7 @@ def main(args):
         pairwise_reference_lag_steps=pairwise.reference_lag_steps,
         pairwise_reward_scale=pairwise.scale,
         pairwise_compare_all_turns=pairwise.compare_all_turns,
+        pairwise_judge_both_incorrect=pairwise.judge_both_incorrect,
     )
 
     eval_workflow_kwargs = workflow_kwargs.copy()
