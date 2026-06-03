@@ -10,60 +10,83 @@ from pathlib import Path
 from typing import Any
 
 sys.path.append(str(pathlib.Path(__file__).parent))
-from configs import CodeCoachConfig
 import workflow as codecoach_workflow_module
+from configs import CodeCoachConfig
 from workflow import CodeCoachAgentWorkflow
 
-from areal.api.cli_args import load_expr_config
+from examples.common.openai_utils import make_teacher_client
 from examples.common.trace_utils import (
     LoggedTeacherClient,
     TraceSink,
     load_demo_rows,
     patch_teacher_factory,
 )
-from examples.common.openai_utils import AsyncLLMCaller, make_teacher_client
+
+from areal.api.cli_args import load_expr_config
 
 
-class LoggedStudentCaller:
-    def __init__(self, caller: AsyncLLMCaller, sink: TraceSink):
+class LoggedAuxiliaryCaller:
+    def __init__(self, caller: Any, sink: TraceSink):
         self._caller = caller
         self._sink = sink
-        self.request_config = caller.request_config
 
-    async def call_text(self, messages: list[dict[str, str]]) -> str:
-        self._sink.append_messages("student_input", messages)
-        output = await self._caller.call_text(messages)
-        self._sink.append("student", output)
-        return output
+    @property
+    def request_config(self) -> dict[str, Any]:
+        return self._caller.request_config
+
+    async def call_text(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        rid_prefix: str = "auxiliary",
+    ):
+        self._sink.append_messages(f"{rid_prefix}_input", messages)
+        result = await self._caller.call_text(messages, rid_prefix=rid_prefix)
+        self._sink.append(rid_prefix, result.raw_text or result.text or result.error or "")
+        return result
 
 
 class DemoCodeCoachWorkflow(CodeCoachAgentWorkflow):
     def __init__(self, *args, trace_sink: TraceSink, **kwargs):
         super().__init__(*args, **kwargs)
         self.trace_sink = trace_sink
-        self.student_caller = LoggedStudentCaller(self.student_caller, trace_sink)
+        if self.api_aux_caller is not None:
+            self.api_aux_caller = LoggedAuxiliaryCaller(self.api_aux_caller, trace_sink)
 
 
 def build_workflow_kwargs(config: CodeCoachConfig, trace_sink: TraceSink) -> dict[str, Any]:
+    auxiliary_model = config.auxiliary_model
+    reward = config.reward
+    pairwise = reward.pairwise
     return dict(
         trace_sink=trace_sink,
         temperature=config.gconfig.temperature,
         top_p=config.gconfig.top_p,
         max_completion_tokens=config.gconfig.max_new_tokens,
         max_turns=config.max_turns,
-        student_base_url=config.student_base_url,
-        student_model=config.student_model,
-        student_api_key=config.student_api_key,
-        student_timeout=config.student_timeout,
-        student_max_tokens=config.student_max_tokens,
-        student_temperature=config.student_temperature,
-        student_top_p=config.student_top_p,
-        max_concurrent_students=config.max_concurrent_students,
-        student_request_params=config.student_request_params,
+        enable_thinking=config.enable_thinking,
+        aux_mode=auxiliary_model.mode,
+        aux_enable_thinking=auxiliary_model.enable_thinking,
+        aux_base_url=auxiliary_model.base_url,
+        aux_model=auxiliary_model.model,
+        aux_api_key=auxiliary_model.api_key,
+        aux_timeout=auxiliary_model.timeout,
+        aux_max_tokens=auxiliary_model.max_tokens,
+        aux_temperature=auxiliary_model.temperature,
+        aux_top_p=auxiliary_model.top_p,
+        max_concurrent_aux_calls=auxiliary_model.max_concurrent_calls,
+        aux_request_params=auxiliary_model.request_params,
         work_dir_root=config.work_dir_root,
-        max_episode_total_tokens=config.gconfig.max_tokens,
+        max_train_sample_tokens=config.gconfig.max_tokens,
+        token_budget_penalty=reward.token_budget_penalty,
         tokenizer_path=config.tokenizer_path,
         model_context_length=config.sglang.context_length,
+        pairwise_reward_enabled=pairwise.enabled,
+        pairwise_reference_lag_steps=pairwise.reference_lag_steps,
+        pairwise_reward_scale=pairwise.scale,
+        pairwise_compare_all_turns=pairwise.compare_all_turns,
+        debug_trace_dir=config.debug_trace_dir or None,
+        debug_trace_every_n_rollouts=config.debug_trace_every_n_rollouts,
     )
 
 
@@ -85,25 +108,25 @@ async def _run_one(
         return logged_teacher
 
     with patch_teacher_factory(codecoach_workflow_module, _factory):
-        rewards = await workflow.run(row, **teacher_extra_kwargs)
+        reward = await workflow.run(row, **teacher_extra_kwargs)
 
     turn_totals = [
         (usage.get("prompt_tokens") or 0) + (usage.get("completion_tokens") or 0)
         for usage in logged_teacher.logged_usage
     ]
-    length_exceeded_turns = [
-        idx + 1
-        for idx, total in enumerate(turn_totals)
-        if total >= config.gconfig.max_tokens
-    ]
+    auxiliary_request_config = (
+        workflow.api_aux_caller.request_config
+        if workflow.api_aux_caller is not None
+        else {"mode": "self"}
+    )
     summary = {
         "id": row.get("id"),
-        "rewards": rewards,
+        "reward": reward,
+        "history": workflow.last_history,
         "teacher_usage": logged_teacher.logged_usage,
         "turn_total_tokens": turn_totals,
         "length_budget": config.gconfig.max_tokens,
-        "length_exceeded_turns": length_exceeded_turns,
-        "student_request_config": workflow.student_caller.request_config,
+        "auxiliary_request_config": auxiliary_request_config,
     }
     meta = {
         "dataset_row": row,
@@ -112,9 +135,9 @@ async def _run_one(
         "workflow_config": {
             "max_turns": config.max_turns,
             "max_completion_tokens": config.gconfig.max_new_tokens,
-            "max_episode_total_tokens": config.gconfig.max_tokens,
-            "student_base_url": config.student_base_url,
-            "student_model": config.student_model,
+            "max_train_sample_tokens": config.gconfig.max_tokens,
+            "auxiliary_model": config.auxiliary_model,
+            "reward": config.reward,
             "work_dir_root": config.work_dir_root,
         },
     }
@@ -141,7 +164,12 @@ def main():
     config_args = ["--config", args.config, *args.overrides]
     config, _ = load_expr_config(config_args, CodeCoachConfig)
     rows = load_demo_rows(config.train_dataset.path, args.split, args.num_rollouts)
-    root = Path(args.output_dir or Path(__file__).parent / "demo_output" / datetime.now().strftime("%Y%m%d_%H%M%S"))
+    root = Path(
+        args.output_dir
+        or Path(__file__).parent
+        / "demo_output"
+        / datetime.now().strftime("%Y%m%d_%H%M%S")
+    )
     root.mkdir(parents=True, exist_ok=True)
 
     summaries = []

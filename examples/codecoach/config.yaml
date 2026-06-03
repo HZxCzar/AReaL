@@ -1,5 +1,5 @@
 experiment_name: codecoach-grpo
-trial_name: 20260414_084510
+trial_name: tutorinf-style-pairwise
 
 seed: 1
 enable_offload: false
@@ -9,17 +9,33 @@ tokenizer_path: ${actor.path}
 workflow: examples.codecoach.workflow.CodeCoachAgentWorkflow
 eval_workflow: ${workflow}
 max_turns: 5
-student_base_url: http://127.0.0.1:30001/v1
-student_model: default
-student_api_key: EMPTY
-student_timeout: 120
-student_max_tokens: 4096
-student_temperature: 0.7
-student_top_p: 0.8
-max_concurrent_students: 4
-student_request_params:
-  seed: 42
+enable_thinking: true
+
+auxiliary_model:
+  mode: api
+  enable_thinking: false
+  base_url: http://127.0.0.1:30001/v1
+  model: default
+  api_key: EMPTY
+  timeout: 120
+  max_tokens: 4096
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 4
+  request_params:
+    seed: 42
+
+reward:
+  token_budget_penalty: -0.2
+  pairwise:
+    enabled: true
+    reference_lag_steps: 5
+    scale: 0.05
+    compare_all_turns: true
+
 work_dir_root: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/codecoach/artifacts
+debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/codecoach/debug_traces/${experiment_name}/${trial_name}
+debug_trace_every_n_rollouts: 10
 
 cluster:
   n_nodes: 1
@@ -42,8 +58,10 @@ rollout:
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 2
+  pause_grace_period: 10
   enable_rollout_tracing: false
   scheduling_spec: ${actor.scheduling_spec}
+  use_lora: true
   dump_to_file: true
   openai:
     mode: inline
@@ -54,15 +72,24 @@ rollout:
     turn_discount: 1.0
 
 gconfig:
-  n_samples: 8
+  n_samples: 1
   min_new_tokens: 0
-  # Old verL config used data.max_response_length=16384.
   max_new_tokens: 16384
-  # Old base config used data.max_prompt_length=2048 and codecoach train script did not override it.
   max_tokens: 18432
   greedy: false
   temperature: 1.0
   top_p: 1.0
+  lora_name: default_lora
+
+eval_gconfig:
+  n_samples: 1
+  min_new_tokens: 0
+  max_new_tokens: 16384
+  max_tokens: 18432
+  greedy: false
+  temperature: 0.6
+  top_p: 1.0
+  lora_name: default_lora
 
 actor:
   backend: "fsdp:d4p1t1"
@@ -87,21 +114,23 @@ actor:
     warmup_steps_proportion: 0.001
   eps_clip: 0.4
   temperature: ${gconfig.temperature}
-  reward_scaling: 10.0
-  reward_bias: -0.5
+  reward_scaling: 1.0
+  reward_bias: 0.0
   kl_ctl: 0.0
   ppo_n_minibatches: 8
   recompute_logprob: true
   use_decoupled_loss: true
   behave_imp_weight_cap: 5.0
-  reward_norm:
-    mean_level: group
-    std_level: group
-    group_size: ${gconfig.n_samples}
+  reward_norm: null
   adv_norm:
     mean_level: batch
     std_level: batch
   weight_update_mode: disk
+  use_lora: ${rollout.use_lora}
+  peft_type: lora
+  lora_rank: 16
+  lora_alpha: 16
+  target_modules: [all-linear]
   max_new_tokens: ${gconfig.max_new_tokens}
   scheduling_spec:
     - task_type: worker
@@ -134,6 +163,9 @@ sglang:
   max_running_requests: null
   context_length: 40960
   mem_fraction_static: 0.6
+  enable_lora: ${actor.use_lora}
+  max_lora_rank: ${actor.lora_rank}
+  max_loaded_loras: 16
 
 train_dataset:
   batch_size: 4
@@ -142,7 +174,6 @@ train_dataset:
   num_workers: 0
   path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/codecoach/circle_packing_dataset
   type: rl
-  # Per-sample length aligned with old verL response_length.
   max_length: 16384
 
 valid_dataset:

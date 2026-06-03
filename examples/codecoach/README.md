@@ -1,8 +1,16 @@
-# CodeCoach AgentWorkflow
+# CodeCoach TutorInf-Style Workflow
 
-This example ports the old `agentenv-codecoach` loop into an AReaL-native
-`AgentWorkflow`. The teacher model is trained through AReaL's OpenAI proxy. The student
-model remains external and the evaluator runs locally.
+This example runs the CodeCoach script-writing task with the TutorInf training pattern:
+
+- multi-turn teacher/student interaction
+- one training sample per teacher turn
+- CodeCoach rule-based evaluator for task progress and correctness
+- optional pairwise reward between the current LoRA teacher and a lagged reference LoRA
+- no leak check
+
+The teacher is the trainable AReaL actor. The student is configured through
+`auxiliary_model`: `mode: api` calls an external OpenAI-compatible student service, while
+`mode: self` uses the actor base model with LoRA disabled.
 
 ## Dataset
 
@@ -27,10 +35,6 @@ Each dataset sample contains:
 - `eval_timeout_sec`
 - `metadata`
 
-If `--train-ids` and `--test-ids` are provided, the split follows the old
-`AgentItemId/codecoach_train.json` and `AgentItemId/codecoach_test.json` files. Duplicate
-item ids are preserved in the resulting split.
-
 ## Train
 
 ```bash
@@ -39,10 +43,6 @@ python3 examples/codecoach/train.py \
   scheduler.type=local
 ```
 
-Update `student_base_url` and `student_model` in the config to point at the external
-student service.
-
-Set student API call parameters directly in YAML. Common parameters use dedicated
-fields such as `student_max_tokens`, `student_temperature`, and `student_top_p`; put
-additional OpenAI request kwargs under `student_request_params`, including
-backend-specific `extra_body` values.
+For an external student service, update `auxiliary_model.base_url`,
+`auxiliary_model.model`, and request parameters in `auxiliary_model.request_params`.
+For base-model student calls, set `auxiliary_model.mode=self`.
