@@ -48,9 +48,11 @@ TEACHER_STATE_USER_TEMPLATE = """\
 Task:
 {{ task }}
 
-Private ground truth / answer key:
+{% if show_ground_truth %}
+Private ground truth key:
 {{ ground_truth }}
 
+{% endif %}
 Public conversation history shown to both tutor and student:
 {{ public_history }}
 
@@ -60,7 +62,9 @@ Previous tutor output:
 Private feedback for the tutor:
 {% if feedback_kind == "leak" %}
 - Previous tutor output was NOT shown to the student because it leaked answer information.
+{% if show_ground_truth %}
 - Leak feedback: {{ leak_feedback }}
+{% endif %}
 {% elif feedback_kind == "student_judged" %}
 - Latest student output: {{ student_output }}
 - Exact-answer correctness: {{ 'correct' if judge_correct else 'incorrect' }}

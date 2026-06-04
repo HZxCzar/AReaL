@@ -119,6 +119,7 @@ def build_workflow(config: TutorConfig, max_concurrency: int) -> TutorAgentWorkf
         aux_top_p=auxiliary_model.top_p,
         max_concurrent_aux_calls=max_concurrency,
         aux_request_params=auxiliary_model.request_params,
+        teacher_show_ground_truth=config.teacher_show_ground_truth,
         student_system_prompt=config.student_system_prompt,
         tokenizer_path=config.tokenizer_path,
         model_context_length=config.sglang.context_length,

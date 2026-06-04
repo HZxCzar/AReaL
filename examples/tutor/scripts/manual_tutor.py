@@ -141,7 +141,7 @@ def resolve_local_tokenizer_path(tokenizer_path: str | None) -> str | None:
     return None
 
 
-def build_workflow(config: Any, max_turns: int) -> Any:
+def build_workflow(config: Any, max_turns: int, *, hide_ground_truth: bool) -> Any:
     from workflow import TutorAgentWorkflow
 
     auxiliary_model = config.auxiliary_model
@@ -174,6 +174,9 @@ def build_workflow(config: Any, max_turns: int) -> Any:
         length_penalty_per_100_chars=reward.length_penalty_per_100_chars,
         length_penalty_min=reward.length_penalty_min,
         teacher_system_prompt=config.teacher_system_prompt,
+        teacher_show_ground_truth=(
+            bool(config.teacher_show_ground_truth) and not hide_ground_truth
+        ),
         student_system_prompt=config.student_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
         summary_system_prompt=config.summary_system_prompt,
@@ -250,7 +253,9 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
         seed=int(args.seed),
     )
     max_turns = int(args.max_turns) if args.max_turns > 0 else int(config.max_turns)
-    workflow = build_workflow(config, max_turns=max_turns)
+    workflow = build_workflow(
+        config, max_turns=max_turns, hide_ground_truth=bool(args.hide_ground_truth)
+    )
 
     task = str(row["task"])
     ground_truth = str(row["ground_truth"])

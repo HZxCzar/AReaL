@@ -11,6 +11,7 @@ eval_workflow: ${workflow}
 answer_scorer: aime
 max_turns: 10
 enable_thinking: false
+teacher_show_ground_truth: true
 
 auxiliary_model:
   base_url: http://127.0.0.1:30001/v1

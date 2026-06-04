@@ -125,6 +125,10 @@ class TutorConfig(GRPOConfig):
             "help": "Whether to enable thinking mode for the tutor rollout model."
         },
     )
+    teacher_show_ground_truth: bool = field(
+        default=False,
+        metadata={"help": "Whether teacher prompts include the ground-truth answer."},
+    )
     auxiliary_model: TutorAuxiliaryModelConfig = field(
         default_factory=TutorAuxiliaryModelConfig
     )

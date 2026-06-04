@@ -1,5 +1,5 @@
-experiment_name: tutor-math
-trial_name: qwen8b-thinking-self-turn10-filtered-pairwise-no-both-wrong-judge-ep200
+experiment_name: tutor-math-baseline
+trial_name: qwen8b-thinking-self-turn10-baseline-with-gt
 
 seed: 42
 enable_offload: false
@@ -31,11 +31,10 @@ reward:
   length_penalty_per_100_chars: -0.005
   length_penalty_min: -0.1
   pairwise:
-    enabled: true
+    enabled: false
     reference_lag_steps: 5
     scale: 0.05
     compare_all_turns: true
-    judge_both_incorrect: false
 
 debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor/debug_traces/${experiment_name}/${trial_name}
 debug_trace_every_n_rollouts: 10
@@ -175,7 +174,7 @@ train_dataset:
   shuffle: true
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_8b_filter_16384_clean
+  path: examples/tutor/data/math_dataset_8b_filter_16384_clean_teacher_solved
   type: rl
   max_length: 16384
 
@@ -183,7 +182,7 @@ valid_dataset:
   batch_size: 8
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_8b_filter_16384_clean
+  path: examples/tutor/data/math_dataset_8b_filter_16384_clean_teacher_solved
   type: rl
 
 saver:

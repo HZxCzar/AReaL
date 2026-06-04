@@ -205,6 +205,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         length_penalty_per_100_chars: float = -0.005,
         length_penalty_min: float = -0.1,
         teacher_system_prompt: str = "",
+        teacher_show_ground_truth: bool = False,
         student_system_prompt: str = "",
         leak_check_system_prompt: str = "",
         summary_system_prompt: str = "",
@@ -254,6 +255,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.length_penalty_per_100_chars = float(length_penalty_per_100_chars)
         self.length_penalty_min = float(length_penalty_min)
         self.teacher_system_prompt = teacher_system_prompt.strip()
+        self.teacher_show_ground_truth = bool(teacher_show_ground_truth)
         self.student_system_prompt = student_system_prompt.strip()
         self.leak_check_system_prompt = leak_check_system_prompt.strip()
         self.summary_system_prompt = summary_system_prompt.strip()
@@ -838,6 +840,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             TEACHER_STATE_USER_TEMPLATE,
             task=state.task,
             ground_truth=state.ground_truth,
+            show_ground_truth=self.teacher_show_ground_truth,
             public_history=state.public_history.summary
             or "No visible tutoring history yet.",
             previous_tutor_output=state.previous_tutor_visible_output or "(none yet)",
