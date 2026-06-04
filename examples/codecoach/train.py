@@ -1,5 +1,9 @@
 import pathlib
 import sys
+from copy import deepcopy
+from typing import Any
+
+from torch.utils.data import Dataset as TorchDataset
 
 sys.path.append(str(pathlib.Path(__file__).parent))
 from configs import CodeCoachConfig
@@ -7,7 +11,61 @@ from configs import CodeCoachConfig
 from areal import PPOTrainer
 from areal.api.cli_args import load_expr_config
 from areal.dataset import get_custom_dataset
+from areal.utils import logging
 from areal.utils.hf_utils import load_hf_tokenizer
+
+logger = logging.getLogger("CodeCoach")
+
+
+class _RepeatedDataset(TorchDataset):
+    def __init__(self, dataset: Any, indices: list[int]) -> None:
+        self._dataset = dataset
+        self._indices = indices
+
+    def __len__(self) -> int:
+        return len(self._indices)
+
+    def __getitem__(self, index: int) -> Any:
+        return self._dataset[self._indices[index]]
+
+
+def _repeat_to_min_batch(dataset: Any, batch_size: int, split: str) -> Any:
+    if batch_size <= 0:
+        return dataset
+    try:
+        dataset_size = len(dataset)
+    except (RuntimeError, TypeError):
+        return dataset
+    if dataset_size == 0 or dataset_size >= batch_size:
+        return dataset
+
+    indices = [idx % dataset_size for idx in range(batch_size)]
+    logger.info(
+        "Repeating CodeCoach %s dataset from %d to %d rows to preserve batch_size=%d",
+        split,
+        dataset_size,
+        len(indices),
+        batch_size,
+    )
+    if hasattr(dataset, "select"):
+        return dataset.select(indices)
+    return _RepeatedDataset(dataset, indices)
+
+
+def _load_local_codecoach_dataset(
+    *,
+    split: str,
+    dataset_config: Any,
+    tokenizer: Any,
+) -> Any:
+    local_dataset_config = deepcopy(dataset_config)
+    local_dataset_config.scheduling_spec = None
+    dataset = get_custom_dataset(
+        split=split,
+        dataset_config=local_dataset_config,
+        tokenizer=tokenizer,
+    )
+    return _repeat_to_min_batch(dataset, local_dataset_config.batch_size, split)
 
 
 def main(args):
@@ -17,12 +75,12 @@ def main(args):
     pairwise = reward.pairwise
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
 
-    train_dataset = get_custom_dataset(
+    train_dataset = _load_local_codecoach_dataset(
         split="train",
         dataset_config=config.train_dataset,
         tokenizer=tokenizer,
     )
-    valid_dataset = get_custom_dataset(
+    valid_dataset = _load_local_codecoach_dataset(
         split="test",
         dataset_config=config.valid_dataset,
         tokenizer=tokenizer,
