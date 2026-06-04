@@ -1,6 +1,7 @@
 import pathlib
 import sys
 from copy import deepcopy
+from datetime import datetime
 from typing import Any
 
 from torch.utils.data import Dataset as TorchDataset
@@ -69,6 +70,13 @@ def _load_local_codecoach_dataset(
 
 
 def main(args):
+    config_path = pathlib.Path(args[args.index("--config") + 1])
+    trial_name = next(
+        line.split(":", 1)[1].strip().strip("'\"")
+        for line in config_path.read_text(encoding="utf-8").splitlines()
+        if line.startswith("trial_name:")
+    )
+    args = [*args, f"trial_name={datetime.now():%Y%m%d_%H%M%S}_{trial_name}"]
     config, _ = load_expr_config(args, CodeCoachConfig)
     auxiliary_model = config.auxiliary_model
     reward = config.reward
