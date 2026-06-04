@@ -33,7 +33,7 @@ debug_trace_every_n_rollouts: 10
 cluster:
   n_nodes: 1
   n_gpus_per_node: 8
-  fileroot: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/codecoach
+  fileroot: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/codecoach
   name_resolve:
     type: nfs
     nfs_record_root: ${cluster.fileroot}/name_resolve

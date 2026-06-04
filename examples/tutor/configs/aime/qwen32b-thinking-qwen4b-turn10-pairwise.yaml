@@ -41,16 +41,16 @@ reward:
     scale: 0.05
     compare_all_turns: true
 
-debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor/debug_traces/${experiment_name}/${trial_name}
+debug_trace_dir: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/debug_traces/${experiment_name}/${trial_name}
 debug_trace_every_n_rollouts: 10
 
 cluster:
   n_nodes: 1
   n_gpus_per_node: 4
-  fileroot: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor
+  fileroot: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor
   name_resolve:
     type: nfs
-    nfs_record_root: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/outputs/tutor/name_resolve
+    nfs_record_root: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/name_resolve
 
 scheduler:
   type: local
