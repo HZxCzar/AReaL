@@ -89,9 +89,11 @@ class TutorEvaluatorConfig(EvaluatorConfig):
 class TutorRewardConfig:
     success: float = field(default=1.0)
     leak_penalty: float = field(default=-1.0)
+    assign_success_reward: bool = field(default=False)
     outcome_prior_turn_weight: float = field(default=0.1)
     outcome_credit_gamma: float = field(default=0.9)
     early_success_bonus: float = field(default=0.3)
+    enable_turn_penalty: bool = field(default=False)
     turn_penalty: float = field(default=-0.01)
     length_penalty_threshold_chars: int = field(default=1200)
     length_penalty_per_100_chars: float = field(default=-0.005)

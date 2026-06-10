@@ -197,9 +197,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         aux_request_params: dict[str, Any] | None = None,
         success_reward: float = 1.0,
         leak_penalty: float = -1.0,
+        assign_success_reward: bool = False,
         outcome_prior_turn_weight: float = 0.1,
         outcome_credit_gamma: float = 0.9,
         early_success_bonus: float = 0.3,
+        enable_turn_penalty: bool = False,
         turn_penalty: float = -0.01,
         length_penalty_threshold_chars: int = 1200,
         length_penalty_per_100_chars: float = -0.005,
@@ -247,9 +249,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.context_window_margin = int(context_window_margin)
         self.success_reward = float(success_reward)
         self.leak_penalty = float(leak_penalty)
+        self.assign_success_reward = bool(assign_success_reward)
         self.outcome_prior_turn_weight = float(outcome_prior_turn_weight)
         self.outcome_credit_gamma = float(outcome_credit_gamma)
         self.early_success_bonus = float(early_success_bonus)
+        self.enable_turn_penalty = bool(enable_turn_penalty)
         self.turn_penalty = float(turn_penalty)
         self.length_penalty_threshold_chars = int(length_penalty_threshold_chars)
         self.length_penalty_per_100_chars = float(length_penalty_per_100_chars)
@@ -572,9 +576,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         reward_computer = EpisodeRewardComputer(
             success_reward=self.success_reward,
             leak_penalty=self.leak_penalty,
+            assign_success_reward=self.assign_success_reward,
             outcome_prior_turn_weight=self.outcome_prior_turn_weight,
             outcome_credit_gamma=self.outcome_credit_gamma,
             early_success_bonus=self.early_success_bonus,
+            enable_turn_penalty=self.enable_turn_penalty,
             turn_penalty=self.turn_penalty,
             length_penalty_threshold_chars=self.length_penalty_threshold_chars,
             length_penalty_per_100_chars=self.length_penalty_per_100_chars,

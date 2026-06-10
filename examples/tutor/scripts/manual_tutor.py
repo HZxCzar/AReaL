@@ -19,7 +19,6 @@ from examples.tutor.core.text import (  # noqa: E402
     strip_reasoning_for_context as _strip_reasoning_for_context,
 )
 
-
 DEFAULT_FILTERED_DATASET = _THIS_DIR / "aime_dataset_no_pre_solve"
 
 
@@ -166,9 +165,11 @@ def build_workflow(config: Any, max_turns: int, *, hide_ground_truth: bool) -> A
         aux_request_params=auxiliary_model.request_params,
         success_reward=reward.success,
         leak_penalty=reward.leak_penalty,
+        assign_success_reward=reward.assign_success_reward,
         outcome_prior_turn_weight=reward.outcome_prior_turn_weight,
         outcome_credit_gamma=reward.outcome_credit_gamma,
         early_success_bonus=reward.early_success_bonus,
+        enable_turn_penalty=reward.enable_turn_penalty,
         turn_penalty=reward.turn_penalty,
         length_penalty_threshold_chars=reward.length_penalty_threshold_chars,
         length_penalty_per_100_chars=reward.length_penalty_per_100_chars,
@@ -232,14 +233,16 @@ def to_visible_tutor_message(tutor_message: str) -> str:
 
 
 async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
-    from areal.api.cli_args import load_expr_config
     from configs import TutorConfig
+
     from examples.tutor.core.types import (
         PublicHistoryState,
         StudentTurnState,
         TutorPrivateFeedback,
         TutorTurnState,
     )
+
+    from areal.api.cli_args import load_expr_config
 
     config_args = ["--config", args.config, *args.overrides]
     config, _ = load_expr_config(config_args, TutorConfig)

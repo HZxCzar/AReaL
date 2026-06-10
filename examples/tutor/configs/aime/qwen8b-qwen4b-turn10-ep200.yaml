@@ -27,10 +27,12 @@ auxiliary_model:
 
 reward:
   success: 1.0
+  assign_success_reward: false
   leak_penalty: -1.0
   outcome_prior_turn_weight: 0.1
   outcome_credit_gamma: 0.9
   early_success_bonus: 0.3
+  enable_turn_penalty: false
   turn_penalty: -0.01
   length_penalty_threshold_chars: 1200
   length_penalty_per_100_chars: -0.005

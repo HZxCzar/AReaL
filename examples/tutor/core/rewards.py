@@ -14,9 +14,11 @@ class EpisodeRewardComputer:
         *,
         success_reward: float,
         leak_penalty: float,
+        assign_success_reward: bool = False,
         outcome_prior_turn_weight: float = 0.1,
         outcome_credit_gamma: float = 0.9,
         early_success_bonus: float = 0.0,
+        enable_turn_penalty: bool = False,
         turn_penalty: float = 0.0,
         length_penalty_threshold_chars: int = 0,
         length_penalty_per_100_chars: float = 0.0,
@@ -24,9 +26,11 @@ class EpisodeRewardComputer:
     ) -> None:
         self.success_reward = success_reward
         self.leak_penalty = leak_penalty
+        self.assign_success_reward = assign_success_reward
         self.outcome_prior_turn_weight = outcome_prior_turn_weight
         self.outcome_credit_gamma = outcome_credit_gamma
         self.early_success_bonus = early_success_bonus
+        self.enable_turn_penalty = enable_turn_penalty
         self.turn_penalty = turn_penalty
         self.length_penalty_threshold_chars = length_penalty_threshold_chars
         self.length_penalty_per_100_chars = length_penalty_per_100_chars
@@ -49,7 +53,7 @@ class EpisodeRewardComputer:
             success_credit = success_credits.get(artifact.turn_idx, 0.0)
             if success_credit:
                 components["success_credit"] = success_credit
-            if self.turn_penalty:
+            if self.enable_turn_penalty and self.turn_penalty:
                 components["turn_penalty"] = self.turn_penalty
             length_penalty = self._length_penalty(artifact.tutor_visible_output)
             if length_penalty:
@@ -91,6 +95,8 @@ class EpisodeRewardComputer:
         else:
             early_fraction = max(0.0, (max_turns - success_turn) / (max_turns - 1))
         budget = self.success_reward + self.early_success_bonus * early_fraction
+        if not self.assign_success_reward:
+            return {success_turn: float(budget)}
 
         weights: dict[int, float] = {}
         for artifact in turns:

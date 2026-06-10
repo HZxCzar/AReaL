@@ -10,18 +10,19 @@ from pathlib import Path
 from typing import Any
 
 sys.path.append(str(pathlib.Path(__file__).parent))
-from configs import TutorConfig
 import workflow as tutor_workflow_module
+from configs import TutorConfig
 from workflow import TutorAgentWorkflow
 
-from areal.api.cli_args import load_expr_config
+from examples.common.openai_utils import make_teacher_client
 from examples.common.trace_utils import (
     LoggedTeacherClient,
     TraceSink,
     load_demo_rows,
     patch_teacher_factory,
 )
-from examples.common.openai_utils import make_teacher_client
+
+from areal.api.cli_args import load_expr_config
 
 
 class DemoTutorWorkflow(TutorAgentWorkflow):
@@ -127,9 +128,11 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         aux_request_params=auxiliary_model.request_params,
         success_reward=reward.success,
         leak_penalty=reward.leak_penalty,
+        assign_success_reward=reward.assign_success_reward,
         outcome_prior_turn_weight=reward.outcome_prior_turn_weight,
         outcome_credit_gamma=reward.outcome_credit_gamma,
         early_success_bonus=reward.early_success_bonus,
+        enable_turn_penalty=reward.enable_turn_penalty,
         turn_penalty=reward.turn_penalty,
         length_penalty_threshold_chars=reward.length_penalty_threshold_chars,
         length_penalty_per_100_chars=reward.length_penalty_per_100_chars,

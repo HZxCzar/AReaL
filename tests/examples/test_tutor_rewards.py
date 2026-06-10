@@ -110,10 +110,29 @@ def _outcome_computer(**overrides) -> EpisodeRewardComputer:
     return EpisodeRewardComputer(**params)
 
 
-def test_assigns_success_credit_from_final_outcome():
+def test_default_success_reward_goes_to_success_turn_only():
     turns = [_turn(1), _turn(2), _turn(3, correct=True)]
     assignments = asyncio.run(
         _outcome_computer().compute(_episode(turns, termination_reason="success"))
+    )
+
+    expected_budget = 1.0 + 0.3 * (10 - 3) / (10 - 1)
+    assert assignments[0].reward_components == {}
+    assert assignments[1].reward_components == {}
+    assert assignments[2].reward_components["success_credit"] == pytest.approx(
+        expected_budget
+    )
+    assert [assignment.reward for assignment in assignments] == pytest.approx(
+        [0.0, 0.0, expected_budget]
+    )
+
+
+def test_assign_success_reward_distributes_credit_from_final_outcome():
+    turns = [_turn(1), _turn(2), _turn(3, correct=True)]
+    assignments = asyncio.run(
+        _outcome_computer(assign_success_reward=True).compute(
+            _episode(turns, termination_reason="success")
+        )
     )
 
     success_credits = [
@@ -122,10 +141,6 @@ def test_assigns_success_credit_from_final_outcome():
     expected_budget = 1.0 + 0.3 * (10 - 3) / (10 - 1)
     assert sum(success_credits) == pytest.approx(expected_budget)
     assert success_credits[2] > success_credits[1] > success_credits[0]
-    assert all(
-        assignment.reward_components["turn_penalty"] == pytest.approx(-0.01)
-        for assignment in assignments
-    )
 
 
 def test_leak_turn_gets_no_success_credit():
@@ -135,21 +150,33 @@ def test_leak_turn_gets_no_success_credit():
     )
 
     assert "success_credit" not in assignments[0].reward_components
-    assert assignments[0].reward_components == {
-        "leak": -1.0,
-        "turn_penalty": -0.01,
-    }
-    assert assignments[0].reward == pytest.approx(-1.01)
+    assert assignments[0].reward_components == {"leak": -1.0}
+    assert assignments[0].reward == pytest.approx(-1.0)
     assert assignments[1].reward_components["success_credit"] > 0.0
 
 
-def test_failed_episode_has_no_positive_success_credit():
+def test_failed_episode_has_no_positive_success_credit_or_turn_penalty_by_default():
     turns = [_turn(1), _turn(2)]
     assignments = asyncio.run(
         _outcome_computer().compute(_episode(turns, termination_reason="max_turns"))
     )
 
-    assert all("success_credit" not in item.reward_components for item in assignments)
+    assert [item.reward_components for item in assignments] == [{}, {}]
+    assert [item.reward for item in assignments] == pytest.approx([0.0, 0.0])
+
+
+def test_turn_penalty_applies_only_when_enabled():
+    turns = [_turn(1), _turn(2)]
+    assignments = asyncio.run(
+        _outcome_computer(enable_turn_penalty=True).compute(
+            _episode(turns, termination_reason="max_turns")
+        )
+    )
+
+    assert all(
+        assignment.reward_components == {"turn_penalty": -0.01}
+        for assignment in assignments
+    )
     assert [item.reward for item in assignments] == pytest.approx([-0.01, -0.01])
 
 

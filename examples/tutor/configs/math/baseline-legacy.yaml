@@ -1,5 +1,5 @@
-experiment_name: tutor-aime
-trial_name: qwen8b-qwen4b-turn10-overfit-one-prm-ep200
+experiment_name: tutor-math-baseline
+trial_name: qwen8b-thinking-self-turn10-baseline
 
 seed: 42
 enable_offload: false
@@ -8,22 +8,17 @@ tokenizer_path: ${actor.path}
 
 workflow: examples.tutor.workflow.TutorAgentWorkflow
 eval_workflow: ${workflow}
-answer_scorer: aime
+answer_scorer: math
 max_turns: 10
-enable_thinking: false
-teacher_show_ground_truth: true
+enable_thinking: true
+teacher_show_ground_truth: false
 
 auxiliary_model:
-  base_url: http://127.0.0.1:30001/v1
-  model: default
-  api_key: EMPTY
-  timeout: 120
+  mode: self
+  enable_thinking: false
   max_tokens: 1024
   temperature: 0.0
-  top_p: 0.8
   max_concurrent_calls: 4
-  request_params:
-    seed: 42
 
 reward:
   success: 2.0
@@ -48,7 +43,7 @@ debug_trace_every_n_rollouts: 10
 
 cluster:
   n_nodes: 1
-  n_gpus_per_node: 4
+  n_gpus_per_node: 8
   fileroot: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor
   name_resolve:
     type: nfs
@@ -58,15 +53,16 @@ scheduler:
   type: local
 
 rollout:
-  backend: "sglang:d2p1t1"
+  backend: "sglang:d4p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   tokenizer_path: ${tokenizer_path}
-  max_concurrent_rollouts: 2
+  max_concurrent_rollouts: 8
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 2
+  pause_grace_period: 10
   enable_rollout_tracing: false
   scheduling_spec: ${actor.scheduling_spec}
   use_lora: true
@@ -82,25 +78,25 @@ rollout:
 gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 1024
-  max_tokens: 20478
+  max_new_tokens: 16384
+  max_tokens: 32768
   greedy: false
-  temperature: 0.7
+  temperature: 0.6
   top_p: 1.0
   lora_name: default_lora
 
 eval_gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 1024
-  max_tokens: 20478
+  max_new_tokens: 16384
+  max_tokens: 32768
   greedy: false
-  temperature: 0.0
+  temperature: 0.6
   top_p: 1.0
   lora_name: default_lora
 
 actor:
-  backend: "fsdp:d2p1t1"
+  backend: "fsdp:d4p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
@@ -109,7 +105,7 @@ actor:
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 32768
+    max_tokens_per_mb: 40960
   optimizer:
     type: adam
     lr: 5.0e-5
@@ -131,7 +127,7 @@ actor:
   behave_imp_weight_cap: 5.0
   reward_norm: null
   adv_norm:
-    mean_level: null
+    mean_level: batch
     std_level: batch
   weight_update_mode: disk
   use_lora: ${rollout.use_lora}
@@ -168,27 +164,27 @@ sglang:
   random_seed: ${seed}
   skip_tokenizer_init: true
   dtype: ${actor.dtype}
-  max_running_requests: 2
+  max_running_requests: 4
   context_length: 40960
-  mem_fraction_static: 0.6
+  mem_fraction_static: 0.75
   enable_lora: ${actor.use_lora}
   max_lora_rank: ${actor.lora_rank}
-  max_loaded_loras: 12
+  max_loaded_loras: 16
 
 train_dataset:
-  batch_size: 4
+  batch_size: 16
   shuffle: true
   pin_memory: false
   num_workers: 0
-  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/aime_dataset_one_sample
+  path: examples/tutor/data/math_dataset_8b_filter_16384_clean_teacher_solved
   type: rl
   max_length: 16384
 
 valid_dataset:
-  batch_size: 4
+  batch_size: 8
   pin_memory: false
   num_workers: 0
-  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/aime_dataset_one_sample
+  path: examples/tutor/data/math_dataset_8b_filter_16384_clean_teacher_solved
   type: rl
 
 saver:
@@ -212,9 +208,10 @@ evaluator:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
-  freq_epochs: 10
-  freq_steps: null
+  freq_epochs: null
+  freq_steps: 50
   freq_secs: null
+  max_samples: 32
 
 stats_logger:
   experiment_name: ${experiment_name}
