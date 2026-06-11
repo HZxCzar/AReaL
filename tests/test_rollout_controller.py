@@ -717,7 +717,11 @@ class TestRolloutControllerLifecycle:
 
         controller.pause()
 
-        pause_calls = [call for call in scheduler.engine_calls if call[1] == "pause"]
+        pause_calls = [
+            call
+            for call in scheduler.engine_calls
+            if call[1] == "pause_rollout_submission"
+        ]
         assert len(pause_calls) == 2
 
         controller.destroy()
@@ -735,7 +739,11 @@ class TestRolloutControllerLifecycle:
 
         controller.resume()
 
-        resume_calls = [call for call in scheduler.engine_calls if call[1] == "resume"]
+        resume_calls = [
+            call
+            for call in scheduler.engine_calls
+            if call[1] == "resume_rollout_submission"
+        ]
         assert len(resume_calls) == 2
 
         controller.destroy()

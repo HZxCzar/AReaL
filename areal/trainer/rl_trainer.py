@@ -417,7 +417,7 @@ class PPOTrainer:
                 category=Category.INSTR,
             ),
         ):
-            rollout.pause()
+            rollout.pause_rollout_submission()
 
         with (
             stats_tracker.record_timing("rollout_pause_generation"),
@@ -458,13 +458,13 @@ class PPOTrainer:
 
         try:
             with (
-                stats_tracker.record_timing("rollout_continue_generation"),
+                stats_tracker.record_timing("rollout_resume_generation"),
                 perf_tracer.trace_scope(
-                    "train.rollout_continue_generation",
+                    "train.rollout_resume_generation",
                     category=Category.INSTR,
                 ),
             ):
-                call_maybe_async(rollout.continue_generation)
+                call_maybe_async(rollout.resume_generation)
         except Exception as exc:  # noqa: BLE001
             if cleanup_error is None:
                 cleanup_error = exc
@@ -477,7 +477,7 @@ class PPOTrainer:
                     category=Category.INSTR,
                 ),
             ):
-                rollout.resume()
+                rollout.resume_rollout_submission()
         except Exception as exc:  # noqa: BLE001
             if cleanup_error is None:
                 cleanup_error = exc
@@ -687,7 +687,7 @@ class PPOTrainer:
                     self._offload_model(self.critic, role="critic")
 
             # pause inference for updating weights, save, and evaluation
-            self.rollout.pause()
+            self.rollout.pause_rollout_submission()
 
             with (
                 stats_tracker.record_timing("update_weights"),
@@ -775,7 +775,7 @@ class PPOTrainer:
                 )
 
             # Resume rollout
-            self.rollout.resume()
+            self.rollout.resume_rollout_submission()
 
             self._save_perf_tracer(step=global_step)
 

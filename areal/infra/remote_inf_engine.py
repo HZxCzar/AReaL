@@ -915,8 +915,8 @@ class RemoteInfEngine(InferenceEngine):
             stop_reason not in ["stop", "tool_calls", "length"]
             and len(accumulated_output_tokens) < ori_max_new_tokens
         ):
-            # Generation is interrupted, wait for some time to avoid interfering
-            # with full-model weight update requests.
+            # Only hard generation pause is honored here. Rollout submission
+            # pause stops new workflows, but in-flight workflows may continue.
             while self.is_generation_paused():
                 await asyncio.sleep(0.5)
 
@@ -1457,7 +1457,7 @@ class RemoteInfEngine(InferenceEngine):
 
     @trace_perf("remote_inf_engine.pause_generation", category="misc")
     def pause_generation(self):
-        """Pause request submission for async rollout."""
+        """Hard-pause generation requests to the inference backend."""
         self._set_generation_paused(True)
         try:
             pause_req = self.backend.get_pause_request()
@@ -1470,24 +1470,42 @@ class RemoteInfEngine(InferenceEngine):
         # The following line waits until all requests are indeed dropped.
         time.sleep(self.config.pause_grace_period)
 
-    @trace_perf("remote_inf_engine.continue_generation", category="misc")
-    def continue_generation(self):
-        """Resume request submission for async rollout."""
+    def _resume_generation(self):
         try:
             resume_req = self.backend.get_resume_request()
             self._run_request_on_all_servers(resume_req)
         finally:
             self._set_generation_paused(False)
 
-    def pause(self):
-        """Pause request submission for async rollout.
-        Used during evaluation to prevent data over generation.
+    @trace_perf("remote_inf_engine.resume_generation", category="misc")
+    def resume_generation(self):
+        """Resume backend generation requests after :meth:`pause_generation`."""
+        self._resume_generation()
+
+    @trace_perf("remote_inf_engine.continue_generation", category="misc")
+    def continue_generation(self):
+        """Compatibility alias for :meth:`resume_generation`."""
+        self._resume_generation()
+
+    def pause_rollout_submission(self):
+        """Soft-pause starting new rollout workflows.
+
+        Existing workflows may continue and may still call :meth:`agenerate`
+        unless :meth:`pause_generation` is used separately.
         """
-        return self.workflow_executor.pause()
+        return self.workflow_executor.pause_submission()
+
+    def resume_rollout_submission(self):
+        """Resume starting new rollout workflows."""
+        return self.workflow_executor.resume_submission()
+
+    def pause(self):
+        """Compatibility alias for :meth:`pause_rollout_submission`."""
+        return self.pause_rollout_submission()
 
     def resume(self):
-        """Resume request submission for async rollout."""
-        return self.workflow_executor.resume()
+        """Compatibility alias for :meth:`resume_rollout_submission`."""
+        return self.resume_rollout_submission()
 
     def offload(self) -> None:
         """Offload model memory on all servers."""

@@ -1036,6 +1036,9 @@ class RolloutController:
     async def pause_generation(self):
         await self._collective_rpc_async("pause_generation")
 
+    async def resume_generation(self):
+        await self._collective_rpc_async("resume_generation")
+
     async def continue_generation(self):
         await self._collective_rpc_async("continue_generation")
 
@@ -1060,13 +1063,19 @@ class RolloutController:
         with self._version_lock:
             return self._version
 
+    def pause_rollout_submission(self):
+        self.dispatcher.pause_submission()
+        self._collective_rpc("pause_rollout_submission", http_timeout=60.0)
+
+    def resume_rollout_submission(self):
+        self._collective_rpc("resume_rollout_submission", http_timeout=60.0)
+        self.dispatcher.resume_submission()
+
     def pause(self):
-        self.dispatcher.pause()
-        self._collective_rpc("pause", http_timeout=60.0)
+        self.pause_rollout_submission()
 
     def resume(self):
-        self._collective_rpc("resume", http_timeout=60.0)
-        self.dispatcher.resume()
+        self.resume_rollout_submission()
 
     def export_stats(self) -> dict[str, float]:
         all_raw_stats = self._collective_rpc(method="export_stats", http_timeout=60.0)

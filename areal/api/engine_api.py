@@ -922,26 +922,43 @@ class InferenceEngine(abc.ABC):
         raise NotImplementedError()
 
     def pause_generation(self):
-        """Pause the generation of inference engine.
+        """Hard-pause generation requests to the inference backend.
 
-        Used during updating weights from distributed or disk.
+        In-flight workflows that call :meth:`agenerate` should wait before
+        sending another request to the backend. Use this when the backend must
+        be quiet, for example during full-model weight updates or offload.
+        This is stronger than :meth:`pause_rollout_submission`.
         """
+        raise NotImplementedError()
+
+    def resume_generation(self):
+        """Resume backend generation requests after :meth:`pause_generation`."""
         raise NotImplementedError()
 
     def continue_generation(self):
-        """Continue the generation of inference engine."""
-        raise NotImplementedError()
+        """Compatibility alias for :meth:`resume_generation`."""
+        return self.resume_generation()
 
-    def pause(self):
-        """Pause request submission for async rollout.
+    def pause_rollout_submission(self):
+        """Soft-pause async rollout submission.
 
-        Used during evaluation to prevent data over-generation.
+        No new rollout tasks should be started from the input queue after this
+        call, but already-running workflows may continue and may still call
+        :meth:`agenerate` unless generation is hard-paused separately.
         """
         raise NotImplementedError()
 
-    def resume(self):
-        """Resume request submission for async rollout."""
+    def resume_rollout_submission(self):
+        """Resume async rollout submission after :meth:`pause_rollout_submission`."""
         raise NotImplementedError()
+
+    def pause(self):
+        """Compatibility alias for :meth:`pause_rollout_submission`."""
+        return self.pause_rollout_submission()
+
+    def resume(self):
+        """Compatibility alias for :meth:`resume_rollout_submission`."""
+        return self.resume_rollout_submission()
 
     def offload(self):
         """Offload model from GPU to CPU for inference engine."""

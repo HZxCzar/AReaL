@@ -542,24 +542,33 @@ class BatchTaskDispatcher(Generic[TInput, TResult]):
         # Shutdown the async task runner
         self.runner.destroy()
 
-    def pause(self):
-        """Pause request submission for async tasks.
+    def pause_submission(self):
+        """Pause starting new async tasks.
 
-        After calling pause(), no new tasks will be started from the
-        input queue, but existing running tasks will continue to completion.
+        Already-running tasks continue to completion; this only prevents the
+        dispatcher from pulling more work from the input queue.
         """
         self.runner.pause()
         with self._input_cv:
             self._input_cv.notify()
 
-    def resume(self):
-        """Resume request submission for async tasks.
-
-        Allows new tasks to be pulled from the input queue and started.
-        """
+    def resume_submission(self):
+        """Resume starting new async tasks from the input queue."""
         self.runner.resume()
         with self._input_cv:
             self._input_cv.notify()
+
+    def pause(self):
+        """Compatibility alias for :meth:`pause_submission`."""
+        self.pause_submission()
+
+    def resume(self):
+        """Compatibility alias for :meth:`resume_submission`."""
+        self.resume_submission()
+
+    def is_submission_paused(self) -> bool:
+        """Check if starting new tasks is currently paused."""
+        return self.is_paused()
 
     def is_paused(self) -> bool:
         """Check if the dispatcher is currently paused.
@@ -1445,21 +1454,28 @@ class WorkflowExecutor:
         # Return list of trajectory dicts (filter out None)
         return [r.trajectory for r in results if r is not None]
 
-    def pause(self):
-        """Pause request submission for async rollout.
+    def pause_submission(self):
+        """Soft-pause starting new rollout tasks.
 
-        See :meth:`~areal.api.engine_api.InferenceEngine.pause` for detailed
-        documentation.
+        Already-running workflows continue to completion and may still call the
+        inference engine unless generation is hard-paused separately.
         """
-        self.dispatcher.pause()
+        self.dispatcher.pause_submission()
+
+    def resume_submission(self):
+        """Resume starting new rollout tasks after :meth:`pause_submission`."""
+        self.dispatcher.resume_submission()
+
+    def pause(self):
+        """Compatibility alias for :meth:`pause_submission`."""
+        self.pause_submission()
 
     def resume(self):
-        """Resume request submission for async rollout.
+        """Compatibility alias for :meth:`resume_submission`."""
+        self.resume_submission()
 
-        See :meth:`~areal.api.engine_api.InferenceEngine.resume` for detailed
-        documentation.
-        """
-        self.dispatcher.resume()
+    def is_submission_paused(self):
+        return self.dispatcher.is_submission_paused()
 
     def is_paused(self):
         return self.dispatcher.is_paused()

@@ -7,7 +7,8 @@ import torch
 
 from areal.api import ModelRequest, RolloutWorkflow
 from areal.api.cli_args import GenerationHyperparameters, InferenceEngineConfig
-from areal.api.io_struct import HttpRequest
+from areal.api.io_struct import HttpGenerationResult, HttpRequest
+from areal.infra import remote_inf_engine as remote_inf_engine_module
 from areal.infra import workflow_context
 from areal.infra.remote_inf_engine import RemoteInfEngine
 from areal.infra.staleness_manager import StalenessManager
@@ -71,6 +72,31 @@ class FakeBackend:
 
     def get_health_check_request(self):
         return HttpRequest(endpoint="/health", payload={}, method="GET")
+
+
+class SuccessfulFakeBackend(FakeBackend):
+    def parse_generation_response(self, response: dict[str, Any]):
+        return HttpGenerationResult(
+            output_tokens=[7], output_logprobs=[0.0], stop_reason="stop"
+        )
+
+
+class FakeSubmissionExecutor:
+    def __init__(self):
+        self.paused = False
+        self.min_allowed_rollout_version = None
+
+    def set_min_allowed_rollout_version(self, version: int) -> None:
+        self.min_allowed_rollout_version = version
+
+    def is_rollout_version_stale(self, version: int) -> bool:
+        return False
+
+    def pause_submission(self) -> None:
+        self.paused = True
+
+    def resume_submission(self) -> None:
+        self.paused = False
 
 
 def make_executor(version: int = 0) -> tuple[WorkflowExecutor, FakeInferenceEngine]:
@@ -194,4 +220,87 @@ def test_remote_agenerate_raises_before_backend_request_when_rollout_stale():
     with pytest.raises(RolloutStaleError):
         asyncio.run(engine.agenerate(req))
 
+    workflow_context.set(WorkflowContext())
+
+
+def make_remote_engine_for_pause_tests() -> tuple[RemoteInfEngine, FakeSubmissionExecutor]:
+    config = InferenceEngineConfig(
+        backend="sglang:d1",
+        max_head_offpolicyness=1,
+        tokenizer_path="dummy-tokenizer",
+        request_timeout=1,
+        pause_grace_period=0,
+        use_lora=False,
+    )
+    engine = RemoteInfEngine(config=config, backend=SuccessfulFakeBackend())
+    executor = FakeSubmissionExecutor()
+    engine.workflow_executor = executor
+    engine.addresses = ["127.0.0.1:1"]
+    return engine, executor
+
+
+def test_rollout_submission_pause_aliases_do_not_hard_pause_generation(monkeypatch):
+    engine, executor = make_remote_engine_for_pause_tests()
+    requests = []
+
+    async def fake_request(**kwargs):
+        requests.append(kwargs["payload"])
+        return {"ok": True}
+
+    monkeypatch.setattr(remote_inf_engine_module, "arequest_with_retry", fake_request)
+
+    engine.pause_rollout_submission()
+    assert executor.paused is True
+
+    req = ModelRequest(
+        rid="soft-pause",
+        input_ids=[1, 2],
+        gconfig=GenerationHyperparameters(max_new_tokens=1, max_tokens=8),
+    )
+    resp = asyncio.run(engine.agenerate(req))
+
+    assert resp.output_tokens == [7]
+    assert requests == [{"version": 0}]
+
+    engine.resume()
+    assert executor.paused is False
+
+    engine.pause()
+    assert executor.paused is True
+    engine.resume_rollout_submission()
+    assert executor.paused is False
+
+
+def test_generation_pause_blocks_agenerate_until_resumed(monkeypatch):
+    engine, _ = make_remote_engine_for_pause_tests()
+    requests = []
+
+    async def fake_request(**kwargs):
+        requests.append(kwargs["payload"])
+        return {"ok": True}
+
+    monkeypatch.setattr(remote_inf_engine_module, "arequest_with_retry", fake_request)
+    monkeypatch.setattr(engine, "_run_request_on_all_servers", lambda requests: None)
+
+    async def run_test():
+        engine.pause_generation()
+        req = ModelRequest(
+            rid="hard-pause",
+            input_ids=[1, 2],
+            gconfig=GenerationHyperparameters(max_new_tokens=1, max_tokens=8),
+        )
+        task = asyncio.create_task(engine.agenerate(req))
+        await asyncio.sleep(0.05)
+        assert requests == []
+
+        engine.resume_generation()
+        resp = await asyncio.wait_for(task, timeout=2)
+        assert resp.output_tokens == [7]
+        assert requests == [{"version": 0}]
+
+        engine.pause_generation()
+        engine.continue_generation()
+        assert engine.is_generation_paused() is False
+
+    asyncio.run(run_test())
     workflow_context.set(WorkflowContext())

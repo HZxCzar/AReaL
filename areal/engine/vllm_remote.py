@@ -430,14 +430,23 @@ class RemotevLLMEngine(InferenceEngine):
             dynamic_bs=dynamic_bs,
         )
 
+    def pause_rollout_submission(self):
+        return self._engine.pause_rollout_submission()
+
+    def resume_rollout_submission(self):
+        return self._engine.resume_rollout_submission()
+
     def pause(self):
-        return self._engine.pause()
+        return self.pause_rollout_submission()
 
     def resume(self):
-        return self._engine.resume()
+        return self.resume_rollout_submission()
 
     def pause_generation(self):
         return self._engine.pause_generation()
+
+    def resume_generation(self):
+        return self._engine.resume_generation()
 
     def continue_generation(self):
         return self._engine.continue_generation()
