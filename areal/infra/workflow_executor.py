@@ -302,6 +302,10 @@ _SHUTDOWN_TIMEOUT_SECONDS = 2.0
 _DEFAULT_WAIT_TIMEOUT_SECONDS = float(7 * 24 * 3600)
 
 
+class RolloutStaleError(RuntimeError):
+    """Raised when a rollout task has fallen outside the allowed version window."""
+
+
 class WithTaskID(Protocol):
     task_id: int
 
@@ -835,6 +839,9 @@ class WorkflowExecutor:
         self._tokenizer = None
         self._tokenizer_lock = threading.Lock()
 
+        self._stale_lock = threading.Lock()
+        self._min_allowed_rollout_version = 0
+
     def _resolve_dp_world_size(self):
         if not dist.is_initialized():
             return 1
@@ -1043,6 +1050,18 @@ class WorkflowExecutor:
         if tracer is not None:
             tracer.flush(force=True)
 
+    def set_min_allowed_rollout_version(self, version: int) -> None:
+        """Set the minimum rollout version that may continue running."""
+        with self._stale_lock:
+            self._min_allowed_rollout_version = max(0, int(version))
+
+    def is_rollout_version_stale(self, version: int | None) -> bool:
+        """Return whether a task version is outside the allowed version window."""
+        if version is None:
+            return False
+        with self._stale_lock:
+            return int(version) < self._min_allowed_rollout_version
+
     def get_capacity(self):
         """Get current available capacity for new rollouts.
 
@@ -1082,6 +1101,8 @@ class WorkflowExecutor:
             filtering/validation.
         """
 
+        task_version = self.inference_engine.get_version()
+
         async def _execute_workflow() -> _RolloutResult | None:
             """Execute workflow.arun_episode and apply AReaL-specific logic."""
             task_id = pending_task.task_id
@@ -1089,9 +1110,7 @@ class WorkflowExecutor:
             # Set task_id in ContextVar before entering arun_episode
             perf_tracer.set_task_id(task_id)
 
-            workflow_lora_version = (
-                self.inference_engine.get_version() if self.config.use_lora else None
-            )
+            workflow_lora_version = task_version if self.config.use_lora else None
 
             # Set workflow execution context
             workflow_context.set(
@@ -1109,6 +1128,11 @@ class WorkflowExecutor:
             reason: str | None = None
 
             try:
+                if self.is_rollout_version_stale(task_version):
+                    raise RolloutStaleError(
+                        f"Rollout task {task_id} version {task_version} is stale."
+                    )
+
                 episode_lora_versions = (
                     _get_episode_lora_versions(
                         pending_task.workflow,
@@ -1128,6 +1152,11 @@ class WorkflowExecutor:
                         )
                     traj = await pending_task.workflow.arun_episode(
                         self.inference_engine, pending_task.data
+                    )
+
+                if self.is_rollout_version_stale(task_version):
+                    raise RolloutStaleError(
+                        f"Rollout task {task_id} version {task_version} is stale."
                     )
 
                 # Trajectory format checking
@@ -1204,6 +1233,21 @@ class WorkflowExecutor:
                 if self.config.enable_rollout_tracing:
                     self.logger.info(
                         f"Finish but reject rollout. {self._rollout_stats()}",
+                    )
+                return None
+
+            except RolloutStaleError as exc:
+                manager.on_rollout_rejected()
+                stats_tracker.get("rollout").scalar(rejected=1, stale=1)
+                trace_session_event(
+                    "mark_finalized",
+                    task_id=task_id,
+                    status="rejected",
+                    reason="stale",
+                )
+                if self.config.enable_rollout_tracing:
+                    self.logger.info(
+                        f"Reject stale rollout: {exc}. {self._rollout_stats()}"
                     )
                 return None
 

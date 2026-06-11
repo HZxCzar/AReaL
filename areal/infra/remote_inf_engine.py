@@ -60,7 +60,7 @@ from areal.utils.network import (
 )
 from areal.utils.perf_tracer import trace_perf
 
-from .workflow_executor import WorkflowExecutor
+from .workflow_executor import RolloutStaleError, WorkflowExecutor
 
 if TYPE_CHECKING:
     from areal.experimental.openai import InteractionWithTokenLogpReward
@@ -579,6 +579,8 @@ class RemoteInfEngine(InferenceEngine):
     def workflow_executor(self, workflow_executor: WorkflowExecutor):
         """Set the workflow executor of the inference engine."""
         self._workflow_executor = workflow_executor
+        min_allowed = self.get_version() - self.config.max_head_offpolicyness
+        workflow_executor.set_min_allowed_rollout_version(min_allowed)
 
     @property
     def initialized(self) -> bool:
@@ -586,13 +588,28 @@ class RemoteInfEngine(InferenceEngine):
 
     def set_version(self, version):
         """Set the current weight version."""
+        version = int(version)
         with self.lock:
             self._version = version
+        if self._workflow_executor is not None:
+            min_allowed = version - self.config.max_head_offpolicyness
+            self._workflow_executor.set_min_allowed_rollout_version(min_allowed)
 
     def get_version(self):
         """Get the current weight version."""
         with self.lock:
             return self._version
+
+    def _raise_if_rollout_stale(self) -> None:
+        ctx = workflow_context.get()
+        lora_version = ctx.lora_version
+        if lora_version is None or self._workflow_executor is None:
+            return
+        if self._workflow_executor.is_rollout_version_stale(lora_version):
+            raise RolloutStaleError(
+                f"Rollout task {ctx.task_id} version {lora_version} is stale "
+                f"at current version {self.get_version()}."
+            )
 
     def set_proxy_gateway_addr(self, addr: str) -> None:
         """Set the proxy gateway address.
@@ -870,7 +887,8 @@ class RemoteInfEngine(InferenceEngine):
                 raise ValueError(
                     "ModelRequest.metadata['lora_version'] must be non-negative."
                 )
-        elif self.config.use_lora and not request_disable_lora:
+        context_lora_enabled = self.config.use_lora and not request_disable_lora
+        if request_lora_version is None and context_lora_enabled:
             context_lora_version = workflow_context.get().lora_version
             if context_lora_version is not None:
                 request_lora_version = int(context_lora_version)
@@ -902,6 +920,7 @@ class RemoteInfEngine(InferenceEngine):
             while self.is_generation_paused():
                 await asyncio.sleep(0.5)
 
+            self._raise_if_rollout_stale()
             generation_version = (
                 request_lora_version
                 if request_lora_version is not None
@@ -932,6 +951,7 @@ class RemoteInfEngine(InferenceEngine):
                     max_retries=self.config.request_retries,
                     timeout=self.config.request_timeout,
                 )
+            self._raise_if_rollout_stale()
 
             # Assert response is JSON dict (not text/binary from error pages)
             if not isinstance(result, dict):

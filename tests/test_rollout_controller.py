@@ -345,7 +345,7 @@ class TestRolloutControllerCapacity:
 
         controller.destroy()
 
-    def test_get_capacity_uses_version(self):
+    def test_get_capacity_ignores_version(self):
         config = create_test_config(
             consumer_batch_size=8,
             max_concurrent_rollouts=1000,
@@ -365,7 +365,7 @@ class TestRolloutControllerCapacity:
         controller.set_version(5)
         capacity_v5 = controller.get_capacity()
 
-        assert capacity_v5 > capacity_v0
+        assert capacity_v5 == capacity_v0 == 1000
 
         controller.destroy()
 

@@ -108,24 +108,22 @@ class TestCapacityCalculations:
         capacity = manager.get_capacity()
         assert capacity == 2  # 5 - 3 = 2 remaining
 
-    def test_staleness_limit(self):
-        """Test that staleness limit is enforced."""
+    def test_staleness_limit_does_not_affect_capacity(self):
+        """Test that max_staleness no longer limits rollout capacity."""
         version_provider = MockVersionProvider(0)
 
         manager = StalenessManager(
             version_provider=version_provider,
-            max_concurrent_rollouts=100,  # Very high, won't be limiting factor
+            max_concurrent_rollouts=100,
             consumer_batch_size=4,
             max_staleness=2,
         )
 
-        # At version 0: max_samples = (2 + 0 + 1) * 4 = 12
-        # With 0 submitted/accepted, capacity should be 12
         capacity = manager.get_capacity()
-        assert capacity == 12
+        assert capacity == 100
 
-    def test_staleness_increases_with_version(self):
-        """Test that allowed capacity increases with version."""
+    def test_capacity_does_not_increase_with_version(self):
+        """Test that model version does not affect rollout capacity."""
         version_provider = MockVersionProvider(0)
 
         manager = StalenessManager(
@@ -135,18 +133,13 @@ class TestCapacityCalculations:
             max_staleness=2,
         )
 
-        # At version 0: (2 + 0 + 1) * 4 = 12
         capacity_v0 = manager.get_capacity()
-        assert capacity_v0 == 12
+        assert capacity_v0 == 1000
 
-        # At version 5: (2 + 5 + 1) * 4 = 32
         version_provider.set_version(5)
 
         capacity_v5 = manager.get_capacity()
-        assert capacity_v5 == 32
-
-        # Capacity should increase with version
-        assert capacity_v5 > capacity_v0
+        assert capacity_v5 == 1000
 
     def test_capacity_with_running_rollouts(self):
         """Test capacity calculation with running rollouts."""
@@ -162,9 +155,6 @@ class TestCapacityCalculations:
         # Submit 3 rollouts
         enqueue_and_submit(manager, count=3)
 
-        # Concurrency capacity: 10 - 3 = 7
-        # Staleness capacity: (2 + 0 + 1) * 4 - 3 = 12 - 3 = 9
-        # Should be limited by concurrency
         capacity = manager.get_capacity()
         assert capacity == 7
 
@@ -185,12 +175,9 @@ class TestCapacityCalculations:
             manager.on_rollout_submitted()
             manager.on_rollout_accepted()
 
-        # running = 0, accepted = 5
-        # Concurrency capacity: 20 - 0 = 20
-        # Staleness capacity: (2 + 0 + 1) * 4 - 5 = 12 - 5 = 7
-        # Should be limited by staleness
+        # Accepted history does not reduce concurrency capacity.
         capacity = manager.get_capacity()
-        assert capacity == 7
+        assert capacity == 20
 
     def test_capacity_at_limit(self):
         """Test capacity when at exactly the limit."""
@@ -206,10 +193,8 @@ class TestCapacityCalculations:
         # Submit 5 rollouts (at concurrency limit)
         enqueue_and_submit(manager, count=5)
 
-        # Concurrency: 5 - 5 = 0
-        # Staleness: (5 + 0 + 1) * 2 - 5 = 12 - 5 = 7 (not limiting)
         capacity = manager.get_capacity()
-        assert capacity == 0  # Limited by concurrency
+        assert capacity == 0
 
     def test_capacity_can_be_negative(self):
         """Test that capacity can be negative when over limit."""
@@ -510,15 +495,13 @@ class TestEdgeCases:
             max_staleness=0,
         )
 
-        # At version 0: (0 + 0 + 1) * 8 = 8
         capacity = manager.get_capacity()
-        assert capacity == 8
+        assert capacity == 100
 
-        # At version 5: (0 + 5 + 1) * 8 = 48
         version_provider.set_version(5)
 
         capacity = manager.get_capacity()
-        assert capacity == 48
+        assert capacity == 100
 
     def test_very_large_version(self):
         """Test with very large version numbers."""
@@ -549,9 +532,8 @@ class TestEdgeCases:
             max_staleness=2,
         )
 
-        # At version 0: (2 + 0 + 1) * 1 = 3
         capacity = manager.get_capacity()
-        assert capacity == 3
+        assert capacity == 10
 
     def test_all_rollouts_rejected(self):
         """Test scenario where all rollouts are rejected."""
@@ -608,12 +590,8 @@ class TestEdgeCases:
         assert stats.accepted == 15
         assert stats.rejected == 5
 
-        # Check capacity with the accepted rollouts
-        # Staleness capacity: (3 + 0 + 1) * 8 - 15 = 32 - 15 = 17
-        # Concurrency capacity: 20 - 0 = 20
-        # Should be limited by staleness
         capacity = manager.get_capacity()
-        assert capacity == 17
+        assert capacity == 20
 
 
 class TestRealWorldScenarios:
@@ -699,19 +677,14 @@ class TestRealWorldScenarios:
             max_staleness=3,  # Limited staleness
         )
 
-        # Generate rollouts and accept them without version progression
-        # Staleness limit: (3 + 0 + 1) * 8 = 32
-
-        # Accept 30 rollouts (approaching staleness limit)
+        # Generate and accept rollouts without version progression.
         for _ in range(30):
             manager.on_rollout_enqueued()
             manager.on_rollout_submitted()
             manager.on_rollout_accepted()
 
-        # Capacity should be very limited now
-        # Staleness: (3 + 0 + 1) * 8 - 30 = 32 - 30 = 2
         capacity = manager.get_capacity()
-        assert capacity == 2  # Very constrained by staleness
+        assert capacity == 100
 
 
 # Parametrized tests for broader coverage
@@ -760,10 +733,7 @@ def test_parametrized_version_progression(version):
     )
 
     capacity = manager.get_capacity()
-    expected_staleness_capacity = (5 + version + 1) * 32
-
-    # Capacity should be limited by concurrency (1000)
-    assert capacity == min(1000, expected_staleness_capacity)
+    assert capacity == 1000
 
 
 if __name__ == "__main__":

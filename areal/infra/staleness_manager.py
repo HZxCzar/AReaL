@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Staleness-aware capacity manager for rollout generation.
+"""Capacity manager for rollout generation.
 
-This module provides the StalenessManager class which manages capacity
-and staleness constraints for asynchronous rollout generation in RL training.
+This module provides the StalenessManager class which manages rollout
+concurrency for asynchronous rollout generation in RL training. Version
+freshness is checked by the workflow executor using the per-task rollout
+version.
 """
 
 from threading import Lock
@@ -18,12 +20,10 @@ class VersionProvider(Protocol):
 
 
 class StalenessManager:
-    """Manages rollout capacity based on staleness and concurrency constraints.
+    """Manages rollout capacity based on concurrency constraints.
 
-    The manager ensures that:
-    1. The number of concurrent rollouts doesn't exceed the configured maximum
-    2. Rollouts don't become too stale (off-policy) by limiting acceptance based on
-       the current model version and maximum allowed offpolicyness
+    The manager ensures that the number of concurrent rollouts does not exceed
+    the configured maximum.
 
     Parameters
     ----------
@@ -72,45 +72,21 @@ class StalenessManager:
         Returns
         -------
         int
-            Maximum number of pending rollouts (enqueued)
+            Maximum number of pending rollouts (enqueued).
         """
-        return (self.max_staleness + 1) * self.consumer_batch_size
+        return max(1, self.max_concurrent_rollouts)
 
     def get_capacity(self) -> int:
         """Calculate available capacity for new rollouts.
-
-        Considers both concurrency limits and staleness constraints.
-        Obtains current model version from version_provider.
 
         Returns
         -------
         int
             Number of new rollout slots available. Can be negative if over capacity.
-
-        Notes
-        -----
-        The staleness control formula is:
-        max_samples = (max_staleness + current_version + 1) * consumer_batch_size
-        capacity = min(concurrency_limit, max_samples - current_samples)
-
-        This ensures that by the time samples are consumed, they won't exceed
-        the maximum allowed staleness.
         """
         with self.lock:
-            current_version = self.version_provider.get_version()
-            # Calculate concurrency-based capacity
             max_concurrent_rollouts = max(1, self.max_concurrent_rollouts)
-            concurrency_capacity = max_concurrent_rollouts - self.rollout_stat.running
-
-            # Calculate staleness-based capacity
-            ofp = self.max_staleness
-            sample_cnt = self.rollout_stat.accepted + self.rollout_stat.running
-            consumer_bs = max(1, self.consumer_batch_size)
-            staleness_capacity = (ofp + current_version + 1) * consumer_bs - sample_cnt
-
-            # Return the minimum of both constraints
-            capacity = min(concurrency_capacity, staleness_capacity)
-            return capacity
+            return max_concurrent_rollouts - self.rollout_stat.running
 
     def on_rollout_enqueued(self) -> None:
         """Callback when a rollout is enqueued as a pending input task.
