@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from examples.tutor import workflow as tutor_workflow
 from examples.tutor.core.pairwise import PairwiseTutorEvaluator
 from examples.tutor.core.rewards import EpisodeRewardComputer
 from examples.tutor.core.types import (
@@ -13,6 +14,7 @@ from examples.tutor.core.types import (
     PublicHistoryState,
     StudentTurnState,
     TurnArtifact,
+    TurnTrace,
     TutorPrivateFeedback,
     TutorTurnState,
 )
@@ -242,3 +244,133 @@ def test_pairwise_can_skip_judge_when_both_answers_are_incorrect():
     assert result.reason == "both_incorrect"
     assert result.reward == pytest.approx(0.0)
     assert reward_caller.calls == 0
+
+
+def _trace(
+    turn_idx: int,
+    reward_components: dict[str, float],
+    *,
+    leaked: bool = False,
+    correct: bool = False,
+) -> TurnTrace:
+    turn = _turn(turn_idx, leaked=leaked, correct=correct)
+    return TurnTrace(
+        turn_idx=turn.turn_idx,
+        tutor_state=turn.tutor_state,
+        tutor_raw_output=turn.tutor_raw_output,
+        tutor_visible_output=turn.tutor_visible_output,
+        leaked=turn.leak_result.leaked,
+        student_output=turn.student_output,
+        judge_correct=bool(turn.judge_result and turn.judge_result.correct),
+        judge_feedback=turn.judge_result.feedback if turn.judge_result else "",
+        reward=sum(reward_components.values()),
+        reward_components=reward_components,
+        public_history_before=turn.public_history_before,
+        public_history_after=turn.public_history_after,
+    )
+
+
+def _metric_workflow(**overrides):
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    params = {
+        "success_reward": 1.0,
+        "early_success_bonus": 0.0,
+        "leak_penalty": -0.05,
+        "enable_turn_penalty": True,
+        "turn_penalty": -0.01,
+        "length_penalty_threshold_chars": 10,
+        "length_penalty_per_100_chars": -0.5,
+        "pairwise_reward_enabled": True,
+        "pairwise_reward_scale": 0.05,
+    }
+    params.update(overrides)
+    for name, value in params.items():
+        setattr(workflow, name, value)
+    return workflow
+
+
+def test_rollout_stats_uses_clean_metric_names_and_reward_breakdown(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        tutor_workflow,
+        "_safe_scalar",
+        lambda **metrics: captured.update(metrics),
+    )
+    workflow = _metric_workflow()
+    traces = [
+        _trace(1, {"leak": -0.05, "turn_penalty": -0.01}, leaked=True),
+        _trace(
+            2,
+            {
+                "success_credit": 1.0,
+                "length_penalty": -0.1,
+                "pairwise": 0.05,
+            },
+            correct=True,
+        ),
+    ]
+
+    workflow._log_rollout_stats(
+        total_reward=sum(trace.reward for trace in traces),
+        traces=traces,
+        termination_reason="success",
+        pre_success=False,
+        leak_count=1,
+    )
+
+    assert captured["reward"] == pytest.approx(0.89)
+    assert captured["turns"] == 2
+    assert captured["leaks"] == 1
+    assert captured["pre_solved"] == 0.0
+    assert captured["solved"] == 1.0
+    assert captured["solve_turn"] == 2
+    assert captured["stop/max_turns"] == 0.0
+    assert captured["stop/context_limit"] == 0.0
+
+    for old_key in (
+        "num_turns",
+        "samples_per_episode",
+        "leak_count",
+        "pre_success",
+        "term_success",
+        "success_round",
+        "termination_pre_solved",
+        "termination_success",
+        "termination_max_turns",
+        "termination_context_budget_limit",
+    ):
+        assert old_key not in captured
+
+    expected_components = {
+        "success": 1.0,
+        "leak": -0.05,
+        "turn_penalty": -0.01,
+        "length_penalty": -0.1,
+        "pairwise": 0.05,
+    }
+    total_abs = sum(abs(value) for value in expected_components.values())
+    for name, value in expected_components.items():
+        assert captured[f"reward_component/{name}"] == pytest.approx(value)
+        assert captured[f"reward_share/{name}"] == pytest.approx(
+            abs(value) / total_abs
+        )
+
+
+def test_reward_component_share_is_zero_when_enabled_components_are_absent():
+    workflow = _metric_workflow(
+        enable_turn_penalty=False,
+        length_penalty_threshold_chars=0,
+        pairwise_reward_enabled=False,
+    )
+
+    metrics = workflow._reward_component_metrics([])
+
+    assert metrics == {
+        "reward_component/success": 0.0,
+        "reward_share/success": 0.0,
+        "reward_component/leak": 0.0,
+        "reward_share/leak": 0.0,
+    }
+

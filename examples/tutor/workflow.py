@@ -163,12 +163,20 @@ from examples.tutor.prompts import (
 
 logger = logging.getLogger("TutorWorkflow")
 
+_REWARD_COMPONENT_ALIASES = {
+    "success_credit": "success",
+}
+
 
 def _safe_scalar(**metrics: Any) -> None:
     try:
         stats_tracker.get(workflow_context.stat_scope()).scalar(**metrics)
     except Exception:
         logger.debug("Skipping stats logging outside workflow context.")
+
+
+def _reward_component_key(name: str) -> str:
+    return _REWARD_COMPONENT_ALIASES.get(name, name)
 
 
 class TutorAgentWorkflow(RolloutWorkflow):
@@ -1004,21 +1012,60 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
             0,
         )
-        _safe_scalar(
-            reward=float(total_reward),
-            num_turns=len(traces),
-            samples_per_episode=len(traces),
-            leak_count=int(leak_count),
-            pre_success=float(pre_success),
-            term_success=float(success_round > 0),
-            success_round=int(success_round),
-            termination_pre_solved=float(termination_reason == "pre_solved"),
-            termination_success=float(termination_reason == "success"),
-            termination_max_turns=float(termination_reason == "max_turns"),
-            termination_context_budget_limit=float(
+        metrics = {
+            "reward": float(total_reward),
+            "turns": len(traces),
+            "leaks": int(leak_count),
+            "pre_solved": float(pre_success),
+            "solved": float(success_round > 0),
+            "stop/max_turns": float(termination_reason == "max_turns"),
+            "stop/context_limit": float(
                 termination_reason == CONTEXT_BUDGET_TERMINATION_REASON
             ),
-        )
+        }
+        if success_round > 0:
+            metrics["solve_turn"] = int(success_round)
+
+        metrics.update(self._reward_component_metrics(traces))
+        _safe_scalar(**metrics)
+
+    def _enabled_reward_component_keys(self) -> list[str]:
+        keys = []
+        if self.success_reward or self.early_success_bonus:
+            keys.append("success")
+        if self.leak_penalty:
+            keys.append("leak")
+        if self.enable_turn_penalty and self.turn_penalty:
+            keys.append("turn_penalty")
+        if (
+            self.length_penalty_threshold_chars > 0
+            and self.length_penalty_per_100_chars
+        ):
+            keys.append("length_penalty")
+        if self.pairwise_reward_enabled and self.pairwise_reward_scale:
+            keys.append("pairwise")
+        return keys
+
+    def _reward_component_metrics(self, traces: list[TurnTrace]) -> dict[str, float]:
+        component_totals = dict.fromkeys(self._enabled_reward_component_keys(), 0.0)
+        for trace in traces:
+            for raw_name, value in trace.reward_components.items():
+                component_key = _reward_component_key(raw_name)
+                component_totals[component_key] = (
+                    component_totals.get(component_key, 0.0) + float(value)
+                )
+
+        if not component_totals:
+            return {}
+
+        total_abs = sum(abs(value) for value in component_totals.values())
+        metrics: dict[str, float] = {}
+        for component_key, value in component_totals.items():
+            metrics[f"reward_component/{component_key}"] = value
+            metrics[f"reward_share/{component_key}"] = (
+                abs(value) / total_abs if total_abs else 0.0
+            )
+        return metrics
 
     def _maybe_dump_debug_trace(
         self,

@@ -26,9 +26,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_TUTOR_DIR))
 
 
-DEFAULT_CONFIG_PATH = (
-    "examples/tutor/configs/math/qwen8b-thinking-self-turn10-filtered-pairwise.yaml"
-)
+DEFAULT_CONFIG_PATH = "examples/tutor/configs/math/baseline.yaml"
 DEFAULT_TEACHER_BASE_URL = "http://127.0.0.1:30008/v1"
 DEFAULT_SOLVER_SYSTEM_PROMPT = (
     "You are a careful math solver. Solve the problem independently. "
@@ -598,9 +596,10 @@ async def main_async(args: argparse.Namespace) -> None:
         raise RuntimeError(
             "The datasets package is required to run the teacher-solved filter."
         ) from exc
-    from areal.api.cli_args import load_expr_config
     from examples.tutor.configs import TutorConfig
     from examples.tutor.core.scoring import get_answer_scorer
+
+    from areal.api.cli_args import load_expr_config
 
     config_args = ["--config", args.config, *args.overrides]
     config, _ = load_expr_config(config_args, TutorConfig)

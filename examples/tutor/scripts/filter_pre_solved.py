@@ -12,19 +12,23 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from datasets import Dataset, DatasetDict
-
     from configs import TutorConfig
+    from datasets import Dataset, DatasetDict
     from workflow import TutorAgentWorkflow
 
 
 logger = logging.getLogger("TutorPreSolveFilter")
 _THIS_DIR = pathlib.Path(__file__).resolve().parent
-_REPO_ROOT = _THIS_DIR.parents[1]
-sys.path.append(str(_THIS_DIR))
-sys.path.append(str(_REPO_ROOT))
+_TUTOR_DIR = _THIS_DIR.parent
+_REPO_ROOT = _TUTOR_DIR.parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_TUTOR_DIR))
 
-from examples.tutor.core.types import PublicHistoryState, StudentTurnState
+from examples.tutor.core.types import PublicHistoryState, StudentTurnState  # noqa: E402
+
+DEFAULT_CONFIG_PATH = "examples/tutor/configs/math/baseline.yaml"
+DEFAULT_STUDENT_BASE_URL = "http://127.0.0.1:30008/v1"
+DEFAULT_STUDENT_MODEL = "default"
 
 
 @dataclass(slots=True)
@@ -44,7 +48,43 @@ def parse_args() -> argparse.Namespace:
             "receiving any tutor feedback."
         )
     )
-    parser.add_argument("--config", default="examples/tutor/config.yaml")
+    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    parser.add_argument(
+        "--student-base-url",
+        default=DEFAULT_STUDENT_BASE_URL,
+        help=(
+            "OpenAI-compatible student/auxiliary base URL used for offline "
+            "pre-solve filtering. Defaults to the local Qwen3-8B service on 30008."
+        ),
+    )
+    parser.add_argument(
+        "--student-model",
+        default=DEFAULT_STUDENT_MODEL,
+        help="Model name sent to chat.completions.create for the student service.",
+    )
+    parser.add_argument(
+        "--student-thinking",
+        choices=["config", "on", "off", "unset"],
+        default="config",
+        help=(
+            "Whether to send extra_body.chat_template_kwargs.enable_thinking for "
+            "student calls. 'config' uses auxiliary_model.enable_thinking."
+        ),
+    )
+    parser.add_argument(
+        "--request-params",
+        default="",
+        help=(
+            "Additional chat.completions.create kwargs as a JSON object for student "
+            "calls. Merged over config.auxiliary_model.request_params."
+        ),
+    )
+    parser.add_argument(
+        "--request-params-file",
+        type=Path,
+        default=None,
+        help="JSON file containing additional student request params.",
+    )
     parser.add_argument(
         "--input",
         default="",
@@ -101,24 +141,82 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_workflow(config: TutorConfig, max_concurrency: int) -> TutorAgentWorkflow:
+def merge_dicts(base: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in update.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_json_object_arg(value: str, *, label: str) -> dict[str, Any]:
+    if not value:
+        return {}
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{label} must be a JSON object.")
+    return parsed
+
+
+def load_request_params(args: argparse.Namespace) -> dict[str, Any]:
+    params = load_json_object_arg(args.request_params, label="--request-params")
+    if args.request_params_file is not None:
+        file_params = json.loads(args.request_params_file.read_text(encoding="utf-8"))
+        if not isinstance(file_params, dict):
+            raise ValueError("--request-params-file must contain a JSON object.")
+        params = merge_dicts(params, file_params)
+    return params
+
+
+def resolve_student_thinking(args: argparse.Namespace, auxiliary_model: Any) -> bool | None:
+    if args.student_thinking == "unset":
+        return None
+    if args.student_thinking == "on":
+        return True
+    if args.student_thinking == "off":
+        return False
+    return bool(auxiliary_model.enable_thinking)
+
+
+def build_aux_request_params(args: argparse.Namespace, auxiliary_model: Any) -> dict[str, Any]:
+    params = merge_dicts(dict(auxiliary_model.request_params), load_request_params(args))
+    enable_thinking = resolve_student_thinking(args, auxiliary_model)
+    if enable_thinking is not None:
+        params = merge_dicts(
+            params,
+            {
+                "extra_body": {
+                    "chat_template_kwargs": {
+                        "enable_thinking": enable_thinking,
+                    }
+                }
+            },
+        )
+    return params
+
+
+def build_workflow(
+    config: TutorConfig, args: argparse.Namespace, max_concurrency: int
+) -> TutorAgentWorkflow:
     from workflow import TutorAgentWorkflow
 
     auxiliary_model = config.auxiliary_model
     return TutorAgentWorkflow(
         max_turns=config.max_turns,
         answer_scorer=config.answer_scorer,
-        aux_mode=auxiliary_model.mode,
-        aux_enable_thinking=auxiliary_model.enable_thinking,
-        aux_base_url=auxiliary_model.base_url,
-        aux_model=auxiliary_model.model,
+        aux_mode="api",
+        aux_enable_thinking=bool(resolve_student_thinking(args, auxiliary_model)),
+        aux_base_url=args.student_base_url or auxiliary_model.base_url,
+        aux_model=args.student_model or auxiliary_model.model,
         aux_api_key=auxiliary_model.api_key,
         aux_timeout=auxiliary_model.timeout,
         aux_max_tokens=auxiliary_model.max_tokens,
         aux_temperature=auxiliary_model.temperature,
         aux_top_p=auxiliary_model.top_p,
         max_concurrent_aux_calls=max_concurrency,
-        aux_request_params=auxiliary_model.request_params,
+        aux_request_params=build_aux_request_params(args, auxiliary_model),
         teacher_show_ground_truth=config.teacher_show_ground_truth,
         student_system_prompt=config.student_system_prompt,
         tokenizer_path=config.tokenizer_path,
@@ -127,21 +225,25 @@ def build_workflow(config: TutorConfig, max_concurrency: int) -> TutorAgentWorkf
 
 
 def auxiliary_report_config(
-    config: TutorConfig, workflow: TutorAgentWorkflow, max_concurrency: int
+    config: TutorConfig,
+    workflow: TutorAgentWorkflow,
+    args: argparse.Namespace,
+    max_concurrency: int,
 ) -> dict[str, Any]:
     auxiliary_model = config.auxiliary_model
     report = {
-        "mode": auxiliary_model.mode,
-        "enable_thinking": auxiliary_model.enable_thinking,
-        "base_url": auxiliary_model.base_url,
-        "model": auxiliary_model.model,
+        "configured_mode": auxiliary_model.mode,
+        "effective_mode": "api",
+        "enable_thinking": resolve_student_thinking(args, auxiliary_model),
+        "base_url": args.student_base_url or auxiliary_model.base_url,
+        "model": args.student_model or auxiliary_model.model,
         "timeout": auxiliary_model.timeout,
         "max_tokens": auxiliary_model.max_tokens,
         "temperature": auxiliary_model.temperature,
         "top_p": auxiliary_model.top_p,
         "max_concurrent_calls": auxiliary_model.max_concurrent_calls,
         "effective_max_concurrent_calls": max_concurrency,
-        "request_params": auxiliary_model.request_params,
+        "request_params": build_aux_request_params(args, auxiliary_model),
     }
     request_config = getattr(
         getattr(workflow, "aux_caller", None), "request_config", None
@@ -326,7 +428,7 @@ async def main_async(args: argparse.Namespace) -> None:
     loaded = load_from_disk(str(input_path))
     dataset = loaded if isinstance(loaded, DatasetDict) else DatasetDict({"train": loaded})
     selected_splits = resolve_splits(args.splits, dataset)
-    workflow = build_workflow(config, max_concurrency=max_concurrency)
+    workflow = build_workflow(config, args=args, max_concurrency=max_concurrency)
 
     filtered_splits: dict[str, Dataset] = {}
     report: dict[str, Any] = {
@@ -334,7 +436,7 @@ async def main_async(args: argparse.Namespace) -> None:
         "output": str(output_path) if output_path is not None else None,
         "config": str(Path(args.config).resolve()),
         "answer_scorer": config.answer_scorer,
-        "auxiliary_model": auxiliary_report_config(config, workflow, max_concurrency),
+        "auxiliary_model": auxiliary_report_config(config, workflow, args, max_concurrency),
         "splits": {},
         "attempts": attempts,
         "keep_on_error": bool(args.keep_on_error),

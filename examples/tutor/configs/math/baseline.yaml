@@ -181,7 +181,7 @@ train_dataset:
   max_length: 16384
 
 valid_dataset:
-  batch_size: 8
+  batch_size: ${train_dataset.batch_size}
   pin_memory: false
   num_workers: 0
   path: examples/tutor/data/math_dataset_8b_filter_16384_clean_teacher_solved
@@ -209,7 +209,7 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: 50
+  freq_steps: 20
   freq_secs: null
   max_samples: 32
 
