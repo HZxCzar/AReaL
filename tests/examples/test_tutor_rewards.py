@@ -197,6 +197,79 @@ def test_length_penalty_is_capped():
     assert assignments[0].reward == pytest.approx(-0.1)
 
 
+def test_optional_leak_check_disabled_returns_clean_result_without_checker(monkeypatch):
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.enable_leak_check = False
+
+    async def fail_leak_check(*args, **kwargs):
+        raise AssertionError("leak checker should not be called")
+
+    monkeypatch.setattr(workflow, "_run_leak_check", fail_leak_check)
+
+    result = asyncio.run(
+        workflow._run_optional_leak_check("task", "42", "the answer is 42")
+    )
+
+    assert result.leaked is False
+    assert result.feedback == "Leak check disabled."
+    assert result.parse_error is None
+    assert result.raw_result == {"disabled": True}
+
+
+def test_pairwise_leak_check_disabled_uses_clean_reference_result(monkeypatch):
+    captured = {}
+
+    class FakePairwiseEvaluator:
+        def __init__(self, **kwargs):
+            self.run_leak_check = kwargs["run_leak_check"]
+
+        async def evaluate(self, episode_artifact, *, reference_version):
+            captured["reference_version"] = reference_version
+            captured["leak_result"] = await self.run_leak_check(
+                episode_artifact.task,
+                episode_artifact.ground_truth,
+                "reference answer is 42",
+            )
+            return []
+
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.enable_leak_check = False
+    workflow.pairwise_reference_lag_steps = 2
+    workflow.pairwise_reward_scale = 0.05
+    workflow.pairwise_compare_all_turns = True
+    workflow.pairwise_judge_both_incorrect = True
+
+    async def fail_leak_check(*args, **kwargs):
+        raise AssertionError("leak checker should not be called")
+
+    async def unused_student(*args, **kwargs):
+        raise AssertionError("student should not be called")
+
+    monkeypatch.setattr(workflow, "_run_leak_check", fail_leak_check)
+    monkeypatch.setattr(workflow, "_run_student", unused_student)
+    monkeypatch.setattr(
+        tutor_workflow, "PairwiseTutorEvaluator", FakePairwiseEvaluator
+    )
+
+    results = asyncio.run(
+        workflow._run_pairwise_evaluation(
+            _episode([_turn(1)], termination_reason="max_turns"),
+            episode_lora_version=5,
+            chat_caller=object(),
+            aux_caller=object(),
+        )
+    )
+
+    assert results == []
+    assert captured["reference_version"] == 3
+    assert captured["leak_result"].leaked is False
+    assert captured["leak_result"].raw_result == {"disabled": True}
+
+
 def test_pairwise_can_skip_judge_when_both_answers_are_incorrect():
     class RewardCaller:
         calls = 0

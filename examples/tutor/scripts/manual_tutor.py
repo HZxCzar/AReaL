@@ -152,6 +152,7 @@ def build_workflow(config: Any, max_turns: int, *, hide_ground_truth: bool) -> A
         max_turns=max_turns,
         answer_scorer=config.answer_scorer,
         enable_thinking=config.enable_thinking,
+        enable_leak_check=config.enable_leak_check,
         aux_mode=auxiliary_model.mode,
         aux_enable_thinking=auxiliary_model.enable_thinking,
         aux_base_url=auxiliary_model.base_url,
@@ -349,7 +350,7 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
             "public_history_before": public_history.summary,
         }
 
-        if not args.skip_leak_check:
+        if config.enable_leak_check and not args.skip_leak_check:
             print("\nRunning leak check before sending this message to the student...")
             leak_result = await workflow._run_leak_check(
                 task, ground_truth, tutor_visible_message

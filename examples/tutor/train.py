@@ -58,6 +58,7 @@ def main(args):
         answer_scorer=config.answer_scorer,
         max_turns=config.max_turns,
         enable_thinking=config.enable_thinking,
+        enable_leak_check=config.enable_leak_check,
         aux_mode=auxiliary_model.mode,
         aux_enable_thinking=auxiliary_model.enable_thinking,
         aux_base_url=auxiliary_model.base_url,

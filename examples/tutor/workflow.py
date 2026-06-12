@@ -187,6 +187,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         answer_scorer: str = "aime",
         max_turns: int = 6,
         enable_thinking: bool = False,
+        enable_leak_check: bool = True,
         temperature: float = 1.0,
         top_p: float = 1.0,
         max_completion_tokens: int = 512,
@@ -235,6 +236,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.answer_scorer_name = answer_scorer
         self.answer_scorer: AnswerScorer = get_answer_scorer(answer_scorer)
         self.enable_thinking = enable_thinking
+        self.enable_leak_check = bool(enable_leak_check)
         self.gconfig = gconfig
         self.temperature = gconfig.temperature if gconfig is not None else temperature
         self.top_p = gconfig.top_p if gconfig is not None else top_p
@@ -480,7 +482,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             tutor_visible_output = _strip_reasoning_for_context(tutor_raw_output)
             public_before = public_history.summary
 
-            leak_result = await self._run_leak_check(
+            leak_result = await self._run_optional_leak_check(
                 task,
                 ground_truth,
                 tutor_visible_output,
@@ -766,6 +768,29 @@ class TutorAgentWorkflow(RolloutWorkflow):
             return "", result.error
         return result.text, None
 
+    async def _run_optional_leak_check(
+        self,
+        task: str,
+        ground_truth: str,
+        teacher_action: str,
+        *,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
+    ) -> LeakCheckResult:
+        if not self.enable_leak_check:
+            return LeakCheckResult(
+                raw_output="",
+                leaked=False,
+                feedback="Leak check disabled.",
+                parse_error=None,
+                raw_result={"disabled": True},
+            )
+        return await self._run_leak_check(
+            task,
+            ground_truth,
+            teacher_action,
+            aux_caller=aux_caller,
+        )
+
     async def _run_leak_check(
         self,
         task: str,
@@ -945,7 +970,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             run_student=lambda state: self._run_student(state, aux_caller=aux_caller),
             run_leak_check=lambda task,
             ground_truth,
-            teacher_action: self._run_leak_check(
+            teacher_action: self._run_optional_leak_check(
                 task,
                 ground_truth,
                 teacher_action,
