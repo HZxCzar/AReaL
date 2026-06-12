@@ -2279,6 +2279,53 @@ class SchedulerConfig:
 
 
 @dataclass
+class DifficultyBalanceConfig:
+    """Configuration for difficulty-balanced dataset sampling."""
+
+    enabled: bool = field(
+        default=False,
+        metadata={"help": "Enable difficulty-balanced train batches."},
+    )
+    label_field: str = field(
+        default="metadata.difficulty_label",
+        metadata={
+            "help": "Dotted dataset field path containing the difficulty label."
+        },
+    )
+    ratios: dict[str, float] = field(
+        default_factory=lambda: {
+            "easy": 3.0,
+            "medium": 8.0,
+            "hard": 5.0,
+            "noisy": 0.0,
+        },
+        metadata={
+            "help": (
+                "Per-label sampling weights for balanced batches. Labels with "
+                "weight 0 are excluded."
+            )
+        },
+    )
+
+    def __post_init__(self):
+        if not self.label_field:
+            raise ValueError("difficulty_balance.label_field must not be empty")
+        if not self.ratios:
+            raise ValueError("difficulty_balance.ratios must not be empty")
+        for label, ratio in self.ratios.items():
+            if float(ratio) < 0:
+                raise ValueError(
+                    f"difficulty_balance.ratios['{label}'] must be non-negative, "
+                    f"got {ratio}"
+                )
+        if self.enabled and sum(float(v) for v in self.ratios.values()) <= 0:
+            raise ValueError(
+                "difficulty_balance.ratios must contain at least one positive "
+                "weight when enabled"
+            )
+
+
+@dataclass
 class _DatasetConfig:
     """Configuration for dataset loading and preprocessing."""
 
@@ -2332,6 +2379,10 @@ class _DatasetConfig:
             "help": "Additional keyword arguments for dataset loading. "
             "These are passed to the dataset loading function `get_custom_dataset`."
         },
+    )
+    difficulty_balance: DifficultyBalanceConfig = field(
+        default_factory=DifficultyBalanceConfig,
+        metadata={"help": "Difficulty-balanced train batch sampling config."},
     )
     scheduling_spec: SchedulingSpec | None = field(
         default_factory=lambda: SchedulingSpec(
