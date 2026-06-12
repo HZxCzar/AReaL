@@ -607,6 +607,12 @@ class InferenceEngine(abc.ABC):
         """
         raise NotImplementedError()
 
+    def record_lora_server_args(
+        self, server_args: dict[str, Any], addresses: list[str] | None = None
+    ) -> None:
+        """Record backend LoRA server args, if the engine tracks adapter capacity."""
+        return None
+
     def teardown_server(self):
         """Teardown the inference server launched by `launch_server`."""
         raise NotImplementedError()

@@ -330,6 +330,11 @@ class RemotevLLMEngine(InferenceEngine):
         """Get the current weight version."""
         return self._engine.get_version()
 
+    def record_lora_server_args(
+        self, server_args: dict[str, Any], addresses: list[str] | None = None
+    ) -> None:
+        return self._engine.record_lora_server_args(server_args, addresses)
+
     def set_proxy_gateway_addr(self, addr: str) -> None:
         self._engine.set_proxy_gateway_addr(addr)
 

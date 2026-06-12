@@ -290,6 +290,17 @@ class RolloutController:
                 )
             ]
             await asyncio.gather(*tasks)
+            if server_args is not None:
+                tasks = [
+                    self.scheduler.async_call_engine(
+                        worker_id=worker.id,
+                        method="record_lora_server_args",
+                        engine_name=self._engine_name(rank),
+                        server_args=server_args,
+                    )
+                    for rank, worker in enumerate(self.workers)
+                ]
+                await asyncio.gather(*tasks)
         else:
             self.server_infos = await self._collective_rpc_async(
                 "launch_server", server_args=server_args

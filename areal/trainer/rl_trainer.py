@@ -985,6 +985,7 @@ class PPOTrainer:
             engine.initialize(
                 train_data_parallel_size=self.actor_alloc.parallel.dp_size
             )
+            engine.record_lora_server_args(server_args)
             return engine
 
         # Single-controller mode - no engine instantiation needed

@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import time
 import uuid
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future
 from contextlib import contextmanager, nullcontext
@@ -381,9 +381,9 @@ class RemoteInfEngine(InferenceEngine):
         self._generation_paused = False
         self._lora_cond = Condition()
         self._active_lora_versions: Counter[int] = Counter()
-        self._loaded_lora_versions: set[int] = set()
-        self._unloading_lora_versions: set[int] = set()
-        self._max_loaded_loras: int | None = None
+        self._loaded_lora_versions_by_addr: dict[str, set[int]] = {}
+        self._unloading_lora_versions_by_addr: dict[str, set[int]] = {}
+        self._max_loaded_loras_by_addr: dict[str, int] = {}
         self._warned_unknown_lora_capacity = False
 
         self._workflow_executor: WorkflowExecutor | None = None
@@ -422,10 +422,13 @@ class RemoteInfEngine(InferenceEngine):
         match = re.search(r"-v(\d+)$", lora_name)
         return int(match.group(1)) if match is not None else None
 
-    def _record_lora_server_args(self, server_args: dict[str, Any]) -> None:
+    def _record_lora_server_args(
+        self, server_args: dict[str, Any], addr: str | None = None
+    ) -> None:
         max_loaded_loras = server_args.get("max_loaded_loras")
-        if max_loaded_loras is not None:
-            self._max_loaded_loras = int(max_loaded_loras)
+        max_loaded_loras = (
+            int(max_loaded_loras) if max_loaded_loras is not None else None
+        )
 
         lora_paths = server_args.get("lora_paths") or []
         loaded_versions: set[int] = set()
@@ -435,18 +438,37 @@ class RemoteInfEngine(InferenceEngine):
             if version is not None:
                 loaded_versions.add(version)
 
-        if loaded_versions:
-            with self._lora_cond:
-                self._loaded_lora_versions.update(loaded_versions)
-                self._lora_cond.notify_all()
+        addrs = [addr] if addr is not None else list(self.addresses)
+        if not addrs:
+            return
+
+        with self._lora_cond:
+            for server_addr in addrs:
+                self._loaded_lora_versions_by_addr.setdefault(
+                    server_addr, set()
+                ).update(loaded_versions)
+                self._unloading_lora_versions_by_addr.setdefault(server_addr, set())
+                if max_loaded_loras is not None:
+                    self._max_loaded_loras_by_addr[server_addr] = max_loaded_loras
+            self._lora_cond.notify_all()
+
+    def record_lora_server_args(
+        self, server_args: dict[str, Any], addresses: list[str] | None = None
+    ) -> None:
+        """Record LoRA capacity and initial adapters for known server addresses."""
+        if addresses is None:
+            self._record_lora_server_args(server_args)
+            return
+        for addr in addresses:
+            self._record_lora_server_args(server_args, addr)
 
     def _log_lora_capacity_warning_once(self) -> None:
         if self._warned_unknown_lora_capacity:
             return
         self._warned_unknown_lora_capacity = True
         self.logger.warning(
-            "LoRA capacity is unknown for this inference engine; "
-            "AReaL will load new LoRA adapters without proactive unload."
+            "LoRA capacity is unknown for one or more inference servers; "
+            "AReaL will load new LoRA adapters without proactive unload on those servers."
         )
 
     @contextmanager
@@ -1165,43 +1187,118 @@ class RemoteInfEngine(InferenceEngine):
         fut.add_done_callback(callback)
         return fut
 
-    def _select_inactive_lora_to_unload(
+    def _select_inactive_loras_to_unload(
         self, new_version: int, deadline: float
-    ) -> int | None:
+    ) -> dict[int, list[str]]:
         while True:
             with self._lora_cond:
-                if new_version in self._loaded_lora_versions:
-                    return None
+                unload_plan: dict[int, list[str]] = defaultdict(list)
+                blocked_addrs: list[str] = []
+                unknown_capacity_addrs: list[str] = []
 
-                if self._max_loaded_loras is None:
+                for addr in list(self.addresses):
+                    loaded_versions = self._loaded_lora_versions_by_addr.setdefault(
+                        addr, set()
+                    )
+                    unloading_versions = (
+                        self._unloading_lora_versions_by_addr.setdefault(addr, set())
+                    )
+
+                    if new_version in loaded_versions:
+                        continue
+
+                    max_loaded_loras = self._max_loaded_loras_by_addr.get(addr)
+                    if max_loaded_loras is None:
+                        unknown_capacity_addrs.append(addr)
+                        continue
+
+                    if len(loaded_versions) < max_loaded_loras:
+                        continue
+
+                    candidates = [
+                        version
+                        for version in sorted(loaded_versions)
+                        if version not in self._active_lora_versions
+                        and version not in unloading_versions
+                    ]
+                    if candidates:
+                        unload_plan[candidates[0]].append(addr)
+                    else:
+                        blocked_addrs.append(addr)
+
+                if unknown_capacity_addrs:
                     self._log_lora_capacity_warning_once()
-                    return None
 
-                if len(self._loaded_lora_versions) < self._max_loaded_loras:
-                    return None
-
-                candidates = [
-                    version
-                    for version in sorted(self._loaded_lora_versions)
-                    if version not in self._active_lora_versions
-                    and version not in self._unloading_lora_versions
-                ]
-                if candidates:
-                    version = candidates[0]
-                    self._unloading_lora_versions.add(version)
-                    return version
+                if not blocked_addrs:
+                    for version, addrs in unload_plan.items():
+                        for addr in addrs:
+                            self._unloading_lora_versions_by_addr.setdefault(
+                                addr, set()
+                            ).add(version)
+                    return dict(unload_plan)
 
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     active_versions = dict(self._active_lora_versions)
+                    loaded_by_addr = {
+                        addr: sorted(versions)
+                        for addr, versions in self._loaded_lora_versions_by_addr.items()
+                    }
+                    unloading_by_addr = {
+                        addr: sorted(versions)
+                        for addr, versions in self._unloading_lora_versions_by_addr.items()
+                    }
                     raise TimeoutError(
-                        "Timed out waiting for an inactive LoRA adapter slot. "
-                        f"loaded_versions={sorted(self._loaded_lora_versions)}, "
+                        "Timed out waiting for inactive LoRA adapter slots. "
+                        f"new_version={new_version}, "
+                        f"blocked_addrs={blocked_addrs}, "
+                        f"loaded_versions_by_addr={loaded_by_addr}, "
                         f"active_versions={active_versions}, "
-                        f"unloading_versions={sorted(self._unloading_lora_versions)}, "
-                        f"max_loaded_loras={self._max_loaded_loras}."
+                        f"unloading_versions_by_addr={unloading_by_addr}, "
+                        f"max_loaded_loras_by_addr={self._max_loaded_loras_by_addr}."
                     )
                 self._lora_cond.wait(timeout=min(1.0, remaining))
+
+    def _run_requests_on_servers(
+        self, requests: list[HttpRequest], addresses: list[str]
+    ) -> tuple[set[str], dict[str, BaseException]]:
+        addresses = list(addresses)
+        if not addresses:
+            return set(), {}
+
+        async def _fn():
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self.config.request_timeout),
+                read_bufsize=1024 * 1024 * 10,
+                connector=get_default_connector(),
+            ) as session:
+
+                async def _run_for_addr(addr: str):
+                    for http_req in requests:
+                        await arequest_with_retry(
+                            session=session,
+                            addr=addr,
+                            endpoint=http_req.endpoint,
+                            payload=http_req.payload,
+                            method=http_req.method,
+                            max_retries=self.config.request_retries,
+                            timeout=self.config.request_timeout,
+                        )
+
+                results = await asyncio.gather(
+                    *[_run_for_addr(addr) for addr in addresses],
+                    return_exceptions=True,
+                )
+                successes: set[str] = set()
+                failures: dict[str, BaseException] = {}
+                for addr, result in zip(addresses, results, strict=True):
+                    if isinstance(result, BaseException):
+                        failures[addr] = result
+                    else:
+                        successes.add(addr)
+                return successes, failures
+
+        return uvloop.run(_fn())
 
     def _run_requests_on_all_servers(self, requests: list[HttpRequest]) -> None:
         async def _fn():
@@ -1227,20 +1324,79 @@ class RemoteInfEngine(InferenceEngine):
 
         uvloop.run(_fn())
 
-    def _unload_lora_version(self, meta: WeightUpdateMeta, version: int) -> None:
-        unload_req = self.backend.build_lora_unload_request(meta, version)
+    @staticmethod
+    def _format_lora_server_failures(
+        action: str, version: int, failures: dict[str, BaseException]
+    ) -> str:
+        details = "; ".join(
+            f"{addr}: {type(exc).__name__}: {exc}" for addr, exc in failures.items()
+        )
+        return (
+            f"Failed to {action} LoRA version {version} "
+            f"on {len(failures)} server(s): {details}"
+        )
+
+    def _unload_lora_versions(
+        self, meta: WeightUpdateMeta, unload_plan: dict[int, list[str]]
+    ) -> None:
+        all_failures: dict[int, dict[str, BaseException]] = {}
         try:
-            self._run_requests_on_all_servers([unload_req])
+            for version, addrs in unload_plan.items():
+                unload_req = self.backend.build_lora_unload_request(meta, version)
+                successes, failures = self._run_requests_on_servers(
+                    [unload_req], addrs
+                )
+
+                with self._lora_cond:
+                    for addr in successes:
+                        self._loaded_lora_versions_by_addr.setdefault(
+                            addr, set()
+                        ).discard(version)
+                        self._unloading_lora_versions_by_addr.setdefault(
+                            addr, set()
+                        ).discard(version)
+                    for addr in failures:
+                        self._unloading_lora_versions_by_addr.setdefault(
+                            addr, set()
+                        ).discard(version)
+                    self._lora_cond.notify_all()
+
+                if failures:
+                    all_failures[version] = failures
         except Exception:
             with self._lora_cond:
-                self._unloading_lora_versions.discard(version)
+                for version, addrs in unload_plan.items():
+                    for addr in addrs:
+                        self._unloading_lora_versions_by_addr.setdefault(
+                            addr, set()
+                        ).discard(version)
                 self._lora_cond.notify_all()
             raise
 
+        if all_failures:
+            messages = [
+                self._format_lora_server_failures("unload", version, failures)
+                for version, failures in all_failures.items()
+            ]
+            raise RuntimeError("; ".join(messages))
+
+    def _load_lora_version_from_disk(
+        self, meta: WeightUpdateMeta, requests: list[HttpRequest], addrs: list[str]
+    ) -> None:
+        assert meta.version is not None
+        successes, failures = self._run_requests_on_servers(requests, addrs)
+
         with self._lora_cond:
-            self._loaded_lora_versions.discard(version)
-            self._unloading_lora_versions.discard(version)
+            for addr in successes:
+                self._loaded_lora_versions_by_addr.setdefault(addr, set()).add(
+                    meta.version
+                )
             self._lora_cond.notify_all()
+
+        if failures:
+            raise RuntimeError(
+                self._format_lora_server_failures("load", meta.version, failures)
+            )
 
     def _update_lora_weights_from_disk(
         self,
@@ -1259,18 +1415,21 @@ class RemoteInfEngine(InferenceEngine):
         load_timestamp = datetime.now().timestamp()
 
         deadline = time.monotonic() + self.config.request_timeout
-        version_to_unload = self._select_inactive_lora_to_unload(
-            meta.version, deadline
-        )
-        if version_to_unload is not None:
-            self._unload_lora_version(meta, version_to_unload)
-
-        weight_reqs = self.backend.build_disk_weight_update_requests(meta)
-        self._run_requests_on_all_servers(weight_reqs.requests)
+        unload_plan = self._select_inactive_loras_to_unload(meta.version, deadline)
+        if unload_plan:
+            self._unload_lora_versions(meta, unload_plan)
 
         with self._lora_cond:
-            self._loaded_lora_versions.add(meta.version)
-            self._lora_cond.notify_all()
+            load_addrs = [
+                addr
+                for addr in self.addresses
+                if meta.version
+                not in self._loaded_lora_versions_by_addr.setdefault(addr, set())
+            ]
+
+        if load_addrs:
+            weight_reqs = self.backend.build_disk_weight_update_requests(meta)
+            self._load_lora_version_from_disk(meta, weight_reqs.requests, load_addrs)
 
         return load_timestamp - save_timestamp
 
@@ -1543,7 +1702,6 @@ class RemoteInfEngine(InferenceEngine):
 
     def launch_server(self, server_args: dict[str, Any]) -> LocalInfServerInfo:
         """Launch a local inference server."""
-        self._record_lora_server_args(server_args)
         server_args["host"] = gethostip()
         server_args["port"] = find_free_ports(1)[0]
         process = self.backend.launch_server(server_args)
@@ -1556,6 +1714,7 @@ class RemoteInfEngine(InferenceEngine):
         try:
             self._wait_for_server(address, process=process)
             self.local_server_processes.append(server_info)
+            self._record_lora_server_args(server_args, address)
             if ray.is_initialized():
                 # do not return with process for ray as it is not picklable
                 return LocalInfServerInfo(
@@ -1575,6 +1734,11 @@ class RemoteInfEngine(InferenceEngine):
         addr = format_hostport(server_info.host, server_info.port)
         if addr in self.addresses:
             self.addresses.remove(addr)
+        with self._lora_cond:
+            self._loaded_lora_versions_by_addr.pop(addr, None)
+            self._unloading_lora_versions_by_addr.pop(addr, None)
+            self._max_loaded_loras_by_addr.pop(addr, None)
+            self._lora_cond.notify_all()
         if server_info.process.poll() is not None:
             return
         kill_process_tree(server_info.process.pid, graceful=True)

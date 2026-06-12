@@ -30,6 +30,17 @@ AReaL 当前的 LoRA 支持矩阵如下：
 | FSDP2    | `examples/math/gsm8k_grpo_lora.yaml`          |
 | Megatron | `examples/math/gsm8k_grpo_megatron_lora.yaml` |
 
+## 运行时版本语义
+
+AReaL 的异步 LoRA 版本管理主要面向 SGLang + disk update 路径。在这个模式下，
+rollout server 上可以同时保留多个带版本号的 LoRA adapter，运行时会记录正在使用的
+LoRA version，避免把仍可能被进行中的 workflow 请求到的旧 adapter 卸掉。
+
+vLLM 的运行时 LoRA 配置字段不同（`max_loras` / `lora_modules`），并且 vLLM 的
+XCCL LoRA 更新更像是固定 adapter 槽位的原地权重替换。不要依赖 vLLM XCCL LoRA
+同时保留多个历史 LoRA version。如果 stale 或 lagged rollout workflow 需要请求旧
+LoRA version，应使用 SGLang + disk update 路径。
+
 ## 核心 LoRA 参数
 
 | 参数              | 作用                                                               | 常见取值              |

@@ -36,6 +36,20 @@ Example scripts:
 | FSDP2    | `examples/math/gsm8k_grpo_lora.yaml`          |
 | Megatron | `examples/math/gsm8k_grpo_megatron_lora.yaml` |
 
+## Runtime Version Semantics
+
+AReaL's asynchronous LoRA version management is primarily designed for the
+SGLang + disk-update path. In that mode, multiple versioned LoRA adapters may
+remain loaded on the rollout servers at the same time, and the runtime tracks
+active versions so an adapter is not unloaded while an in-flight workflow can
+still request it.
+
+vLLM uses different runtime LoRA options (`max_loras` / `lora_modules`) and its
+XCCL LoRA update path behaves like a fixed adapter slot whose weights are
+replaced in place. Do not rely on vLLM XCCL LoRA to keep multiple historical
+LoRA versions concurrently addressable. Use SGLang + disk updates when stale or
+lagged rollout workflows need to request older LoRA versions.
+
 ## Core LoRA Parameters
 
 | Parameter         | What it controls                                                                                        | Typical values        |
