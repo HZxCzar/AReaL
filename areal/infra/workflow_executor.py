@@ -1218,7 +1218,7 @@ class WorkflowExecutor:
 
                 if should_accept_traj:
                     manager.on_rollout_accepted()
-                    stats_tracker.get("rollout").scalar(accepted=1)
+                    stats_tracker.get("rollout").scalar(accepted=1, stale=0)
                     trace_session_event(
                         "mark_finalized",
                         task_id=task_id,
@@ -1232,7 +1232,7 @@ class WorkflowExecutor:
                     return _RolloutResult(task_id=task_id, trajectory=traj)
 
                 manager.on_rollout_rejected()
-                stats_tracker.get("rollout").scalar(rejected=1)
+                stats_tracker.get("rollout").scalar(rejected=1, stale=0)
                 trace_session_event(
                     "mark_finalized",
                     task_id=task_id,
@@ -1264,7 +1264,7 @@ class WorkflowExecutor:
                 if getattr(exc, "_fatal_rollout_error", False):
                     raise
                 manager.on_rollout_rejected()
-                stats_tracker.get("rollout").scalar(rejected=1)
+                stats_tracker.get("rollout").scalar(rejected=1, stale=0)
                 trace_session_event(
                     "mark_finalized",
                     task_id=task_id,

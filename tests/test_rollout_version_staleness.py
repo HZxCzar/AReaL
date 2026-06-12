@@ -10,6 +10,7 @@ from areal.api.cli_args import GenerationHyperparameters, InferenceEngineConfig
 from areal.api.io_struct import HttpGenerationResult, HttpRequest
 from areal.infra import remote_inf_engine as remote_inf_engine_module
 from areal.infra import workflow_context
+from areal.infra import workflow_executor as workflow_executor_module
 from areal.infra.remote_inf_engine import RemoteInfEngine
 from areal.infra.staleness_manager import StalenessManager
 from areal.infra.workflow_context import WorkflowContext
@@ -195,6 +196,42 @@ def test_workflow_task_rejects_stale_after_workflow_returns():
     assert should_accept_called is False
     stats = executor.staleness_manager.get_stats()
     assert stats.rejected == 1
+
+
+def test_workflow_task_logs_stale_zero_for_accepted_and_one_for_stale(monkeypatch):
+    """The stale metric should average over finalized rollout tasks."""
+
+    class CapturingStatsTracker:
+        def __init__(self):
+            self.records = []
+
+        def get(self, name: str):
+            assert name == "rollout"
+            return self
+
+        def scalar(self, **metrics):
+            self.records.append(metrics)
+
+    tracker = CapturingStatsTracker()
+    monkeypatch.setattr(workflow_executor_module, "stats_tracker", tracker)
+
+    accepted_executor, _ = make_executor(version=0)
+    accepted_task = accepted_executor._create_workflow_task(
+        _RolloutTaskInput(task_id=20, data={}, workflow=StaticWorkflow())
+    )
+    assert asyncio.run(accepted_task()) is not None
+
+    stale_executor, _ = make_executor(version=0)
+    stale_task = stale_executor._create_workflow_task(
+        _RolloutTaskInput(task_id=21, data={}, workflow=StaticWorkflow())
+    )
+    stale_executor.set_min_allowed_rollout_version(1)
+    assert asyncio.run(stale_task()) is None
+
+    assert tracker.records == [
+        {"accepted": 1, "stale": 0},
+        {"rejected": 1, "stale": 1},
+    ]
 
 
 def test_remote_agenerate_raises_before_backend_request_when_rollout_stale():
