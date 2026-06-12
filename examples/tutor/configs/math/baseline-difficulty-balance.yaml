@@ -1,5 +1,5 @@
-experiment_name: tutor-math
-trial_name: qwen8b-thinking-self-turn10-filtered-ep200
+experiment_name: tutor-math-baseline
+trial_name: qwen8b-thinking-self-turn10-baseline-difficulty-balance
 
 seed: 42
 enable_offload: false
@@ -11,7 +11,7 @@ eval_workflow: ${workflow}
 answer_scorer: math
 max_turns: 10
 enable_thinking: true
-teacher_show_ground_truth: true
+teacher_show_ground_truth: false
 
 auxiliary_model:
   mode: self
@@ -21,17 +21,17 @@ auxiliary_model:
   max_concurrent_calls: 4
 
 reward:
-  success: 2.0
+  success: 1.0
   assign_success_reward: false
-  leak_penalty: -1.0
+  leak_penalty: -0.05
   outcome_prior_turn_weight: 0.5
   outcome_credit_gamma: 0.9
-  early_success_bonus: 1.0
+  early_success_bonus: 0.0
   enable_turn_penalty: false
   turn_penalty: -0.01
-  length_penalty_threshold_chars: 1200
-  length_penalty_per_100_chars: -0.005
-  length_penalty_min: -0.1
+  length_penalty_threshold_chars: 0
+  length_penalty_per_100_chars: 0.0
+  length_penalty_min: 0.0
   pairwise:
     enabled: false
     reference_lag_steps: 5
@@ -105,10 +105,10 @@ actor:
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 40960
+    max_tokens_per_mb: 32768
   optimizer:
     type: adam
-    lr: 5.0e-5
+    lr: 1.0e-5
     weight_decay: 0.0
     beta1: 0.9
     beta2: 0.999
@@ -116,11 +116,11 @@ actor:
     lr_scheduler_type: constant
     gradient_clipping: 1.0
     warmup_steps_proportion: 0.001
-  eps_clip: 0.4
+  eps_clip: 0.2
   temperature: ${gconfig.temperature}
   reward_scaling: 1.0
   reward_bias: 0.0
-  kl_ctl: 0.0
+  kl_ctl: 3.0e-3
   ppo_n_minibatches: 4
   recompute_logprob: true
   use_decoupled_loss: true
@@ -176,15 +176,24 @@ train_dataset:
   shuffle: true
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_8b_filter_16384_clean
+  path: examples/tutor/data/baseline-qwen3-8B-difficulty
   type: rl
   max_length: 16384
+  difficulty_balance:
+    enabled: true
+    label_field: metadata.difficulty_label
+    ratios:
+      easy: 3
+      medium: 8
+      hard: 5
+      noisy: 0
+  scheduling_spec: null
 
 valid_dataset:
-  batch_size: 8
+  batch_size: ${train_dataset.batch_size}
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_8b_filter_16384_clean
+  path: examples/tutor/data/baseline-qwen3-8B-difficulty
   type: rl
 
 saver:
@@ -209,7 +218,7 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: 50
+  freq_steps: 20
   freq_secs: null
   max_samples: 32
 
