@@ -181,7 +181,7 @@ train_dataset:
   shuffle: true
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/baseline-qwen3-8B
+  path: examples/tutor/data/math_dataset_train_llm_judge
   type: rl
   max_length: 16384
 
@@ -189,7 +189,7 @@ valid_dataset:
   batch_size: ${train_dataset.batch_size}
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/baseline-qwen3-8B
+  path: examples/tutor/data/math_dataset_test_llm_judge
   type: rl
 
 saver:
