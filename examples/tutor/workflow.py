@@ -372,6 +372,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
 
         task = str(data["task"])
         ground_truth = str(data["ground_truth"])
+        trajectory_id = uuid.uuid4().int & ((1 << 63) - 1)
         turn_artifacts: list[TurnArtifact] = []
         leak_count = 0
         termination_reason = "max_turns"
@@ -657,6 +658,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             response_to_tensordict(
                 artifact.tutor_response,
                 reward=assignment.reward,
+                trajectory_id=trajectory_id,
+                turn_idx=artifact.turn_idx,
             )
             for artifact, assignment in zip(turn_artifacts, assignments, strict=True)
         ]
@@ -1022,9 +1025,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             self._answer_judge_cache[cache_key] = result
             return result
 
-        prompt = self._build_answer_judge_prompt(
-            task, ground_truth, extracted_answer
-        )
+        prompt = self._build_answer_judge_prompt(task, ground_truth, extracted_answer)
         judge_call = await self._call_auxiliary_prompt(
             system_prompt=self.answer_judge_system_prompt,
             user_prompt=prompt,
@@ -1160,7 +1161,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 teacher_action,
                 aux_caller=aux_caller,
             ),
-            score_answer=lambda task, ground_truth, student_output: self._score_answer_async(
+            score_answer=lambda task,
+            ground_truth,
+            student_output: self._score_answer_async(
                 task,
                 ground_truth,
                 student_output,
@@ -1265,9 +1268,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         for trace in traces:
             for raw_name, value in trace.reward_components.items():
                 component_key = _reward_component_key(raw_name)
-                component_totals[component_key] = (
-                    component_totals.get(component_key, 0.0) + float(value)
-                )
+                component_totals[component_key] = component_totals.get(
+                    component_key, 0.0
+                ) + float(value)
 
         if not component_totals:
             return {}

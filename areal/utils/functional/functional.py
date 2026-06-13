@@ -220,6 +220,7 @@ def ppo_actor_loss_fn(
     eps_clip: float,
     loss_mask: torch.Tensor,
     eps_clip_higher: float | None = None,
+    use_ppo_clip: bool = True,
     c_clip: float | None = None,
     behave_imp_weight_cap: float | None = None,
     importance_sampling_level: str = "token",
@@ -266,23 +267,27 @@ def ppo_actor_loss_fn(
             "Must be 'token' or 'sequence'."
         )
 
-    clipped_ratio = torch.clamp(
-        ratio,
-        1.0 - eps_clip,
-        1.0 + (eps_clip if eps_clip_higher is None else eps_clip_higher),
-    )
-
     pg_loss1 = -advantages * ratio
-    pg_loss2 = -advantages * clipped_ratio
-    clip_mask = pg_loss1.detach() < pg_loss2.detach()
-    pg_loss = torch.max(pg_loss1, pg_loss2)
-    if c_clip is not None:
-        assert c_clip > 1.0, c_clip
-        pg_loss3 = torch.sign(advantages) * c_clip * advantages
-        dual_clip_mask = pg_loss3.detach() < pg_loss.detach()
-        pg_loss = torch.min(pg_loss, pg_loss3)
+    if use_ppo_clip:
+        clipped_ratio = torch.clamp(
+            ratio,
+            1.0 - eps_clip,
+            1.0 + (eps_clip if eps_clip_higher is None else eps_clip_higher),
+        )
+        pg_loss2 = -advantages * clipped_ratio
+        clip_mask = pg_loss1.detach() < pg_loss2.detach()
+        pg_loss = torch.max(pg_loss1, pg_loss2)
+        if c_clip is not None:
+            assert c_clip > 1.0, c_clip
+            pg_loss3 = torch.sign(advantages) * c_clip * advantages
+            dual_clip_mask = pg_loss3.detach() < pg_loss.detach()
+            pg_loss = torch.min(pg_loss, pg_loss3)
+        else:
+            dual_clip_mask = torch.zeros_like(clip_mask)
     else:
-        dual_clip_mask = torch.zeros_like(clip_mask)
+        pg_loss = pg_loss1
+        clip_mask = torch.zeros_like(loss_mask, dtype=torch.bool)
+        dual_clip_mask = torch.zeros_like(loss_mask, dtype=torch.bool)
 
     # Compute behavioural importance weight only when not disabled
     # When disabled, pg_loss remains unchanged (no behavioural correction applied)

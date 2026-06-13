@@ -127,3 +127,32 @@ Set auxiliary API call parameters directly under `auxiliary_model` in YAML. Comm
 parameters use dedicated fields such as `max_tokens`, `temperature`, and `top_p`; put
 additional OpenAI request kwargs under `request_params`, including backend-specific
 `extra_body` values.
+
+python examples/tutor/scripts/filter_with_llm_judge.py \
+    --config examples/tutor/configs/math/baseline.yaml \
+    --input examples/tutor/data/math_dataset \
+    --output examples/tutor/data/math_dataset_8b_llm_judge_filter \
+    --splits train test \
+    --base-url http://127.0.0.1:30008/v1 \
+    --model default \
+    --overwrite
+  
+ python examples/tutor/scripts/filter_with_llm_judge.py \
+    --config examples/tutor/configs/math/baseline.yaml \
+    --input examples/tutor/data/math_dataset \
+    --output examples/tutor/data/math_dataset_train_llm_judge \
+    --report examples/tutor/report/math_dataset_train_llm_judge_report.json \
+    --splits train \
+    --base-url http://127.0.0.1:30008/v1 \
+    --model default \
+    --overwrite
+
+python examples/tutor/scripts/filter_with_llm_judge.py \
+    --config examples/tutor/configs/math/baseline.yaml \
+    --input examples/tutor/data/math_dataset \
+    --output examples/tutor/data/math_dataset_test_llm_judge \
+    --report examples/tutor/report/math_dataset_test_llm_judge_report.json \
+    --splits test \
+    --base-url http://127.0.0.1:30008/v1 \
+    --model default \
+    --overwrite

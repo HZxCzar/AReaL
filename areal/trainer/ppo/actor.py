@@ -40,6 +40,48 @@ from areal.utils.perf_tracer import trace_perf
 logger = logging.getLogger("PPOActor")
 
 
+def _compute_rebn_returns(
+    rewards: torch.Tensor,
+    trajectory_ids: torch.Tensor,
+    turn_indices: torch.Tensor,
+    turn_discount: float,
+    valid_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Compute discounted future returns over turn-level trajectories."""
+    rewards = rewards.float()
+    returns = torch.zeros_like(rewards)
+    if rewards.numel() == 0:
+        return returns
+    if valid_mask is None:
+        valid_mask = torch.ones_like(rewards, dtype=torch.bool)
+    else:
+        valid_mask = valid_mask.bool()
+    valid_indices = torch.nonzero(valid_mask, as_tuple=False).flatten()
+    if valid_indices.numel() == 0:
+        return returns
+
+    unique_trajectory_ids = torch.unique(trajectory_ids[valid_indices])
+    gamma = float(turn_discount)
+    for trajectory_id in unique_trajectory_ids.tolist():
+        traj_mask = valid_mask & (trajectory_ids == trajectory_id)
+        traj_indices = torch.nonzero(traj_mask, as_tuple=False).flatten()
+        if traj_indices.numel() == 0:
+            continue
+        order = torch.argsort(turn_indices[traj_indices])
+        ordered_indices = traj_indices[order]
+        running_return = torch.zeros((), dtype=rewards.dtype, device=rewards.device)
+        for idx in reversed(ordered_indices.tolist()):
+            running_return = rewards[idx] + gamma * running_return
+            returns[idx] = running_return
+    return returns
+
+
+def _broadcast_turn_values_to_tokens(
+    turn_values: torch.Tensor, loss_mask: torch.Tensor
+) -> torch.Tensor:
+    return turn_values.float().unsqueeze(-1).expand_as(loss_mask) * loss_mask.float()
+
+
 class PPOActor:
     def __init__(self, config: PPOActorConfig, engine: TrainEngine):
         self.config = config
@@ -120,6 +162,8 @@ class PPOActor:
         logger.info(
             f"  reward_norm: {config.reward_norm if config.reward_norm else 'DISABLED (None)'}"
         )
+        logger.info(f"  advantage_estimator: {config.advantage_estimator}")
+        logger.info(f"  use_ppo_clip: {config.use_ppo_clip}")
         logger.info(f"  eps_clip: {config.eps_clip}")
         logger.info("=" * 70)
 
@@ -141,7 +185,6 @@ class PPOActor:
 
     def _compute_advantages(self, data: dict[str, Any]) -> dict[str, Any]:
         bs = data["input_ids"].shape[0]
-        max_seqlen = data["input_ids"].shape[1]
         batch_indices = torch.arange(
             bs, device=data["input_ids"].device, dtype=torch.long
         )
@@ -208,11 +251,77 @@ class PPOActor:
         else:
             rewards[batch_indices, indices] += reward_score
 
-        # Compute GAE.
-        if "values" not in data:
-            values = torch.zeros_like(rewards)
+        if self.config.advantage_estimator == "rebn":
+            if "trajectory_id" not in data or "turn_idx" not in data:
+                raise ValueError(
+                    "advantage_estimator='rebn' requires trajectory_id and turn_idx "
+                    "metadata in rollout data."
+                )
+            kl_only_rewards = kl_rewards.clone()
+            kl_only_rewards[batch_indices, seqlens - 1] = 0
+            values = torch.zeros_like(kl_only_rewards)
+            kl_advantages = self._compute_token_gae(
+                rewards=kl_only_rewards,
+                values=values,
+                loss_mask=loss_mask,
+                seq_no_eos_mask=seq_no_eos_mask,
+            )
+            valid_turn_mask = loss_mask.sum(dim=-1) > 0
+            turn_returns = _compute_rebn_returns(
+                reward_score,
+                data["trajectory_id"].to(reward_score.device),
+                data["turn_idx"].to(reward_score.device),
+                self.config.turn_discount,
+                valid_mask=valid_turn_mask,
+            )
+            if self.adv_norm is not None and valid_turn_mask.any():
+                normalized_turn_returns = torch.zeros_like(turn_returns)
+                normalized_turn_returns[valid_turn_mask] = self.adv_norm(
+                    turn_returns[valid_turn_mask]
+                )
+            else:
+                normalized_turn_returns = turn_returns
+            advantages = kl_advantages + _broadcast_turn_values_to_tokens(
+                normalized_turn_returns, loss_mask
+            )
+            data["returns"] = advantages
         else:
-            values = data["values"]
+            if "values" not in data:
+                values = torch.zeros_like(rewards)
+            else:
+                values = data["values"]
+            advantages = self._compute_token_gae(
+                rewards=rewards,
+                values=values,
+                loss_mask=loss_mask,
+                seq_no_eos_mask=seq_no_eos_mask,
+            )
+            data["returns"] = advantages + values
+
+            # Optionally perform advantage normalization.
+            if self.adv_norm is not None:
+                advantages = self.adv_norm(advantages, loss_mask)
+
+        # Store data in the dict.
+        data["advantages"] = advantages
+        data["kl_rewards"] = kl_rewards
+        data["tot_rewards"] = rewards
+        data["loss_mask"] = loss_mask
+        # because we have rolled old_logp by -1
+        data["logprobs"] = old_logp
+
+        return data
+
+    def _compute_token_gae(
+        self,
+        *,
+        rewards: torch.Tensor,
+        values: torch.Tensor,
+        loss_mask: torch.Tensor,
+        seq_no_eos_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        bs = rewards.shape[0]
+        max_seqlen = rewards.shape[1]
         advantages_reversed = [
             torch.zeros(bs, dtype=torch.float32, device=values.device)
         ]
@@ -227,23 +336,7 @@ class PPOActor:
             nextvalues = nextvalues * (1 - mask) + values[:, t] * mask
             lastgaelam = lastgaelam * (1 - mask) + newgaelam * mask
             advantages_reversed.append(lastgaelam)
-
-        advantages = torch.stack(advantages_reversed[::-1], dim=1)
-        data["returns"] = advantages + values
-
-        # Optionally perform advantage normalization.
-        if self.adv_norm is not None:
-            advantages = self.adv_norm(advantages, loss_mask)
-
-        # Store data in the dict.
-        data["advantages"] = advantages
-        data["kl_rewards"] = kl_rewards
-        data["tot_rewards"] = rewards
-        data["loss_mask"] = loss_mask
-        # because we have rolled old_logp by -1
-        data["logprobs"] = old_logp
-
-        return data
+        return torch.stack(advantages_reversed[::-1], dim=1)
 
     @trace_perf("ppo_actor.ppo_update", category="compute")
     @stats_tracker.scope_func_wrapper("ppo_actor")
@@ -323,7 +416,13 @@ class PPOActor:
 
         # Pop keys that are no longer needed after advantage computation
         # Note: "versions" is kept if needed for approximation/metrics in loss function
-        for key in ["rewards", "tot_rewards", "kl_rewards"]:
+        for key in [
+            "rewards",
+            "tot_rewards",
+            "kl_rewards",
+            "trajectory_id",
+            "turn_idx",
+        ]:
             data.pop(key, None)
         # NOTE: calling engine.train() is critical to enabling gradient checkpointing
         self.engine.train()
@@ -344,6 +443,7 @@ class PPOActor:
                         eps_clip=self.config.eps_clip,
                         eps_clip_higher=self.config.eps_clip_higher,
                         c_clip=self.config.c_clip,
+                        use_ppo_clip=self.config.use_ppo_clip,
                         behave_imp_weight_cap=self.config.behave_imp_weight_cap,
                         m2_threshold=self.m2_threshold,
                         importance_sampling_level=self.config.importance_sampling_level,
@@ -408,6 +508,7 @@ def grpo_loss_fn(
     eps_clip_higher: float | None,
     c_clip: float | None,
     behave_imp_weight_cap: float | None,
+    use_ppo_clip: bool = True,
     m2_threshold: float | None = None,
     importance_sampling_level: str = "token",
     current_version: int | None = None,
@@ -468,6 +569,7 @@ def grpo_loss_fn(
             eps_clip=eps_clip,
             eps_clip_higher=eps_clip_higher,
             loss_mask=loss_mask,
+            use_ppo_clip=use_ppo_clip,
             c_clip=c_clip,
             proximal_logprobs=prox_logp,
             behave_imp_weight_cap=behave_imp_weight_cap,

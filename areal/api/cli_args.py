@@ -1214,6 +1214,12 @@ class PPOActorConfig(TrainEngineConfig):
             "help": "Dual clipping factor for policy ratio, must be > 1.0. None disables dual clipping."
         },
     )
+    use_ppo_clip: bool = field(
+        default=True,
+        metadata={
+            "help": "Whether to use PPO clipped surrogate loss. If false, use the unclipped policy-gradient surrogate."
+        },
+    )
     # M2PO
     m2_threshold: float | None = field(
         default=None, metadata={"help": "The second momentum threshold for M2PO."}
@@ -1258,6 +1264,17 @@ class PPOActorConfig(TrainEngineConfig):
     )
     adv_norm: NormConfig | None = field(
         default=None, metadata={"help": "Normalization configuration for advantages."}
+    )
+    advantage_estimator: str = field(
+        default="gae",
+        metadata={
+            "help": "Advantage estimator. 'gae' uses token-level GAE. 'rebn' uses multi-turn return batch normalization.",
+            "choices": ["gae", "rebn"],
+        },
+    )
+    turn_discount: float = field(
+        default=1.0,
+        metadata={"help": "Turn-level discount factor for advantage_estimator=rebn."},
     )
 
     # KL Control
@@ -1372,6 +1389,22 @@ class PPOActorConfig(TrainEngineConfig):
 
     def __post_init__(self):
         """Validate PPO actor configuration."""
+        if self.advantage_estimator not in {"gae", "rebn"}:
+            raise ValueError(
+                "advantage_estimator must be 'gae' or 'rebn', "
+                f"got {self.advantage_estimator!r}."
+            )
+        if self.turn_discount < 0.0 or self.turn_discount > 1.0:
+            raise ValueError(
+                f"turn_discount must be in [0, 1], got {self.turn_discount}."
+            )
+        if self.advantage_estimator == "rebn" and self.reward_norm is not None:
+            raise ValueError(
+                "actor.advantage_estimator='rebn' is not compatible with "
+                "actor.reward_norm. ReBN normalizes turn-level returns through "
+                "actor.adv_norm; disable actor.reward_norm to use ReBN."
+            )
+
         # Validate MIS/TIS configuration
         if self.behave_imp_weight_mode == "disabled":
             if self.behave_imp_weight_cap is not None:
@@ -2288,9 +2321,7 @@ class DifficultyBalanceConfig:
     )
     label_field: str = field(
         default="metadata.difficulty_label",
-        metadata={
-            "help": "Dotted dataset field path containing the difficulty label."
-        },
+        metadata={"help": "Dotted dataset field path containing the difficulty label."},
     )
     ratios: dict[str, float] = field(
         default_factory=lambda: {
@@ -2578,6 +2609,12 @@ class PPOConfig(BaseExperimentConfig):
         """Validate the eval generation config."""
         if self.eval_gconfig is None:
             self.eval_gconfig = self.gconfig.new()
+        if self.actor.advantage_estimator == "rebn" and self.critic is not None:
+            raise ValueError(
+                "actor.advantage_estimator='rebn' is not compatible with critic. "
+                "ReBN stores normalized policy advantages in the returns field; "
+                "disable critic to use ReBN."
+            )
         super().__post_init__()
 
 

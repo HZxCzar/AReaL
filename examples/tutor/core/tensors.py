@@ -5,7 +5,13 @@ from typing import Any
 import torch
 
 
-def response_to_tensordict(response: Any, *, reward: float) -> dict[str, torch.Tensor]:
+def response_to_tensordict(
+    response: Any,
+    *,
+    reward: float,
+    trajectory_id: int | None = None,
+    turn_idx: int | None = None,
+) -> dict[str, torch.Tensor]:
     full_ids = list(response.input_tokens) + list(response.output_tokens)
     output_logprobs = list(response.output_logprobs)
     if len(output_logprobs) < response.output_len:
@@ -17,6 +23,8 @@ def response_to_tensordict(response: Any, *, reward: float) -> dict[str, torch.T
         output_versions.extend([0] * (response.output_len - len(output_versions)))
     if len(output_versions) > response.output_len:
         output_versions = output_versions[: response.output_len]
+    trajectory_value = 0 if trajectory_id is None else int(trajectory_id)
+    turn_value = 0 if turn_idx is None else int(turn_idx)
     return {
         "input_ids": torch.tensor(full_ids, dtype=torch.long).unsqueeze(0),
         "logprobs": torch.tensor(
@@ -33,4 +41,6 @@ def response_to_tensordict(response: Any, *, reward: float) -> dict[str, torch.T
         ).unsqueeze(0),
         "attention_mask": torch.ones(len(full_ids), dtype=torch.bool).unsqueeze(0),
         "rewards": torch.tensor([float(reward)], dtype=torch.float32),
+        "trajectory_id": torch.tensor([trajectory_value], dtype=torch.long),
+        "turn_idx": torch.tensor([turn_value], dtype=torch.long),
     }
