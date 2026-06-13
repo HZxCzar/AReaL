@@ -26,7 +26,7 @@ PairwiseOutcome = Literal["current", "reference", "tie", "skipped", "failure"]
 TutorGenerator = Callable[[TutorTurnState, int], Awaitable[str]]
 StudentRunner = Callable[[StudentTurnState], Awaitable[tuple[str, str | None]]]
 LeakChecker = Callable[[str, str, str], Awaitable[LeakCheckResult]]
-AnswerScorer = Callable[[str, str, str], JudgeResult]
+AnswerScorer = Callable[[str, str, str], Awaitable[JudgeResult]]
 
 
 @dataclass(slots=True)
@@ -236,7 +236,7 @@ class PairwiseTutorEvaluator:
                 reference=reference,
             )
 
-        reference.judge_result = self.score_answer(
+        reference.judge_result = await self.score_answer(
             episode.task, episode.ground_truth, reference.student_output
         )
 

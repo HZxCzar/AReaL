@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from examples.tutor.prompts import (
+    DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT,
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
     DEFAULT_STUDENT_SYSTEM_PROMPT,
     DEFAULT_SUMMARY_SYSTEM_PROMPT,
@@ -48,6 +49,19 @@ class TutorAuxiliaryModelConfig:
                 "mode='api'. Use extra_body for backend-specific parameters."
             )
         },
+    )
+    answer_judge_enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Use this auxiliary model as an LLM fallback judge when exact "
+                "answer matching fails."
+            )
+        },
+    )
+    answer_judge_max_tokens: int = field(
+        default=256,
+        metadata={"help": "Maximum completion tokens for answer judge JSON output."},
     )
 
 
@@ -148,6 +162,9 @@ class TutorConfig(GRPOConfig):
     teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
     student_system_prompt: str = field(default=DEFAULT_STUDENT_SYSTEM_PROMPT)
     leak_check_system_prompt: str = field(default=DEFAULT_LEAK_CHECK_SYSTEM_PROMPT)
+    answer_judge_system_prompt: str = field(
+        default=DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT
+    )
     summary_system_prompt: str = field(default=DEFAULT_SUMMARY_SYSTEM_PROMPT)
     debug_trace_dir: str = field(
         default="",

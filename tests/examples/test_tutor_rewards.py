@@ -5,6 +5,8 @@ import asyncio
 import pytest
 
 from examples.tutor import workflow as tutor_workflow
+from examples.tutor.core.callers import TextCallResult
+from examples.tutor.core.math import score_math_answer
 from examples.tutor.core.pairwise import PairwiseTutorEvaluator
 from examples.tutor.core.rewards import EpisodeRewardComputer
 from examples.tutor.core.types import (
@@ -261,6 +263,7 @@ def test_pairwise_leak_check_disabled_uses_clean_reference_result(monkeypatch):
             episode_lora_version=5,
             chat_caller=object(),
             aux_caller=object(),
+            answer_judge_caller=None,
         )
     )
 
@@ -268,6 +271,129 @@ def test_pairwise_leak_check_disabled_uses_clean_reference_result(monkeypatch):
     assert captured["reference_version"] == 3
     assert captured["leak_result"].leaked is False
     assert captured["leak_result"].raw_result == {"disabled": True}
+
+
+
+class FakeAnswerJudgeCaller:
+    def __init__(self, *outputs: str):
+        self.outputs = list(outputs)
+        self.calls: list[dict[str, object]] = []
+
+    async def call_text(self, messages, *, rid_prefix="auxiliary"):
+        self.calls.append({"messages": messages, "rid_prefix": rid_prefix})
+        if not self.outputs:
+            raise AssertionError("unexpected answer judge call")
+        output = self.outputs.pop(0)
+        return TextCallResult(text=output, raw_text=output, error=None)
+
+
+def _answer_judge_workflow(*, enabled: bool = True):
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.answer_scorer = score_math_answer
+    workflow.answer_judge_enabled = enabled
+    workflow.answer_judge_system_prompt = "judge system"
+    workflow._answer_judge_cache = {}
+    return workflow
+
+
+def test_answer_judge_exact_match_skips_llm_call():
+    workflow = _answer_judge_workflow(enabled=True)
+    caller = FakeAnswerJudgeCaller('{"correct": false}')
+
+    result = asyncio.run(
+        workflow._score_answer_async(
+            "task",
+            r"\frac{x+5}{6}",
+            r"$$\boxed{\frac{x+5}{6}}$$",
+            answer_judge_caller=caller,
+        )
+    )
+
+    assert result.correct is True
+    assert caller.calls == []
+
+
+def test_answer_judge_marks_equivalent_function_answer_correct():
+    workflow = _answer_judge_workflow(enabled=True)
+    caller = FakeAnswerJudgeCaller('{"correct": true}')
+
+    result = asyncio.run(
+        workflow._score_answer_async(
+            "Find the inverse.",
+            r"\frac{x+5}{6}",
+            r"$$\boxed{h^{-1}(x)=\frac{x+5}{6}}$$",
+            answer_judge_caller=caller,
+        )
+    )
+
+    assert result.correct is True
+    assert result.raw_result["extracted_answer"] == r"h^{-1}(x)=\frac{x+5}{6}"
+    assert result.raw_result["answer_judge"]["used"] is True
+    assert caller.calls[0]["rid_prefix"] == "answer-judge"
+    user_prompt = caller.calls[0]["messages"][1]["content"]
+    assert "Find the inverse." in user_prompt
+    assert r"\frac{x+5}{6}" in user_prompt
+    assert r"h^{-1}(x)=\frac{x+5}{6}" in user_prompt
+
+
+def test_answer_judge_keeps_non_equivalent_answer_incorrect():
+    workflow = _answer_judge_workflow(enabled=True)
+    caller = FakeAnswerJudgeCaller('{"correct": false}')
+
+    result = asyncio.run(
+        workflow._score_answer_async(
+            "task",
+            r"\frac{x+5}{6}",
+            r"$$\boxed{\frac{x-5}{6}}$$",
+            answer_judge_caller=caller,
+        )
+    )
+
+    assert result.correct is False
+    assert result.feedback == "Incorrect."
+    assert result.raw_result["answer_judge"]["correct"] is False
+
+
+def test_answer_judge_parse_failure_fails_closed():
+    workflow = _answer_judge_workflow(enabled=True)
+    caller = FakeAnswerJudgeCaller("not json")
+
+    result = asyncio.run(
+        workflow._score_answer_async(
+            "task",
+            r"\frac{x+5}{6}",
+            r"$$\boxed{h^{-1}(x)=\frac{x+5}{6}}$$",
+            answer_judge_caller=caller,
+        )
+    )
+
+    assert result.correct is False
+    assert result.feedback == "Incorrect."
+    assert result.raw_result["answer_judge"]["used"] is False
+    assert "error" in result.raw_result["answer_judge"]
+
+
+def test_answer_judge_caches_repeated_comparisons():
+    workflow = _answer_judge_workflow(enabled=True)
+    caller = FakeAnswerJudgeCaller('{"correct": true}')
+    args = (
+        "task",
+        r"\frac{x+5}{6}",
+        r"$$\boxed{h^{-1}(x)=\frac{x+5}{6}}$$",
+    )
+
+    first = asyncio.run(
+        workflow._score_answer_async(*args, answer_judge_caller=caller)
+    )
+    second = asyncio.run(
+        workflow._score_answer_async(*args, answer_judge_caller=caller)
+    )
+
+    assert first.correct is True
+    assert second.correct is True
+    assert len(caller.calls) == 1
 
 
 def test_pairwise_can_skip_judge_when_both_answers_are_incorrect():
@@ -290,7 +416,7 @@ def test_pairwise_can_skip_judge_when_both_answers_are_incorrect():
         del task, ground_truth, teacher_action
         return _leak(False)
 
-    def score_answer(task, ground_truth, student_output):
+    async def score_answer(task, ground_truth, student_output):
         del task, ground_truth, student_output
         return _judge(False)
 

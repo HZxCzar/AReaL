@@ -20,6 +20,7 @@ auxiliary_model:
   temperature: 0.0
   top_p: null
   max_concurrent_calls: 4
+  answer_judge_enabled: true
 
 reward:
   success: 2.0

@@ -26,6 +26,7 @@ auxiliary_model:
     extra_body:
       chat_template_kwargs:
         enable_thinking: false
+  answer_judge_enabled: true
 
 reward:
   success: 2.0

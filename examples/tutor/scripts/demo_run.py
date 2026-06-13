@@ -89,8 +89,20 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
         self.trace_sink.append("leak_check", result.raw_output or result.feedback)
         return result
 
-    def _score_answer(self, task: str, ground_truth: str, student_answer: str):
-        result = super()._score_answer(task, ground_truth, student_answer)
+    async def _score_answer_async(
+        self,
+        task: str,
+        ground_truth: str,
+        student_answer: str,
+        *,
+        answer_judge_caller=None,
+    ):
+        result = await super()._score_answer_async(
+            task,
+            ground_truth,
+            student_answer,
+            answer_judge_caller=answer_judge_caller,
+        )
         self.trace_sink.append("judge", result.raw_output)
         self.last_judge_outputs.append(
             {
@@ -142,6 +154,9 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         teacher_show_ground_truth=config.teacher_show_ground_truth,
         student_system_prompt=config.student_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
+        answer_judge_enabled=auxiliary_model.answer_judge_enabled,
+        answer_judge_max_tokens=auxiliary_model.answer_judge_max_tokens,
+        answer_judge_system_prompt=config.answer_judge_system_prompt,
         summary_system_prompt=config.summary_system_prompt,
         max_train_sample_tokens=config.gconfig.max_tokens,
         tokenizer_path=config.tokenizer_path,

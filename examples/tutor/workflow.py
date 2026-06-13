@@ -119,6 +119,7 @@ from examples.common.openai_utils import (
     AuxModelConfig,
     make_teacher_client,
 )
+from examples.common.parsing import parse_json_dict
 from examples.tutor.core.callers import (
     ApiAuxiliaryCaller,
     AReaLEngineActorCaller,
@@ -155,6 +156,8 @@ from examples.tutor.core.types import (
     TutorTurnState,
 )
 from examples.tutor.prompts import (
+    ANSWER_JUDGE_USER_TEMPLATE,
+    DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT,
     LEAK_CHECK_USER_TEMPLATE,
     STUDENT_STATE_USER_TEMPLATE,
     TEACHER_STATE_USER_TEMPLATE,
@@ -219,6 +222,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_show_ground_truth: bool = False,
         student_system_prompt: str = "",
         leak_check_system_prompt: str = "",
+        answer_judge_enabled: bool = False,
+        answer_judge_max_tokens: int = 256,
+        answer_judge_system_prompt: str = DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT,
         summary_system_prompt: str = "",
         debug_trace_dir: str | None = None,
         debug_trace_every_n_rollouts: int = 1,
@@ -249,9 +255,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError(f"aux_mode must be 'api' or 'self', got {aux_mode!r}")
         self.aux_mode = aux_mode
         self.aux_enable_thinking = bool(aux_enable_thinking)
+        self.aux_base_url = aux_base_url
+        self.aux_model = aux_model
+        self.aux_api_key = aux_api_key
+        self.aux_timeout = int(aux_timeout)
         self.aux_max_tokens = int(aux_max_tokens)
         self.aux_temperature = float(aux_temperature)
         self.aux_top_p = aux_top_p
+        self.aux_request_params = dict(aux_request_params or {})
         self.max_concurrent_aux_calls = int(max_concurrent_aux_calls)
         self._self_aux_semaphore = asyncio.Semaphore(
             max(1, self.max_concurrent_aux_calls)
@@ -272,6 +283,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.teacher_show_ground_truth = bool(teacher_show_ground_truth)
         self.student_system_prompt = student_system_prompt.strip()
         self.leak_check_system_prompt = leak_check_system_prompt.strip()
+        self.answer_judge_enabled = bool(answer_judge_enabled)
+        self.answer_judge_max_tokens = max(1, int(answer_judge_max_tokens))
+        self.answer_judge_system_prompt = answer_judge_system_prompt.strip()
+        self._answer_judge_cache: dict[tuple[str, str, str], JudgeResult] = {}
         self.summary_system_prompt = summary_system_prompt.strip()
         self.debug_trace_dir = debug_trace_dir.strip() if debug_trace_dir else ""
         self.debug_trace_every_n_rollouts = max(1, int(debug_trace_every_n_rollouts))
@@ -301,7 +316,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             temperature=aux_temperature,
             top_p=aux_top_p,
             max_concurrency=max_concurrent_aux_calls,
-            request_params=aux_request_params or {},
+            request_params=self.aux_request_params,
             tokenizer_path=tokenizer_path,
             context_length=model_context_length,
             context_window_margin=context_window_margin,
@@ -311,6 +326,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if self.aux_mode == "api"
             else None
         )
+        self.tokenizer_path = tokenizer_path
+        self.model_context_length = model_context_length
 
     def get_lora_versions_for_episode(
         self,
@@ -391,6 +408,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             external_client=external_client,
         )
         aux_caller = self._make_auxiliary_caller(chat_caller=aux_chat_caller)
+        answer_judge_caller = self._make_answer_judge_caller(
+            chat_caller=aux_chat_caller
+        )
 
         initial_student_answer, initial_student_error = await self._run_student(
             StudentTurnState(
@@ -402,8 +422,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             aux_caller=aux_caller,
         )
         initial_student_answer = _strip_reasoning_for_context(initial_student_answer)
-        initial_judge_result = self._score_answer(
-            task, ground_truth, initial_student_answer
+        initial_judge_result = await self._score_answer_async(
+            task,
+            ground_truth,
+            initial_student_answer,
+            answer_judge_caller=answer_judge_caller,
         )
         if initial_judge_result.correct:
             self.last_history = []
@@ -525,7 +548,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 aux_caller=aux_caller,
             )
             student_answer = _strip_reasoning_for_context(student_answer)
-            judge_result = self._score_answer(task, ground_truth, student_answer)
+            judge_result = await self._score_answer_async(
+                task,
+                ground_truth,
+                student_answer,
+                answer_judge_caller=answer_judge_caller,
+            )
 
             if judge_result.correct:
                 termination_reason = "success"
@@ -603,6 +631,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 episode_lora_version=episode_lora_version,
                 chat_caller=actor_chat_caller,
                 aux_caller=aux_caller,
+                answer_judge_caller=answer_judge_caller,
             )
             pairwise_rewards = {
                 result.turn_idx: result.reward
@@ -724,6 +753,46 @@ class TutorAgentWorkflow(RolloutWorkflow):
             base_gconfig=self.gconfig,
             max_completion_tokens=self.aux_max_tokens,
             temperature=self.aux_temperature,
+            top_p=self.aux_top_p,
+            max_concurrency=self.max_concurrent_aux_calls,
+            context_length=self.teacher_context_budget.context_length,
+            context_window_margin=self.context_window_margin,
+            semaphore=self._self_aux_semaphore,
+        )
+
+    def _make_answer_judge_caller(
+        self,
+        *,
+        chat_caller: AReaLEngineChatCaller | None = None,
+    ) -> ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None:
+        if not self.answer_judge_enabled:
+            return None
+        if self.aux_mode == "api":
+            config = AuxModelConfig(
+                base_url=self.aux_base_url,
+                model=self.aux_model,
+                api_key=self.aux_api_key,
+                timeout=self.aux_timeout,
+                max_tokens=self.answer_judge_max_tokens,
+                temperature=0.0,
+                top_p=self.aux_top_p,
+                max_concurrency=self.max_concurrent_aux_calls,
+                request_params=self.aux_request_params,
+                tokenizer_path=self.tokenizer_path,
+                context_length=self.model_context_length,
+                context_window_margin=self.context_window_margin,
+            )
+            return ApiAuxiliaryCaller(AsyncLLMCaller(config))
+        if chat_caller is None:
+            raise RuntimeError(
+                "answer_judge with auxiliary_model.mode='self' requires an "
+                "AReaL inference engine."
+            )
+        return AReaLEngineAuxiliaryCaller(
+            chat_caller=chat_caller,
+            base_gconfig=self.gconfig,
+            max_completion_tokens=self.answer_judge_max_tokens,
+            temperature=0.0,
             top_p=self.aux_top_p,
             max_concurrency=self.max_concurrent_aux_calls,
             context_length=self.teacher_context_budget.context_length,
@@ -927,6 +996,120 @@ class TutorAgentWorkflow(RolloutWorkflow):
     ) -> JudgeResult:
         return self.answer_scorer(task, ground_truth, student_answer)
 
+    async def _score_answer_async(
+        self,
+        task: str,
+        ground_truth: str,
+        student_answer: str,
+        *,
+        answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
+    ) -> JudgeResult:
+        exact_result = self._score_answer(task, ground_truth, student_answer)
+        if exact_result.correct or not self.answer_judge_enabled:
+            return exact_result
+
+        extracted_answer = str(exact_result.raw_result.get("extracted_answer") or "")
+        cache_key = (str(task), str(ground_truth), extracted_answer)
+        cached = self._answer_judge_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if answer_judge_caller is None:
+            result = self._answer_judge_failed_result(
+                exact_result,
+                error="answer judge caller is unavailable",
+            )
+            self._answer_judge_cache[cache_key] = result
+            return result
+
+        prompt = self._build_answer_judge_prompt(
+            task, ground_truth, extracted_answer
+        )
+        judge_call = await self._call_auxiliary_prompt(
+            system_prompt=self.answer_judge_system_prompt,
+            user_prompt=prompt,
+            aux_caller=answer_judge_caller,
+            rid_prefix="answer-judge",
+        )
+        if judge_call.error:
+            result = self._answer_judge_failed_result(
+                exact_result,
+                error=judge_call.error,
+            )
+            self._answer_judge_cache[cache_key] = result
+            return result
+
+        result = self._parse_answer_judge_result(exact_result, judge_call)
+        self._answer_judge_cache[cache_key] = result
+        return result
+
+    def _answer_judge_failed_result(
+        self, exact_result: JudgeResult, *, error: str
+    ) -> JudgeResult:
+        raw_result = dict(exact_result.raw_result)
+        raw_result["exact_match_correct"] = bool(exact_result.correct)
+        raw_result["answer_judge"] = {
+            "enabled": True,
+            "used": False,
+            "error": error,
+        }
+        return JudgeResult(
+            raw_output=exact_result.raw_output,
+            correct=exact_result.correct,
+            feedback=exact_result.feedback,
+            parse_error=exact_result.parse_error,
+            raw_result=raw_result,
+        )
+
+    def _parse_answer_judge_result(
+        self, exact_result: JudgeResult, judge_call: TextCallResult
+    ) -> JudgeResult:
+        parsed, parse_error = parse_json_dict(judge_call.text)
+        if not isinstance(parsed, dict):
+            return self._answer_judge_failed_result(
+                exact_result,
+                error=parse_error or "Expected JSON object from answer judge.",
+            )
+
+        correct = parsed.get("correct")
+        if not isinstance(correct, bool):
+            return self._answer_judge_failed_result(
+                exact_result,
+                error='Answer judge field "correct" must be a boolean.',
+            )
+        if parse_error:
+            return self._answer_judge_failed_result(
+                exact_result,
+                error=parse_error,
+            )
+
+        raw_result = dict(exact_result.raw_result)
+        raw_result["exact_match_correct"] = bool(exact_result.correct)
+        raw_result["answer_judge"] = {
+            "enabled": True,
+            "used": True,
+            "correct": correct,
+            "raw_output": judge_call.raw_text or judge_call.text,
+            "raw_result": parsed,
+        }
+        return JudgeResult(
+            raw_output=judge_call.raw_text or judge_call.text,
+            correct=correct,
+            feedback=exact_result.feedback,
+            parse_error=None,
+            raw_result=raw_result,
+        )
+
+    def _build_answer_judge_prompt(
+        self, task: str, ground_truth: str, extracted_answer: str
+    ) -> str:
+        return render_prompt(
+            ANSWER_JUDGE_USER_TEMPLATE,
+            task=task,
+            ground_truth=ground_truth,
+            extracted_answer=extracted_answer,
+        )
+
     def _should_run_pairwise_reward(
         self, engine: Any | None, turn_artifacts: list[TurnArtifact]
     ) -> bool:
@@ -947,6 +1130,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         episode_lora_version: int | None,
         chat_caller: AReaLEngineChatCaller | None,
         aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller,
+        answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
     ):
         if episode_lora_version is None or chat_caller is None:
             return []
@@ -976,7 +1160,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 teacher_action,
                 aux_caller=aux_caller,
             ),
-            score_answer=self._score_answer,
+            score_answer=lambda task, ground_truth, student_output: self._score_answer_async(
+                task,
+                ground_truth,
+                student_output,
+                answer_judge_caller=answer_judge_caller,
+            ),
             compare_all_turns=self.pairwise_compare_all_turns,
             judge_both_incorrect=self.pairwise_judge_both_incorrect,
         )

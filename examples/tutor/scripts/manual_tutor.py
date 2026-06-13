@@ -181,6 +181,9 @@ def build_workflow(config: Any, max_turns: int, *, hide_ground_truth: bool) -> A
         ),
         student_system_prompt=config.student_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
+        answer_judge_enabled=auxiliary_model.answer_judge_enabled,
+        answer_judge_max_tokens=auxiliary_model.answer_judge_max_tokens,
+        answer_judge_system_prompt=config.answer_judge_system_prompt,
         summary_system_prompt=config.summary_system_prompt,
         debug_trace_dir="",
         max_train_sample_tokens=config.gconfig.max_tokens,
@@ -260,6 +263,7 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
     workflow = build_workflow(
         config, max_turns=max_turns, hide_ground_truth=bool(args.hide_ground_truth)
     )
+    answer_judge_caller = workflow._make_answer_judge_caller()
 
     task = str(row["task"])
     ground_truth = str(row["ground_truth"])
@@ -296,7 +300,12 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
             latest_tutor_visible_output="(none, produce the first answer attempt)",
         )
     )
-    initial_judge = workflow._score_answer(task, ground_truth, initial_answer)
+    initial_judge = await workflow._score_answer_async(
+        task,
+        ground_truth,
+        initial_answer,
+        answer_judge_caller=answer_judge_caller,
+    )
     transcript["initial_student_answer"] = initial_answer
     transcript["initial_student_error"] = initial_error
     transcript["initial_judge"] = initial_judge.raw_result
@@ -390,7 +399,12 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
             tutor_visible_output=tutor_visible_message,
             current_student_answer=student_answer,
         )
-        judge_result = workflow._score_answer(task, ground_truth, student_answer)
+        judge_result = await workflow._score_answer_async(
+            task,
+            ground_truth,
+            student_answer,
+            answer_judge_caller=answer_judge_caller,
+        )
         latest_answer = student_answer
         record.update(
             {

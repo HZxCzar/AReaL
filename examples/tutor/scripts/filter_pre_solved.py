@@ -275,6 +275,7 @@ def item_id_from_row(row: dict[str, Any], index: int) -> int | str:
 async def classify_row(
     *,
     workflow: TutorAgentWorkflow,
+    answer_judge_caller: Any,
     row: dict[str, Any],
     index: int,
     attempts: int,
@@ -294,7 +295,12 @@ async def classify_row(
                 latest_tutor_visible_output="(none, produce the first answer attempt)",
             )
         )
-        judge_result = workflow._score_answer(task, ground_truth, answer)
+        judge_result = await workflow._score_answer_async(
+            task,
+            ground_truth,
+            answer,
+            answer_judge_caller=answer_judge_caller,
+        )
         attempt_rows.append(
             {
                 "attempt": attempt_idx,
@@ -334,6 +340,7 @@ async def classify_row(
 async def classify_split(
     *,
     workflow: TutorAgentWorkflow,
+    answer_judge_caller: Any,
     dataset: Dataset,
     split_name: str,
     attempts: int,
@@ -349,6 +356,7 @@ async def classify_split(
         nonlocal processed
         result = await classify_row(
             workflow=workflow,
+            answer_judge_caller=answer_judge_caller,
             row=dict(dataset[index]),
             index=index,
             attempts=attempts,
@@ -429,6 +437,7 @@ async def main_async(args: argparse.Namespace) -> None:
     dataset = loaded if isinstance(loaded, DatasetDict) else DatasetDict({"train": loaded})
     selected_splits = resolve_splits(args.splits, dataset)
     workflow = build_workflow(config, args=args, max_concurrency=max_concurrency)
+    answer_judge_caller = workflow._make_answer_judge_caller()
 
     filtered_splits: dict[str, Dataset] = {}
     report: dict[str, Any] = {
@@ -454,6 +463,7 @@ async def main_async(args: argparse.Namespace) -> None:
         logger.info("Filtering split '%s' with %s rows", split_name, len(split_dataset))
         results = await classify_split(
             workflow=workflow,
+            answer_judge_caller=answer_judge_caller,
             dataset=split_dataset,
             split_name=split_name,
             attempts=attempts,

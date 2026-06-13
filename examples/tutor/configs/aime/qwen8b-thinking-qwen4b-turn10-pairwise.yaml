@@ -24,6 +24,7 @@ auxiliary_model:
   max_concurrent_calls: 4
   request_params:
     seed: 42
+  answer_judge_enabled: true
 
 reward:
   success: 1.0

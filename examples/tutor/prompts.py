@@ -30,6 +30,13 @@ DEFAULT_LEAK_CHECK_SYSTEM_PROMPT = (
     "valid JSON only with keys leaked (boolean) and feedback (string)."
 )
 
+DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT = (
+    "You are a strict math answer equivalence judge. Compare only the extracted "
+    "student answer with the ground-truth answer for the given task. Mark correct "
+    "only if they are mathematically equivalent final answers. Return valid JSON "
+    "only with key correct (boolean)."
+)
+
 DEFAULT_SUMMARY_SYSTEM_PROMPT = (
     "You summarize only public tutoring history. You may use only the visible "
     "student and tutor messages provided by the user. Do not infer from hidden "
@@ -138,6 +145,27 @@ Return JSON only with this schema:
 {
   "leaked": false,
   "feedback": "short explanation"
+}
+"""
+
+ANSWER_JUDGE_USER_TEMPLATE = """\
+Task:
+{{ task }}
+
+Ground Truth:
+{{ ground_truth }}
+
+Extracted Student Answer:
+{{ extracted_answer or '(empty)' }}
+
+Decide whether the extracted student answer is mathematically equivalent to the
+ground truth as a final answer to the task. Ignore superficial notation
+differences, such as including the function name on the left side of an equation,
+when the right-hand side is equivalent. Do not use any hidden student reasoning.
+
+Return JSON only with this schema:
+{
+  "correct": false
 }
 """
 

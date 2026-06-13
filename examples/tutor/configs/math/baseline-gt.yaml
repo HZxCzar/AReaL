@@ -19,6 +19,7 @@ auxiliary_model:
   max_tokens: 1024
   temperature: 0.0
   max_concurrent_calls: 4
+  answer_judge_enabled: true
 
 reward:
   success: 2.0
