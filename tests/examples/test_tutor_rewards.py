@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import types
 
 import pytest
 
@@ -74,12 +75,10 @@ def _turn(
             public_history=PublicHistoryState(),
             previous_student_output="prev",
             latest_tutor_visible_output=tutor_output,
-        )
-        if not leaked
-        else None,
-        student_prompt="student prompt" if not leaked else "",
-        student_output="student answer" if not leaked else "",
-        judge_result=_judge(correct) if not leaked else None,
+        ),
+        student_prompt="student prompt",
+        student_output="student answer",
+        judge_result=_judge(correct),
     )
 
 
@@ -147,16 +146,15 @@ def test_assign_success_reward_distributes_credit_from_final_outcome():
     assert success_credits[2] > success_credits[1] > success_credits[0]
 
 
-def test_leak_turn_gets_no_success_credit():
-    turns = [_turn(1, leaked=True), _turn(2, correct=True)]
+def test_leak_turn_can_receive_success_credit_with_penalty():
+    turns = [_turn(1, leaked=True, correct=True)]
     assignments = asyncio.run(
         _outcome_computer().compute(_episode(turns, termination_reason="success"))
     )
 
-    assert "success_credit" not in assignments[0].reward_components
-    assert assignments[0].reward_components == {"leak": -1.0}
-    assert assignments[0].reward == pytest.approx(-1.0)
-    assert assignments[1].reward_components["success_credit"] > 0.0
+    assert assignments[0].reward_components["leak"] == pytest.approx(-1.0)
+    assert assignments[0].reward_components["success_credit"] > 0.0
+    assert assignments[0].reward == pytest.approx(0.3)
 
 
 def test_failed_episode_has_no_positive_success_credit_or_turn_penalty_by_default():
@@ -396,6 +394,91 @@ def test_answer_judge_caches_repeated_comparisons():
     assert len(caller.calls) == 1
 
 
+def test_workflow_leak_does_not_skip_student_or_success(monkeypatch):
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.max_turns = 1
+    workflow.success_reward = 1.0
+    workflow.leak_penalty = -1.0
+    workflow.assign_success_reward = False
+    workflow.outcome_prior_turn_weight = 0.1
+    workflow.outcome_credit_gamma = 0.9
+    workflow.early_success_bonus = 0.0
+    workflow.enable_turn_penalty = False
+    workflow.turn_penalty = -0.01
+    workflow.length_penalty_threshold_chars = 0
+    workflow.length_penalty_per_100_chars = 0.0
+    workflow.length_penalty_min = 0.0
+    workflow.pairwise_reward_enabled = False
+
+    response = types.SimpleNamespace(
+        input_tokens=[1],
+        output_tokens=[2],
+        output_logprobs=[-0.1],
+        output_versions=[0],
+        input_len=1,
+        output_len=1,
+    )
+    student_calls = []
+    leak_calls = []
+    judge_results = [_judge(False), _judge(True)]
+
+    workflow._make_actor_caller = lambda **_kwargs: object()
+    workflow._make_auxiliary_caller = lambda **_kwargs: object()
+    workflow._make_answer_judge_caller = lambda **_kwargs: None
+    workflow._build_tutor_prompt = lambda state: f"tutor prompt {state.turn_idx}"
+    workflow._build_student_prompt_from_state = lambda state: "student prompt"
+    workflow._log_rollout_stats = lambda **_kwargs: None
+    workflow._maybe_dump_debug_trace = lambda **_kwargs: None
+
+    async def generate_tutor_response(*_args, **_kwargs):
+        return response, "the answer is 42"
+
+    async def run_student(state, **_kwargs):
+        student_calls.append(state)
+        if len(student_calls) == 1:
+            return "initial wrong answer", None
+        return "student copies 42", None
+
+    async def score_answer(*_args, **_kwargs):
+        return judge_results.pop(0)
+
+    async def run_leak_check(task, ground_truth, teacher_action, **_kwargs):
+        leak_calls.append((task, ground_truth, teacher_action))
+        return _leak(True)
+
+    async def update_history(**_kwargs):
+        return PublicHistoryState(summary="teacher and student kept", turn_count=1)
+
+    workflow._generate_tutor_response = generate_tutor_response
+    workflow._run_student = run_student
+    workflow._score_answer_async = score_answer
+    workflow._run_optional_leak_check = run_leak_check
+    workflow._run_public_summary_update = update_history
+
+    result = asyncio.run(
+        workflow._run_episode(
+            {"task": "task", "ground_truth": "42"},
+            external_client=object(),
+        )
+    )
+
+    assert result is not None
+    assert len(student_calls) == 2
+    assert len(leak_calls) == 1
+    assert leak_calls[0][2] == "the answer is 42"
+    assert workflow.last_traces[0].leaked is True
+    assert workflow.last_traces[0].judge_correct is True
+    assert workflow.last_traces[0].student_output == "student copies 42"
+    assert workflow.last_traces[0].public_history_after == "teacher and student kept"
+    assert workflow.last_traces[0].reward_components["leak"] == pytest.approx(-1.0)
+    assert workflow.last_traces[0].reward_components["success_credit"] == pytest.approx(
+        1.0
+    )
+    assert workflow.last_total_reward == pytest.approx(0.0)
+
+
 def test_pairwise_can_skip_judge_when_both_answers_are_incorrect():
     class RewardCaller:
         calls = 0
@@ -443,6 +526,108 @@ def test_pairwise_can_skip_judge_when_both_answers_are_incorrect():
     assert result.reason == "both_incorrect"
     assert result.reward == pytest.approx(0.0)
     assert reward_caller.calls == 0
+
+
+def test_pairwise_current_leak_still_compares_reference():
+    calls = {"reference": 0, "student": 0, "leak": 0, "score": 0}
+
+    class RewardCaller:
+        async def call_text(self, *args, **kwargs):
+            raise AssertionError("pairwise judge should not be needed")
+
+    async def generate_reference_tutor(tutor_state, reference_version):
+        del tutor_state, reference_version
+        calls["reference"] += 1
+        return "reference hint"
+
+    async def run_student(state):
+        del state
+        calls["student"] += 1
+        return "reference student answer", None
+
+    async def run_leak_check(task, ground_truth, teacher_action):
+        del task, ground_truth, teacher_action
+        calls["leak"] += 1
+        return _leak(False)
+
+    async def score_answer(task, ground_truth, student_output):
+        del task, ground_truth, student_output
+        calls["score"] += 1
+        return _judge(False)
+
+    evaluator = PairwiseTutorEvaluator(
+        reward_scale=0.05,
+        reward_caller=RewardCaller(),
+        generate_reference_tutor=generate_reference_tutor,
+        run_student=run_student,
+        run_leak_check=run_leak_check,
+        score_answer=score_answer,
+    )
+    turn = _turn(1, leaked=True, correct=True)
+
+    result = asyncio.run(
+        evaluator.evaluate_turn(
+            _episode([turn], termination_reason="success"),
+            turn,
+            reference_version=0,
+        )
+    )
+
+    assert result.outcome == "current"
+    assert result.reason == "exact_correctness"
+    assert result.reward == pytest.approx(0.05)
+    assert calls == {"reference": 1, "student": 1, "leak": 1, "score": 1}
+
+
+def test_pairwise_reference_leak_still_runs_student():
+    calls = {"student": 0, "score": 0}
+
+    class RewardCaller:
+        async def call_text(self, *args, **kwargs):
+            raise AssertionError("pairwise judge should not be needed")
+
+    async def generate_reference_tutor(tutor_state, reference_version):
+        del tutor_state, reference_version
+        return "reference leaks 42"
+
+    async def run_student(state):
+        del state
+        calls["student"] += 1
+        return "reference student answer", None
+
+    async def run_leak_check(task, ground_truth, teacher_action):
+        del task, ground_truth, teacher_action
+        return _leak(True)
+
+    async def score_answer(task, ground_truth, student_output):
+        del task, ground_truth, student_output
+        calls["score"] += 1
+        return _judge(True)
+
+    evaluator = PairwiseTutorEvaluator(
+        reward_scale=0.05,
+        reward_caller=RewardCaller(),
+        generate_reference_tutor=generate_reference_tutor,
+        run_student=run_student,
+        run_leak_check=run_leak_check,
+        score_answer=score_answer,
+    )
+    turn = _turn(1, correct=False)
+
+    result = asyncio.run(
+        evaluator.evaluate_turn(
+            _episode([turn], termination_reason="max_turns"),
+            turn,
+            reference_version=0,
+        )
+    )
+
+    assert result.outcome == "reference"
+    assert result.reason == "exact_correctness"
+    assert result.reference is not None
+    assert result.reference.leak_result.leaked is True
+    assert result.reward == pytest.approx(-0.05)
+    assert calls == {"student": 1, "score": 1}
 
 
 def _trace(

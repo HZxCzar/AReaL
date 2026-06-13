@@ -506,37 +506,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             tutor_visible_output = _strip_reasoning_for_context(tutor_raw_output)
             public_before = public_history.summary
 
-            leak_result = await self._run_optional_leak_check(
-                task,
-                ground_truth,
-                tutor_visible_output,
-                aux_caller=aux_caller,
-            )
-            if leak_result.leaked:
-                leak_count += 1
-                turn_artifacts.append(
-                    TurnArtifact(
-                        turn_idx=turn_idx,
-                        tutor_state=tutor_state,
-                        tutor_prompt=self._build_tutor_prompt(tutor_state),
-                        tutor_response=response,
-                        tutor_raw_output=tutor_raw_output,
-                        tutor_visible_output=tutor_visible_output,
-                        leak_result=leak_result,
-                        public_history_before=public_before,
-                        public_history_after=public_before,
-                    )
-                )
-                previous_feedback = TutorPrivateFeedback(
-                    kind="leak",
-                    leak_feedback=leak_result.feedback,
-                )
-                previous_tutor_visible_output = tutor_visible_output
-                termination_reason = (
-                    "max_turns" if turn_idx == self.max_turns else "continue"
-                )
-                continue
-
             student_state = StudentTurnState(
                 task=task,
                 public_history=public_history,
@@ -577,7 +546,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     tutor_response=response,
                     tutor_raw_output=tutor_raw_output,
                     tutor_visible_output=tutor_visible_output,
-                    leak_result=leak_result,
+                    leak_result=self._pending_leak_check_result(),
                     public_history_before=public_before,
                     public_history_after=next_public_history.summary,
                     student_state=student_state,
@@ -600,6 +569,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if judge_result.correct:
                 break
 
+        leak_count = await self._annotate_turn_leak_results(
+            task,
+            ground_truth,
+            turn_artifacts,
+            aux_caller=aux_caller,
+        )
         episode_artifact = EpisodeArtifact(
             task=task,
             ground_truth=ground_truth,
@@ -839,6 +814,45 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if result.error:
             return "", result.error
         return result.text, None
+
+    @staticmethod
+    def _pending_leak_check_result() -> LeakCheckResult:
+        return LeakCheckResult(
+            raw_output="",
+            leaked=False,
+            feedback="Leak check pending.",
+            parse_error=None,
+            raw_result={"pending": True},
+        )
+
+    async def _annotate_turn_leak_results(
+        self,
+        task: str,
+        ground_truth: str,
+        turn_artifacts: list[TurnArtifact],
+        *,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
+    ) -> int:
+        if not turn_artifacts:
+            return 0
+        leak_results = await asyncio.gather(
+            *(
+                self._run_optional_leak_check(
+                    task,
+                    ground_truth,
+                    artifact.tutor_visible_output,
+                    aux_caller=aux_caller,
+                )
+                for artifact in turn_artifacts
+            )
+        )
+        leak_count = 0
+        for artifact, leak_result in zip(
+            turn_artifacts, leak_results, strict=True
+        ):
+            artifact.leak_result = leak_result
+            leak_count += int(leak_result.leaked)
+        return leak_count
 
     async def _run_optional_leak_check(
         self,
@@ -1225,7 +1239,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             (
                 trace.turn_idx
                 for trace in traces
-                if trace.judge_correct and not trace.leaked
+                if trace.judge_correct
             ),
             0,
         )

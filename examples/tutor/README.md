@@ -108,9 +108,10 @@ python3 examples/tutor/manual_tutor.py \
 ```
 
 The script prints the task, the student's initial answer, and the configured judge
-result. Each tutor turn is checked for answer leakage by default; leaked turns are not
-shown to the student, matching the training workflow. Pass `--skip-leak-check` only when
-you want to test whether the student can copy or use direct answer disclosure.
+result. Each tutor turn is checked for answer leakage by default. Leak detection only
+affects reward accounting: leaked tutor turns still remain visible to the student, but
+receive the configured leak penalty. Pass `--skip-leak-check` only when you want to
+disable that penalty signal.
 
 ## Train
 

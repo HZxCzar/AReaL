@@ -77,8 +77,6 @@ class EpisodeRewardComputer:
         if episode.termination_reason != "success":
             return None
         for artifact in episode.turns:
-            if artifact.leak_result.leaked:
-                continue
             if artifact.judge_result is not None and artifact.judge_result.correct:
                 return artifact
         return None
@@ -100,8 +98,6 @@ class EpisodeRewardComputer:
 
         weights: dict[int, float] = {}
         for artifact in turns:
-            if artifact.leak_result.leaked:
-                continue
             turn_idx = int(artifact.turn_idx)
             if turn_idx > success_turn:
                 continue

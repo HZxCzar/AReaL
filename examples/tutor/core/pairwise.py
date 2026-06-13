@@ -143,11 +143,7 @@ class PairwiseTutorEvaluator:
     ) -> list[PairwiseTurnResult]:
         turns = list(episode.turns)
         if not self.compare_all_turns:
-            comparable_turns = [
-                turn
-                for turn in turns
-                if not turn.leak_result.leaked and turn.student_state
-            ]
+            comparable_turns = [turn for turn in turns if turn.student_state]
             turns = comparable_turns[-1:] if comparable_turns else []
         return [
             await self.evaluate_turn(episode, turn, reference_version=reference_version)
@@ -161,13 +157,6 @@ class PairwiseTutorEvaluator:
         *,
         reference_version: int,
     ) -> PairwiseTurnResult:
-        if current_turn.leak_result.leaked:
-            return self._skipped_result(
-                current_turn,
-                reference_version,
-                reason="current_leaked",
-            )
-
         if current_turn.student_state is None or current_turn.judge_result is None:
             return self._failure_result(
                 current_turn, reference_version, reason="missing_current_student_state"
@@ -200,15 +189,6 @@ class PairwiseTutorEvaluator:
             tutor_visible_output=reference_visible_output,
             leak_result=reference_leak,
         )
-        if reference_leak.leaked:
-            return self._winner_result(
-                current_turn,
-                reference_version,
-                outcome="current",
-                reason="reference_leaked",
-                reference=reference,
-            )
-
         reference_student_state = StudentTurnState(
             task=current_turn.student_state.task,
             public_history=current_turn.student_state.public_history,
