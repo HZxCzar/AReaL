@@ -7,6 +7,7 @@ from examples.tutor.prompts import (
     DEFAULT_STUDENT_SYSTEM_PROMPT,
     DEFAULT_SUMMARY_SYSTEM_PROMPT,
     DEFAULT_TEACHER_SYSTEM_PROMPT,
+    TEACHER_STATE_USER_TEMPLATE,
 )
 
 from areal.api.cli_args import EvaluatorConfig, GRPOConfig
@@ -160,6 +161,7 @@ class TutorConfig(GRPOConfig):
     evaluator: TutorEvaluatorConfig = field(default_factory=TutorEvaluatorConfig)
     reward: TutorRewardConfig = field(default_factory=TutorRewardConfig)
     teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
+    teacher_user_prompt_template: str = field(default=TEACHER_STATE_USER_TEMPLATE)
     student_system_prompt: str = field(default=DEFAULT_STUDENT_SYSTEM_PROMPT)
     leak_check_system_prompt: str = field(default=DEFAULT_LEAK_CHECK_SYSTEM_PROMPT)
     answer_judge_system_prompt: str = field(

@@ -219,6 +219,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         length_penalty_per_100_chars: float = -0.005,
         length_penalty_min: float = -0.1,
         teacher_system_prompt: str = "",
+        teacher_user_prompt_template: str | None = None,
         teacher_show_ground_truth: bool = False,
         student_system_prompt: str = "",
         leak_check_system_prompt: str = "",
@@ -280,6 +281,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.length_penalty_per_100_chars = float(length_penalty_per_100_chars)
         self.length_penalty_min = float(length_penalty_min)
         self.teacher_system_prompt = teacher_system_prompt.strip()
+        self.teacher_user_prompt_template = (
+            teacher_user_prompt_template or TEACHER_STATE_USER_TEMPLATE
+        ).strip()
         self.teacher_show_ground_truth = bool(teacher_show_ground_truth)
         self.student_system_prompt = student_system_prompt.strip()
         self.leak_check_system_prompt = leak_check_system_prompt.strip()
@@ -962,7 +966,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
     def _build_tutor_prompt(self, state: TutorTurnState) -> str:
         feedback = state.previous_feedback
         return render_prompt(
-            TEACHER_STATE_USER_TEMPLATE,
+            self.teacher_user_prompt_template,
             task=state.task,
             ground_truth=state.ground_truth,
             show_ground_truth=self.teacher_show_ground_truth,

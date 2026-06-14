@@ -176,6 +176,7 @@ def build_workflow(config: Any, max_turns: int, *, hide_ground_truth: bool) -> A
         length_penalty_per_100_chars=reward.length_penalty_per_100_chars,
         length_penalty_min=reward.length_penalty_min,
         teacher_system_prompt=config.teacher_system_prompt,
+        teacher_user_prompt_template=config.teacher_user_prompt_template,
         teacher_show_ground_truth=(
             bool(config.teacher_show_ground_truth) and not hide_ground_truth
         ),
