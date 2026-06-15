@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-thinking-self-turn10-baseline-overfit-1-total-leak-direct
+trial_name: qwen8b-thinking-self-turn10-baseline-overfit-1-total-leak-direct-lr5e-5-kl0-clip0p4
 
 seed: 42
 enable_offload: false
@@ -148,7 +148,7 @@ actor:
     max_tokens_per_mb: 32768
   optimizer:
     type: adam
-    lr: 1.0e-5
+    lr: 5.0e-5
     weight_decay: 0.0
     beta1: 0.9
     beta2: 0.999
@@ -156,14 +156,14 @@ actor:
     lr_scheduler_type: constant
     gradient_clipping: 1.0
     warmup_steps_proportion: 0.001
-  eps_clip: 0.2
+  eps_clip: 0.4
   use_ppo_clip: true
   advantage_estimator: rebn
   turn_discount: 1.0
   temperature: ${gconfig.temperature}
   reward_scaling: 1.0
   reward_bias: 0.0
-  kl_ctl: 3.0e-3
+  kl_ctl: 0.0
   ppo_n_minibatches: 4
   recompute_logprob: true
   use_decoupled_loss: true
