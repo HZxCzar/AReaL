@@ -106,6 +106,9 @@ class SequentialRunner(ForwardBackwardRunner):
             logits = logits.squeeze(0)
             del tree_attn_meta
 
+            if forward_only and mb_item.is_dummy:
+                continue
+
             result = process_output_fn(logits, ctx.to_dict())
 
             if result is not None:
@@ -293,6 +296,8 @@ class PipelinedRunner(ForwardBackwardRunner):
     ) -> list[torch.Tensor]:
         results: list[torch.Tensor] = []
         for output, ctx in zip(output_chunks, contexts, strict=True):
+            if getattr(ctx, "is_dummy", False):
+                continue
             # Squeeze batch dim: outputs (1, seq_len, vocab) -> (seq_len, vocab)
             if output.ndim == 3:
                 output = output.squeeze(0)

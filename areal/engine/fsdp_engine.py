@@ -150,6 +150,8 @@ class FSDPTrainContext:
         Extra padding added for Ulysses sequence parallel alignment.
     trie_node
         The root TrieNode for tree training (if applicable).
+    is_dummy
+        Whether this micro-batch is a zero-loss padding batch for DP sync.
     """
 
     model_inputs: dict[str, Any]
@@ -157,6 +159,7 @@ class FSDPTrainContext:
     pad_length: int = 0
     ulysses_pad_size: int = 0
     trie_node: TrieNode | None = None
+    is_dummy: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Shallow dict conversion (avoids ``dataclasses.asdict`` which would
@@ -620,6 +623,9 @@ class FSDPEngine(TrainEngine):
             # Release tree attention metadata after forward pass
             for key in tree_attn_keys:
                 del inputs[key]
+
+            if forward_only and mb_item.is_dummy:
+                continue
 
             ctx_dict = ctx.to_dict()
             loss = process_output_fn(logits, ctx_dict)
@@ -1501,7 +1507,12 @@ class FSDPEngine(TrainEngine):
         else:
             input_ = amend_position_ids(input_)
 
-        mb_list = split_padded_tensor_dict_into_mb_list(input_, self.config.mb_spec)
+        mb_list = split_padded_tensor_dict_into_mb_list(
+            input_,
+            self.config.mb_spec,
+            group=self.dp_group,
+            allow_dummy_mbs=True,
+        )
         mb_list.mbs = [pack_tensor_dict(mb) for mb in mb_list.mbs]
         mb_list = pad_mb_list(
             mb_list,
@@ -1630,6 +1641,7 @@ class FSDPEngine(TrainEngine):
             pad_length=mb_item.padding_length,
             ulysses_pad_size=ulysses_pad_size,
             trie_node=trie_node,
+            is_dummy=mb_item.is_dummy,
         )
         return inputs, ctx
 

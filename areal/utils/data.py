@@ -456,21 +456,45 @@ def allocate_balanced_mbs(mb_spec: MicroBatchSpec, lens: list[int]) -> list[list
     return group_indices
 
 
+def allocate_balanced_mbs_synced_with_padding(
+    mb_spec: MicroBatchSpec,
+    lens: list[int],
+    group: dist.ProcessGroup | None = None,
+    allow_dummy_mbs: bool = False,
+) -> tuple[list[list[int]], int]:
+    group_indices = allocate_balanced_mbs(mb_spec, lens)
+    if not dist.is_initialized():
+        return group_indices, 0
+
+    all_n_mbs: list[int | None] = [None for _ in range(dist.get_world_size(group))]
+    dist.all_gather_object(all_n_mbs, len(group_indices), group=group)
+    if any(mbs is None for mbs in all_n_mbs):
+        raise RuntimeError(f"Failed to gather micro-batch counts: {all_n_mbs}")
+
+    target_n_mbs = max(int(mbs) for mbs in all_n_mbs)
+    if target_n_mbs == len(group_indices):
+        return group_indices, 0
+    if allow_dummy_mbs:
+        return group_indices, target_n_mbs - len(group_indices)
+
+    return allocate_balanced_mbs_synced_with_padding(
+        MicroBatchSpec.new(mb_spec, n_mbs=target_n_mbs),
+        lens,
+        group=group,
+        allow_dummy_mbs=False,
+    )
+
+
 def allocate_balanced_mbs_synced(
     mb_spec: MicroBatchSpec,
     lens: list[int],
     group: dist.ProcessGroup | None = None,
 ) -> list[list[int]]:
-    group_indices = allocate_balanced_mbs(mb_spec, lens)
-    if not dist.is_initialized():
-        return group_indices
-    all_n_mbs = [None for _ in range(dist.get_world_size(group))]
-    dist.all_gather_object(all_n_mbs, len(group_indices), group=group)
-    if all(mbs == len(group_indices) for mbs in all_n_mbs):
-        return group_indices
-    return allocate_balanced_mbs_synced(
-        MicroBatchSpec.new(mb_spec, n_mbs=max(all_n_mbs)), lens, group=group
+    group_indices, n_dummy_mbs = allocate_balanced_mbs_synced_with_padding(
+        mb_spec, lens, group=group, allow_dummy_mbs=False
     )
+    assert n_dummy_mbs == 0
+    return group_indices
 
 
 def pack_tensor_dict(data: dict[str, Any]) -> dict[str, Any]:
@@ -583,6 +607,7 @@ class MicroBatchItem(NamedTuple):
     padding_length: int
     old_cu_seqlens: torch.Tensor | None
     padded_to_length: int | None = None
+    is_dummy: bool = False
 
 
 @dataclass
@@ -601,6 +626,7 @@ class MicroBatchList:
     # sequence-level padding information
     align_to_lengths: list[int] | None = None
     old_cu_seqlens_list: list[torch.Tensor] | None = None
+    is_dummy: list[bool] | None = None
 
     @property
     def max_seqlen(self) -> int:
@@ -643,6 +669,7 @@ class MicroBatchList:
                 padding_length=self.padding_lengths[i],
                 old_cu_seqlens=old_cu_seqlens,
                 padded_to_length=padded_to_length,
+                is_dummy=self.is_dummy[i] if self.is_dummy is not None else False,
             )
 
     def to(self, *args, **kwargs):
@@ -671,6 +698,7 @@ class MicroBatchList:
             padded_to_lengths=self.padded_to_lengths,
             old_cu_seqlens_list=old_cu_seqlens_list,
             align_to_lengths=self.align_to_lengths,
+            is_dummy=self.is_dummy,
         )
 
 
@@ -681,6 +709,7 @@ def split_padded_tensor_dict_into_mb_list(
     data: dict[str, Any],
     mb_spec: MicroBatchSpec,
     group: dist.ProcessGroup | None = None,
+    allow_dummy_mbs: bool = False,
 ) -> MicroBatchList:
     """Split a padded dict of tensors into micro-batches based on the attention mask.
 
@@ -688,6 +717,9 @@ def split_padded_tensor_dict_into_mb_list(
         data (Dict): Dictionary containing padded tensors.
         mb_spec (MicroBatchSpec): Specification for micro-batch splitting.
         group (Optional[dist.ProcessGroup]): Process group for distributed synchronization.
+        allow_dummy_mbs (bool): If true, align uneven distributed micro-batch
+            counts by appending zero-loss dummy micro-batches instead of
+            forcing all ranks to split real samples into the same count.
 
     Returns:
         MicroBatchList: A structure containing the split micro-batches and metadata.
@@ -732,7 +764,9 @@ def split_padded_tensor_dict_into_mb_list(
             not_to_split[key] = value
 
     # split
-    group_indices = allocate_balanced_mbs_synced(mb_spec, input_lens, group=group)
+    group_indices, n_dummy_mbs = allocate_balanced_mbs_synced_with_padding(
+        mb_spec, input_lens, group=group, allow_dummy_mbs=allow_dummy_mbs
+    )
     group_indices = [
         seqpack.flat2d(
             [list(range(i * granularity, (i + 1) * granularity)) for i in group_index]
@@ -748,6 +782,8 @@ def split_padded_tensor_dict_into_mb_list(
     forward_indices = seqpack.flat2d(group_indices)
     backward_indices = np.zeros(bs, dtype=np.int64)
     backward_indices[forward_indices] = np.arange(bs)
+
+    split_tensor_templates = dict(to_split)
 
     def _split(tensor):
         """Split and pad a tensor based on forward indices and lens."""
@@ -781,10 +817,34 @@ def split_padded_tensor_dict_into_mb_list(
     mbs = dict_of_list2list_of_dict(to_split)
 
     results = []
+    is_dummy = []
     # organize splitted micro batches
     assert len(mbs) == len(splitted_lens), (len(mbs), len(splitted_lens))
     for i, (mb, lens) in enumerate(zip(mbs, splitted_lens)):
         results.append({**mb, **not_to_split})
+        is_dummy.append(False)
+
+    def _make_dummy_mb() -> dict[str, Any]:
+        dummy: dict[str, Any] = {}
+        for key, value in split_tensor_templates.items():
+            if isinstance(value, list):
+                continue
+            if not torch.is_tensor(value):
+                continue
+            dummy_value = torch.zeros(
+                (1, *value.shape[1:]), dtype=value.dtype, device=value.device
+            )
+            if key == "attention_mask":
+                dummy_value[0, 0] = True
+            dummy[key] = dummy_value
+        for key in multimodal_keys:
+            dummy[key] = [{}]
+        return {**dummy, **not_to_split}
+
+    for _ in range(n_dummy_mbs):
+        results.append(_make_dummy_mb())
+        group_lens.append(1)
+        is_dummy.append(True)
 
     return MicroBatchList(
         data=data,
@@ -793,6 +853,7 @@ def split_padded_tensor_dict_into_mb_list(
         forward_indices=forward_indices,
         backward_indices=backward_indices.tolist(),
         group_lens=group_lens,
+        is_dummy=is_dummy,
     )
 
 
@@ -997,8 +1058,13 @@ def pad_mb_list(
             "Unable to pad to maximum because max_tokens_per_mb is not properly set."
         )
         pad_to_maximum = False
-    for mb, length in zip(mb_list.mbs, mb_list.group_lens):
-        if pad_to_maximum and mb_list.mb_spec.max_tokens_per_mb is not None:
+    for i, (mb, length) in enumerate(zip(mb_list.mbs, mb_list.group_lens)):
+        is_dummy = mb_list.is_dummy is not None and mb_list.is_dummy[i]
+        if (
+            pad_to_maximum
+            and not is_dummy
+            and mb_list.mb_spec.max_tokens_per_mb is not None
+        ):
             pad_to_length = mb_list.mb_spec.max_tokens_per_mb
         else:
             # NOTE: GPU page size is 2MB

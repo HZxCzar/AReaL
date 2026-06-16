@@ -127,12 +127,14 @@ class ArchonTrainContext:
             None when using tree training (labels are computed via trie structure).
         pad_length: Batch-level padding added by pad_mb_list.
         trie_node: The root TrieNode for tree training (if applicable).
+        is_dummy: Whether this is a zero-loss padding micro-batch for DP sync.
     """
 
     mb_input: dict[str, Any]
     labels: torch.Tensor | None = None
     pad_length: int = 0
     trie_node: TrieNode | None = None
+    is_dummy: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Shallow dict conversion (avoids ``dataclasses.asdict`` which would
@@ -922,6 +924,7 @@ class ArchonEngine(TrainEngine):
                 mb_input=mb_item.orig_mb,
                 pad_length=mb_item.padding_length,
                 trie_node=trie_node,
+                is_dummy=mb_item.is_dummy,
             )
         else:
             labels = torch.roll(inputs["input_ids"], shifts=-1, dims=-1)
@@ -942,6 +945,7 @@ class ArchonEngine(TrainEngine):
                 mb_input=mb_item.orig_mb,
                 labels=labels,
                 pad_length=mb_item.padding_length,
+                is_dummy=mb_item.is_dummy,
             )
         return inputs, ctx
 
@@ -1162,7 +1166,12 @@ class ArchonEngine(TrainEngine):
         else:
             mb_spec = self.config.mb_spec
 
-        mb_list = split_padded_tensor_dict_into_mb_list(input_, mb_spec)
+        mb_list = split_padded_tensor_dict_into_mb_list(
+            input_,
+            mb_spec,
+            group=self.data_parallel_group,
+            allow_dummy_mbs=True,
+        )
         mb_list.mbs = [pack_tensor_dict(mb) for mb in mb_list.mbs]
 
         # LCM ensures page-aligned memory and exact CP slicing without extra padding.

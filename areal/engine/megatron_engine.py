@@ -711,10 +711,13 @@ class MegatronEngine(TrainEngine):
             for key in tree_attn_keys:
                 del mb_input.padded_mb[key]
 
-            def _process_output(input_, output_):
-                loss = process_output_fn(output_, input_)
-                if loss is None:
+            def _process_output(input_, is_dummy: bool, output_):
+                if forward_only and is_dummy:
                     loss = torch.tensor(1.0, device=output_.device)
+                else:
+                    loss = process_output_fn(output_, input_)
+                    if loss is None:
+                        loss = torch.tensor(1.0, device=output_.device)
                 return loss, {}
 
             model_vp_stage = getattr(model, "vp_stage", 0)
@@ -727,7 +730,9 @@ class MegatronEngine(TrainEngine):
                     cu_seqlens=cu_seqlens,
                     old_cu_seqlens=mb_input.old_cu_seqlens,
                 )
-            return output, functools.partial(_process_output, mb_input.orig_mb)
+            return output, functools.partial(
+                _process_output, mb_input.orig_mb, mb_input.is_dummy
+            )
 
         forward_backward_func = get_forward_backward_func()
         with trace_scope("megatron_engine.forward_backward"):
@@ -1653,6 +1658,7 @@ class MegatronEngine(TrainEngine):
             input_,
             mb_spec,
             group=mpu.get_data_parallel_group(),
+            allow_dummy_mbs=True,
         )
         mb_list.mbs = [pack_tensor_dict(mb) for mb in mb_list.mbs]
         # NOTE: Pad micro-batches to:
