@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-thinking-self-turn10-baseline-overfit-1
+trial_name: qwen8b-thinking-self-turn10-baseline-overfit-1-test-new-config
 
 seed: 42
 enable_offload: false
@@ -80,7 +80,7 @@ gconfig:
   n_samples: 1
   min_new_tokens: 0
   max_new_tokens: 16384
-  max_tokens: 32768
+  max_tokens: 24576
   greedy: false
   temperature: 0.6
   top_p: 1.0
@@ -90,7 +90,7 @@ eval_gconfig:
   n_samples: 1
   min_new_tokens: 0
   max_new_tokens: 16384
-  max_tokens: 32768
+  max_tokens: 24576
   greedy: false
   temperature: 0.6
   top_p: 1.0
@@ -106,7 +106,8 @@ actor:
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 32768
+    n_mbs: 1
+    max_tokens_per_mb: 28672
   optimizer:
     type: adam
     lr: 5.0e-5
@@ -124,8 +125,8 @@ actor:
   temperature: ${gconfig.temperature}
   reward_scaling: 1.0
   reward_bias: 0.0
-  kl_ctl: 0.4
-  ppo_n_minibatches: 4
+  kl_ctl: 0.0
+  ppo_n_minibatches: 2
   recompute_logprob: true
   use_decoupled_loss: true
   behave_imp_weight_cap: 5.0
@@ -156,7 +157,8 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 32768
+    n_mbs: 1
+    max_tokens_per_mb: 28672
   optimizer: null
   scheduling_strategy:
     type: colocation

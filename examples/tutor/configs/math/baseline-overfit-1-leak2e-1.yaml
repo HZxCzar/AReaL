@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-thinking-self-turn10-baseline-overfit-1
+trial_name: qwen8b-thinking-self-turn10-baseline-overfit-1-leak2e-1
 
 seed: 42
 enable_offload: false
@@ -24,7 +24,7 @@ auxiliary_model:
 reward:
   success: 1.0
   assign_success_reward: false
-  leak_penalty: -0.05
+  leak_penalty: -0.2
   outcome_prior_turn_weight: 0.5
   outcome_credit_gamma: 0.9
   early_success_bonus: 0.0
@@ -124,7 +124,7 @@ actor:
   temperature: ${gconfig.temperature}
   reward_scaling: 1.0
   reward_bias: 0.0
-  kl_ctl: 0.4
+  kl_ctl: 0.0
   ppo_n_minibatches: 4
   recompute_logprob: true
   use_decoupled_loss: true

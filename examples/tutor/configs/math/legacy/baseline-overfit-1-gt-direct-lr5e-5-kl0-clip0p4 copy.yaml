@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-thinking-self-turn10-baseline-overfit-1
+trial_name: qwen8b-thinking-self-turn10-baseline-overfit-1-gt-direct-lr5e-5-kl0-clip0p4
 
 seed: 42
 enable_offload: false
@@ -11,7 +11,46 @@ eval_workflow: ${workflow}
 answer_scorer: math
 max_turns: 10
 enable_thinking: true
-teacher_show_ground_truth: false
+teacher_show_ground_truth: true
+teacher_system_prompt: >
+  You are a careful math tutor. Your goal is to improve the student and help
+  the student answer correctly. The student's answer may be truncated due to length; if
+  so, ask them to continue or be brief. The judge extracts the final answer
+  from the last \\boxed{...} and checks with the answer key after normalization.
+
+teacher_user_prompt_template: |
+  Task:
+  {{ task }}
+
+  {% if show_ground_truth %}
+  Private ground truth key:
+  {{ ground_truth }}
+
+  {% endif %}
+  Public conversation history shown to both tutor and student:
+  {{ public_history }}
+
+  Previous tutor output:
+  {{ previous_tutor_output }}
+
+  Private feedback for the tutor:
+  {% if feedback_kind == "leak" %}
+  - Previous tutor output was flagged for leaking answer information.
+  {% if show_ground_truth %}
+  - Leak feedback: {{ leak_feedback }}
+  {% endif %}
+  {% elif feedback_kind == "student_judged" %}
+  - Latest student output: {{ student_output }}
+  - Answer correctness: {{ 'correct' if judge_correct else 'incorrect' }}
+  - Judge feedback: {{ judge_feedback }}
+  {% else %}
+  - No previous private feedback.
+  {% endif %}
+
+  Round: {{ current_round }}/{{ max_turns }}
+  Remaining rounds: {{ remaining_rounds }}
+
+  Goal: help the student answer correctly.
 
 auxiliary_model:
   mode: self
@@ -124,7 +163,7 @@ actor:
   temperature: ${gconfig.temperature}
   reward_scaling: 1.0
   reward_bias: 0.0
-  kl_ctl: 0.4
+  kl_ctl: 0.0
   ppo_n_minibatches: 4
   recompute_logprob: true
   use_decoupled_loss: true

@@ -109,7 +109,7 @@ actor:
     max_tokens_per_mb: 32768
   optimizer:
     type: adam
-    lr: 5.0e-5
+    lr: 1.0e-5
     weight_decay: 0.0
     beta1: 0.9
     beta2: 0.999
@@ -117,14 +117,14 @@ actor:
     lr_scheduler_type: constant
     gradient_clipping: 1.0
     warmup_steps_proportion: 0.001
-  eps_clip: 0.4
+  eps_clip: 0.2
   use_ppo_clip: true
   advantage_estimator: rebn
   turn_discount: 1.0
   temperature: ${gconfig.temperature}
   reward_scaling: 1.0
   reward_bias: 0.0
-  kl_ctl: 0.4
+  kl_ctl: 3.0e-3
   ppo_n_minibatches: 4
   recompute_logprob: true
   use_decoupled_loss: true

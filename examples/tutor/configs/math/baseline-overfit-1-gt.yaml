@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-thinking-self-turn10-baseline-overfit-1
+trial_name: qwen8b-thinking-self-turn10-baseline-overfit-1-gt
 
 seed: 42
 enable_offload: false
@@ -11,7 +11,7 @@ eval_workflow: ${workflow}
 answer_scorer: math
 max_turns: 10
 enable_thinking: true
-teacher_show_ground_truth: false
+teacher_show_ground_truth: true
 
 auxiliary_model:
   mode: self
@@ -124,7 +124,7 @@ actor:
   temperature: ${gconfig.temperature}
   reward_scaling: 1.0
   reward_bias: 0.0
-  kl_ctl: 0.4
+  kl_ctl: 0.0
   ppo_n_minibatches: 4
   recompute_logprob: true
   use_decoupled_loss: true

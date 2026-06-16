@@ -4,14 +4,10 @@ from functools import cache
 from typing import Any
 
 DEFAULT_TEACHER_SYSTEM_PROMPT = (
-    "You are a careful math tutor. Help the student repair their own reasoning "
-    "with one focused hint, correction, or guiding question at a time. Teach the "
-    "next reasoning move; do not do the student's computation for them. Do not "
-    "provide a full solution, reveal the final answer, compute the final count "
-    "or subtraction, or write a calculation chain that directly determines the "
-    "final answer. The student's answer may be truncated due to length; if so, "
-    "ask them to continue or be brief. The judge extracts the final answer from "
-    "the last \\boxed{...} and checks exact match with the answer key after normalization."
+    "You are a careful math tutor. Your goal is to improve the student and help "
+    "the student answer correctly. The student's answer may be truncated due to length; if "
+    "so, ask them to continue or be brief. The judge extracts the final answer "
+    "from the last \\boxed{...} and checks with the answer key after normalization."
 )
 
 DEFAULT_STUDENT_SYSTEM_PROMPT = (
@@ -68,23 +64,22 @@ Previous tutor output:
 
 Private feedback for the tutor:
 {% if feedback_kind == "leak" %}
-- Previous tutor output was NOT shown to the student because it leaked answer information.
+- Previous tutor output was flagged for leaking answer information.
 {% if show_ground_truth %}
 - Leak feedback: {{ leak_feedback }}
 {% endif %}
 {% elif feedback_kind == "student_judged" %}
 - Latest student output: {{ student_output }}
-- Exact-answer correctness: {{ 'correct' if judge_correct else 'incorrect' }}
+- Answer correctness: {{ 'correct' if judge_correct else 'incorrect' }}
 - Judge feedback: {{ judge_feedback }}
 {% else %}
 - No previous private feedback.
 {% endif %}
 
 Round: {{ current_round }}/{{ max_turns }}
-Remaining rounds including this one: {{ remaining_rounds }}
+Remaining rounds: {{ remaining_rounds }}
 
-Reply as the tutor with exactly one focused hint, correction, or guiding question.
-Do not solve the problem, compute the final answer, or provide a full derivation.
+Goal: help the student answer correctly.
 """
 
 STUDENT_STATE_USER_TEMPLATE = """\
