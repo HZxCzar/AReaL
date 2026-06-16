@@ -129,31 +129,10 @@ parameters use dedicated fields such as `max_tokens`, `temperature`, and `top_p`
 additional OpenAI request kwargs under `request_params`, including backend-specific
 `extra_body` values.
 
-python examples/tutor/scripts/filter_with_llm_judge.py \
-    --config examples/tutor/configs/math/baseline.yaml \
-    --input examples/tutor/data/math_dataset \
-    --output examples/tutor/data/math_dataset_8b_llm_judge_filter \
-    --splits train test \
-    --base-url http://127.0.0.1:30008/v1 \
-    --model default \
-    --overwrite
-  
- python examples/tutor/scripts/filter_with_llm_judge.py \
-    --config examples/tutor/configs/math/baseline.yaml \
-    --input examples/tutor/data/math_dataset \
-    --output examples/tutor/data/math_dataset_train_llm_judge \
-    --report examples/tutor/report/math_dataset_train_llm_judge_report.json \
-    --splits train \
-    --base-url http://127.0.0.1:30008/v1 \
-    --model default \
-    --overwrite
+```bash
+cd /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL
 
-python examples/tutor/scripts/filter_with_llm_judge.py \
-    --config examples/tutor/configs/math/baseline.yaml \
-    --input examples/tutor/data/math_dataset \
-    --output examples/tutor/data/math_dataset_test_llm_judge \
-    --report examples/tutor/report/math_dataset_test_llm_judge_report.json \
-    --splits test \
-    --base-url http://127.0.0.1:30008/v1 \
-    --model default \
-    --overwrite
+python examples/tutor/scripts/estimate_multiturn_difficulty.py   --config /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/configs/math/baseline-overfit-1.yaml   --input /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/math_dataset_train_llm_judge   --output /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/math_dataset_train_llm_judge_multiturn_difficulty   --report /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/report/math_dataset_train_llm_judge_multiturn_difficulty_report.json   --csv /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/report/math_dataset_train_llm_judge_multiturn_difficulty.csv   --splits train   --base-url http://127.0.0.1:30008/v1   --model default   --attempts 3   --partial-every 10   --overwrite
+
+python examples/tutor/scripts/estimate_multiturn_difficulty.py   --config /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/configs/math/baseline-overfit-1.yaml   --input /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/math_dataset_test_llm_judge   --output /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/math_dataset_test_llm_judge_multiturn_difficulty   --report /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/report/math_dataset_test_llm_judge_multiturn_difficulty_report.json   --csv /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/report/math_dataset_test_llm_judge_multiturn_difficulty.csv   --splits test   --base-url http://127.0.0.1:30008/v1   --model default   --attempts 3   --partial-every 10   --overwrite
+```

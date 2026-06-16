@@ -28,6 +28,7 @@ _REPO_ROOT = _TUTOR_DIR.parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_TUTOR_DIR))
 
+from examples.tutor.core.history import trace_to_json
 from examples.tutor.core.text import strip_reasoning_for_context
 
 
@@ -37,6 +38,9 @@ DEFAULT_CONFIG_PATH = "examples/tutor/configs/math/baseline-overfit-2.yaml"
 DEFAULT_BASE_URL = "http://127.0.0.1:30008/v1"
 DEFAULT_MODEL = "default"
 DEFAULT_ATTEMPTS = 3
+DEFAULT_OUTPUT_ROOT = Path(
+    "/inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output"
+)
 
 
 @dataclass(slots=True)
@@ -60,6 +64,7 @@ class AttemptResult:
     leak_count: int
     total_reward: float
     latest_student_answer: str
+    trace_path: str | None = None
     error: str | None = None
 
 
@@ -75,6 +80,7 @@ class DifficultyTutorWorkflow:
     """Mixin-style subclass target that records a compact episode summary."""
 
     last_episode_summary: EpisodeSummary | None
+    last_episode_trace_payload: dict[str, Any] | None
 
     def _record_episode_summary(
         self,
@@ -96,6 +102,43 @@ class DifficultyTutorWorkflow:
             leak_count=int(leak_count),
             success=str(termination_reason) in {"success", "pre_solved"},
             latest_student_answer=latest_student_answer,
+        )
+
+    def _maybe_dump_debug_trace(
+        self,
+        *,
+        task: str,
+        ground_truth: str,
+        initial_student_answer: str,
+        latest_student_answer: str,
+        total_reward: float,
+        traces: list[Any],
+        termination_reason: str,
+        pre_success: bool,
+        leak_count: int,
+    ) -> None:
+        self.last_episode_trace_payload = {
+            "termination_reason": str(termination_reason),
+            "total_reward": float(total_reward),
+            "num_turns": len(traces),
+            "pre_success": bool(pre_success),
+            "leak_count": int(leak_count),
+            "task": task,
+            "ground_truth": ground_truth,
+            "initial_student_answer": initial_student_answer,
+            "latest_student_answer": latest_student_answer,
+            "turns": [trace_to_json(trace) for trace in traces],
+        }
+        super()._maybe_dump_debug_trace(  # type: ignore[misc]
+            task=task,
+            ground_truth=ground_truth,
+            initial_student_answer=initial_student_answer,
+            latest_student_answer=latest_student_answer,
+            total_reward=total_reward,
+            traces=traces,
+            termination_reason=termination_reason,
+            pre_success=pre_success,
+            leak_count=leak_count,
         )
 
     def _log_rollout_stats(
@@ -175,6 +218,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", default="")
     parser.add_argument("--report", default="")
     parser.add_argument("--csv", default="")
+    parser.add_argument(
+        "--trace-root",
+        type=Path,
+        default=DEFAULT_OUTPUT_ROOT,
+        help=(
+            "Root directory for per-attempt trace JSON files when --trace-dir is not "
+            f"set. Defaults to {DEFAULT_OUTPUT_ROOT}."
+        ),
+    )
+    parser.add_argument(
+        "--trace-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for full per-attempt trace JSON files. Defaults to "
+            "<trace-root>/tutor/multiturn_difficulty_traces/"
+            "<experiment_name>/<trial_name>."
+        ),
+    )
     parser.add_argument("--splits", nargs="+", default=["train"])
     parser.add_argument("--attempts", type=int, default=DEFAULT_ATTEMPTS)
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
@@ -322,6 +384,7 @@ def build_workflow(
     class OfflineDifficultyWorkflow(DifficultyTutorWorkflow, TutorAgentWorkflow):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             self.last_episode_summary = None
+            self.last_episode_trace_payload = None
             super().__init__(*args, **kwargs)
 
     auxiliary_model = config.auxiliary_model
@@ -379,6 +442,61 @@ def build_workflow(
     )
 
 
+def safe_path_token(value: Any) -> str:
+    token = str(value)
+    safe = "".join(char if char.isalnum() or char in "._-" else "_" for char in token)
+    return safe.strip("._") or "item"
+
+
+def default_trace_dir(config: Any, trace_root: Path = DEFAULT_OUTPUT_ROOT) -> Path:
+    return (
+        trace_root
+        / "tutor"
+        / "multiturn_difficulty_traces"
+        / safe_path_token(config.experiment_name)
+        / safe_path_token(config.trial_name)
+    )
+
+
+def resolve_trace_dir(args: argparse.Namespace, config: Any) -> Path:
+    if args.trace_dir is not None:
+        return args.trace_dir.expanduser().resolve()
+    return default_trace_dir(config, args.trace_root.expanduser().resolve())
+
+
+def write_attempt_trace(
+    *,
+    trace_dir: Path,
+    split_name: str,
+    row: dict[str, Any],
+    index: int,
+    item_id: int | str,
+    attempt_idx: int,
+    payload: dict[str, Any],
+) -> Path:
+    split_dir = trace_dir / safe_path_token(split_name)
+    split_dir.mkdir(parents=True, exist_ok=True)
+    file_path = split_dir / (
+        f"row_{index:08d}_id_{safe_path_token(item_id)}"
+        f"_attempt_{attempt_idx:02d}.json"
+    )
+    trace_payload = dict(payload)
+    trace_payload.update(
+        {
+            "split": split_name,
+            "index": int(index),
+            "id": item_id,
+            "attempt": int(attempt_idx),
+            "row_metadata": row.get("metadata") or {},
+        }
+    )
+    file_path.write_text(
+        json.dumps(trace_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return file_path
+
+
 async def run_row_attempts(
     *,
     workflow_factory: Callable[[], Any],
@@ -386,6 +504,8 @@ async def run_row_attempts(
     row: dict[str, Any],
     index: int,
     attempts: int,
+    split_name: str,
+    trace_dir: Path,
 ) -> RowDifficultyResult:
     item_id = item_id_from_row(row, index)
     attempt_rows: list[AttemptResult] = []
@@ -398,6 +518,19 @@ async def run_row_attempts(
             summary = workflow.last_episode_summary
             if summary is None:
                 raise RuntimeError("Tutor workflow did not record an episode summary.")
+            trace_path = None
+            if workflow.last_episode_trace_payload is not None:
+                trace_path = os.fspath(
+                    write_attempt_trace(
+                        trace_dir=trace_dir,
+                        split_name=split_name,
+                        row=row,
+                        index=index,
+                        item_id=item_id,
+                        attempt_idx=attempt_idx,
+                        payload=workflow.last_episode_trace_payload,
+                    )
+                )
             attempt_rows.append(
                 AttemptResult(
                     attempt=attempt_idx,
@@ -408,6 +541,7 @@ async def run_row_attempts(
                     leak_count=summary.leak_count,
                     total_reward=summary.total_reward,
                     latest_student_answer=summary.latest_student_answer,
+                    trace_path=trace_path,
                     error=None,
                 )
             )
@@ -447,6 +581,7 @@ async def run_split(
     attempts: int,
     concurrency: int,
     limit: int,
+    trace_dir: Path,
     on_result: Callable[[RowDifficultyResult, int, int], None] | None = None,
     log_every: int = 10,
 ) -> list[RowDifficultyResult]:
@@ -464,6 +599,8 @@ async def run_split(
                 row=dict(dataset[index]),
                 index=index,
                 attempts=attempts,
+                split_name=split_name,
+                trace_dir=trace_dir,
             )
         async with log_lock:
             processed += 1
@@ -696,6 +833,7 @@ async def main_async(args: argparse.Namespace) -> None:
     )
     aux_request_params = build_aux_request_params(args, config)
     tutor_request_params = build_tutor_request_params(args, config)
+    trace_dir = resolve_trace_dir(args, config)
 
     def workflow_factory() -> Any:
         return build_workflow(
@@ -731,8 +869,10 @@ async def main_async(args: argparse.Namespace) -> None:
         "selected_splits": selected_splits,
         "teacher_show_ground_truth": bool(config.teacher_show_ground_truth),
         "teacher_prompt": config.teacher_system_prompt,
+        "teacher_user_prompt_template": config.teacher_user_prompt_template,
         "tutor_request_params": tutor_request_params,
         "auxiliary_request_params": aux_request_params,
+        "trace_dir": str(trace_dir),
         "save_outputs": bool(args.save_outputs),
         "preview_chars": int(args.preview_chars),
         "splits": {},
@@ -807,6 +947,7 @@ async def main_async(args: argparse.Namespace) -> None:
             attempts=attempts,
             concurrency=max_concurrency,
             limit=max(0, int(args.limit)),
+            trace_dir=trace_dir,
             on_result=_write_partial,
         )
         all_error_ids = [result.item_id for result in results if result.error is not None]
