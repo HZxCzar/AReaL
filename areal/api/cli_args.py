@@ -1108,6 +1108,15 @@ class TrainEngineConfig:
         default="lora",
         metadata={"help": "peft method type. Only LoRA is supported for now."},
     )
+    init_lora_path: str = field(
+        default="",
+        metadata={
+            "help": (
+                "Optional HuggingFace PEFT adapter path used to initialize LoRA "
+                "weights before training."
+            )
+        },
+    )
 
     # Tree training
     enable_tree_training: bool = field(
@@ -1189,6 +1198,8 @@ class TrainEngineConfig:
             raise ValueError(
                 f"_version must be either 'v1' or 'v2', got '{self._version}'"
             )
+        if self.init_lora_path and not self.use_lora:
+            raise ValueError("init_lora_path requires use_lora=True.")
 
 
 @dataclass
