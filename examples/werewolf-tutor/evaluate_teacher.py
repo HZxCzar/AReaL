@@ -17,6 +17,12 @@ from game_tutor_common import (
 
 
 from werewolf_env import WerewolfEnv  # noqa: E402
+from werewolf_tutor_metrics import (  # noqa: E402
+    werewolf_action_quality,
+    werewolf_direct_action_penalty,
+    werewolf_tutor_quality,
+    werewolf_tutoring_score,
+)
 
 
 def build_env(env_kwargs: dict[str, Any]) -> WerewolfEnv:
@@ -35,17 +41,22 @@ def build_prompt(env: WerewolfEnv, obs: str, guide: str, teacher_advice: str, me
     ).strip()
 
 
-def score(env: WerewolfEnv, _last_reward: Any) -> float:
-    stats = env.get_stats()
-    return float(
-        20.0 * stats.get("vill_wins", 0)
-        - 20.0 * stats.get("were_wins", 0)
-        + stats.get("villager_correct_votes", 0)
-        - stats.get("villager_wrong_votes", 0)
-        + stats.get("witch_correct_heals", 0)
-        + stats.get("witch_correct_poisons", 0)
-        + stats.get("hunter_correct_shots", 0)
-    )
+def score(env: WerewolfEnv, _last_reward: Any, trace: list[dict[str, Any]] | None = None) -> float:
+    metrics_trace = []
+    for row in trace or []:
+        advice = str(row.get("teacher_advice", ""))
+        metrics_trace.append(
+            {
+                "werewolf_action_quality": werewolf_action_quality(
+                    parsed_action=str(row.get("parsed_action", "")),
+                    step_reward=row.get("reward", 0.0),
+                ),
+                "teacher_quality": werewolf_tutor_quality(advice),
+                "teacher_leakage": 0.0,
+                "teacher_direct_action": werewolf_direct_action_penalty(advice),
+            }
+        )
+    return float(werewolf_tutoring_score(env, metrics_trace))
 
 
 async def main() -> None:
@@ -61,7 +72,7 @@ async def main() -> None:
     output_path = config.get("output_path", "examples/werewolf-tutor/outputs/teacher_eval.json")
     write_report(report, output_path)
     print(f"Wrote teacher evaluation report to {output_path}")
-    print(f"Average score improvement: {report['improvement']['avg_score']:.4f}")
+    print(f"Average tutoring-score improvement: {report['improvement']['avg_score']:.4f}")
 
 
 if __name__ == "__main__":

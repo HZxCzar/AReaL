@@ -15,16 +15,20 @@ student_top_p: 1.0
 student_max_tokens: 1024
 max_episode_turns: 25
 turn_discount: 0.98
-use_privileged_teacher_observation: true
+use_privileged_teacher_observation: false
 consistency_coef: 0.25
-reasoning_coef: 1.00
-leakage_coef: 0.7
-task_reward_coef: 3.0
-invalid_action_penalty: 0.1
+reasoning_coef: 0.20
+tutor_quality_coef: 0.60
+action_quality_coef: 0.80
+leakage_coef: 1.2
+direct_action_penalty: 0.5
+task_reward_coef: 2.0
+invalid_action_penalty: 0.3
 teacher_policy: >
-  Tutor with public-facing reasoning only. You may use perfect information to
-  decide which public risk to emphasize, but never reveal the acting player's
-  hidden card identities or directly name the exact private card to play.
+  Tutor with public-facing reasoning only. Emphasize public stacks, discards,
+  information/fuse tokens, safe-vs-risky action classes, and one decision
+  criterion. Never reveal the acting player's hidden card identities and do not
+  output the exact final action for the student.
 env_kwargs:
   scenario: full
 

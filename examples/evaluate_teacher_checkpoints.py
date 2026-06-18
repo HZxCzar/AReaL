@@ -44,6 +44,33 @@ def checkpoint(trial: str, step: int) -> Path:
 
 
 def default_suite() -> dict[str, list[tuple[str, str, int | None]]]:
+    return build_suite("legacy")
+
+
+def build_suite(suite: str) -> dict[str, list[tuple[str, str, int | None]]]:
+    if suite == "newre":
+        hanabi_trial = "hanabi-newre1-qwen3_5-2b-teacher-qwen3-0_6b-student"
+        hidden_trial = "hidden-rule-newre1-qwen3_5-2b-teacher-qwen3-0_6b-student"
+        werewolf_trial = "werewolf-newre2-qwen3_5-2b-teacher-qwen3-0_6b-student"
+        return {
+            "hanabi": [("base", BASE_TEACHER, None)]
+            + [
+                (f"step{step}", str(checkpoint(hanabi_trial, step)), step)
+                for step in (1, 25, 50, 75, 99, 150, 200, 254)
+            ],
+            "hidden-rule": [("base", BASE_TEACHER, None)]
+            + [
+                (f"step{step}", str(checkpoint(hidden_trial, step)), step)
+                for step in (2, 30, 66, 101, 145, 183, 224, 264)
+            ],
+            "werewolf": [("base", BASE_TEACHER, None)]
+            + [
+                (f"step{step}", str(checkpoint(werewolf_trial, step)), step)
+                for step in (3, 24, 48, 75, 101, 125, 153)
+            ],
+        }
+    if suite != "legacy":
+        raise ValueError(f"Unknown suite={suite!r}; expected 'legacy' or 'newre'.")
     hanabi_trial = "hanabi-largelr-qwen3_5-2b-teacher-qwen3-0_6b-student"
     hidden_trial = "hidden-rule-largelr-qwen3_5-2b-teacher-qwen3-0_6b-student"
     werewolf_trial = "werewolf-qwen3_5-2b-teacher-qwen3-0_6b-student"
@@ -229,12 +256,17 @@ async def run_game_model(game: str, module: Any, cfg: dict[str, Any]) -> dict[st
             "baseline": baseline,
             "teacher": teacher,
             "improvement": {
+                "mean_tutoring_score": teacher["mean_tutoring_score"]
+                - baseline["mean_tutoring_score"],
                 "mean_reward": teacher["mean_reward"] - baseline["mean_reward"],
                 "mean_heldout_accuracy": teacher["mean_heldout_accuracy"]
                 - baseline["mean_heldout_accuracy"],
                 "success_rate": teacher["success_rate"] - baseline["success_rate"],
                 "avg_examples_used": teacher["avg_examples_used"] - baseline["avg_examples_used"],
                 "avg_turns_taken": teacher["avg_turns_taken"] - baseline["avg_turns_taken"],
+                "avg_tutor_quality": teacher["avg_tutor_quality"] - baseline["avg_tutor_quality"],
+                "avg_leakage_penalty": teacher["avg_leakage_penalty"]
+                - baseline["avg_leakage_penalty"],
             },
         }
         return report
@@ -251,11 +283,14 @@ def summarize_metric(game: str, report: dict[str, Any]) -> dict[str, float]:
     imp = report["improvement"]
     if game == "hidden-rule":
         return {
-            "primary_delta": float(imp["mean_reward"]),
-            "teacher_primary": float(report["teacher"]["mean_reward"]),
-            "baseline_primary": float(report["baseline"]["mean_reward"]),
+            "primary_delta": float(imp["mean_tutoring_score"]),
+            "teacher_primary": float(report["teacher"]["mean_tutoring_score"]),
+            "baseline_primary": float(report["baseline"]["mean_tutoring_score"]),
+            "reward_delta": float(imp["mean_reward"]),
             "accuracy_delta": float(imp["mean_heldout_accuracy"]),
             "success_delta": float(imp["success_rate"]),
+            "quality_delta": float(imp["avg_tutor_quality"]),
+            "leakage_delta": float(imp["avg_leakage_penalty"]),
         }
     return {
         "primary_delta": float(imp["avg_score"]),
@@ -266,7 +301,22 @@ def summarize_metric(game: str, report: dict[str, Any]) -> dict[str, float]:
     }
 
 
-def plot_game(game: str, rows: list[dict[str, Any]], out_dir: Path) -> None:
+def original_teacher_score(
+    game: str,
+    rows: list[dict[str, Any]],
+    reference_scores: dict[str, float] | None = None,
+) -> float:
+    if reference_scores and game in reference_scores:
+        return reference_scores[game]
+    return next((row["teacher_primary"] for row in rows if row["label"] == "base"), rows[0]["teacher_primary"])
+
+
+def plot_game(
+    game: str,
+    rows: list[dict[str, Any]],
+    out_dir: Path,
+    reference_scores: dict[str, float] | None = None,
+) -> None:
     labels = [row["label"] for row in rows]
     deltas = [row["primary_delta"] for row in rows]
     teacher = [row["teacher_primary"] for row in rows]
@@ -293,7 +343,7 @@ def plot_game(game: str, rows: list[dict[str, Any]], out_dir: Path) -> None:
     plt.savefig(out_dir / f"{game}_scores.png", dpi=180)
     plt.close()
 
-    base_teacher = next((row["teacher_primary"] for row in rows if row["label"] == "base"), teacher[0])
+    base_teacher = original_teacher_score(game, rows, reference_scores)
     vs_base = [row["teacher_primary"] - base_teacher for row in rows]
     plt.figure(figsize=(8, 4.8))
     plt.axhline(0, color="#444", linewidth=1)
@@ -310,10 +360,7 @@ def plot_game(game: str, rows: list[dict[str, Any]], out_dir: Path) -> None:
         steps = [int(row["step"]) for row in trend_rows]
         trend_teacher = [row["teacher_primary"] for row in trend_rows]
         trend_gain = [row["primary_delta"] for row in trend_rows]
-        base_teacher_value = next(
-            (row["teacher_primary"] for row in rows if row["label"] == "base"),
-            trend_teacher[0],
-        )
+        base_teacher_value = original_teacher_score(game, rows, reference_scores)
         plt.figure(figsize=(8, 4.8))
         plt.axhline(base_teacher_value, color="#E15759", linestyle="--", linewidth=1.5, label="Original teacher")
         plt.plot(steps, trend_teacher, marker="o", color="#4C78A8", label="Checkpoint teacher")
@@ -327,8 +374,13 @@ def plot_game(game: str, rows: list[dict[str, Any]], out_dir: Path) -> None:
         plt.close()
 
 
-def write_game_report(game: str, rows: list[dict[str, Any]], out_dir: Path) -> None:
-    base_teacher = next((row["teacher_primary"] for row in rows if row["label"] == "base"), rows[0]["teacher_primary"])
+def write_game_report(
+    game: str,
+    rows: list[dict[str, Any]],
+    out_dir: Path,
+    reference_scores: dict[str, float] | None = None,
+) -> None:
+    base_teacher = original_teacher_score(game, rows, reference_scores)
     trained_rows = [row for row in rows if row["label"] != "base"] or rows
     best = max(trained_rows, key=lambda row: row["teacher_primary"] - base_teacher)
     lines = [
@@ -364,6 +416,7 @@ def write_game_report(game: str, rows: list[dict[str, Any]], out_dir: Path) -> N
 
 async def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--suite", choices=["legacy", "newre"], default="legacy")
     parser.add_argument("--out-dir", default=str(RESULTS))
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--dtype", default="bfloat16")
@@ -375,6 +428,9 @@ async def main() -> None:
     parser.add_argument("--hanabi-max-tokens", type=int, default=None)
     parser.add_argument("--hidden-rule-max-tokens", type=int, default=None)
     parser.add_argument("--werewolf-max-tokens", type=int, default=None)
+    parser.add_argument("--hanabi-original-teacher-score", type=float, default=None)
+    parser.add_argument("--hidden-rule-original-teacher-score", type=float, default=None)
+    parser.add_argument("--werewolf-original-teacher-score", type=float, default=None)
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -392,12 +448,21 @@ async def main() -> None:
         "hidden-rule": int(args.hidden_rule_num_turns or args.num_turns),
         "werewolf": int(args.werewolf_num_turns or args.num_turns),
     }
+    reference_scores = {
+        game: score
+        for game, score in {
+            "hanabi": args.hanabi_original_teacher_score,
+            "hidden-rule": args.hidden_rule_original_teacher_score,
+            "werewolf": args.werewolf_original_teacher_score,
+        }.items()
+        if score is not None
+    }
 
     modules = load_eval_modules()
     ACTIVE_MODELS["student"] = LocalChatModel(STUDENT, args.device, dtype)
     all_rows: list[dict[str, Any]] = []
     try:
-        for game, models in default_suite().items():
+        for game, models in build_suite(args.suite).items():
             game_rows = []
             for label, model_path, step in models:
                 print(f"[eval] {game} {label}: {model_path}", flush=True)
@@ -420,15 +485,19 @@ async def main() -> None:
                 finally:
                     ACTIVE_MODELS["teacher"].close()
                     ACTIVE_MODELS.pop("teacher", None)
-            plot_game(game, game_rows, out_dir)
-            write_game_report(game, game_rows, out_dir)
+            plot_game(game, game_rows, out_dir, reference_scores)
+            write_game_report(game, game_rows, out_dir, reference_scores)
         (out_dir / "summary.json").write_text(json.dumps(all_rows, ensure_ascii=True, indent=2))
-        write_overall_report(all_rows, out_dir)
+        write_overall_report(all_rows, out_dir, reference_scores)
     finally:
         ACTIVE_MODELS["student"].close()
 
 
-def write_overall_report(rows: list[dict[str, Any]], out_dir: Path) -> None:
+def write_overall_report(
+    rows: list[dict[str, Any]],
+    out_dir: Path,
+    reference_scores: dict[str, float] | None = None,
+) -> None:
     lines = [
         "# Teacher Checkpoint Evaluation Summary",
         "",
@@ -437,10 +506,7 @@ def write_overall_report(rows: list[dict[str, Any]], out_dir: Path) -> None:
     ]
     for game in sorted({row["game"] for row in rows}):
         game_rows = [row for row in rows if row["game"] == game]
-        base_teacher = next(
-            (row["teacher_primary"] for row in game_rows if row["label"] == "base"),
-            game_rows[0]["teacher_primary"],
-        )
+        base_teacher = original_teacher_score(game, game_rows, reference_scores)
         trained_rows = [row for row in game_rows if row["label"] != "base"] or game_rows
         best = max(trained_rows, key=lambda row: row["teacher_primary"] - base_teacher)
         lines.append(

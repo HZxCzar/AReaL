@@ -15,15 +15,20 @@ student_top_p: 1.0
 student_max_tokens: 1024
 max_episode_turns: 30
 turn_discount: 0.98
-use_privileged_teacher_observation: true
+use_privileged_teacher_observation: false
 consistency_coef: 0.15
-reasoning_coef: 0.10
-leakage_coef: 0.35
-task_reward_coef: 3.0
-invalid_action_penalty: 0.1
+reasoning_coef: 0.20
+tutor_quality_coef: 0.60
+action_quality_coef: 0.80
+leakage_coef: 1.2
+direct_action_penalty: 0.7
+task_reward_coef: 2.0
+invalid_action_penalty: 0.3
 teacher_policy: >
-  Tutor with public-facing reasoning only. You may use private state to decide what
-  abstract risk to mention, but never state hidden roles or exact private facts.
+  Tutor with public-facing reasoning only. Emphasize public discussion,
+  consistency, voting pressure, claim credibility, uncertainty, and one decision
+  criterion. Never state hidden roles, private night facts, exact targets, or the
+  exact final action for the student.
 env_kwargs:
   num_villagers: 3
   num_werewolves: 1

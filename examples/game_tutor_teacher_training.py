@@ -46,6 +46,9 @@ class TeacherTrainingConfig(GRPOConfig):
     leakage_coef: float = 0.35
     task_reward_coef: float = 1.0
     invalid_action_penalty: float = 0.1
+    action_quality_coef: float = 0.0
+    tutor_quality_coef: float = 0.0
+    direct_action_penalty: float = 0.0
     report_reward_components: bool = True
 
 
@@ -75,6 +78,17 @@ def _make_env(game: str, env_kwargs: dict[str, Any]):
         module = _load_module("hanabi_teacher_training_env", _game_dir(game) / "hanabi_env.py")
         return module.HanabiEnv(**env_kwargs)
     raise ValueError(f"Unsupported environment game: {game}")
+
+
+def _hanabi_metrics_module():
+    return _load_module("hanabi_tutor_training_metrics", _game_dir("hanabi") / "hanabi_tutor_metrics.py")
+
+
+def _werewolf_metrics_module():
+    return _load_module(
+        "werewolf_tutor_training_metrics",
+        _game_dir("werewolf") / "werewolf_tutor_metrics.py",
+    )
 
 
 def _teacher_prompt(game: str, obs: str, guide: str, teacher_obs: str, policy: str) -> str:
@@ -125,6 +139,62 @@ def _normalize_reward(game: str, score: float) -> float:
     if game == "hanabi":
         return max(-1.0, min(1.0, score / 25.0))
     return max(-1.0, min(1.0, score / 20.0))
+
+
+def _hanabi_final_tutoring_reward(env: Any, components: list[tuple[float, ...]]) -> float:
+    module = _hanabi_metrics_module()
+    stats = env.get_stats()
+    if components:
+        avg_action_quality = sum(item[4] for item in components) / len(components)
+        avg_tutor_quality = sum(item[5] for item in components) / len(components)
+        avg_direct_action = sum(item[6] for item in components) / len(components)
+        avg_leakage = sum(item[2] for item in components) / len(components)
+        invalid_actions = sum(1 for item in components if item[3] > 0)
+    else:
+        avg_action_quality = 0.0
+        avg_tutor_quality = 0.0
+        avg_direct_action = 0.0
+        avg_leakage = 0.0
+        invalid_actions = 0
+    score = module.hanabi_tutoring_score_from_stats(
+        score=float(stats.get("score", 0.0)),
+        target_score=float(getattr(env, "target_score", 25)),
+        fuse_tokens=int(stats.get("fuse_tokens", 0)),
+        max_fuse_tokens=int(getattr(env, "max_fuse_tokens", 3)),
+        invalid_actions=invalid_actions,
+        turns=max(1, int(stats.get("turns", len(components)))),
+        avg_action_quality=avg_action_quality,
+        avg_tutor_quality=avg_tutor_quality,
+        avg_leakage=avg_leakage,
+        avg_direct_action=avg_direct_action,
+    )
+    return max(-1.0, min(1.0, 2.0 * (score - 0.35)))
+
+
+def _werewolf_final_tutoring_reward(env: Any, components: list[tuple[float, ...]]) -> float:
+    module = _werewolf_metrics_module()
+    if components:
+        avg_action_quality = sum(item[4] for item in components) / len(components)
+        avg_tutor_quality = sum(item[5] for item in components) / len(components)
+        avg_direct_action = sum(item[6] for item in components) / len(components)
+        avg_leakage = sum(item[2] for item in components) / len(components)
+        invalid_actions = sum(1 for item in components if item[3] > 0)
+    else:
+        avg_action_quality = 0.0
+        avg_tutor_quality = 0.0
+        avg_direct_action = 0.0
+        avg_leakage = 0.0
+        invalid_actions = 0
+    score = module.werewolf_tutoring_score_from_stats(
+        stats=env.get_stats(),
+        turns=max(1, len(components)),
+        invalid_actions=invalid_actions,
+        avg_action_quality=avg_action_quality,
+        avg_tutor_quality=avg_tutor_quality,
+        avg_leakage=avg_leakage,
+        avg_direct_action=avg_direct_action,
+    )
+    return max(-1.0, min(1.0, score))
 
 
 def _reasoning_score(text: str) -> float:
@@ -214,6 +284,9 @@ class GameTeacherWorkflow(RolloutWorkflow):
         leakage_coef: float = 0.35,
         task_reward_coef: float = 1.0,
         invalid_action_penalty: float = 0.1,
+        action_quality_coef: float = 0.0,
+        tutor_quality_coef: float = 0.0,
+        direct_action_penalty: float = 0.0,
         report_reward_components: bool = True,
     ):
         self.tokenizer = load_hf_tokenizer(tokenizer) if isinstance(tokenizer, str) else tokenizer
@@ -240,6 +313,9 @@ class GameTeacherWorkflow(RolloutWorkflow):
         self.leakage_coef = float(leakage_coef)
         self.task_reward_coef = float(task_reward_coef)
         self.invalid_action_penalty = float(invalid_action_penalty)
+        self.action_quality_coef = float(action_quality_coef)
+        self.tutor_quality_coef = float(tutor_quality_coef)
+        self.direct_action_penalty = float(direct_action_penalty)
         self.report_reward_components = bool(report_reward_components)
 
     async def arun_episode(self, engine: InferenceEngine, data: dict[str, Any]):
@@ -274,6 +350,8 @@ class GameTeacherWorkflow(RolloutWorkflow):
             advice = self.tokenizer.decode(resp.output_tokens, skip_special_tokens=True)
 
             student_prompt = _student_prompt(self.game, obs, guide, advice)
+            acting_role = getattr(env, "agent_role", None)
+            acting_phase = getattr(env, "phase", None)
             student_action = await self.student.complete(
                 normalize_messages(
                     "You are the acting game player. Follow the required answer format exactly.",
@@ -286,18 +364,60 @@ class GameTeacherWorkflow(RolloutWorkflow):
             reasoning = _reasoning_score(advice)
             leakage = _leakage_penalty(self.game, advice)
             invalid = 0.0 if parsed_action else 1.0
+            if self.game == "hanabi":
+                hanabi_metrics = _hanabi_metrics_module()
+                action_quality = hanabi_metrics.hanabi_action_quality(
+                    info.get("event", "") if isinstance(info, dict) else "",
+                    float(step_reward if not isinstance(step_reward, list) else sum(step_reward)),
+                    parsed_action,
+                )
+                tutor_quality = hanabi_metrics.hanabi_tutor_quality(advice)
+                direct_action = hanabi_metrics.hanabi_direct_action_penalty(advice)
+            elif self.game == "werewolf":
+                werewolf_metrics = _werewolf_metrics_module()
+                action_quality = werewolf_metrics.werewolf_action_quality(
+                    parsed_action=parsed_action,
+                    step_reward=step_reward,
+                    role=acting_role,
+                    phase=acting_phase,
+                )
+                tutor_quality = werewolf_metrics.werewolf_tutor_quality(advice)
+                direct_action = werewolf_metrics.werewolf_direct_action_penalty(advice)
+            else:
+                action_quality = float(step_reward if not isinstance(step_reward, list) else sum(step_reward))
+                tutor_quality = reasoning
+                direct_action = 0.0
             shaped = (
                 self.consistency_coef * consistency
                 + self.reasoning_coef * reasoning
+                + self.tutor_quality_coef * tutor_quality
+                + self.action_quality_coef * action_quality
                 - self.leakage_coef * leakage
                 - self.invalid_action_penalty * invalid
+                - self.direct_action_penalty * direct_action
             )
             responses.append((resp, shaped, turn_idx))
-            components.append((consistency, reasoning, leakage, invalid, float(step_reward if not isinstance(step_reward, list) else sum(step_reward))))
+            components.append(
+                (
+                    consistency,
+                    reasoning,
+                    leakage,
+                    invalid,
+                    action_quality,
+                    tutor_quality,
+                    direct_action,
+                    float(step_reward if not isinstance(step_reward, list) else sum(step_reward)),
+                )
+            )
             if done:
                 break
 
-        final_task_reward = _normalize_reward(self.game, _score_env(self.game, env))
+        if self.game == "hanabi":
+            final_task_reward = _hanabi_final_tutoring_reward(env, components)
+        elif self.game == "werewolf":
+            final_task_reward = _werewolf_final_tutoring_reward(env, components)
+        else:
+            final_task_reward = _normalize_reward(self.game, _score_env(self.game, env))
         tensors = []
         horizon = max(1, len(responses) - 1)
         for resp, shaped, turn_idx in responses:
@@ -323,7 +443,12 @@ class GameTeacherWorkflow(RolloutWorkflow):
                 teacher_reasoning=avg(1),
                 teacher_leakage=avg(2),
                 student_invalid_action=avg(3),
-                env_step_reward=avg(4),
+                action_quality=avg(4),
+                hanabi_action_quality=avg(4),
+                werewolf_action_quality=avg(4),
+                teacher_quality=avg(5),
+                teacher_direct_action=avg(6),
+                env_step_reward=avg(7),
             )
 
         return concat_padded_tensors(tensors, pad_value=0.0)
@@ -375,6 +500,9 @@ def run_game_teacher_training(args: list[str], game: str) -> None:
         leakage_coef=config.leakage_coef,
         task_reward_coef=config.task_reward_coef,
         invalid_action_penalty=config.invalid_action_penalty,
+        action_quality_coef=config.action_quality_coef,
+        tutor_quality_coef=config.tutor_quality_coef,
+        direct_action_penalty=config.direct_action_penalty,
         report_reward_components=config.report_reward_components,
     )
     with PPOTrainer(config, train_dataset=train_dataset, valid_dataset=valid_dataset) as trainer:

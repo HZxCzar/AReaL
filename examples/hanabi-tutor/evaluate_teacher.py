@@ -17,6 +17,7 @@ from game_tutor_common import (
 
 
 from hanabi_env import HanabiEnv  # noqa: E402
+from hanabi_tutor_metrics import hanabi_tutoring_score  # noqa: E402
 
 
 def build_env(env_kwargs: dict[str, Any]) -> HanabiEnv:
@@ -33,8 +34,36 @@ def build_prompt(env: HanabiEnv, obs: str, guide: str, teacher_advice: str, memo
     ).strip()
 
 
-def score(env: HanabiEnv, _last_reward: Any) -> float:
-    return float(env.get_stats().get("score", 0.0))
+def score(env: HanabiEnv, _last_reward: Any, trace: list[dict[str, Any]] | None = None) -> float:
+    metrics_trace = []
+    for row in trace or []:
+        action_quality = 0.0
+        try:
+            from hanabi_tutor_metrics import (
+                hanabi_action_quality,
+                hanabi_direct_action_penalty,
+                hanabi_tutor_quality,
+            )
+
+            action_quality = hanabi_action_quality(
+                str(row.get("event", "")),
+                float(row.get("reward", 0.0)),
+                str(row.get("parsed_action", "")),
+            )
+            teacher_quality = hanabi_tutor_quality(str(row.get("teacher_advice", "")))
+            direct_action = hanabi_direct_action_penalty(str(row.get("teacher_advice", "")))
+        except Exception:
+            teacher_quality = 0.0
+            direct_action = 0.0
+        metrics_trace.append(
+            {
+                "hanabi_action_quality": action_quality,
+                "teacher_quality": teacher_quality,
+                "teacher_leakage": 0.0,
+                "teacher_direct_action": direct_action,
+            }
+        )
+    return float(hanabi_tutoring_score(env, metrics_trace))
 
 
 async def main() -> None:
@@ -50,7 +79,7 @@ async def main() -> None:
     output_path = config.get("output_path", "examples/hanabi-tutor/outputs/teacher_eval.json")
     write_report(report, output_path)
     print(f"Wrote teacher evaluation report to {output_path}")
-    print(f"Average score improvement: {report['improvement']['avg_score']:.4f}")
+    print(f"Average tutoring-score improvement: {report['improvement']['avg_score']:.4f}")
 
 
 if __name__ == "__main__":

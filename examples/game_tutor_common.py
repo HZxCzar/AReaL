@@ -358,7 +358,10 @@ class TeacherEvaluator:
                 turns_left -= 1
                 last_step = reward
 
-            score = float(self.score_getter(env, last_step))
+            try:
+                score = float(self.score_getter(env, last_step, episode_trace))
+            except TypeError:
+                score = float(self.score_getter(env, last_step))
             total_score += score
             traces.append(
                 {
