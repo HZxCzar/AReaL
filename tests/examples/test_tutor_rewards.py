@@ -251,9 +251,7 @@ def test_pairwise_leak_check_disabled_uses_clean_reference_result(monkeypatch):
 
     monkeypatch.setattr(workflow, "_run_leak_check", fail_leak_check)
     monkeypatch.setattr(workflow, "_run_student", unused_student)
-    monkeypatch.setattr(
-        tutor_workflow, "PairwiseTutorEvaluator", FakePairwiseEvaluator
-    )
+    monkeypatch.setattr(tutor_workflow, "PairwiseTutorEvaluator", FakePairwiseEvaluator)
 
     results = asyncio.run(
         workflow._run_pairwise_evaluation(
@@ -269,7 +267,6 @@ def test_pairwise_leak_check_disabled_uses_clean_reference_result(monkeypatch):
     assert captured["reference_version"] == 3
     assert captured["leak_result"].leaked is False
     assert captured["leak_result"].raw_result == {"disabled": True}
-
 
 
 class FakeAnswerJudgeCaller:
@@ -382,9 +379,7 @@ def test_answer_judge_caches_repeated_comparisons():
         r"$$\boxed{h^{-1}(x)=\frac{x+5}{6}}$$",
     )
 
-    first = asyncio.run(
-        workflow._score_answer_async(*args, answer_judge_caller=caller)
-    )
+    first = asyncio.run(workflow._score_answer_async(*args, answer_judge_caller=caller))
     second = asyncio.run(
         workflow._score_answer_async(*args, answer_judge_caller=caller)
     )
@@ -477,6 +472,158 @@ def test_workflow_leak_does_not_skip_student_or_success(monkeypatch):
         1.0
     )
     assert workflow.last_total_reward == pytest.approx(0.0)
+
+
+def test_workflow_student_generalize_runs_after_success_from_same_context(monkeypatch):
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.max_turns = 1
+    workflow.success_reward = 1.0
+    workflow.leak_penalty = 0.0
+    workflow.assign_success_reward = False
+    workflow.outcome_prior_turn_weight = 0.1
+    workflow.outcome_credit_gamma = 0.9
+    workflow.early_success_bonus = 0.0
+    workflow.enable_turn_penalty = False
+    workflow.turn_penalty = 0.0
+    workflow.length_penalty_threshold_chars = 0
+    workflow.length_penalty_per_100_chars = 0.0
+    workflow.length_penalty_min = 0.0
+    workflow.pairwise_reward_enabled = False
+    workflow.student_generalize_enabled = True
+    workflow.student_generalize_level_rewards = {"level1": 0.2, "level2": 0.5}
+    workflow.student_generalize_bank = {}
+
+    response = types.SimpleNamespace(
+        input_tokens=[1],
+        output_tokens=[2],
+        output_logprobs=[-0.1],
+        output_versions=[0],
+        input_len=1,
+        output_len=1,
+    )
+    student_calls = []
+    score_calls = []
+    judge_results = [_judge(False), _judge(True), _judge(True), _judge(False)]
+
+    workflow._make_actor_caller = lambda **_kwargs: object()
+    workflow._make_auxiliary_caller = lambda **_kwargs: object()
+    workflow._make_answer_judge_caller = lambda **_kwargs: None
+    workflow._build_tutor_prompt = lambda state: f"tutor prompt {state.turn_idx}"
+    workflow._build_student_prompt_from_state = lambda state: "student prompt"
+    workflow._log_rollout_stats = lambda **_kwargs: None
+    workflow._maybe_dump_debug_trace = lambda **_kwargs: None
+
+    async def generate_tutor_response(*_args, **_kwargs):
+        return response, "last tutor hint"
+
+    async def run_student(state, **_kwargs):
+        student_calls.append(state)
+        outputs = [
+            "initial wrong",
+            "original solved",
+            "level1 solved",
+            "level2 wrong",
+        ]
+        return outputs[len(student_calls) - 1], None
+
+    async def score_answer(task, ground_truth, student_output, **_kwargs):
+        score_calls.append((task, ground_truth, student_output))
+        return judge_results.pop(0)
+
+    async def run_leak_check(*_args, **_kwargs):
+        return _leak(False)
+
+    async def update_history(**_kwargs):
+        return PublicHistoryState(summary="success context", turn_count=1)
+
+    workflow._generate_tutor_response = generate_tutor_response
+    workflow._run_student = run_student
+    workflow._score_answer_async = score_answer
+    workflow._run_optional_leak_check = run_leak_check
+    workflow._run_public_summary_update = update_history
+
+    result = asyncio.run(
+        workflow._run_episode(
+            {
+                "id": "sample-1",
+                "task": "original task",
+                "ground_truth": "42",
+                "metadata": {
+                    "student_generalize": {
+                        "level1": {
+                            "task": "level1 task",
+                            "ground_truth": "43",
+                        },
+                        "level2": {
+                            "task": "level2 task",
+                            "ground_truth": "44",
+                        },
+                    }
+                },
+            },
+            external_client=object(),
+        )
+    )
+
+    assert result is not None
+    assert [state.task for state in student_calls] == [
+        "original task",
+        "original task",
+        "level1 task",
+        "level2 task",
+    ]
+    assert student_calls[2].public_history.summary == "success context"
+    assert student_calls[3].public_history.summary == "success context"
+    assert student_calls[2].public_history is not student_calls[3].public_history
+    assert score_calls[-2:] == [
+        ("level1 task", "43", "level1 solved"),
+        ("level2 task", "44", "level2 wrong"),
+    ]
+
+    generalization = workflow.last_student_generalization_results
+    assert [item.level for item in generalization] == ["level1", "level2"]
+    assert [item.attempted for item in generalization] == [True, True]
+    assert [item.reward for item in generalization] == pytest.approx([0.2, 0.0])
+    assert workflow.last_traces[0].reward_components["success_credit"] == pytest.approx(
+        1.0
+    )
+    assert workflow.last_traces[0].reward_components[
+        "student_generalize_level1"
+    ] == pytest.approx(0.2)
+    assert "student_generalize_level2" not in workflow.last_traces[0].reward_components
+    assert workflow.last_total_reward == pytest.approx(1.2)
+
+
+def test_student_generalize_missing_variants_skips_without_student_call(monkeypatch):
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_generalize_enabled = True
+    workflow.student_generalize_level_rewards = {"level1": 0.2, "level2": 0.5}
+    workflow.student_generalize_bank = {}
+    turn = _turn(1, correct=True)
+    turn.public_history_after = "success context"
+    episode = _episode([turn], termination_reason="success")
+
+    async def fail_student(*args, **kwargs):
+        raise AssertionError("student should not be called without variants")
+
+    workflow._run_student = fail_student
+
+    results = asyncio.run(
+        workflow._run_student_generalization(
+            {"id": "missing", "metadata": {}},
+            episode,
+            aux_caller=object(),
+            answer_judge_caller=None,
+        )
+    )
+
+    assert [result.level for result in results] == ["level1", "level2"]
+    assert all(result.skipped for result in results)
+    assert all(result.skip_reason == "missing_variant" for result in results)
 
 
 def test_pairwise_can_skip_judge_when_both_answers_are_incorrect():
@@ -737,9 +884,59 @@ def test_rollout_stats_uses_clean_metric_names_and_reward_breakdown(monkeypatch)
     total_abs = sum(abs(value) for value in expected_components.values())
     for name, value in expected_components.items():
         assert captured[f"reward_component/{name}"] == pytest.approx(value)
-        assert captured[f"reward_share/{name}"] == pytest.approx(
-            abs(value) / total_abs
+        assert captured[f"reward_share/{name}"] == pytest.approx(abs(value) / total_abs)
+
+
+def test_rollout_stats_includes_student_generalize_metrics(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        tutor_workflow,
+        "_safe_scalar",
+        lambda **metrics: captured.update(metrics),
+    )
+    workflow = _metric_workflow(
+        student_generalize_enabled=True,
+        student_generalize_level_rewards={"level1": 0.2, "level2": 0.5},
+    )
+    traces = [
+        _trace(
+            1,
+            {
+                "success_credit": 1.0,
+                "student_generalize_level1": 0.2,
+            },
+            correct=True,
         )
+    ]
+    generalization = [
+        tutor_workflow.StudentGeneralizationResult(
+            level="level1",
+            attempted=True,
+            judge_result=_judge(True),
+            reward=0.2,
+        ),
+        tutor_workflow.StudentGeneralizationResult(
+            level="level2",
+            skipped=True,
+            skip_reason="missing_variant",
+        ),
+    ]
+
+    workflow._log_rollout_stats(
+        total_reward=sum(trace.reward for trace in traces),
+        traces=traces,
+        termination_reason="success",
+        pre_success=False,
+        leak_count=0,
+        student_generalization_results=generalization,
+    )
+
+    assert captured["student_generalize/attempted"] == pytest.approx(1.0)
+    assert captured["student_generalize/skipped"] == pytest.approx(1.0)
+    assert captured["student_generalize/level1_correct"] == pytest.approx(1.0)
+    assert captured["student_generalize/level2_correct"] == pytest.approx(0.0)
+    assert captured["reward_component/student_generalize_level1"] == pytest.approx(0.2)
+    assert captured["reward_component/student_generalize_level2"] == pytest.approx(0.0)
 
 
 def test_reward_component_share_is_zero_when_enabled_components_are_absent():
@@ -757,4 +954,3 @@ def test_reward_component_share_is_zero_when_enabled_components_are_absent():
         "reward_component/leak": 0.0,
         "reward_share/leak": 0.0,
     }
-

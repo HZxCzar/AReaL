@@ -1,0 +1,82 @@
+{
+  "train-927": {
+    "level1": {
+      "task": "A two-row triangle is created with a total of 15 pieces: nine unit rods and six connectors, as shown in the original diagram. What is the total number of pieces that would be used to create a six-row triangle?",
+      "ground_truth": "91"
+    },
+    "level2": {
+      "task": "In the same rod-and-connector triangle pattern, do not count connectors. What is the total number of unit rods needed to create a ten-row triangle?",
+      "ground_truth": "165"
+    }
+  },
+  "train-1801": {
+    "level1": {
+      "task": "Diane has one 1-cent stamp, two identical 2-cent stamps, and so on, up to nine identical 9-cent stamps. In how many different arrangements can Diane paste exactly 11 cents worth of postage in a row across the top of an envelope? Rotating or inverting a stamp, or exchanging two stamps with the same denomination, should be considered the same arrangement.",
+      "ground_truth": "156"
+    },
+    "level2": {
+      "task": "Diane has one 1-cent stamp, two identical 2-cent stamps, and so on, up to nine identical 9-cent stamps. If the order across the envelope does not matter, how many different selections of stamps have total postage exactly 10 cents?",
+      "ground_truth": "16"
+    }
+  },
+  "train-2131": {
+    "level1": {
+      "task": "A collection of 7 cubes consists of one cube with edge-length k for each integer k, 1 <= k <= 7. A tower is built using all 7 cubes. Any cube may be the bottom cube, and the cube immediately on top of a cube with edge-length k must have edge-length at most k+2. Let T be the number of different towers. What is the remainder when T is divided by 1000?",
+      "ground_truth": "486"
+    },
+    "level2": {
+      "task": "A collection of 8 cubes consists of one cube with edge-length k for each integer k, 1 <= k <= 8. A tower is built using all 8 cubes. Any cube may be the bottom cube, and the cube immediately on top of a cube with edge-length k must have edge-length at most k+1. Let T be the number of different towers. What is the remainder when T is divided by 1000?",
+      "ground_truth": "128"
+    }
+  },
+  "train-1705": {
+    "level1": {
+      "task": "How much money should I invest at an annually compounded interest rate of 6% so that I have $500,000 in ten years? Express your answer as a dollar value rounded to the nearest cent.",
+      "ground_truth": "\\$279,\\!197.39"
+    },
+    "level2": {
+      "task": "How much money should I invest at a nominal annual interest rate of 5%, compounded monthly, so that I have $500,000 in ten years? Express your answer as a dollar value rounded to the nearest cent.",
+      "ground_truth": "\\$303,\\!580.52"
+    }
+  },
+  "train-1912": {
+    "level1": {
+      "task": "What is the second smallest five-digit number in Pascal's triangle?",
+      "ground_truth": "10001"
+    },
+    "level2": {
+      "task": "Excluding the outer 1s and the adjacent diagonal entries 1, 2, 3, ... on either side, what is the smallest four-digit number in Pascal's triangle?",
+      "ground_truth": "1035"
+    }
+  },
+  "train-2138": {
+    "level1": {
+      "task": "Consider sequences that consist entirely of A's and B's and that have the property that every run of consecutive A's has even length, and every run of consecutive B's has odd length. How many such sequences have length 12?",
+      "ground_truth": "80"
+    },
+    "level2": {
+      "task": "Consider sequences that consist entirely of A's and B's and that have the property that every run of consecutive A's has length divisible by 3, and every run of consecutive B's has odd length. How many such sequences have length 14?",
+      "ground_truth": "40"
+    }
+  },
+  "train-2346": {
+    "level1": {
+      "task": "A triangular grid of toothpicks has five unit toothpicks along each side, with all the same internal lattice toothpicks included. What is the fewest number of toothpicks that could be removed so that no triangles remain?",
+      "ground_truth": "15"
+    },
+    "level2": {
+      "task": "In the original triangular toothpick figure with four unit toothpicks along each side, what is the fewest number of toothpicks that could be removed so that no downward-pointing unit triangles remain?",
+      "ground_truth": "6"
+    }
+  },
+  "train-456": {
+    "level1": {
+      "task": "Let f be the same piecewise function from the original problem. If f^a(x) means the function is nested a times, what is the smallest value of a greater than 1 that satisfies f(3)=f^a(3)?",
+      "ground_truth": "5"
+    },
+    "level2": {
+      "task": "Let f(x) = x/10 if x is a multiple of both 2 and 5, f(x) = 2x if x is only a multiple of 5, f(x) = 5x if x is only a multiple of 2, and f(x) = x+4 if x is not a multiple of 2 or 5. If f^a(x) means the function is nested a times, what is the smallest value of a greater than 1 that satisfies f(1)=f^a(1)?",
+      "ground_truth": "4"
+    }
+  }
+}

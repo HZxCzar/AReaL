@@ -25,6 +25,7 @@ def main(args):
         args = [*args, f"trial_name={datetime.now():%Y%m%d_%H%M%S}_{trial_name}"]
     config, _ = load_expr_config(args, TutorConfig)
     auxiliary_model = config.auxiliary_model
+    student_generalize = config.student_generalize
     reward = config.reward
     pairwise = reward.pairwise
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
@@ -97,6 +98,10 @@ def main(args):
         max_train_sample_tokens=config.gconfig.max_tokens,
         tokenizer_path=config.tokenizer_path,
         model_context_length=config.sglang.context_length,
+        student_generalize_enabled=student_generalize.enabled,
+        student_generalize_path=student_generalize.path,
+        student_generalize_level1_reward=student_generalize.level1_reward,
+        student_generalize_level2_reward=student_generalize.level2_reward,
         pairwise_reward_enabled=pairwise.enabled,
         pairwise_reference_lag_steps=pairwise.reference_lag_steps,
         pairwise_reward_scale=pairwise.scale,

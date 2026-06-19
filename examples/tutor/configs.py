@@ -88,6 +88,30 @@ class TutorPairwiseRewardConfig:
 
 
 @dataclass
+class TutorStudentGeneralizeConfig:
+    enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Run post-success student generalization tests and add their "
+                "correctness as reward components."
+            )
+        },
+    )
+    path: str = field(
+        default="",
+        metadata={
+            "help": (
+                "Optional JSON sidecar keyed by sample id with level1/level2 "
+                "generalization tasks."
+            )
+        },
+    )
+    level1_reward: float = field(default=0.2)
+    level2_reward: float = field(default=0.5)
+
+
+@dataclass
 class TutorEvaluatorConfig(EvaluatorConfig):
     max_samples: int | None = field(
         default=None,
@@ -158,15 +182,16 @@ class TutorConfig(GRPOConfig):
     auxiliary_model: TutorAuxiliaryModelConfig = field(
         default_factory=TutorAuxiliaryModelConfig
     )
+    student_generalize: TutorStudentGeneralizeConfig = field(
+        default_factory=TutorStudentGeneralizeConfig
+    )
     evaluator: TutorEvaluatorConfig = field(default_factory=TutorEvaluatorConfig)
     reward: TutorRewardConfig = field(default_factory=TutorRewardConfig)
     teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
     teacher_user_prompt_template: str = field(default=TEACHER_STATE_USER_TEMPLATE)
     student_system_prompt: str = field(default=DEFAULT_STUDENT_SYSTEM_PROMPT)
     leak_check_system_prompt: str = field(default=DEFAULT_LEAK_CHECK_SYSTEM_PROMPT)
-    answer_judge_system_prompt: str = field(
-        default=DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT
-    )
+    answer_judge_system_prompt: str = field(default=DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT)
     summary_system_prompt: str = field(default=DEFAULT_SUMMARY_SYSTEM_PROMPT)
     debug_trace_dir: str = field(
         default="",

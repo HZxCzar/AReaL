@@ -182,6 +182,32 @@ def _reward_component_key(name: str) -> str:
     return _REWARD_COMPONENT_ALIASES.get(name, name)
 
 
+_STUDENT_GENERALIZE_LEVELS = ("level1", "level2")
+
+
+@dataclass(slots=True)
+class StudentGeneralizationCase:
+    level: str
+    task: str
+    ground_truth: str
+    reward: float
+
+
+@dataclass(slots=True)
+class StudentGeneralizationResult:
+    level: str
+    task: str = ""
+    ground_truth: str = ""
+    attempted: bool = False
+    skipped: bool = False
+    skip_reason: str = ""
+    student_output: str = ""
+    student_error: str | None = None
+    judge_result: JudgeResult | None = None
+    reward: float = 0.0
+    public_history: str = ""
+
+
 class TutorAgentWorkflow(RolloutWorkflow):
     def __init__(
         self,
@@ -233,6 +259,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         tokenizer_path: str | None = None,
         model_context_length: int | None = None,
         context_window_margin: int = 256,
+        student_generalize_enabled: bool = False,
+        student_generalize_path: str = "",
+        student_generalize_level1_reward: float = 0.2,
+        student_generalize_level2_reward: float = 0.5,
         pairwise_reward_enabled: bool = False,
         pairwise_reference_lag_steps: int = 5,
         pairwise_reward_scale: float = 0.05,
@@ -295,6 +325,17 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.debug_trace_dir = debug_trace_dir.strip() if debug_trace_dir else ""
         self.debug_trace_every_n_rollouts = max(1, int(debug_trace_every_n_rollouts))
         self.max_train_sample_tokens = max_train_sample_tokens
+        self.student_generalize_enabled = bool(student_generalize_enabled)
+        self.student_generalize_path = student_generalize_path.strip()
+        self.student_generalize_level_rewards = {
+            "level1": float(student_generalize_level1_reward),
+            "level2": float(student_generalize_level2_reward),
+        }
+        self.student_generalize_bank = (
+            self._load_student_generalize_bank(self.student_generalize_path)
+            if self.student_generalize_enabled and self.student_generalize_path
+            else {}
+        )
         self.pairwise_reward_enabled = bool(pairwise_reward_enabled)
         self.pairwise_reference_lag_steps = max(0, int(pairwise_reference_lag_steps))
         self.pairwise_reward_scale = float(pairwise_reward_scale)
@@ -302,6 +343,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.pairwise_judge_both_incorrect = bool(pairwise_judge_both_incorrect)
         self.last_history: list[dict[str, Any]] = []
         self.last_traces: list[TurnTrace] = []
+        self.last_student_generalization_results: list[StudentGeneralizationResult] = []
         self.last_total_reward = 0.0
         self.tokenizer = (
             load_hf_tokenizer(tokenizer) if isinstance(tokenizer, str) else tokenizer
@@ -377,6 +419,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         task = str(data["task"])
         ground_truth = str(data["ground_truth"])
         trajectory_id = uuid.uuid4().int & ((1 << 63) - 1)
+        self.last_student_generalization_results = []
         turn_artifacts: list[TurnArtifact] = []
         leak_count = 0
         termination_reason = "max_turns"
@@ -436,6 +479,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if initial_judge_result.correct:
             self.last_history = []
             self.last_traces = []
+            self.last_student_generalization_results = []
             self.last_total_reward = 0.0
             termination_reason = "pre_solved"
             episode_artifact = EpisodeArtifact(
@@ -591,6 +635,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
             leak_count=leak_count,
             latest_student_answer=previous_student_output,
         )
+        student_generalization_results = await self._run_student_generalization(
+            data,
+            episode_artifact,
+            aux_caller=aux_caller,
+            answer_judge_caller=answer_judge_caller,
+        )
         reward_computer = EpisodeRewardComputer(
             success_reward=self.success_reward,
             leak_penalty=self.leak_penalty,
@@ -621,6 +671,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         assignments = await reward_computer.compute(
             episode_artifact, pairwise_rewards=pairwise_rewards
         )
+        self._apply_student_generalization_rewards(
+            turn_artifacts, assignments, student_generalization_results
+        )
         traces = [
             artifact_to_trace(artifact, assignment)
             for artifact, assignment in zip(turn_artifacts, assignments, strict=True)
@@ -645,6 +698,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         total_reward = float(sum(assignment.reward for assignment in assignments))
         self.last_history = history
         self.last_traces = traces
+        self.last_student_generalization_results = student_generalization_results
         self.last_total_reward = total_reward
         self._log_rollout_stats(
             total_reward=total_reward,
@@ -652,6 +706,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             termination_reason=episode_artifact.termination_reason,
             pre_success=episode_artifact.pre_success,
             leak_count=episode_artifact.leak_count,
+            student_generalization_results=student_generalization_results,
         )
         self._maybe_dump_debug_trace(
             task=episode_artifact.task,
@@ -663,6 +718,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             termination_reason=episode_artifact.termination_reason,
             pre_success=episode_artifact.pre_success,
             leak_count=episode_artifact.leak_count,
+            student_generalization_results=student_generalization_results,
         )
         if not results:
             return None
@@ -851,9 +907,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         )
         leak_count = 0
-        for artifact, leak_result in zip(
-            turn_artifacts, leak_results, strict=True
-        ):
+        for artifact, leak_result in zip(turn_artifacts, leak_results, strict=True):
             artifact.leak_result = leak_result
             leak_count += int(leak_result.leaked)
         return leak_count
@@ -1129,6 +1183,212 @@ class TutorAgentWorkflow(RolloutWorkflow):
             extracted_answer=extracted_answer,
         )
 
+    @staticmethod
+    def _load_student_generalize_bank(path: str) -> dict[str, Any]:
+        if not path:
+            return {}
+        file_path = Path(path)
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"student_generalize sidecar must be a JSON object: {file_path}"
+            )
+        return payload
+
+    def _student_generalization_cases(
+        self, data: dict[str, Any]
+    ) -> dict[str, StudentGeneralizationCase]:
+        payload: Any | None = None
+        sample_id = data.get("id")
+        bank = getattr(self, "student_generalize_bank", {}) or {}
+        if sample_id is not None and str(sample_id) in bank:
+            payload = bank[str(sample_id)]
+        else:
+            metadata = data.get("metadata")
+            if isinstance(metadata, dict):
+                payload = metadata.get("student_generalize")
+
+        if not isinstance(payload, dict):
+            return {}
+
+        rewards = getattr(self, "student_generalize_level_rewards", {}) or {}
+        cases: dict[str, StudentGeneralizationCase] = {}
+        for level in _STUDENT_GENERALIZE_LEVELS:
+            item = payload.get(level)
+            if not isinstance(item, dict):
+                continue
+            task = item.get("task")
+            ground_truth = item.get("ground_truth")
+            if task is None or ground_truth is None:
+                continue
+            cases[level] = StudentGeneralizationCase(
+                level=level,
+                task=str(task),
+                ground_truth=str(ground_truth),
+                reward=float(rewards.get(level, 0.0)),
+            )
+        return cases
+
+    def _success_turn(self, episode_artifact: EpisodeArtifact) -> TurnArtifact | None:
+        if episode_artifact.termination_reason != "success":
+            return None
+        for artifact in episode_artifact.turns:
+            if artifact.judge_result is not None and artifact.judge_result.correct:
+                return artifact
+        return None
+
+    async def _run_student_generalization(
+        self,
+        data: dict[str, Any],
+        episode_artifact: EpisodeArtifact,
+        *,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller,
+        answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
+    ) -> list[StudentGeneralizationResult]:
+        if not bool(getattr(self, "student_generalize_enabled", False)):
+            return []
+
+        success_turn = self._success_turn(episode_artifact)
+        if success_turn is None:
+            return []
+
+        cases = self._student_generalization_cases(data)
+        success_turn_count = 0
+        if success_turn.student_state is not None:
+            success_turn_count = (
+                success_turn.student_state.public_history.turn_count + 1
+            )
+        success_history = PublicHistoryState(
+            summary=success_turn.public_history_after,
+            turn_count=success_turn_count,
+        )
+        results: list[StudentGeneralizationResult] = []
+        for level in _STUDENT_GENERALIZE_LEVELS:
+            case = cases.get(level)
+            if case is None:
+                results.append(
+                    StudentGeneralizationResult(
+                        level=level,
+                        skipped=True,
+                        skip_reason="missing_variant",
+                        public_history=success_history.summary,
+                    )
+                )
+                continue
+
+            state = StudentTurnState(
+                task=case.task,
+                public_history=PublicHistoryState(
+                    summary=success_history.summary,
+                    turn_count=success_history.turn_count,
+                ),
+                previous_student_output=success_turn.student_output,
+                latest_tutor_visible_output=success_turn.tutor_visible_output,
+            )
+            student_output, student_error = await self._run_student(
+                state, aux_caller=aux_caller
+            )
+            student_output = _strip_reasoning_for_context(student_output)
+            judge_result = None
+            reward = 0.0
+            if student_error is None:
+                judge_result = await self._score_answer_async(
+                    case.task,
+                    case.ground_truth,
+                    student_output,
+                    answer_judge_caller=answer_judge_caller,
+                )
+                if judge_result.correct:
+                    reward = case.reward
+            results.append(
+                StudentGeneralizationResult(
+                    level=level,
+                    task=case.task,
+                    ground_truth=case.ground_truth,
+                    attempted=True,
+                    student_output=student_output,
+                    student_error=student_error,
+                    judge_result=judge_result,
+                    reward=reward,
+                    public_history=success_history.summary,
+                )
+            )
+        return results
+
+    def _apply_student_generalization_rewards(
+        self,
+        turn_artifacts: list[TurnArtifact],
+        assignments: list[Any],
+        student_generalization_results: list[StudentGeneralizationResult],
+    ) -> None:
+        if not student_generalization_results:
+            return
+        success_idx = next(
+            (
+                idx
+                for idx, artifact in enumerate(turn_artifacts)
+                if artifact.judge_result is not None and artifact.judge_result.correct
+            ),
+            None,
+        )
+        if success_idx is None:
+            return
+        assignment = assignments[success_idx]
+        for result in student_generalization_results:
+            if not result.reward:
+                continue
+            key = f"student_generalize_{result.level}"
+            assignment.reward_components[key] = assignment.reward_components.get(
+                key, 0.0
+            ) + float(result.reward)
+            assignment.reward += float(result.reward)
+
+    def _student_generalization_metrics(
+        self, results: list[StudentGeneralizationResult] | None
+    ) -> dict[str, float]:
+        if not bool(getattr(self, "student_generalize_enabled", False)) and not results:
+            return {}
+        results = results or []
+        metrics: dict[str, float] = {
+            "student_generalize/attempted": float(
+                sum(1 for result in results if result.attempted)
+            ),
+            "student_generalize/skipped": float(
+                sum(1 for result in results if result.skipped)
+            ),
+        }
+        for level in _STUDENT_GENERALIZE_LEVELS:
+            level_result = next(
+                (result for result in results if result.level == level), None
+            )
+            correct = bool(
+                level_result is not None
+                and level_result.judge_result is not None
+                and level_result.judge_result.correct
+            )
+            metrics[f"student_generalize/{level}_correct"] = float(correct)
+        return metrics
+
+    @staticmethod
+    def _student_generalization_result_to_json(
+        result: StudentGeneralizationResult,
+    ) -> dict[str, Any]:
+        judge = result.judge_result
+        return {
+            "level": result.level,
+            "task": result.task,
+            "ground_truth": result.ground_truth,
+            "attempted": bool(result.attempted),
+            "skipped": bool(result.skipped),
+            "skip_reason": result.skip_reason,
+            "student_output": result.student_output,
+            "student_error": result.student_error,
+            "judge_correct": bool(judge.correct) if judge is not None else False,
+            "judge_feedback": judge.feedback if judge is not None else "",
+            "reward": float(result.reward),
+            "public_history": result.public_history,
+        }
+
     def _should_run_pairwise_reward(
         self, engine: Any | None, turn_artifacts: list[TurnArtifact]
     ) -> bool:
@@ -1238,13 +1498,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         termination_reason: str,
         pre_success: bool,
         leak_count: int,
+        student_generalization_results: list[StudentGeneralizationResult] | None = None,
     ) -> None:
         success_round = next(
-            (
-                trace.turn_idx
-                for trace in traces
-                if trace.judge_correct
-            ),
+            (trace.turn_idx for trace in traces if trace.judge_correct),
             0,
         )
         metrics = {
@@ -1262,23 +1519,36 @@ class TutorAgentWorkflow(RolloutWorkflow):
             metrics["solve_turn"] = int(success_round)
 
         metrics.update(self._reward_component_metrics(traces))
+        metrics.update(
+            self._student_generalization_metrics(student_generalization_results)
+        )
         _safe_scalar(**metrics)
 
     def _enabled_reward_component_keys(self) -> list[str]:
         keys = []
-        if self.success_reward or self.early_success_bonus:
+        if getattr(self, "success_reward", 0.0) or getattr(
+            self, "early_success_bonus", 0.0
+        ):
             keys.append("success")
-        if self.leak_penalty:
+        if getattr(self, "leak_penalty", 0.0):
             keys.append("leak")
-        if self.enable_turn_penalty and self.turn_penalty:
+        if getattr(self, "enable_turn_penalty", False) and getattr(
+            self, "turn_penalty", 0.0
+        ):
             keys.append("turn_penalty")
-        if (
-            self.length_penalty_threshold_chars > 0
-            and self.length_penalty_per_100_chars
+        if getattr(self, "length_penalty_threshold_chars", 0) > 0 and getattr(
+            self, "length_penalty_per_100_chars", 0.0
         ):
             keys.append("length_penalty")
-        if self.pairwise_reward_enabled and self.pairwise_reward_scale:
+        if getattr(self, "pairwise_reward_enabled", False) and getattr(
+            self, "pairwise_reward_scale", 0.0
+        ):
             keys.append("pairwise")
+        if getattr(self, "student_generalize_enabled", False):
+            rewards = getattr(self, "student_generalize_level_rewards", {}) or {}
+            for level in _STUDENT_GENERALIZE_LEVELS:
+                if rewards.get(level, 0.0):
+                    keys.append(f"student_generalize_{level}")
         return keys
 
     def _reward_component_metrics(self, traces: list[TurnTrace]) -> dict[str, float]:
@@ -1314,6 +1584,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         termination_reason: str,
         pre_success: bool,
         leak_count: int,
+        student_generalization_results: list[StudentGeneralizationResult] | None = None,
     ) -> None:
         if not self.debug_trace_dir:
             return
@@ -1340,6 +1611,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "initial_student_answer": initial_student_answer,
                 "latest_student_answer": latest_student_answer,
                 "turns": [trace_to_json(trace) for trace in traces],
+                "student_generalization": [
+                    self._student_generalization_result_to_json(result)
+                    for result in (student_generalization_results or [])
+                ],
             }
             file_path.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2),
