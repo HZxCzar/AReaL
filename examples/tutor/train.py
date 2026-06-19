@@ -15,12 +15,14 @@ from areal.utils.hf_utils import load_hf_tokenizer
 
 def main(args):
     config_path = pathlib.Path(args[args.index("--config") + 1])
-    trial_name = next(
-        line.split(":", 1)[1].strip().strip("'\"")
-        for line in config_path.read_text(encoding="utf-8").splitlines()
-        if line.startswith("trial_name:")
-    )
-    args = [*args, f"trial_name={datetime.now():%Y%m%d_%H%M%S}_{trial_name}"]
+    has_trial_name_override = any(arg.startswith("trial_name=") for arg in args)
+    if not has_trial_name_override:
+        trial_name = next(
+            line.split(":", 1)[1].strip().strip("'").strip('"')
+            for line in config_path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("trial_name:")
+        )
+        args = [*args, f"trial_name={datetime.now():%Y%m%d_%H%M%S}_{trial_name}"]
     config, _ = load_expr_config(args, TutorConfig)
     auxiliary_model = config.auxiliary_model
     reward = config.reward
