@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
-from examples.tutor.core.types import JudgeResult
-from examples.tutor.scripts.filter_with_llm_judge import (
+from examples.math_tutor.core.types import JudgeResult
+from examples.math_tutor.scripts.filter_with_llm_judge import (
     classify_pre_solved_row,
     classify_teacher_solved_row,
 )

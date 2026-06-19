@@ -116,19 +116,19 @@ from examples.common.openai_utils import (
     make_teacher_client,
 )
 from examples.common.parsing import join_errors, parse_json_dict
-from examples.tutor.core.callers import (
+from examples.math_tutor.core.callers import (
     ApiAuxiliaryCaller,
     AReaLEngineActorCaller,
     AReaLEngineAuxiliaryCaller,
     AReaLEngineChatCaller,
     ExternalActorCaller,
 )
-from examples.tutor.core.generation_budget import (
+from examples.math_tutor.core.generation_budget import (
     CONTEXT_BUDGET_TERMINATION_REASON,
     ContextBudgetLimitExceeded,
 )
-from examples.tutor.core.tensors import response_to_tensordict
-from examples.tutor.core.text import strip_reasoning_for_context
+from examples.math_tutor.core.tensors import response_to_tensordict
+from examples.math_tutor.core.text import strip_reasoning_for_context
 
 logger = logging.getLogger("CodeCoachWorkflow")
 

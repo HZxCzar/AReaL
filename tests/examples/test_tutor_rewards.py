@@ -5,12 +5,12 @@ import types
 
 import pytest
 
-from examples.tutor import workflow as tutor_workflow
-from examples.tutor.core.callers import TextCallResult
-from examples.tutor.core.math import score_math_answer
-from examples.tutor.core.pairwise import PairwiseTutorEvaluator
-from examples.tutor.core.rewards import EpisodeRewardComputer
-from examples.tutor.core.types import (
+from examples.math_tutor import workflow as tutor_workflow
+from examples.math_tutor.core.callers import TextCallResult
+from examples.math_tutor.core.math import score_math_answer
+from examples.math_tutor.core.pairwise import PairwiseTutorEvaluator
+from examples.math_tutor.core.rewards import EpisodeRewardComputer
+from examples.math_tutor.core.types import (
     EpisodeArtifact,
     JudgeResult,
     LeakCheckResult,
@@ -757,4 +757,3 @@ def test_reward_component_share_is_zero_when_enabled_components_are_absent():
         "reward_component/leak": 0.0,
         "reward_share/leak": 0.0,
     }
-

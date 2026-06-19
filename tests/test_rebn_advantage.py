@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from examples.tutor.core.tensors import response_to_tensordict
+from examples.math_tutor.core.tensors import response_to_tensordict
 
 from areal.api.cli_args import NormConfig, PPOActorConfig, PPOConfig, PPOCriticConfig
 from areal.utils.data import KLEstimator, Normalization

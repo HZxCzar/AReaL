@@ -1,0 +1,230 @@
+﻿experiment_name: tutor-math-baseline
+trial_name: qwen8b-thinking-self-turn10-baseline-overfit-1-no-leak
+
+seed: 42
+enable_offload: false
+total_train_epochs: 200
+tokenizer_path: ${actor.path}
+
+workflow: examples.math_tutor.workflow.TutorAgentWorkflow
+eval_workflow: ${workflow}
+answer_scorer: math
+max_turns: 10
+enable_thinking: true
+enable_leak_check: false
+teacher_show_ground_truth: false
+
+auxiliary_model:
+  mode: self
+  enable_thinking: false
+  max_tokens: 1024
+  temperature: 0.0
+  max_concurrent_calls: 4
+  answer_judge_enabled: true
+
+reward:
+  success: 1.0
+  assign_success_reward: false
+  leak_penalty: 0
+  outcome_prior_turn_weight: 0.5
+  outcome_credit_gamma: 0.9
+  early_success_bonus: 0.0
+  enable_turn_penalty: false
+  turn_penalty: -0.01
+  length_penalty_threshold_chars: 0
+  length_penalty_per_100_chars: 0.0
+  length_penalty_min: 0.0
+  pairwise:
+    enabled: false
+    reference_lag_steps: 5
+    scale: 0.05
+    compare_all_turns: true
+
+debug_trace_dir: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/debug_traces/${experiment_name}/${trial_name}
+debug_trace_every_n_rollouts: 10
+
+cluster:
+  n_nodes: 1
+  n_gpus_per_node: 8
+  fileroot: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor
+  name_resolve:
+    type: nfs
+    nfs_record_root: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/name_resolve
+
+scheduler:
+  type: local
+
+rollout:
+  backend: "sglang:d4p1t1"
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  tokenizer_path: ${tokenizer_path}
+  max_concurrent_rollouts: 8
+  queue_size: null
+  consumer_batch_size: ${train_dataset.batch_size}
+  max_head_offpolicyness: 2
+  pause_grace_period: 10
+  enable_rollout_tracing: false
+  scheduling_spec: ${actor.scheduling_spec}
+  use_lora: true
+  dump_to_file: true
+  openai:
+    mode: inline
+    tool_call_parser: qwen25
+    reasoning_parser: qwen3
+    chat_template_type: concat
+    export_style: concat
+    turn_discount: 1.0
+
+gconfig:
+  n_samples: 1
+  min_new_tokens: 0
+  max_new_tokens: 16384
+  max_tokens: 32768
+  greedy: false
+  temperature: 0.6
+  top_p: 1.0
+  lora_name: default_lora
+
+eval_gconfig:
+  n_samples: 1
+  min_new_tokens: 0
+  max_new_tokens: 16384
+  max_tokens: 32768
+  greedy: false
+  temperature: 0.6
+  top_p: 1.0
+  lora_name: default_lora
+
+actor:
+  backend: "fsdp:d4p1t1"
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+  init_from_scratch: false
+  disable_dropout: true
+  gradient_checkpointing: true
+  dtype: bfloat16
+  mb_spec:
+    max_tokens_per_mb: 32768
+  optimizer:
+    type: adam
+    lr: 1.0e-5
+    weight_decay: 0.0
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1e-8
+    lr_scheduler_type: constant
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.001
+  eps_clip: 0.2
+  use_ppo_clip: true
+  advantage_estimator: rebn
+  turn_discount: 1.0
+  temperature: ${gconfig.temperature}
+  reward_scaling: 1.0
+  reward_bias: 0.0
+  kl_ctl: 3.0e-3
+  ppo_n_minibatches: 4
+  recompute_logprob: true
+  use_decoupled_loss: true
+  behave_imp_weight_cap: 5.0
+  reward_norm: null
+  adv_norm:
+    mean_level: batch
+    std_level: batch
+  weight_update_mode: disk
+  use_lora: ${rollout.use_lora}
+  peft_type: lora
+  lora_rank: 16
+  lora_alpha: 16
+  target_modules: [all-linear]
+  max_new_tokens: ${gconfig.max_new_tokens}
+  scheduling_spec:
+    - task_type: worker
+      port_count: 2
+      gpu: 1
+      cmd: python3 -m areal.infra.rpc.rpc_server
+      env_vars: {}
+
+ref:
+  backend: ${actor.backend}
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${actor.path}
+  init_from_scratch: false
+  disable_dropout: true
+  dtype: ${actor.dtype}
+  mb_spec:
+    max_tokens_per_mb: 32768
+  optimizer: null
+  scheduling_strategy:
+    type: colocation
+    target: actor
+  scheduling_spec: ${actor.scheduling_spec}
+
+sglang:
+  model_path: ${actor.path}
+  random_seed: ${seed}
+  skip_tokenizer_init: true
+  dtype: ${actor.dtype}
+  max_running_requests: 4
+  context_length: 40960
+  mem_fraction_static: 0.75
+  enable_lora: ${actor.use_lora}
+  max_lora_rank: ${actor.lora_rank}
+  max_loaded_loras: 16
+
+train_dataset:
+  batch_size: 16
+  shuffle: true
+  pin_memory: false
+  num_workers: 0
+  path: examples/tutor/data/math_dataset_llm_judge_overfit_1
+  type: rl
+  max_length: 16384
+
+valid_dataset:
+  batch_size: ${train_dataset.batch_size}
+  pin_memory: false
+  num_workers: 0
+  path: examples/tutor/data/math_dataset_llm_judge_overfit_1
+  type: rl
+
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 10
+  freq_steps: null
+  freq_secs: null
+
+recover:
+  mode: disabled
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 10
+  freq_steps: null
+  freq_secs: 3600
+
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 20
+  freq_secs: null
+  max_samples: 32
+
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: offline
+    entity: hz-czar-stanford
+    project: TAgent
+    name: ${trial_name}
+
