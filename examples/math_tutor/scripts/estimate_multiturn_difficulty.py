@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 # ruff: noqa: E402, I001
 
@@ -34,7 +34,7 @@ from examples.math_tutor.core.text import strip_reasoning_for_context
 
 logger = logging.getLogger("TutorMultiturnDifficulty")
 
-DEFAULT_CONFIG_PATH = "examples/tutor/configs/math/baseline-overfit-2.yaml"
+DEFAULT_CONFIG_PATH = "examples/math_tutor/configs/math/baseline-overfit-2.yaml"
 DEFAULT_BASE_URL = "http://127.0.0.1:30008/v1"
 DEFAULT_MODEL = "default"
 DEFAULT_ATTEMPTS = 3

@@ -10,12 +10,12 @@ transcript text.
 Prepare a HuggingFace dataset on disk from an AIME manifest:
 
 ```bash
-python3 examples/tutor/prepare_dataset.py \
+python3 examples/math_tutor/prepare_dataset.py \
   --format aime \
-  --manifest /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AgentGym-RL/examples/tutor/aime_manifest.json \
+  --manifest /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AgentGym-RL/examples/math_tutor/aime_manifest.json \
   --train-ids /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AgentGym-RL/AgentGym-RL/AgentItemId/tutor_train.json \
   --test-ids /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AgentGym-RL/AgentGym-RL/AgentItemId/tutor_test.json \
-  --output /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/aime_dataset
+  --output /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/math_tutor/aime_dataset
 ```
 
 Each dataset sample contains:
@@ -29,24 +29,24 @@ If `--train-ids` and `--test-ids` are provided, the split follows the old
 `AgentItemId/tutor_train.json` and `AgentItemId/tutor_test.json` files instead of using
 the last `N` samples as test data.
 
-To convert the checked-in MATH JSONL files under `examples/tutor/raw_data/`:
+To convert the checked-in MATH JSONL files under `examples/math_tutor/raw_data/`:
 
 ```bash
-python3 examples/tutor/prepare_dataset.py \
+python3 examples/math_tutor/prepare_dataset.py \
   --format math \
-  --train-jsonl examples/tutor/raw_data/math_train.jsonl \
-  --test-jsonl examples/tutor/raw_data/math_test.jsonl \
-  --output examples/tutor/data/math_dataset
+  --train-jsonl examples/math_tutor/raw_data/math_train.jsonl \
+  --test-jsonl examples/math_tutor/raw_data/math_test.jsonl \
+  --output examples/math_tutor/data/math_dataset
 ```
 
 Then point training/eval at that saved dataset and switch the answer scorer:
 
 ```bash
-python3 examples/tutor/train.py \
-  --config examples/tutor/config.yaml \
+python3 examples/math_tutor/train.py \
+  --config examples/math_tutor/config.yaml \
   answer_scorer=math \
-  train_dataset.path=examples/tutor/data/math_dataset \
-  valid_dataset.path=examples/tutor/data/math_dataset \
+  train_dataset.path=examples/math_tutor/data/math_dataset \
+  valid_dataset.path=examples/math_tutor/data/math_dataset \
   scheduler.type=local
 ```
 
@@ -63,10 +63,10 @@ Before training, optionally remove train rows that the auxiliary student can sol
 without tutor feedback:
 
 ```bash
-python3 examples/tutor/filter_pre_solved.py \
-  --config examples/tutor/config.yaml \
-  --input /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/aime_dataset \
-  --output /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/aime_dataset_no_pre_solve \
+python3 examples/math_tutor/filter_pre_solved.py \
+  --config examples/math_tutor/config.yaml \
+  --input /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/math_tutor/aime_dataset \
+  --output /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/math_tutor/aime_dataset_no_pre_solve \
   --splits train \
   --attempts 1 \
   --overwrite
@@ -77,16 +77,16 @@ student with `auxiliary_model` settings from the resolved config (`base_url`, `m
 `max_tokens`, `temperature`, `top_p`, timeout, API params, and concurrency):
 
 ```bash
-python3 examples/tutor/filter_pre_solved.py \
-  --config examples/tutor/config.yaml \
-  --input examples/tutor/data/math_dataset \
-  --output examples/tutor/data/math_dataset_no_pre_solve \
+python3 examples/math_tutor/filter_pre_solved.py \
+  --config examples/math_tutor/config.yaml \
+  --input examples/math_tutor/data/math_dataset \
+  --output examples/math_tutor/data/math_dataset_no_pre_solve \
   --splits train \
   --attempts 1 \
   --overwrite \
   answer_scorer=math \
-  train_dataset.path=examples/tutor/data/math_dataset \
-  valid_dataset.path=examples/tutor/data/math_dataset
+  train_dataset.path=examples/math_tutor/data/math_dataset \
+  valid_dataset.path=examples/math_tutor/data/math_dataset
 ```
 
 The output dataset keeps unselected splits unchanged, so both `train_dataset.path` and
@@ -101,9 +101,9 @@ Use the same auxiliary student and filtered training rows, but type tutor feedba
 hand:
 
 ```bash
-python3 examples/tutor/manual_tutor.py \
-  --config examples/tutor/config.yaml \
-  --dataset examples/tutor/aime_dataset_no_pre_solve \
+python3 examples/math_tutor/manual_tutor.py \
+  --config examples/math_tutor/config.yaml \
+  --dataset examples/math_tutor/aime_dataset_no_pre_solve \
   --random
 ```
 
@@ -116,8 +116,8 @@ disable that penalty signal.
 ## Train
 
 ```bash
-python3 examples/tutor/train.py \
-  --config examples/tutor/config.yaml \
+python3 examples/math_tutor/train.py \
+  --config examples/math_tutor/config.yaml \
   scheduler.type=local
 ```
 
@@ -132,7 +132,7 @@ additional OpenAI request kwargs under `request_params`, including backend-speci
 ```bash
 cd /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL
 
-python examples/tutor/scripts/estimate_multiturn_difficulty.py   --config /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/configs/math/baseline-overfit-1.yaml   --input /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/math_dataset_train_llm_judge   --output /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/math_dataset_train_llm_judge_multiturn_difficulty   --report /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/report/math_dataset_train_llm_judge_multiturn_difficulty_report.json   --csv /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/report/math_dataset_train_llm_judge_multiturn_difficulty.csv   --splits train   --base-url http://127.0.0.1:30008/v1   --model default   --attempts 3   --partial-every 10   --overwrite
+python examples/math_tutor/scripts/estimate_multiturn_difficulty.py   --config /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/math_tutor/configs/math/baseline-overfit-1.yaml   --input /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/math_tutor/data/math_dataset_train_llm_judge   --output /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/math_tutor/data/math_dataset_train_llm_judge_multiturn_difficulty   --report /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/math_tutor/report/math_dataset_train_llm_judge_multiturn_difficulty_report.json   --csv /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/math_tutor/report/math_dataset_train_llm_judge_multiturn_difficulty.csv   --splits train   --base-url http://127.0.0.1:30008/v1   --model default   --attempts 3   --partial-every 10   --overwrite
 
-python examples/tutor/scripts/estimate_multiturn_difficulty.py   --config /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/configs/math/baseline-overfit-1.yaml   --input /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/math_dataset_test_llm_judge   --output /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/math_dataset_test_llm_judge_multiturn_difficulty   --report /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/report/math_dataset_test_llm_judge_multiturn_difficulty_report.json   --csv /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/report/math_dataset_test_llm_judge_multiturn_difficulty.csv   --splits test   --base-url http://127.0.0.1:30008/v1   --model default   --attempts 3   --partial-every 10   --overwrite
+python examples/math_tutor/scripts/estimate_multiturn_difficulty.py   --config /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/math_tutor/configs/math/baseline-overfit-1.yaml   --input /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/math_tutor/data/math_dataset_test_llm_judge   --output /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/math_tutor/data/math_dataset_test_llm_judge_multiturn_difficulty   --report /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/math_tutor/report/math_dataset_test_llm_judge_multiturn_difficulty_report.json   --csv /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/math_tutor/report/math_dataset_test_llm_judge_multiturn_difficulty.csv   --splits test   --base-url http://127.0.0.1:30008/v1   --model default   --attempts 3   --partial-every 10   --overwrite
 ```

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -11,15 +11,16 @@ from pathlib import Path
 from typing import Any
 
 _THIS_DIR = pathlib.Path(__file__).resolve().parent
-_REPO_ROOT = _THIS_DIR.parents[1]
-sys.path.append(str(_THIS_DIR))
+_TUTOR_DIR = _THIS_DIR.parent
+_REPO_ROOT = _TUTOR_DIR.parent.parent
+sys.path.append(str(_TUTOR_DIR))
 sys.path.append(str(_REPO_ROOT))
 
 from examples.math_tutor.core.text import (  # noqa: E402
     strip_reasoning_for_context as _strip_reasoning_for_context,
 )
 
-DEFAULT_FILTERED_DATASET = _THIS_DIR / "aime_dataset_no_pre_solve"
+DEFAULT_FILTERED_DATASET = _TUTOR_DIR / "aime_dataset_no_pre_solve"
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,12 +30,12 @@ def parse_args() -> argparse.Namespace:
             "by a human tutor on rows from the filtered tutor training dataset."
         )
     )
-    parser.add_argument("--config", default="examples/tutor/config.yaml")
+    parser.add_argument("--config", default="examples/math_tutor/config.yaml")
     parser.add_argument(
         "--dataset",
         default="",
         help=(
-            "HuggingFace dataset path. Defaults to examples/tutor/"
+            "HuggingFace dataset path. Defaults to examples/math_tutor/"
             "aime_dataset_no_pre_solve when present, otherwise "
             "config.train_dataset.path."
         ),
@@ -58,7 +59,7 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         default="",
         help=(
-            "Directory for transcript.json. Defaults to examples/tutor/manual_output/"
+            "Directory for transcript.json. Defaults to examples/math_tutor/manual_output/"
             "<timestamp>. Pass 'none' to disable saving."
         ),
     )
@@ -199,7 +200,7 @@ def resolve_output_dir(output_dir_arg: str) -> Path | None:
     if output_dir_arg:
         return Path(output_dir_arg).expanduser().resolve()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return (_THIS_DIR / "manual_output" / timestamp).resolve()
+    return (_TUTOR_DIR / "manual_output" / timestamp).resolve()
 
 
 def print_block(title: str, body: str) -> None:

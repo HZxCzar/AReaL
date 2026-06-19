@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -26,7 +26,7 @@ sys.path.insert(0, str(_TUTOR_DIR))
 
 from examples.math_tutor.core.types import PublicHistoryState, StudentTurnState  # noqa: E402
 
-DEFAULT_CONFIG_PATH = "examples/tutor/configs/math/baseline.yaml"
+DEFAULT_CONFIG_PATH = "examples/math_tutor/configs/math/baseline.yaml"
 DEFAULT_STUDENT_BASE_URL = "http://127.0.0.1:30008/v1"
 DEFAULT_STUDENT_MODEL = "default"
 

@@ -9,10 +9,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DATASET = Path("examples/tutor/data/baseline-qwen3-8B")
-DEFAULT_OUTPUT = Path("examples/tutor/data/baseline-qwen3-8B-difficulty")
-DEFAULT_REPORT = Path("examples/tutor/report/baseline-qwen3-8B_difficulty_report.json")
-DEFAULT_CSV = Path("examples/tutor/report/baseline-qwen3-8B_difficulty.csv")
+DEFAULT_DATASET = Path("examples/math_tutor/data/baseline-qwen3-8B")
+DEFAULT_OUTPUT = Path("examples/math_tutor/data/baseline-qwen3-8B-difficulty")
+DEFAULT_REPORT = Path("examples/math_tutor/report/baseline-qwen3-8B_difficulty_report.json")
+DEFAULT_CSV = Path("examples/math_tutor/report/baseline-qwen3-8B_difficulty.csv")
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _TAGENT_ROOT = _REPO_ROOT.parent
 

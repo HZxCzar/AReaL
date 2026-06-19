@@ -1,4 +1,4 @@
-﻿experiment_name: tutor-aime
+experiment_name: tutor-aime
 trial_name: qwen8b-qwen4b-turn10-ep200
 
 seed: 42
@@ -180,7 +180,7 @@ train_dataset:
   shuffle: true
   pin_memory: false
   num_workers: 0
-  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/aime_dataset_no_pre_solve
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/math_tutor/data/aime_dataset_no_pre_solve
   type: rl
   # Per-sample length
   max_length: 16384
@@ -189,7 +189,7 @@ valid_dataset:
   batch_size: 4
   pin_memory: false
   num_workers: 0
-  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/aime_dataset_no_pre_solve
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/math_tutor/data/aime_dataset_no_pre_solve
   type: rl
 
 saver:

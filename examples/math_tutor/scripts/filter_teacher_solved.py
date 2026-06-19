@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -26,7 +26,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_TUTOR_DIR))
 
 
-DEFAULT_CONFIG_PATH = "examples/tutor/configs/math/baseline.yaml"
+DEFAULT_CONFIG_PATH = "examples/math_tutor/configs/math/baseline.yaml"
 DEFAULT_TEACHER_BASE_URL = "http://127.0.0.1:30008/v1"
 DEFAULT_SOLVER_SYSTEM_PROMPT = (
     "You are a careful math solver. Solve the problem independently. "

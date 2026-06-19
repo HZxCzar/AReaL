@@ -1,4 +1,4 @@
-﻿experiment_name: tutor-math-baseline
+experiment_name: tutor-math-baseline
 trial_name: qwen8b-thinking-self-turn10-baseline-overfit-2-leak-with-gt
 
 seed: 42
@@ -181,7 +181,7 @@ train_dataset:
   shuffle: true
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_llm_judge_overfit_2
+  path: examples/math_tutor/data/math_dataset_llm_judge_overfit_2
   type: rl
   max_length: 16384
 
@@ -189,7 +189,7 @@ valid_dataset:
   batch_size: ${train_dataset.batch_size}
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_llm_judge_overfit_2
+  path: examples/math_tutor/data/math_dataset_llm_judge_overfit_2
   type: rl
 
 saver:

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-CONFIG="${1:-"examples/tutor/config.yaml"}"
+CONFIG="${1:-"examples/math_tutor/config.yaml"}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -10,5 +10,5 @@ export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 
-python examples/tutor/train.py \
+python examples/math_tutor/train.py \
   --config "$CONFIG"
