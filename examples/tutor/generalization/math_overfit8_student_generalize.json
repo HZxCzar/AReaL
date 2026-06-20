@@ -78,5 +78,85 @@
       "task": "Let f(x) = x/10 if x is a multiple of both 2 and 5, f(x) = 2x if x is only a multiple of 5, f(x) = 5x if x is only a multiple of 2, and f(x) = x+4 if x is not a multiple of 2 or 5. If f^a(x) means the function is nested a times, what is the smallest value of a greater than 1 that satisfies f(1)=f^a(1)?",
       "ground_truth": "4"
     }
+  },
+  "test-1527": {
+    "level1": {
+      "task": "How many ways are there to put 8 differently colored beads on a 2 by 4 grid if the purple bead and the green bead cannot be adjacent horizontally, vertically, or diagonally, and rotations and reflections of the rectangle are considered the same?",
+      "ground_truth": "4320"
+    },
+    "level2": {
+      "task": "How many ways are there to put 9 differently colored beads on a 3 by 3 grid if the purple bead and the green bead cannot be adjacent horizontally or vertically, diagonal contact is allowed, and rotations and reflections of the grid are considered the same?",
+      "ground_truth": "30240"
+    }
+  },
+  "test-1593": {
+    "level1": {
+      "task": "In how many patterns can four identical L-shaped pieces, each consisting of three unit squares, be placed to perfectly cover a fixed 3 by 4 board?",
+      "ground_truth": "4"
+    },
+    "level2": {
+      "task": "In how many patterns can six identical straight trominoes, each consisting of three unit squares in a row, be placed to perfectly cover a fixed 3 by 6 board?",
+      "ground_truth": "6"
+    }
+  },
+  "test-2072": {
+    "level1": {
+      "task": "A parallelogram has three of its vertices at (-2,0), (2,3), and (2,-3). What is the positive difference between the greatest possible perimeter and the least possible perimeter of the parallelogram?",
+      "ground_truth": "2"
+    },
+    "level2": {
+      "task": "A parallelogram has three of its vertices at (-1,0), (2,4), and (2,-4). Considering the three possible choices for the fourth vertex, what is the sum of the three possible perimeters?",
+      "ground_truth": "72"
+    }
+  },
+  "test-2397": {
+    "level1": {
+      "task": "Find the number of quadratic equations of the form x^2 + ax + b = 0 such that whenever c is a root of the equation, c^2 is also a root of the equation.",
+      "ground_truth": "5"
+    },
+    "level2": {
+      "task": "Find the number of monic equations of degree 1 or 2 such that whenever c is a root of the equation, c^2 - 2 is also a root of the equation.",
+      "ground_truth": "8"
+    }
+  },
+  "test-2454": {
+    "level1": {
+      "task": "Two non-decreasing sequences of nonnegative integers have different first terms. Each sequence has the property that each term beginning with the third is the sum of the previous two terms, and the sixth term of each sequence is N. What is the smallest possible value of N?",
+      "ground_truth": "40"
+    },
+    "level2": {
+      "task": "Two strictly increasing sequences of nonnegative integers have different first terms. Each sequence has the property that each term beginning with the third is the sum of the previous two terms, and the seventh term of each sequence is N. What is the smallest possible value of N?",
+      "ground_truth": "112"
+    }
+  },
+  "test-2504": {
+    "level1": {
+      "task": "Let a, b, and c be positive real numbers. Find the maximum value of abc / ((1+a)(a+b)(b+c)(c+81)).",
+      "ground_truth": "1/256"
+    },
+    "level2": {
+      "task": "Let a, b, and c be positive real numbers. The expression abc / ((1+a)(a+b)(b+c)(c+81)) attains its maximum at one point. What is the value of a+b+c at that point?",
+      "ground_truth": "39"
+    }
+  },
+  "test-2645": {
+    "level1": {
+      "task": "The equation 432x^6 + 36x^5 + 6x^3 + x - 2 = 0 has two real roots. Compute the square of the difference between them.",
+      "ground_truth": "97/144"
+    },
+    "level2": {
+      "task": "The equation 2000x^6 + 100x^5 + 10x^3 + x - 2 = 0 has two real roots. Compute the sum of the two real roots.",
+      "ground_truth": "-1/20"
+    }
+  },
+  "test-3695": {
+    "level1": {
+      "task": "A regular pentagon and a regular octagon are coplanar and share a common side AD on the same side of that side, analogous to the original figure. What is the degree measure of the angle between the side from A of the pentagon and the side from A of the octagon?",
+      "ground_truth": "27"
+    },
+    "level2": {
+      "task": "A regular pentagon and a regular hexagon are coplanar and share a common side AD, but they lie on opposite sides of line AD. What is the smaller degree measure of the angle between the side from A of the pentagon and the side from A of the hexagon?",
+      "ground_truth": "132"
+    }
   }
 }

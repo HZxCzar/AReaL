@@ -178,6 +178,16 @@ def _safe_scalar(**metrics: Any) -> None:
         logger.debug("Skipping stats logging outside workflow context.")
 
 
+def _safe_generalize_scalar(**metrics: Any) -> None:
+    try:
+        ctx = workflow_context.get()
+        split = "test" if bool(getattr(ctx, "is_eval", False)) else "train"
+        scoped_metrics = {f"{split}/{key}": value for key, value in metrics.items()}
+        stats_tracker.get("generalize").scalar(**scoped_metrics)
+    except Exception:
+        logger.debug("Skipping generalize stats logging outside workflow context.")
+
+
 def _reward_component_key(name: str) -> str:
     return _REWARD_COMPONENT_ALIASES.get(name, name)
 
@@ -1343,31 +1353,43 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ) + float(result.reward)
             assignment.reward += float(result.reward)
 
-    def _student_generalization_metrics(
-        self, results: list[StudentGeneralizationResult] | None
-    ) -> dict[str, float]:
-        if not bool(getattr(self, "student_generalize_enabled", False)) and not results:
-            return {}
-        results = results or []
-        metrics: dict[str, float] = {
-            "student_generalize/attempted": float(
-                sum(1 for result in results if result.attempted)
-            ),
-            "student_generalize/skipped": float(
-                sum(1 for result in results if result.skipped)
-            ),
-        }
+    def _log_generalize_stats(
+        self,
+        *,
+        solved: bool,
+        student_generalization_results: list[StudentGeneralizationResult] | None,
+    ) -> None:
+        if not bool(getattr(self, "student_generalize_enabled", False)):
+            return
+
+        try:
+            is_eval = bool(getattr(workflow_context.get(), "is_eval", False))
+        except Exception:
+            is_eval = False
+
+        metrics: dict[str, float] = {}
+        if is_eval:
+            metrics["teacher_success"] = float(solved)
+
+        results = student_generalization_results or []
         for level in _STUDENT_GENERALIZE_LEVELS:
             level_result = next(
                 (result for result in results if result.level == level), None
             )
-            correct = bool(
-                level_result is not None
-                and level_result.judge_result is not None
-                and level_result.judge_result.correct
-            )
-            metrics[f"student_generalize/{level}_correct"] = float(correct)
-        return metrics
+            attempted = bool(level_result is not None and level_result.attempted)
+            if attempted:
+                correct = bool(
+                    level_result is not None
+                    and level_result.judge_result is not None
+                    and level_result.judge_result.correct
+                )
+                metrics[f"student_{level}_attempted"] = 1.0
+                metrics[f"student_{level}_correct_given_attempted"] = float(correct)
+            elif level_result is not None and level_result.skipped:
+                metrics[f"student_{level}_skipped"] = 1.0
+
+        if metrics:
+            _safe_generalize_scalar(**metrics)
 
     @staticmethod
     def _student_generalization_result_to_json(
@@ -1519,8 +1541,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             metrics["solve_turn"] = int(success_round)
 
         metrics.update(self._reward_component_metrics(traces))
-        metrics.update(
-            self._student_generalization_metrics(student_generalization_results)
+        self._log_generalize_stats(
+            solved=success_round > 0,
+            student_generalization_results=student_generalization_results,
         )
         _safe_scalar(**metrics)
 

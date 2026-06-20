@@ -887,12 +887,18 @@ def test_rollout_stats_uses_clean_metric_names_and_reward_breakdown(monkeypatch)
         assert captured[f"reward_share/{name}"] == pytest.approx(abs(value) / total_abs)
 
 
-def test_rollout_stats_includes_student_generalize_metrics(monkeypatch):
-    captured = {}
+def test_rollout_stats_routes_student_generalize_metrics_to_generalize(monkeypatch):
+    rollout_metrics = {}
+    generalize_metrics = {}
     monkeypatch.setattr(
         tutor_workflow,
         "_safe_scalar",
-        lambda **metrics: captured.update(metrics),
+        lambda **metrics: rollout_metrics.update(metrics),
+    )
+    monkeypatch.setattr(
+        tutor_workflow,
+        "_safe_generalize_scalar",
+        lambda **metrics: generalize_metrics.update(metrics),
     )
     workflow = _metric_workflow(
         student_generalize_enabled=True,
@@ -931,12 +937,51 @@ def test_rollout_stats_includes_student_generalize_metrics(monkeypatch):
         student_generalization_results=generalization,
     )
 
-    assert captured["student_generalize/attempted"] == pytest.approx(1.0)
-    assert captured["student_generalize/skipped"] == pytest.approx(1.0)
-    assert captured["student_generalize/level1_correct"] == pytest.approx(1.0)
-    assert captured["student_generalize/level2_correct"] == pytest.approx(0.0)
-    assert captured["reward_component/student_generalize_level1"] == pytest.approx(0.2)
-    assert captured["reward_component/student_generalize_level2"] == pytest.approx(0.0)
+    assert not any(key.startswith("student_generalize/") for key in rollout_metrics)
+    assert rollout_metrics[
+        "reward_component/student_generalize_level1"
+    ] == pytest.approx(0.2)
+    assert rollout_metrics[
+        "reward_component/student_generalize_level2"
+    ] == pytest.approx(0.0)
+    assert generalize_metrics["student_level1_attempted"] == pytest.approx(1.0)
+    assert generalize_metrics[
+        "student_level1_correct_given_attempted"
+    ] == pytest.approx(1.0)
+    assert generalize_metrics["student_level2_skipped"] == pytest.approx(1.0)
+    assert "student_level2_correct_given_attempted" not in generalize_metrics
+    assert "teacher_success" not in generalize_metrics
+
+
+def test_generalize_stats_includes_eval_teacher_success(monkeypatch):
+    generalize_metrics = {}
+    monkeypatch.setattr(
+        tutor_workflow,
+        "_safe_generalize_scalar",
+        lambda **metrics: generalize_metrics.update(metrics),
+    )
+    workflow = _metric_workflow(student_generalize_enabled=True)
+    ctx_cls = tutor_workflow.workflow_context.WorkflowContext
+    tutor_workflow.workflow_context.set(ctx_cls(is_eval=True))
+    try:
+        workflow._log_generalize_stats(
+            solved=True,
+            student_generalization_results=[
+                tutor_workflow.StudentGeneralizationResult(
+                    level="level1",
+                    attempted=True,
+                    judge_result=_judge(False),
+                )
+            ],
+        )
+    finally:
+        tutor_workflow.workflow_context.set(ctx_cls())
+
+    assert generalize_metrics["teacher_success"] == pytest.approx(1.0)
+    assert generalize_metrics["student_level1_attempted"] == pytest.approx(1.0)
+    assert generalize_metrics[
+        "student_level1_correct_given_attempted"
+    ] == pytest.approx(0.0)
 
 
 def test_reward_component_share_is_zero_when_enabled_components_are_absent():
