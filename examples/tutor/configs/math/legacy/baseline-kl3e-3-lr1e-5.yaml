@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-thinking-self-turn10-baseline-kl3e-3-lr1e-5
+trial_name: qwen8b-baseline-kl3e-3-lr1e-5
 
 seed: 42
 enable_offload: false

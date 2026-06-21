@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-baseline-all-random
+trial_name: qwen8b-baseline-overfit-8-generalize-staged-leak-greward0.5-1-repeat
 
 seed: 42
 enable_offload: false
@@ -13,6 +13,12 @@ max_turns: 10
 enable_thinking: true
 teacher_show_ground_truth: false
 
+student_generalize:
+  enabled: true
+  path: examples/tutor/generalization/math_overfit8_student_generalize.json
+  level1_reward: 0.5
+  level2_reward: 1.0
+
 auxiliary_model:
   mode: self
   enable_thinking: false
@@ -23,8 +29,12 @@ auxiliary_model:
 
 reward:
   success: 1.0
+  leak_penalty_mode: staged
+  leak_penalty: null
+  leak_penalty_final_answer: -2.0
+  leak_penalty_compute: -0.5
+  leak_penalty_formula: -0.05
   assign_success_reward: false
-  leak_penalty: -0.05
   outcome_prior_turn_weight: 0.5
   outcome_credit_gamma: 0.9
   early_success_bonus: 0.0
@@ -179,11 +189,10 @@ sglang:
 
 train_dataset:
   batch_size: 16
-  shuffle: true
-  drop_last: true
+  shuffle: false
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_hard_all
+  path: examples/tutor/data/math_dataset_overfit_8_repeat
   type: rl
   max_length: 16384
 
@@ -191,7 +200,7 @@ valid_dataset:
   batch_size: ${train_dataset.batch_size}
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_hard_all
+  path: examples/tutor/data/math_dataset_overfit_8_repeat
   type: rl
 
 saver:
@@ -229,4 +238,4 @@ stats_logger:
     entity: hz-czar-stanford
     project: TAgent
     name: ${trial_name}
-    group: baseline-all
+    group: overfit8

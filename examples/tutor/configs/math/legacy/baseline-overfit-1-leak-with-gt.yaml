@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-thinking-self-turn10-baseline-overfit-1-leak-with-gt
+trial_name: qwen8b-baseline-overfit-1-leak-with-gt
 
 seed: 42
 enable_offload: false

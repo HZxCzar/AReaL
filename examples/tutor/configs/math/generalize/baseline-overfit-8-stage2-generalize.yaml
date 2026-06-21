@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-thinking-self-turn10-baseline-overfit-8-stage2-generalize
+trial_name: qwen8b-baseline-overfit-8-stage2-generalize
 
 seed: 42
 enable_offload: false
