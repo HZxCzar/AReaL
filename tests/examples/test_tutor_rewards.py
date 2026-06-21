@@ -948,6 +948,7 @@ def test_rollout_stats_routes_student_generalize_metrics_to_generalize(monkeypat
     assert generalize_metrics[
         "student_level1_correct_given_attempted"
     ] == pytest.approx(1.0)
+    assert generalize_metrics["student_level2_attempted"] == pytest.approx(0.0)
     assert generalize_metrics["student_level2_skipped"] == pytest.approx(1.0)
     assert "student_level2_correct_given_attempted" not in generalize_metrics
     assert "teacher_success" not in generalize_metrics
@@ -982,6 +983,27 @@ def test_generalize_stats_includes_eval_teacher_success(monkeypatch):
     assert generalize_metrics[
         "student_level1_correct_given_attempted"
     ] == pytest.approx(0.0)
+    assert generalize_metrics["student_level2_attempted"] == pytest.approx(0.0)
+
+
+def test_generalize_stats_logs_unattempted_levels(monkeypatch):
+    generalize_metrics = {}
+    monkeypatch.setattr(
+        tutor_workflow,
+        "_safe_generalize_scalar",
+        lambda **metrics: generalize_metrics.update(metrics),
+    )
+    workflow = _metric_workflow(student_generalize_enabled=True)
+
+    workflow._log_generalize_stats(
+        solved=False,
+        student_generalization_results=[],
+    )
+
+    assert generalize_metrics["student_level1_attempted"] == pytest.approx(0.0)
+    assert generalize_metrics["student_level2_attempted"] == pytest.approx(0.0)
+    assert "student_level1_correct_given_attempted" not in generalize_metrics
+    assert "student_level2_correct_given_attempted" not in generalize_metrics
 
 
 def test_reward_component_share_is_zero_when_enabled_components_are_absent():
