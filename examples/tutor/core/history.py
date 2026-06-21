@@ -25,6 +25,8 @@ def trace_to_history_record(
         "public_history_before": trace.public_history_before,
         "public_history_after": trace.public_history_after,
     }
+    if trace.leak_level is not None:
+        record["leak_level"] = trace.leak_level
     if leak_result is not None:
         record["leak_feedback"] = leak_result.feedback
     return record

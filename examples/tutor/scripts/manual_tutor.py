@@ -166,6 +166,10 @@ def build_workflow(config: Any, max_turns: int, *, hide_ground_truth: bool) -> A
         aux_request_params=auxiliary_model.request_params,
         success_reward=reward.success,
         leak_penalty=reward.leak_penalty,
+        leak_penalty_mode=reward.leak_penalty_mode,
+        leak_penalty_final_answer=reward.leak_penalty_final_answer,
+        leak_penalty_compute=reward.leak_penalty_compute,
+        leak_penalty_formula=reward.leak_penalty_formula,
         assign_success_reward=reward.assign_success_reward,
         outcome_prior_turn_weight=reward.outcome_prior_turn_weight,
         outcome_credit_gamma=reward.outcome_credit_gamma,
@@ -367,6 +371,7 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
             )
             record["leak_check"] = {
                 "leaked": leak_result.leaked,
+                "level": leak_result.leak_level,
                 "feedback": leak_result.feedback,
                 "parse_error": leak_result.parse_error,
                 "raw_output": leak_result.raw_output,

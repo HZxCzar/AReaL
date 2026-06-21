@@ -137,7 +137,10 @@ from examples.tutor.core.history import (
     trace_to_json,
 )
 from examples.tutor.core.pairwise import PairwiseTutorEvaluator
-from examples.tutor.core.parsers import parse_leak_check_result
+from examples.tutor.core.parsers import (
+    parse_leak_check_result,
+    parse_staged_leak_check_result,
+)
 from examples.tutor.core.rewards import EpisodeRewardComputer, artifact_to_trace
 from examples.tutor.core.scoring import AnswerScorer, get_answer_scorer
 from examples.tutor.core.tensors import response_to_tensordict
@@ -158,7 +161,10 @@ from examples.tutor.core.types import (
 from examples.tutor.prompts import (
     ANSWER_JUDGE_USER_TEMPLATE,
     DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT,
+    DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
+    DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT,
     LEAK_CHECK_USER_TEMPLATE,
+    STAGED_LEAK_CHECK_USER_TEMPLATE,
     STUDENT_STATE_USER_TEMPLATE,
     TEACHER_STATE_USER_TEMPLATE,
     render_prompt,
@@ -244,7 +250,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         max_concurrent_aux_calls: int = 8,
         aux_request_params: dict[str, Any] | None = None,
         success_reward: float = 1.0,
-        leak_penalty: float = -1.0,
+        leak_penalty: float | None = -1.0,
+        leak_penalty_mode: str = "binary",
+        leak_penalty_final_answer: float | None = None,
+        leak_penalty_compute: float | None = None,
+        leak_penalty_formula: float | None = None,
         assign_success_reward: bool = False,
         outcome_prior_turn_weight: float = 0.1,
         outcome_credit_gamma: float = 0.9,
@@ -309,8 +319,37 @@ class TutorAgentWorkflow(RolloutWorkflow):
             max(1, self.max_concurrent_aux_calls)
         )
         self.context_window_margin = int(context_window_margin)
+        if leak_penalty_mode not in {"binary", "staged"}:
+            raise ValueError("leak_penalty_mode must be 'binary' or 'staged'.")
+        if leak_penalty_mode == "binary" and leak_penalty is None:
+            raise ValueError("leak_penalty must be set in binary leak penalty mode.")
+        staged_values = {
+            "leak_penalty_final_answer": leak_penalty_final_answer,
+            "leak_penalty_compute": leak_penalty_compute,
+            "leak_penalty_formula": leak_penalty_formula,
+        }
+        if leak_penalty_mode == "staged":
+            missing = [name for name, value in staged_values.items() if value is None]
+            if missing:
+                raise ValueError(
+                    "staged leak penalty mode requires explicit values for "
+                    f"{', '.join(missing)}."
+                )
+
         self.success_reward = float(success_reward)
-        self.leak_penalty = float(leak_penalty)
+        self.leak_penalty_mode = leak_penalty_mode
+        self.leak_penalty = float(leak_penalty) if leak_penalty is not None else 0.0
+        self.leak_penalty_final_answer = (
+            float(leak_penalty_final_answer)
+            if leak_penalty_final_answer is not None
+            else 0.0
+        )
+        self.leak_penalty_compute = (
+            float(leak_penalty_compute) if leak_penalty_compute is not None else 0.0
+        )
+        self.leak_penalty_formula = (
+            float(leak_penalty_formula) if leak_penalty_formula is not None else 0.0
+        )
         self.assign_success_reward = bool(assign_success_reward)
         self.outcome_prior_turn_weight = float(outcome_prior_turn_weight)
         self.outcome_credit_gamma = float(outcome_credit_gamma)
@@ -326,7 +365,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         ).strip()
         self.teacher_show_ground_truth = bool(teacher_show_ground_truth)
         self.student_system_prompt = student_system_prompt.strip()
-        self.leak_check_system_prompt = leak_check_system_prompt.strip()
+        self.leak_check_system_prompt = self._resolve_leak_check_system_prompt(
+            leak_check_system_prompt
+        )
         self.answer_judge_enabled = bool(answer_judge_enabled)
         self.answer_judge_max_tokens = max(1, int(answer_judge_max_tokens))
         self.answer_judge_system_prompt = answer_judge_system_prompt.strip()
@@ -384,6 +425,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         self.tokenizer_path = tokenizer_path
         self.model_context_length = model_context_length
+
+    def _resolve_leak_check_system_prompt(self, prompt: str) -> str:
+        prompt = (prompt or "").strip()
+        if getattr(self, "leak_penalty_mode", "binary") != "staged":
+            return prompt
+        if not prompt or prompt == DEFAULT_LEAK_CHECK_SYSTEM_PROMPT:
+            return DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT
+        return prompt
 
     def get_lora_versions_for_episode(
         self,
@@ -654,6 +703,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
         reward_computer = EpisodeRewardComputer(
             success_reward=self.success_reward,
             leak_penalty=self.leak_penalty,
+            leak_penalty_mode=getattr(self, "leak_penalty_mode", "binary"),
+            leak_penalty_final_answer=getattr(
+                self, "leak_penalty_final_answer", None
+            ),
+            leak_penalty_compute=getattr(self, "leak_penalty_compute", None),
+            leak_penalty_formula=getattr(self, "leak_penalty_formula", None),
             assign_success_reward=self.assign_success_reward,
             outcome_prior_turn_weight=self.outcome_prior_turn_weight,
             outcome_credit_gamma=self.outcome_credit_gamma,
@@ -971,7 +1026,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 feedback=f"Leak check failed: {result.error}",
                 parse_error=result.error,
                 raw_result={},
+                leak_level=(
+                    1
+                    if getattr(self, "leak_penalty_mode", "binary") == "staged"
+                    else None
+                ),
             )
+        if getattr(self, "leak_penalty_mode", "binary") == "staged":
+            return parse_staged_leak_check_result(result.text)
         return parse_leak_check_result(result.text)
 
     async def _call_auxiliary_prompt(
@@ -1060,8 +1122,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
     def _build_leak_check_prompt(
         self, task: str, ground_truth: str, teacher_action: str
     ) -> str:
+        template = (
+            STAGED_LEAK_CHECK_USER_TEMPLATE
+            if getattr(self, "leak_penalty_mode", "binary") == "staged"
+            else LEAK_CHECK_USER_TEMPLATE
+        )
         return render_prompt(
-            LEAK_CHECK_USER_TEMPLATE,
+            template,
             task=task,
             ground_truth=ground_truth,
             teacher_action=_strip_reasoning_for_context(teacher_action),
@@ -1553,7 +1620,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
             self, "early_success_bonus", 0.0
         ):
             keys.append("success")
-        if getattr(self, "leak_penalty", 0.0):
+        leak_penalty_mode = getattr(self, "leak_penalty_mode", "binary")
+        if leak_penalty_mode == "staged":
+            for key, attr in (
+                ("leak_final_answer", "leak_penalty_final_answer"),
+                ("leak_compute", "leak_penalty_compute"),
+                ("leak_formula", "leak_penalty_formula"),
+            ):
+                if getattr(self, attr, 0.0):
+                    keys.append(key)
+        elif getattr(self, "leak_penalty", 0.0):
             keys.append("leak")
         if getattr(self, "enable_turn_penalty", False) and getattr(
             self, "turn_penalty", 0.0

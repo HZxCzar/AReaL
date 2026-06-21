@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .types import (
     EpisodeArtifact,
+    LeakCheckResult,
     RewardAssignment,
     TurnArtifact,
     TurnTrace,
@@ -13,7 +14,11 @@ class EpisodeRewardComputer:
         self,
         *,
         success_reward: float,
-        leak_penalty: float,
+        leak_penalty: float | None,
+        leak_penalty_mode: str = "binary",
+        leak_penalty_final_answer: float | None = None,
+        leak_penalty_compute: float | None = None,
+        leak_penalty_formula: float | None = None,
         assign_success_reward: bool = False,
         outcome_prior_turn_weight: float = 0.1,
         outcome_credit_gamma: float = 0.9,
@@ -24,8 +29,32 @@ class EpisodeRewardComputer:
         length_penalty_per_100_chars: float = 0.0,
         length_penalty_min: float = 0.0,
     ) -> None:
+        if leak_penalty_mode not in {"binary", "staged"}:
+            raise ValueError("leak_penalty_mode must be 'binary' or 'staged'.")
+        if leak_penalty_mode == "binary" and leak_penalty is None:
+            raise ValueError("leak_penalty must be set in binary leak penalty mode.")
+        staged_penalties = {
+            1: ("leak_final_answer", leak_penalty_final_answer),
+            2: ("leak_compute", leak_penalty_compute),
+            3: ("leak_formula", leak_penalty_formula),
+        }
+        if leak_penalty_mode == "staged":
+            missing = [
+                name for name, value in staged_penalties.values() if value is None
+            ]
+            if missing:
+                raise ValueError(
+                    "staged leak penalty mode requires explicit values for "
+                    f"{', '.join(missing)}."
+                )
+
         self.success_reward = success_reward
-        self.leak_penalty = leak_penalty
+        self.leak_penalty_mode = leak_penalty_mode
+        self.leak_penalty = float(leak_penalty) if leak_penalty is not None else 0.0
+        self.staged_leak_penalties = {
+            level: (name, float(value) if value is not None else 0.0)
+            for level, (name, value) in staged_penalties.items()
+        }
         self.assign_success_reward = assign_success_reward
         self.outcome_prior_turn_weight = outcome_prior_turn_weight
         self.outcome_credit_gamma = outcome_credit_gamma
@@ -48,8 +77,10 @@ class EpisodeRewardComputer:
         assignments: list[RewardAssignment] = []
         for artifact in episode.turns:
             components: dict[str, float] = {}
-            if artifact.leak_result.leaked:
-                components["leak"] = self.leak_penalty
+            leak_component = self._leak_component(artifact.leak_result)
+            if leak_component is not None:
+                name, value = leak_component
+                components[name] = value
             success_credit = success_credits.get(artifact.turn_idx, 0.0)
             if success_credit:
                 components["success_credit"] = success_credit
@@ -70,6 +101,22 @@ class EpisodeRewardComputer:
                 )
             )
         return assignments
+
+    def _leak_component(self, result: LeakCheckResult) -> tuple[str, float] | None:
+        if self.leak_penalty_mode == "binary":
+            if result.leaked:
+                return "leak", self.leak_penalty
+            return None
+
+        level = result.leak_level
+        if level is None:
+            level = 1 if result.leaked else 4
+        if level == 4:
+            return None
+        name, value = self.staged_leak_penalties.get(
+            int(level), self.staged_leak_penalties[1]
+        )
+        return name, value
 
     def _success_artifact(
         self, episode: EpisodeArtifact
@@ -157,4 +204,5 @@ def artifact_to_trace(
         reward_components=assignment.reward_components,
         public_history_before=artifact.public_history_before,
         public_history_after=artifact.public_history_after,
+        leak_level=artifact.leak_result.leak_level,
     )

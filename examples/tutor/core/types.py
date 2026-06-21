@@ -22,6 +22,7 @@ class LeakCheckResult:
     feedback: str
     parse_error: str | None
     raw_result: dict[str, Any]
+    leak_level: int | None = None
 
 
 @dataclass(slots=True)
@@ -110,3 +111,4 @@ class TurnTrace:
     reward_components: dict[str, float]
     public_history_before: str
     public_history_after: str
+    leak_level: int | None = None

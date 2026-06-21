@@ -127,7 +127,18 @@ class TutorEvaluatorConfig(EvaluatorConfig):
 @dataclass
 class TutorRewardConfig:
     success: float = field(default=1.0)
-    leak_penalty: float = field(default=-1.0)
+    leak_penalty_mode: str = field(
+        default="binary",
+        metadata={
+            "help": "Leak penalty mode: 'binary' uses leaked=true/false, "
+            "'staged' uses leak levels 1-4.",
+            "choices": ["binary", "staged"],
+        },
+    )
+    leak_penalty: float | None = field(default=-1.0)
+    leak_penalty_final_answer: float | None = field(default=None)
+    leak_penalty_compute: float | None = field(default=None)
+    leak_penalty_formula: float | None = field(default=None)
     assign_success_reward: bool = field(default=False)
     outcome_prior_turn_weight: float = field(default=0.1)
     outcome_credit_gamma: float = field(default=0.9)
@@ -140,6 +151,34 @@ class TutorRewardConfig:
     pairwise: TutorPairwiseRewardConfig = field(
         default_factory=TutorPairwiseRewardConfig
     )
+
+    def __post_init__(self) -> None:
+        if self.leak_penalty_mode not in {"binary", "staged"}:
+            raise ValueError(
+                "reward.leak_penalty_mode must be either 'binary' or 'staged'."
+            )
+        if self.leak_penalty_mode == "binary":
+            if self.leak_penalty is None:
+                raise ValueError(
+                    "reward.leak_penalty must be set when "
+                    "reward.leak_penalty_mode='binary'."
+                )
+            return
+
+        missing = [
+            name
+            for name, value in {
+                "reward.leak_penalty_final_answer": self.leak_penalty_final_answer,
+                "reward.leak_penalty_compute": self.leak_penalty_compute,
+                "reward.leak_penalty_formula": self.leak_penalty_formula,
+            }.items()
+            if value is None
+        ]
+        if missing:
+            raise ValueError(
+                "staged leak penalty mode requires explicit values for "
+                f"{', '.join(missing)}."
+            )
 
 
 @dataclass

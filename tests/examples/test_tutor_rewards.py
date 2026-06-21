@@ -6,9 +6,11 @@ import types
 import pytest
 
 from examples.tutor import workflow as tutor_workflow
+from examples.tutor.configs import TutorRewardConfig
 from examples.tutor.core.callers import TextCallResult
 from examples.tutor.core.math import score_math_answer
 from examples.tutor.core.pairwise import PairwiseTutorEvaluator
+from examples.tutor.core.parsers import parse_staged_leak_check_result
 from examples.tutor.core.rewards import EpisodeRewardComputer
 from examples.tutor.core.types import (
     EpisodeArtifact,
@@ -33,13 +35,14 @@ def _judge(correct: bool) -> JudgeResult:
     )
 
 
-def _leak(leaked: bool) -> LeakCheckResult:
+def _leak(leaked: bool, leak_level: int | None = None) -> LeakCheckResult:
     return LeakCheckResult(
         raw_output="",
         leaked=leaked,
         feedback="leaked" if leaked else "ok",
         parse_error=None,
         raw_result={},
+        leak_level=leak_level,
     )
 
 
@@ -48,6 +51,7 @@ def _turn(
     *,
     max_turns: int = 10,
     leaked: bool = False,
+    leak_level: int | None = None,
     correct: bool = False,
     tutor_output: str = "hint",
 ) -> TurnArtifact:
@@ -67,7 +71,7 @@ def _turn(
         tutor_response=None,
         tutor_raw_output=tutor_output,
         tutor_visible_output=tutor_output,
-        leak_result=_leak(leaked),
+        leak_result=_leak(leaked, leak_level),
         public_history_before="",
         public_history_after="",
         student_state=StudentTurnState(
@@ -113,6 +117,99 @@ def _outcome_computer(**overrides) -> EpisodeRewardComputer:
     return EpisodeRewardComputer(**params)
 
 
+def test_tutor_reward_config_validates_leak_penalty_modes():
+    config = TutorRewardConfig()
+
+    assert config.leak_penalty_mode == "binary"
+    assert config.leak_penalty == pytest.approx(-1.0)
+
+    with pytest.raises(ValueError, match="leak_penalty"):
+        TutorRewardConfig(leak_penalty=None)
+
+    with pytest.raises(ValueError, match="leak_penalty_formula"):
+        TutorRewardConfig(
+            leak_penalty_mode="staged",
+            leak_penalty_final_answer=-1.0,
+            leak_penalty_compute=-0.5,
+        )
+
+    staged = TutorRewardConfig(
+        leak_penalty_mode="staged",
+        leak_penalty_final_answer=-1.0,
+        leak_penalty_compute=-0.5,
+        leak_penalty_formula=-0.1,
+    )
+    assert staged.leak_penalty_formula == pytest.approx(-0.1)
+
+
+@pytest.mark.parametrize(
+    ("level", "expected_leaked"),
+    [(1, True), (2, True), (3, True), (4, False)],
+)
+def test_parse_staged_leak_check_result_maps_levels(level, expected_leaked):
+    result = parse_staged_leak_check_result(
+        f'{{"level": {level}, "feedback": "level {level}"}}'
+    )
+
+    assert result.leak_level == level
+    assert result.leaked is expected_leaked
+    assert result.feedback == f"level {level}"
+    assert result.parse_error is None
+
+
+def test_parse_staged_leak_check_result_fails_closed_to_level_one():
+    invalid_level = parse_staged_leak_check_result(
+        '{"level": 5, "feedback": "bad"}'
+    )
+    invalid_json = parse_staged_leak_check_result("not json")
+
+    assert invalid_level.leaked is True
+    assert invalid_level.leak_level == 1
+    assert invalid_level.feedback == "Failed to parse staged leak-check output."
+    assert invalid_level.parse_error is not None
+    assert invalid_json.leaked is True
+    assert invalid_json.leak_level == 1
+    assert invalid_json.parse_error is not None
+
+
+def test_workflow_staged_leak_check_uses_staged_prompt_and_parser(monkeypatch):
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.leak_penalty_mode = "staged"
+    workflow.leak_check_system_prompt = "staged system"
+    captured = {}
+
+    async def call_auxiliary_prompt(**kwargs):
+        captured.update(kwargs)
+        return TextCallResult(text='{"level": 2, "feedback": "computed"}')
+
+    monkeypatch.setattr(workflow, "_call_auxiliary_prompt", call_auxiliary_prompt)
+
+    result = asyncio.run(workflow._run_leak_check("task", "42", "6 * 7 = 42"))
+
+    assert result.leaked is True
+    assert result.leak_level == 2
+    assert result.feedback == "computed"
+    assert captured["system_prompt"] == "staged system"
+    assert "Choose exactly one level" in captured["user_prompt"]
+    assert "choose the most severe level" in captured["user_prompt"]
+
+
+def test_workflow_staged_mode_replaces_binary_default_system_prompt():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.leak_penalty_mode = "staged"
+
+    prompt = workflow._resolve_leak_check_system_prompt(
+        tutor_workflow.DEFAULT_LEAK_CHECK_SYSTEM_PROMPT
+    )
+
+    assert prompt == tutor_workflow.DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT
+    assert "choose the most severe level" in prompt
+
+
 def test_default_success_reward_goes_to_success_turn_only():
     turns = [_turn(1), _turn(2), _turn(3, correct=True)]
     assignments = asyncio.run(
@@ -155,6 +252,31 @@ def test_leak_turn_can_receive_success_credit_with_penalty():
     assert assignments[0].reward_components["leak"] == pytest.approx(-1.0)
     assert assignments[0].reward_components["success_credit"] > 0.0
     assert assignments[0].reward == pytest.approx(0.3)
+
+
+def test_staged_leak_penalty_uses_level_specific_components():
+    turns = [
+        _turn(1, leaked=True, leak_level=1),
+        _turn(2, leaked=True, leak_level=2),
+        _turn(3, leaked=True, leak_level=3),
+        _turn(4, leaked=False, leak_level=4),
+    ]
+    assignments = asyncio.run(
+        _outcome_computer(
+            leak_penalty_mode="staged",
+            leak_penalty_final_answer=-1.0,
+            leak_penalty_compute=-0.5,
+            leak_penalty_formula=-0.1,
+        ).compute(_episode(turns, termination_reason="max_turns"))
+    )
+
+    assert assignments[0].reward_components == {"leak_final_answer": -1.0}
+    assert assignments[1].reward_components == {"leak_compute": -0.5}
+    assert assignments[2].reward_components == {"leak_formula": -0.1}
+    assert assignments[3].reward_components == {}
+    assert [assignment.reward for assignment in assignments] == pytest.approx(
+        [-1.0, -0.5, -0.1, 0.0]
+    )
 
 
 def test_failed_episode_has_no_positive_success_credit_or_turn_penalty_by_default():
@@ -782,9 +904,10 @@ def _trace(
     reward_components: dict[str, float],
     *,
     leaked: bool = False,
+    leak_level: int | None = None,
     correct: bool = False,
 ) -> TurnTrace:
-    turn = _turn(turn_idx, leaked=leaked, correct=correct)
+    turn = _turn(turn_idx, leaked=leaked, leak_level=leak_level, correct=correct)
     return TurnTrace(
         turn_idx=turn.turn_idx,
         tutor_state=turn.tutor_state,
@@ -798,6 +921,7 @@ def _trace(
         reward_components=reward_components,
         public_history_before=turn.public_history_before,
         public_history_after=turn.public_history_after,
+        leak_level=turn.leak_result.leak_level,
     )
 
 
@@ -1004,6 +1128,29 @@ def test_generalize_stats_logs_unattempted_levels(monkeypatch):
     assert generalize_metrics["student_level2_attempted"] == pytest.approx(0.0)
     assert "student_level1_correct_given_attempted" not in generalize_metrics
     assert "student_level2_correct_given_attempted" not in generalize_metrics
+
+
+def test_reward_component_metrics_include_staged_leak_components():
+    workflow = _metric_workflow(
+        leak_penalty_mode="staged",
+        leak_penalty_final_answer=-1.0,
+        leak_penalty_compute=-0.5,
+        leak_penalty_formula=-0.1,
+        enable_turn_penalty=False,
+        length_penalty_threshold_chars=0,
+        pairwise_reward_enabled=False,
+    )
+
+    metrics = workflow._reward_component_metrics(
+        [_trace(1, {"leak_compute": -0.5}, leaked=True, leak_level=2)]
+    )
+
+    assert "reward_component/leak" not in metrics
+    assert metrics["reward_component/success"] == pytest.approx(0.0)
+    assert metrics["reward_component/leak_final_answer"] == pytest.approx(0.0)
+    assert metrics["reward_component/leak_compute"] == pytest.approx(-0.5)
+    assert metrics["reward_component/leak_formula"] == pytest.approx(0.0)
+    assert metrics["reward_share/leak_compute"] == pytest.approx(1.0)
 
 
 def test_reward_component_share_is_zero_when_enabled_components_are_absent():
