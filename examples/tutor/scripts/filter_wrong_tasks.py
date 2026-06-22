@@ -6,7 +6,6 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_BAD_QUESTION_IDS = frozenset(
     {
         "train-334",
@@ -37,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input",
         required=True,
-        help="Input filtered dataset directory created by filter_pre_solved.py.",
+        help="Input filtered dataset directory, typically from filter_task.py.",
     )
     parser.add_argument(
         "--output",
@@ -57,8 +56,7 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=["train"],
         help=(
-            "Dataset splits to prune, or 'all'. "
-            "Unselected splits are copied unchanged."
+            "Dataset splits to prune, or 'all'. Unselected splits are copied unchanged."
         ),
     )
     parser.add_argument(

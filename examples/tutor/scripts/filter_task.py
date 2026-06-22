@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from workflow import TutorAgentWorkflow
 
 
-logger = logging.getLogger("TutorLLMJudgeFilter")
+logger = logging.getLogger("TutorTaskFilter")
 _THIS_DIR = pathlib.Path(__file__).resolve().parent
 _TUTOR_DIR = _THIS_DIR.parent
 _REPO_ROOT = _TUTOR_DIR.parent.parent
@@ -35,9 +35,19 @@ sys.path.insert(0, str(_TUTOR_DIR))
 from examples.tutor.core.types import PublicHistoryState, StudentTurnState  # noqa: E402
 
 
-DEFAULT_CONFIG_PATH = "examples/tutor/configs/math/baseline.yaml"
-DEFAULT_BASE_URL = "http://127.0.0.1:30008/v1"
+DEFAULT_CONFIG_PATH = (
+    "examples/tutor/configs/math/staged_leak/"
+    "qwen8b-nonthinking-qwen4b-remote-overfit-8-generalize-staged-leak.yaml"
+)
+DEFAULT_STUDENT_BASE_URL = "http://127.0.0.1:30000/v1"
+DEFAULT_TEACHER_BASE_URL = "http://127.0.0.1:30008/v1"
 DEFAULT_MODEL = "default"
+DEDICATED_REQUEST_PARAM_KEYS = {
+    "max_completion_tokens",
+    "max_tokens",
+    "temperature",
+    "top_p",
+}
 DEFAULT_SOLVER_SYSTEM_PROMPT = (
     "You are a careful math solver. Solve the problem independently. "
     "Show your reasoning if useful. Put the final answer in the last "
@@ -143,7 +153,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--report",
         default="",
-        help="JSON report path. Defaults to '<output>_llm_judge_filter_report.json'.",
+        help="JSON report path. Defaults to '<output>_filter_task_report.json'.",
     )
     parser.add_argument(
         "--splits",
@@ -151,10 +161,55 @@ def parse_args() -> argparse.Namespace:
         default=["train", "test"],
         help="Dataset splits to filter, or 'all'. Unselected splits are copied unchanged.",
     )
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
-    parser.add_argument("--api-key", default="", help="Defaults to OPENAI_API_KEY, then EMPTY.")
-    parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument(
+        "--base-url",
+        default="",
+        help=(
+            "Deprecated shared OpenAI-compatible base URL. Use "
+            "--student-base-url and --teacher-base-url for heterogeneous models."
+        ),
+    )
+    parser.add_argument(
+        "--student-base-url",
+        default="",
+        help=(
+            "OpenAI-compatible student/judge base URL. Defaults to "
+            f"{DEFAULT_STUDENT_BASE_URL}, or config.auxiliary_model.base_url when set."
+        ),
+    )
+    parser.add_argument(
+        "--teacher-base-url",
+        default="",
+        help=(
+            "OpenAI-compatible teacher solver base URL. Defaults to "
+            f"{DEFAULT_TEACHER_BASE_URL}."
+        ),
+    )
+    parser.add_argument(
+        "--api-key",
+        default="",
+        help="Shared API key fallback. Defaults to OPENAI_API_KEY, then EMPTY.",
+    )
+    parser.add_argument("--student-api-key", default="", help="Student/judge API key.")
+    parser.add_argument("--teacher-api-key", default="", help="Teacher API key.")
+    parser.add_argument(
+        "--model",
+        default="",
+        help=(
+            "Deprecated shared model name fallback. Use --student-model and "
+            "--teacher-model for heterogeneous models."
+        ),
+    )
+    parser.add_argument("--student-model", default="")
+    parser.add_argument("--teacher-model", default="")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        help="Shared timeout fallback in seconds.",
+    )
+    parser.add_argument("--student-timeout", type=float, default=None)
+    parser.add_argument("--teacher-timeout", type=float, default=None)
     parser.add_argument("--student-attempts", type=int, default=1)
     parser.add_argument("--teacher-attempts", type=int, default=1)
     parser.add_argument(
@@ -176,13 +231,103 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--request-params",
         default="",
-        help="Additional chat.completions.create kwargs as a JSON object.",
+        help=(
+            "Shared chat.completions.create kwargs as a JSON object. These are "
+            "applied to both student/judge and teacher calls before role-specific "
+            "overrides. The config auxiliary_model.request_params are applied only "
+            "to student/judge calls."
+        ),
     )
     parser.add_argument(
         "--request-params-file",
         type=Path,
         default=None,
-        help="JSON file containing additional chat.completions.create kwargs.",
+        help="JSON file containing shared chat.completions.create kwargs.",
+    )
+    parser.add_argument(
+        "--student-request-params",
+        default="",
+        help="Student/judge-specific chat.completions.create kwargs as JSON.",
+    )
+    parser.add_argument(
+        "--student-request-params-file",
+        type=Path,
+        default=None,
+        help="JSON file containing student/judge-specific request kwargs.",
+    )
+    parser.add_argument(
+        "--teacher-request-params",
+        default="",
+        help="Teacher-specific chat.completions.create kwargs as JSON.",
+    )
+    parser.add_argument(
+        "--teacher-request-params-file",
+        type=Path,
+        default=None,
+        help="JSON file containing teacher-specific request kwargs.",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=0,
+        help=(
+            "Deprecated shared max completion tokens fallback. Prefer "
+            "--student-max-tokens and --teacher-max-tokens."
+        ),
+    )
+    parser.add_argument(
+        "--student-max-tokens",
+        type=int,
+        default=0,
+        help="Student/judge max completion tokens. Defaults to auxiliary_model.max_tokens.",
+    )
+    parser.add_argument(
+        "--teacher-max-tokens",
+        type=int,
+        default=0,
+        help="Teacher max completion tokens. Defaults to gconfig.max_new_tokens.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help=(
+            "Deprecated shared sampling temperature fallback. Prefer "
+            "--student-temperature and --teacher-temperature."
+        ),
+    )
+    parser.add_argument(
+        "--student-temperature",
+        type=float,
+        default=None,
+        help="Student sampling temperature. Defaults to auxiliary_model.temperature.",
+    )
+    parser.add_argument(
+        "--teacher-temperature",
+        type=float,
+        default=None,
+        help="Teacher sampling temperature. Defaults to gconfig.temperature.",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=None,
+        help=(
+            "Deprecated shared top_p fallback. Prefer --student-top-p and "
+            "--teacher-top-p."
+        ),
+    )
+    parser.add_argument(
+        "--student-top-p",
+        type=float,
+        default=None,
+        help="Student top_p. Defaults to auxiliary_model.top_p.",
+    )
+    parser.add_argument(
+        "--teacher-top-p",
+        type=float,
+        default=None,
+        help="Teacher top_p. Defaults to gconfig.top_p.",
     )
     parser.add_argument("--system-prompt-file", type=Path, default=None)
     parser.add_argument("--user-template-file", type=Path, default=None)
@@ -215,14 +360,43 @@ def load_json_object_arg(value: str, *, label: str) -> dict[str, Any]:
     return parsed
 
 
-def load_request_params(args: argparse.Namespace) -> dict[str, Any]:
-    params = load_json_object_arg(args.request_params, label="--request-params")
-    if args.request_params_file is not None:
-        file_params = json.loads(args.request_params_file.read_text(encoding="utf-8"))
+def load_request_params_arg(
+    value: str,
+    path: Path | None,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    params = load_json_object_arg(value, label=label)
+    if path is not None:
+        file_params = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(file_params, dict):
-            raise ValueError("--request-params-file must contain a JSON object.")
+            raise ValueError(f"{label}-file must contain a JSON object.")
         params = merge_dicts(params, file_params)
     return params
+
+
+def load_request_params(args: argparse.Namespace) -> dict[str, Any]:
+    return load_request_params_arg(
+        args.request_params,
+        args.request_params_file,
+        label="--request-params",
+    )
+
+
+def load_student_request_params(args: argparse.Namespace) -> dict[str, Any]:
+    return load_request_params_arg(
+        args.student_request_params,
+        args.student_request_params_file,
+        label="--student-request-params",
+    )
+
+
+def load_teacher_request_params(args: argparse.Namespace) -> dict[str, Any]:
+    return load_request_params_arg(
+        args.teacher_request_params,
+        args.teacher_request_params_file,
+        label="--teacher-request-params",
+    )
 
 
 def resolve_thinking(choice: str, default: bool) -> bool | None:
@@ -235,7 +409,9 @@ def resolve_thinking(choice: str, default: bool) -> bool | None:
     return bool(default)
 
 
-def with_thinking_param(params: dict[str, Any], enable_thinking: bool | None) -> dict[str, Any]:
+def with_thinking_param(
+    params: dict[str, Any], enable_thinking: bool | None
+) -> dict[str, Any]:
     if enable_thinking is None:
         return dict(params)
     return merge_dicts(
@@ -250,32 +426,244 @@ def with_thinking_param(params: dict[str, Any], enable_thinking: bool | None) ->
     )
 
 
+def normalize_max_completion_tokens(params: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(params)
+    if "max_tokens" in normalized:
+        normalized["max_completion_tokens"] = int(normalized.pop("max_tokens"))
+    return normalized
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _request_top_k_from_gconfig(config: Any) -> int | None:
+    top_k = getattr(config.gconfig, "top_k", None)
+    if top_k is None:
+        return None
+    top_k = int(top_k)
+    # GenerationHyperparameters uses a very large value as the no-op default.
+    return top_k if top_k < int(1e8) else None
+
+
+def _generation_params(
+    *,
+    max_tokens: int,
+    temperature: float,
+    top_p: float | None,
+    top_k: int | None = None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "max_completion_tokens": int(max_tokens),
+        "temperature": float(temperature),
+    }
+    if top_p is not None:
+        params["top_p"] = float(top_p)
+    if top_k is not None:
+        params["extra_body"] = {"top_k": int(top_k)}
+    return params
+
+
+def student_generation_params(
+    args: argparse.Namespace, config: Any
+) -> dict[str, Any]:
+    auxiliary_model = config.auxiliary_model
+    max_tokens = (
+        _positive_int(args.student_max_tokens)
+        or _positive_int(args.max_tokens)
+        or int(auxiliary_model.max_tokens)
+    )
+    temperature = (
+        float(args.student_temperature)
+        if args.student_temperature is not None
+        else (
+            float(args.temperature)
+            if args.temperature is not None
+            else float(auxiliary_model.temperature)
+        )
+    )
+    top_p = (
+        args.student_top_p
+        if args.student_top_p is not None
+        else (
+            args.top_p
+            if args.top_p is not None
+            else getattr(auxiliary_model, "top_p", None)
+        )
+    )
+    return _generation_params(
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+    )
+
+
+def teacher_generation_params(
+    args: argparse.Namespace, config: Any
+) -> dict[str, Any]:
+    max_tokens = (
+        _positive_int(args.teacher_max_tokens)
+        or _positive_int(args.max_tokens)
+        or int(config.gconfig.max_new_tokens)
+    )
+    temperature = (
+        float(args.teacher_temperature)
+        if args.teacher_temperature is not None
+        else (
+            float(args.temperature)
+            if args.temperature is not None
+            else float(config.gconfig.temperature)
+        )
+    )
+    top_p = (
+        args.teacher_top_p
+        if args.teacher_top_p is not None
+        else (
+            args.top_p if args.top_p is not None else getattr(config.gconfig, "top_p", None)
+        )
+    )
+    return _generation_params(
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=_request_top_k_from_gconfig(config),
+    )
+
+
+def build_role_request_params(
+    *,
+    generation_params: dict[str, Any],
+    shared_params: dict[str, Any],
+    role_params: dict[str, Any],
+    enable_thinking: bool | None,
+) -> dict[str, Any]:
+    params = merge_dicts(generation_params, shared_params)
+    params = merge_dicts(params, role_params)
+    params = normalize_max_completion_tokens(params)
+    return with_thinking_param(params, enable_thinking)
+
+
+def build_shared_request_params(args: argparse.Namespace) -> dict[str, Any]:
+    return load_request_params(args)
+
+
 def build_aux_request_params(args: argparse.Namespace, config: Any) -> dict[str, Any]:
     auxiliary_model = config.auxiliary_model
-    params = merge_dicts(dict(auxiliary_model.request_params), load_request_params(args))
-    return with_thinking_param(
-        params,
-        resolve_thinking(args.thinking, bool(auxiliary_model.enable_thinking)),
+    return build_role_request_params(
+        generation_params=student_generation_params(args, config),
+        shared_params=merge_dicts(
+            dict(auxiliary_model.request_params), build_shared_request_params(args)
+        ),
+        role_params=load_student_request_params(args),
+        enable_thinking=resolve_thinking(
+            args.thinking, bool(auxiliary_model.enable_thinking)
+        ),
     )
 
 
-def build_teacher_request_params(args: argparse.Namespace, config: Any) -> dict[str, Any]:
-    params = load_request_params(args)
-    params.setdefault("temperature", float(config.gconfig.temperature))
-    if getattr(config.gconfig, "top_p", None) is not None:
-        params.setdefault("top_p", float(config.gconfig.top_p))
-    if "max_tokens" in params and "max_completion_tokens" not in params:
-        params["max_completion_tokens"] = int(params.pop("max_tokens"))
-    params.setdefault("max_completion_tokens", int(config.gconfig.max_new_tokens))
-    return with_thinking_param(
-        params,
-        resolve_thinking(args.thinking, bool(config.enable_thinking)),
+def build_teacher_request_params(
+    args: argparse.Namespace, config: Any
+) -> dict[str, Any]:
+    return build_role_request_params(
+        generation_params=teacher_generation_params(args, config),
+        shared_params=build_shared_request_params(args),
+        role_params=load_teacher_request_params(args),
+        enable_thinking=resolve_thinking(args.thinking, bool(config.enable_thinking)),
     )
+
+
+def strip_dedicated_request_params(params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in params.items()
+        if key not in DEDICATED_REQUEST_PARAM_KEYS
+    }
+
+
+def request_max_completion_tokens(params: dict[str, Any]) -> int:
+    if "max_completion_tokens" in params:
+        return int(params["max_completion_tokens"])
+    if "max_tokens" in params:
+        return int(params["max_tokens"])
+    raise ValueError("request params must include max_completion_tokens.")
+
+
+def request_temperature(params: dict[str, Any]) -> float:
+    if "temperature" not in params:
+        raise ValueError("request params must include temperature.")
+    return float(params["temperature"])
+
+
+def request_top_p(params: dict[str, Any]) -> float | None:
+    value = params.get("top_p")
+    return None if value is None else float(value)
+
+
+def resolve_student_base_url(args: argparse.Namespace, config: Any) -> str:
+    return (
+        args.student_base_url
+        or args.base_url
+        or getattr(config.auxiliary_model, "base_url", "")
+        or DEFAULT_STUDENT_BASE_URL
+    )
+
+
+def resolve_teacher_base_url(args: argparse.Namespace) -> str:
+    return args.teacher_base_url or args.base_url or DEFAULT_TEACHER_BASE_URL
+
+
+def resolve_student_model(args: argparse.Namespace, config: Any) -> str:
+    return (
+        args.student_model
+        or args.model
+        or getattr(config.auxiliary_model, "model", "")
+        or DEFAULT_MODEL
+    )
+
+
+def resolve_teacher_model(args: argparse.Namespace) -> str:
+    return args.teacher_model or args.model or DEFAULT_MODEL
+
+
+def resolve_student_api_key(args: argparse.Namespace, config: Any) -> str:
+    return (
+        args.student_api_key
+        or args.api_key
+        or getattr(config.auxiliary_model, "api_key", "")
+        or os.getenv("OPENAI_API_KEY")
+        or "EMPTY"
+    )
+
+
+def resolve_teacher_api_key(args: argparse.Namespace) -> str:
+    return (
+        args.teacher_api_key or args.api_key or os.getenv("OPENAI_API_KEY") or "EMPTY"
+    )
+
+
+def resolve_student_timeout(args: argparse.Namespace, config: Any) -> float:
+    if args.student_timeout is not None:
+        return float(args.student_timeout)
+    if args.timeout is not None:
+        return float(args.timeout)
+    return float(getattr(config.auxiliary_model, "timeout", 120))
+
+
+def resolve_teacher_timeout(args: argparse.Namespace) -> float:
+    if args.teacher_timeout is not None:
+        return float(args.teacher_timeout)
+    return float(args.timeout)
 
 
 def request_params_for_create(params: dict[str, Any]) -> tuple[dict[str, Any], Any]:
     request_kwargs = {
-        key: value for key, value in params.items() if key != "extra_body" and value is not None
+        key: value
+        for key, value in params.items()
+        if key != "extra_body" and value is not None
     }
     extra_body = params.get("extra_body")
     return request_kwargs, extra_body
@@ -296,7 +684,9 @@ def format_user_prompt(template: str, task: str) -> str:
     try:
         return template.format(task=task)
     except KeyError as exc:
-        raise ValueError("User template may only reference the '{task}' placeholder.") from exc
+        raise ValueError(
+            "User template may only reference the '{task}' placeholder."
+        ) from exc
 
 
 def load_prompt(path: Path | None, default: str) -> str:
@@ -336,7 +726,9 @@ def build_workflow(
     auxiliary_model = config.auxiliary_model
     reward = config.reward
     pairwise = reward.pairwise
-    aux_thinking = resolve_thinking(args.thinking, bool(auxiliary_model.enable_thinking))
+    aux_thinking = resolve_thinking(
+        args.thinking, bool(auxiliary_model.enable_thinking)
+    )
     return TutorAgentWorkflow(
         answer_scorer=config.answer_scorer,
         max_turns=config.max_turns,
@@ -344,15 +736,15 @@ def build_workflow(
         enable_leak_check=config.enable_leak_check,
         aux_mode="api",
         aux_enable_thinking=bool(aux_thinking),
-        aux_base_url=args.base_url or auxiliary_model.base_url,
-        aux_model=args.model or auxiliary_model.model,
-        aux_api_key=args.api_key or auxiliary_model.api_key,
-        aux_timeout=int(args.timeout or auxiliary_model.timeout),
-        aux_max_tokens=auxiliary_model.max_tokens,
-        aux_temperature=auxiliary_model.temperature,
-        aux_top_p=auxiliary_model.top_p,
+        aux_base_url=resolve_student_base_url(args, config),
+        aux_model=resolve_student_model(args, config),
+        aux_api_key=resolve_student_api_key(args, config),
+        aux_timeout=int(resolve_student_timeout(args, config)),
+        aux_max_tokens=request_max_completion_tokens(aux_request_params),
+        aux_temperature=request_temperature(aux_request_params),
+        aux_top_p=request_top_p(aux_request_params),
         max_concurrent_aux_calls=max_concurrency,
-        aux_request_params=aux_request_params,
+        aux_request_params=strip_dedicated_request_params(aux_request_params),
         success_reward=reward.success,
         leak_penalty=reward.leak_penalty,
         leak_penalty_mode=reward.leak_penalty_mode,
@@ -580,7 +972,12 @@ async def classify_split_pre_solved(
         async with log_lock:
             processed += 1
             if processed == size or processed % max(1, log_every) == 0:
-                logger.info("Pre-solve classified %s/%s rows in '%s'", processed, size, split_name)
+                logger.info(
+                    "Pre-solve classified %s/%s rows in '%s'",
+                    processed,
+                    size,
+                    split_name,
+                )
         return result
 
     return list(await asyncio.gather(*[_run(index) for index in range(size)]))
@@ -619,7 +1016,12 @@ async def classify_split_teacher_solved(
         async with log_lock:
             processed += 1
             if processed == size or processed % max(1, log_every) == 0:
-                logger.info("Teacher-solve classified %s/%s rows in '%s'", processed, size, split_name)
+                logger.info(
+                    "Teacher-solve classified %s/%s rows in '%s'",
+                    processed,
+                    size,
+                    split_name,
+                )
         return result
 
     return list(await asyncio.gather(*[_run(index) for index in range(size)]))
@@ -692,12 +1094,19 @@ def summarize_pipeline(
         "input_rows": input_rows,
         "evaluated": len(pre_results),
         "kept": len(final_original_indices),
-        "dropped_pre_solved": sum(result.status == "pre_solved" for result in pre_results),
-        "pre_solve_errors": sum(
-            result.stage == "pre_solve" and result.status == "error" for result in pre_results
+        "dropped_pre_solved": sum(
+            result.status == "pre_solved" for result in pre_results
         ),
-        "teacher_solved": sum(result.status == "teacher_solved" for result in teacher_results),
-        "teacher_unsolved": sum(result.status == "teacher_unsolved" for result in teacher_results),
+        "pre_solve_errors": sum(
+            result.stage == "pre_solve" and result.status == "error"
+            for result in pre_results
+        ),
+        "teacher_solved": sum(
+            result.status == "teacher_solved" for result in teacher_results
+        ),
+        "teacher_unsolved": sum(
+            result.status == "teacher_unsolved" for result in teacher_results
+        ),
         "teacher_errors": sum(result.status == "error" for result in teacher_results),
         "kept_original_indices": final_original_indices,
         "kept_ids": [result.item_id for result in teacher_results if result.kept],
@@ -715,14 +1124,16 @@ def summarize_pipeline(
 
 
 def default_report_path(output_path: Path) -> Path:
-    return output_path.with_name(f"{output_path.name}_llm_judge_filter_report.json")
+    return output_path.with_name(f"{output_path.name}_filter_task_report.json")
 
 
 async def main_async(args: argparse.Namespace) -> None:
     try:
         from datasets import DatasetDict, load_from_disk
     except ImportError as exc:
-        raise RuntimeError("The datasets package is required to run the tutor filter.") from exc
+        raise RuntimeError(
+            "The datasets package is required to run the tutor filter."
+        ) from exc
     from configs import TutorConfig
 
     from areal.api.cli_args import load_expr_config
@@ -738,7 +1149,6 @@ async def main_async(args: argparse.Namespace) -> None:
         if args.report
         else default_report_path(output_path if output_path is not None else input_path)
     )
-    api_key = args.api_key or os.getenv("OPENAI_API_KEY") or "EMPTY"
     max_concurrency = max(
         1,
         int(args.concurrency)
@@ -757,10 +1167,10 @@ async def main_async(args: argparse.Namespace) -> None:
     )
     answer_judge_caller = workflow._make_answer_judge_caller()
     teacher_client = TeacherSolverClient(
-        base_url=args.base_url,
-        api_key=api_key,
-        model=args.model,
-        timeout=float(args.timeout),
+        base_url=resolve_teacher_base_url(args),
+        api_key=resolve_teacher_api_key(args),
+        model=resolve_teacher_model(args),
+        timeout=resolve_teacher_timeout(args),
         request_params=teacher_request_params,
         concurrency=max_concurrency,
     )
@@ -779,15 +1189,31 @@ async def main_async(args: argparse.Namespace) -> None:
         "config": str(Path(args.config).resolve()),
         "answer_scorer": config.answer_scorer,
         "answer_judge_enabled": bool(config.auxiliary_model.answer_judge_enabled),
-        "base_url": args.base_url,
-        "model": args.model,
+        "student_and_judge": {
+            "base_url": resolve_student_base_url(args, config),
+            "model": resolve_student_model(args, config),
+            "timeout": resolve_student_timeout(args, config),
+        },
+        "teacher": {
+            "base_url": resolve_teacher_base_url(args),
+            "model": resolve_teacher_model(args),
+            "timeout": resolve_teacher_timeout(args),
+        },
+        "deprecated_shared_base_url": args.base_url or None,
+        "deprecated_shared_model": args.model or None,
         "max_concurrency": max_concurrency,
         "student_attempts": student_attempts,
         "teacher_attempts": teacher_attempts,
         "keep_on_error": bool(args.keep_on_error),
         "save_outputs": bool(args.save_outputs),
         "preview_chars": int(args.preview_chars),
+        "student_generation_params": student_generation_params(args, config),
+        "teacher_generation_params": teacher_generation_params(args, config),
+        "shared_request_params": build_shared_request_params(args),
         "auxiliary_request_params": aux_request_params,
+        "auxiliary_extra_request_params": strip_dedicated_request_params(
+            aux_request_params
+        ),
         "teacher_request_params": teacher_request_params,
         "prompt": {
             "system_prompt": system_prompt,
@@ -863,7 +1289,11 @@ async def main_async(args: argparse.Namespace) -> None:
                 )
             shutil.rmtree(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_dataset = DatasetDict(filtered_splits) if is_dataset_dict else filtered_splits["train"]
+        output_dataset = (
+            DatasetDict(filtered_splits)
+            if is_dataset_dict
+            else filtered_splits["train"]
+        )
         output_dataset.save_to_disk(str(output_path))
         logger.info("Saved filtered dataset to %s", output_path)
 

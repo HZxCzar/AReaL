@@ -116,6 +116,7 @@ class DifficultyTutorWorkflow:
         termination_reason: str,
         pre_success: bool,
         leak_count: int,
+        student_generalization_results: list[Any] | None = None,
     ) -> None:
         self.last_episode_trace_payload = {
             "termination_reason": str(termination_reason),
@@ -128,6 +129,10 @@ class DifficultyTutorWorkflow:
             "initial_student_answer": initial_student_answer,
             "latest_student_answer": latest_student_answer,
             "turns": [trace_to_json(trace) for trace in traces],
+            "student_generalization": [
+                self._student_generalization_result_to_json(result)
+                for result in (student_generalization_results or [])
+            ],
         }
         super()._maybe_dump_debug_trace(  # type: ignore[misc]
             task=task,
@@ -139,6 +144,7 @@ class DifficultyTutorWorkflow:
             termination_reason=termination_reason,
             pre_success=pre_success,
             leak_count=leak_count,
+            student_generalization_results=student_generalization_results,
         )
 
     def _log_rollout_stats(
@@ -149,6 +155,7 @@ class DifficultyTutorWorkflow:
         termination_reason: str,
         pre_success: bool,
         leak_count: int,
+        student_generalization_results: list[Any] | None = None,
     ) -> None:
         self._record_episode_summary(
             total_reward=total_reward,
@@ -163,6 +170,7 @@ class DifficultyTutorWorkflow:
             termination_reason=termination_reason,
             pre_success=pre_success,
             leak_count=leak_count,
+            student_generalization_results=student_generalization_results,
         )
 
 
@@ -239,10 +247,29 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--splits", nargs="+", default=["train"])
     parser.add_argument("--attempts", type=int, default=DEFAULT_ATTEMPTS)
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument(
+        "--base-url",
+        default=DEFAULT_BASE_URL,
+        help=(
+            "Deprecated shared/tutor OpenAI-compatible base URL. Use "
+            "--tutor-base-url and --aux-base-url for heterogeneous models."
+        ),
+    )
+    parser.add_argument("--tutor-base-url", default="")
+    parser.add_argument(
+        "--aux-base-url",
+        default="",
+        help="Auxiliary student/judge base URL. Defaults to config.auxiliary_model.base_url.",
+    )
     parser.add_argument("--api-key", default="")
+    parser.add_argument("--tutor-api-key", default="")
+    parser.add_argument("--aux-api-key", default="")
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--tutor-model", default="")
+    parser.add_argument("--aux-model", default="")
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--tutor-timeout", type=float, default=None)
+    parser.add_argument("--aux-timeout", type=float, default=None)
     parser.add_argument(
         "--concurrency",
         type=int,
@@ -258,9 +285,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--request-params",
         default="",
-        help="Additional chat.completions.create kwargs as a JSON object for API calls.",
+        help=(
+            "Shared chat.completions.create kwargs as a JSON object. These are "
+            "applied to tutor and aux calls before role-specific overrides."
+        ),
     )
     parser.add_argument("--request-params-file", type=Path, default=None)
+    parser.add_argument(
+        "--tutor-request-params",
+        default="",
+        help="Tutor-specific chat.completions.create kwargs as a JSON object.",
+    )
+    parser.add_argument("--tutor-request-params-file", type=Path, default=None)
+    parser.add_argument(
+        "--aux-request-params",
+        default="",
+        help="Auxiliary student/judge-specific chat.completions.create kwargs as JSON.",
+    )
+    parser.add_argument("--aux-request-params-file", type=Path, default=None)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--keep-on-error", action="store_true")
     parser.add_argument("--save-outputs", action="store_true")
@@ -298,14 +340,43 @@ def load_json_object_arg(value: str, *, label: str) -> dict[str, Any]:
     return parsed
 
 
-def load_request_params(args: argparse.Namespace) -> dict[str, Any]:
-    params = load_json_object_arg(args.request_params, label="--request-params")
-    if args.request_params_file is not None:
-        file_params = json.loads(args.request_params_file.read_text(encoding="utf-8"))
+def load_request_params_arg(
+    value: str,
+    path: Path | None,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    params = load_json_object_arg(value, label=label)
+    if path is not None:
+        file_params = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(file_params, dict):
-            raise ValueError("--request-params-file must contain a JSON object.")
+            raise ValueError(f"{label}-file must contain a JSON object.")
         params = merge_dicts(params, file_params)
     return params
+
+
+def load_request_params(args: argparse.Namespace) -> dict[str, Any]:
+    return load_request_params_arg(
+        args.request_params,
+        args.request_params_file,
+        label="--request-params",
+    )
+
+
+def load_tutor_request_params(args: argparse.Namespace) -> dict[str, Any]:
+    return load_request_params_arg(
+        args.tutor_request_params,
+        args.tutor_request_params_file,
+        label="--tutor-request-params",
+    )
+
+
+def load_aux_request_params(args: argparse.Namespace) -> dict[str, Any]:
+    return load_request_params_arg(
+        args.aux_request_params,
+        args.aux_request_params_file,
+        label="--aux-request-params",
+    )
 
 
 def resolve_thinking(choice: str, default: bool) -> bool | None:
@@ -336,8 +407,24 @@ def with_thinking_param(
     )
 
 
+def _request_top_k_from_gconfig(config: Any) -> int | None:
+    top_k = getattr(config.gconfig, "top_k", None)
+    if top_k is None:
+        return None
+    top_k = int(top_k)
+    return top_k if top_k < int(1e8) else None
+
+
+def tutor_generation_request_params(config: Any) -> dict[str, Any]:
+    top_k = _request_top_k_from_gconfig(config)
+    if top_k is None:
+        return {}
+    return {"extra_body": {"top_k": int(top_k)}}
+
+
 def build_tutor_request_params(args: argparse.Namespace, config: Any) -> dict[str, Any]:
-    params = load_request_params(args)
+    params = merge_dicts(tutor_generation_request_params(config), load_request_params(args))
+    params = merge_dicts(params, load_tutor_request_params(args))
     return with_thinking_param(
         params,
         resolve_thinking(args.thinking, bool(config.enable_thinking)),
@@ -347,10 +434,68 @@ def build_tutor_request_params(args: argparse.Namespace, config: Any) -> dict[st
 def build_aux_request_params(args: argparse.Namespace, config: Any) -> dict[str, Any]:
     auxiliary_model = config.auxiliary_model
     params = merge_dicts(dict(auxiliary_model.request_params), load_request_params(args))
+    params = merge_dicts(params, load_aux_request_params(args))
     return with_thinking_param(
         params,
         resolve_thinking(args.thinking, bool(auxiliary_model.enable_thinking)),
     )
+
+
+def resolve_tutor_base_url(args: argparse.Namespace) -> str:
+    return args.tutor_base_url or args.base_url or DEFAULT_BASE_URL
+
+
+def resolve_aux_base_url(args: argparse.Namespace, config: Any) -> str:
+    return (
+        args.aux_base_url
+        or getattr(config.auxiliary_model, "base_url", "")
+        or args.base_url
+        or DEFAULT_BASE_URL
+    )
+
+
+def resolve_tutor_model(args: argparse.Namespace) -> str:
+    return args.tutor_model or args.model or DEFAULT_MODEL
+
+
+def resolve_aux_model(args: argparse.Namespace, config: Any) -> str:
+    return (
+        args.aux_model
+        or getattr(config.auxiliary_model, "model", "")
+        or args.model
+        or DEFAULT_MODEL
+    )
+
+
+def resolve_tutor_api_key(args: argparse.Namespace) -> str:
+    return (
+        args.tutor_api_key
+        or args.api_key
+        or os.getenv("OPENAI_API_KEY")
+        or "EMPTY"
+    )
+
+
+def resolve_aux_api_key(args: argparse.Namespace, config: Any) -> str:
+    return (
+        args.aux_api_key
+        or getattr(config.auxiliary_model, "api_key", "")
+        or args.api_key
+        or os.getenv("OPENAI_API_KEY")
+        or "EMPTY"
+    )
+
+
+def resolve_tutor_timeout(args: argparse.Namespace) -> float:
+    if args.tutor_timeout is not None:
+        return float(args.tutor_timeout)
+    return float(args.timeout)
+
+
+def resolve_aux_timeout(args: argparse.Namespace, config: Any) -> float:
+    if args.aux_timeout is not None:
+        return float(args.aux_timeout)
+    return float(getattr(config.auxiliary_model, "timeout", args.timeout))
 
 
 def item_id_from_row(row: dict[str, Any], index: int) -> int | str:
@@ -402,10 +547,10 @@ def build_workflow(
         enable_leak_check=config.enable_leak_check,
         aux_mode="api",
         aux_enable_thinking=bool(aux_thinking),
-        aux_base_url=args.base_url or auxiliary_model.base_url,
-        aux_model=args.model or auxiliary_model.model,
-        aux_api_key=args.api_key or auxiliary_model.api_key,
-        aux_timeout=int(args.timeout or auxiliary_model.timeout),
+        aux_base_url=resolve_aux_base_url(args, config),
+        aux_model=resolve_aux_model(args, config),
+        aux_api_key=resolve_aux_api_key(args, config),
+        aux_timeout=int(resolve_aux_timeout(args, config)),
         aux_max_tokens=auxiliary_model.max_tokens,
         aux_temperature=auxiliary_model.temperature,
         aux_top_p=auxiliary_model.top_p,
@@ -827,7 +972,6 @@ async def main_async(args: argparse.Namespace) -> None:
         else default_report_path(output_path)
     )
     csv_path = Path(args.csv).resolve() if args.csv else default_csv_path(output_path)
-    api_key = args.api_key or os.getenv("OPENAI_API_KEY") or "EMPTY"
     attempts = max(1, int(args.attempts))
     max_concurrency = max(
         1,
@@ -848,10 +992,10 @@ async def main_async(args: argparse.Namespace) -> None:
         )
 
     tutor_client = ApiTutorClient(
-        base_url=args.base_url,
-        api_key=api_key,
-        model=args.model,
-        timeout=float(args.timeout),
+        base_url=resolve_tutor_base_url(args),
+        api_key=resolve_tutor_api_key(args),
+        model=resolve_tutor_model(args),
+        timeout=resolve_tutor_timeout(args),
         request_params=tutor_request_params,
     )
 
@@ -866,8 +1010,18 @@ async def main_async(args: argparse.Namespace) -> None:
         "input": str(input_path),
         "output": str(output_path),
         "config": str(Path(args.config).resolve()),
-        "base_url": args.base_url,
-        "model": args.model,
+        "tutor": {
+            "base_url": resolve_tutor_base_url(args),
+            "model": resolve_tutor_model(args),
+            "timeout": resolve_tutor_timeout(args),
+        },
+        "auxiliary": {
+            "base_url": resolve_aux_base_url(args, config),
+            "model": resolve_aux_model(args, config),
+            "timeout": resolve_aux_timeout(args, config),
+        },
+        "deprecated_shared_base_url": args.base_url or None,
+        "deprecated_shared_model": args.model or None,
         "attempts": attempts,
         "max_concurrency": max_concurrency,
         "selected_splits": selected_splits,

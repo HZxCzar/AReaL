@@ -55,45 +55,48 @@ uses the lm-eval/Hendrycks MATH boxed-answer extraction and string-normalized ex
 match. Both scorers extract the student's final answer from the last `\boxed{...}` or
 `\fbox{...}` in the student response.
 Pass the same `answer_scorer=math` and dataset path overrides to
-`filter_pre_solved.py`, `manual_tutor.py`, or `demo_run.py` when using MATH rows.
+`filter_task.py`, `manual_tutor.py`, or `demo_run.py` when using MATH rows.
 
-## Filter pre-solved tasks
+## Filter Tasks
 
-Before training, optionally remove train rows that the auxiliary student can solve
-without tutor feedback:
+Before training, regenerate the train/test task filter with the configured LLM answer
+judge fallback. The filter first drops rows that the external student can solve without
+tutor feedback, then keeps only rows that the external teacher can solve independently.
+For the full old 8B self-filter and current 4B+8B runbooks, see
+[`FILTER_RUNBOOK.md`](FILTER_RUNBOOK.md).
+Use explicit student and teacher endpoints when the two models differ:
 
 ```bash
-python3 examples/tutor/filter_pre_solved.py \
-  --config examples/tutor/config.yaml \
-  --input /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/aime_dataset \
-  --output /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/aime_dataset_no_pre_solve \
-  --splits train \
-  --attempts 1 \
+python3 examples/tutor/scripts/filter_task.py \
+  --config examples/tutor/configs/math/staged_leak/qwen8b-nonthinking-qwen4b-remote-overfit-8-generalize-staged-leak.yaml \
+  --input examples/tutor/data/math_dataset \
+  --output examples/tutor/data/math_dataset_filter_task \
+  --splits train test \
+  --teacher-base-url http://127.0.0.1:30008/v1 \
+  --teacher-model default \
+  --thinking off \
+  --student-attempts 1 \
+  --teacher-attempts 1 \
   --overwrite
 ```
 
-For MATH rows, use the MATH dataset path and scorer. The filter calls the auxiliary
-student with `auxiliary_model` settings from the resolved config (`base_url`, `model`,
-`max_tokens`, `temperature`, `top_p`, timeout, API params, and concurrency):
+Student defaults come from `auxiliary_model` in the config. Teacher defaults come from
+`gconfig` plus `--teacher-base-url`. Use `--student-*` or `--teacher-*` flags only for
+intentional role-specific overrides. The script writes a `*_filter_task_report.json`
+report with the resolved endpoints and request parameters.
+
+After the LLM judge filter, prune known bad task ids if needed:
 
 ```bash
-python3 examples/tutor/filter_pre_solved.py \
-  --config examples/tutor/config.yaml \
-  --input examples/tutor/data/math_dataset \
-  --output examples/tutor/data/math_dataset_no_pre_solve \
+python3 examples/tutor/scripts/filter_wrong_tasks.py \
+  --input examples/tutor/data/math_dataset_filter_task \
+  --output examples/tutor/data/math_dataset_filter_task_pruned \
   --splits train \
-  --attempts 1 \
-  --overwrite \
-  answer_scorer=math \
-  train_dataset.path=examples/tutor/data/math_dataset \
-  valid_dataset.path=examples/tutor/data/math_dataset
+  --overwrite
 ```
 
 The output dataset keeps unselected splits unchanged, so both `train_dataset.path` and
-`valid_dataset.path` can point to the filtered dataset directory. Increase `--attempts`
-to drop a row if any sampled initial student attempt solves it. The script also writes a
-`*_pre_solve_filter_report.json` file with kept, dropped, and error ids, plus the
-resolved answer scorer and auxiliary request config used for the run.
+`valid_dataset.path` can point to the filtered dataset directory.
 
 ## Manual human tutor probe
 
