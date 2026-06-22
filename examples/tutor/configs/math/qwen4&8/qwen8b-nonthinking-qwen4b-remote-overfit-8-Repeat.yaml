@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-nonthinking-qwen4b-remote-overfit-8-generalize-staged-leak
+trial_name: qwen8b-nonthinking-qwen4b-remote-overfit-8-Repeat
 
 seed: 42
 enable_offload: false
@@ -12,12 +12,6 @@ answer_scorer: math
 max_turns: 10
 enable_thinking: false
 teacher_show_ground_truth: false
-
-student_generalize:
-  enabled: true
-  path: examples/tutor/generalization/math_qwen4_8_overfit8_student_generalize.json
-  level1_reward: 0.5
-  level2_reward: 1.0
 
 auxiliary_model:
   mode: api
@@ -42,12 +36,8 @@ auxiliary_model:
 
 reward:
   success: 1.0
-  leak_penalty_mode: staged
-  leak_penalty: null
-  leak_penalty_final_answer: -2.0
-  leak_penalty_compute: -0.5
-  leak_penalty_formula: -0.05
   assign_success_reward: false
+  leak_penalty: -0.05
   outcome_prior_turn_weight: 0.5
   outcome_credit_gamma: 0.9
   early_success_bonus: 0.0
@@ -207,7 +197,7 @@ train_dataset:
   shuffle: false
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_qwen4-8-overfit8
+  path: examples/tutor/data/math_dataset_qwen4-8-overfit8repeat
   type: rl
   max_length: 16384
 
@@ -215,7 +205,7 @@ valid_dataset:
   batch_size: ${train_dataset.batch_size}
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_qwen4-8-overfit8
+  path: examples/tutor/data/math_dataset_qwen4-8-overfit8repeat
   type: rl
 
 saver:
@@ -240,7 +230,7 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: 10
+  freq_steps: null
   freq_secs: null
   max_samples: null
 
@@ -253,4 +243,4 @@ stats_logger:
     entity: hz-czar-stanford
     project: TAgent
     name: ${trial_name}
-    group: overfit8
+    group: qwen4&8-overfit8

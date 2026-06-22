@@ -1,0 +1,162 @@
+{
+  "train-1813": {
+    "level1": {
+      "task": "If two lines l and m have equations y = -x + 10 and y = -5x + 10, what is the probability that a point randomly selected in the first quadrant and below l will fall between l and m? Express your answer as a decimal to the nearest hundredth.",
+      "ground_truth": "0.80"
+    },
+    "level2": {
+      "task": "If two lines l and m have equations y = -x + 12 and y = -4x + 12, what is the probability that a point randomly selected in the first quadrant and below l will also fall below m? Express your answer as a decimal to the nearest hundredth.",
+      "ground_truth": "0.25"
+    }
+  },
+  "train-1882": {
+    "level1": {
+      "task": "In the same labeled graph, with edges AC, AD, CB, CF, CD, DF, DE, EF, and FB, how many continuous paths from A to E do not revisit any of the six labeled points?",
+      "ground_truth": "10"
+    },
+    "level2": {
+      "task": "In the graph with labeled points A, B, C, D, E, and F and edges AC, AD, CB, CF, CD, DF, DE, EF, and FB, how many continuous paths from C to E do not revisit any labeled point?",
+      "ground_truth": "8"
+    }
+  },
+  "train-2651": {
+    "level1": {
+      "task": "A figure is constructed from unit cubes, and each cube shares at least one face with another cube. The front view has two columns of heights 3 and 1 from left to right, and the side view has two columns of heights 1 and 3 from front to back. What is the minimum number of cubes needed?",
+      "ground_truth": "5"
+    },
+    "level2": {
+      "task": "A connected figure is constructed from unit cubes. Its front view has three columns of heights 3, 1, and 2 from left to right, and its side view has two columns of heights 2 and 3 from front to back. What is the minimum number of cubes needed?",
+      "ground_truth": "7"
+    }
+  },
+  "train-3200": {
+    "level1": {
+      "task": "Given that BDEF is a square and AB = BC = 2 in the same regular-octagon construction, find the number of square units in the area of the regular octagon.",
+      "ground_truth": "16+16\\sqrt{2}"
+    },
+    "level2": {
+      "task": "In the same regular-octagon construction, suppose AB = BC = 2. What is the perimeter of the regular octagon?",
+      "ground_truth": "16\\sqrt{2}"
+    }
+  },
+  "train-3201": {
+    "level1": {
+      "task": "The same circle-and-equilateral-triangle figure is formed, but the equilateral triangle has side length 24 cm. If the sum of the areas of the two small shaded regions is a\\pi - b\\sqrt{c} in simplest radical form, what is a+b+c?",
+      "ground_truth": "123"
+    },
+    "level2": {
+      "task": "In the original circle-and-equilateral-triangle figure with side length 12 cm, one of the two small shaded regions has area a\\pi - b\\sqrt{c} in simplest radical form. What is a+b+c?",
+      "ground_truth": "18"
+    }
+  },
+  "train-3289": {
+    "level1": {
+      "task": "What is the area of the portion of the circle defined by x^2 - 10x + y^2 = 75 that lies above the x-axis and to the right of the line y = 5 - x?",
+      "ground_truth": "\\frac{75\\pi}{2}"
+    },
+    "level2": {
+      "task": "What is the area of the portion of the circle defined by x^2 - 8x + y^2 = 20 that lies above the x-axis and above the line y = x - 4?",
+      "ground_truth": "\\frac{27\\pi}{2}"
+    }
+  },
+  "train-5851": {
+    "level1": {
+      "task": "In the same parallel-line diagram, suppose angle AXE is 84 degrees less than 3 times angle CYX. Find angle BXY.",
+      "ground_truth": "42^\\circ"
+    },
+    "level2": {
+      "task": "In the same kind of diagram with AB parallel to CD and transversal EXYF, suppose angle AXE is 120 degrees less than 4 times angle CYX. Find angle BXY.",
+      "ground_truth": "40^\\circ"
+    }
+  },
+  "train-7495": {
+    "level1": {
+      "task": "Find the number of real solutions of the equation x/50 = sin x.",
+      "ground_truth": "31"
+    },
+    "level2": {
+      "task": "Find the number of real solutions of the equation x/75 = sin x.",
+      "ground_truth": "47"
+    }
+  },
+  "test-1837": {
+    "level1": {
+      "task": "In the same construction, four squares of side length 2 are placed in the corners of a square of side length 8, and square ABCD has sides passing through the corresponding four inner corner points W, X, Y, and Z. If P is the lower-right corner of the large square, what is the maximum possible distance from A to P?",
+      "ground_truth": "2+2\\sqrt{13}"
+    },
+    "level2": {
+      "task": "In the same construction with four corner squares of side length 2 inside a square of side length 8, and with P the lower-right corner of the large square, what is the minimum possible distance from A to P?",
+      "ground_truth": "2\\sqrt{13}-2"
+    }
+  },
+  "test-3564": {
+    "level1": {
+      "task": "Suppose that P_b times P_b equals QP_b, where P, Q, and b are distinct digits 1 through 9. If Q = P/3 and P is three less than b, what is the value of the digit P?",
+      "ground_truth": "3"
+    },
+    "level2": {
+      "task": "Suppose that P_b times P_b equals QP_b, where P, Q, and b are distinct digits 1 through 9. If Q = P/3 and P is three less than b, what is the value of the digit b?",
+      "ground_truth": "6"
+    }
+  },
+  "test-3800": {
+    "level1": {
+      "task": "Each triangle is a 30-60-90 triangle, and the hypotenuse of one triangle is the longer leg of an adjacent triangle. The hypotenuse of the larger triangle is 20 centimeters. What is the number of centimeters in the length of the longer leg of the smaller triangle?",
+      "ground_truth": "15"
+    },
+    "level2": {
+      "task": "Each triangle is a 30-60-90 triangle, and the hypotenuse of one triangle is the longer leg of an adjacent triangle. The hypotenuse of the larger triangle is 32 centimeters. What is the number of centimeters in the length of the shorter leg of the smaller triangle?",
+      "ground_truth": "8\\sqrt{3}"
+    }
+  },
+  "test-4179": {
+    "level1": {
+      "task": "A consumer report revealed the following information about three tubes of toothpaste. Bright is 50% more expensive than Fresh and has 20% less volume than Glow. Glow is 20% less expensive than Bright and has 25% more volume than Fresh. Fresh costs $1.00 per unit of volume. What is the number of cents per unit of volume of Glow?",
+      "ground_truth": "96"
+    },
+    "level2": {
+      "task": "A consumer report revealed the following information about three tubes of toothpaste. Bright is 50% more expensive than Fresh and has 20% less volume than Glow. Glow is 20% less expensive than Bright and has 25% more volume than Fresh. Fresh costs $1.00 per unit of volume. What is the number of cents per unit of volume of Bright?",
+      "ground_truth": "150"
+    }
+  },
+  "test-4471": {
+    "level1": {
+      "task": "In the same circle setup with points A, B, C, and D, all six constructed lines pass through P, and P = aA + bB + cC + dD in vector notation. What is the value of a?",
+      "ground_truth": "\\frac{1}{2}"
+    },
+    "level2": {
+      "task": "In the same circle setup with points A, B, C, and D, all six constructed lines pass through P, and P = aA + bB + cC + dD in vector notation. Find 2a+2b+2c+2d.",
+      "ground_truth": "4"
+    }
+  },
+  "test-4790": {
+    "level1": {
+      "task": "A point has rectangular coordinates (2,1,2) and spherical coordinates (rho, theta, phi). Find the rectangular coordinates of the point with spherical coordinates (rho, theta, 2phi).",
+      "ground_truth": "\\left(\\frac{8}{3},\\frac{4}{3},-\\frac{1}{3}\\right)"
+    },
+    "level2": {
+      "task": "A point has rectangular coordinates (2,-1,-2) and spherical coordinates (rho, theta, phi). Find the rectangular coordinates of the point with spherical coordinates (rho, theta+\\pi, 2phi).",
+      "ground_truth": "\\left(\\frac{8}{3},-\\frac{4}{3},-\\frac{1}{3}\\right)"
+    }
+  },
+  "test-4550": {
+    "level1": {
+      "task": "If arccos x + arccos 2x + arccos 4x = pi, then x satisfies a cubic polynomial ax^3 + bx^2 + cx + d = 0, where a, b, c, and d are integers and a is nonzero. Find the smallest possible value of |a|+|b|+|c|+|d|.",
+      "ground_truth": "38"
+    },
+    "level2": {
+      "task": "If arccos x + arccos 3x + arccos 4x = pi, then x satisfies a cubic polynomial ax^3 + bx^2 + cx + d = 0, where a, b, c, and d are integers and a is nonzero. Find the smallest possible value of |a|+|b|+|c|+|d|.",
+      "ground_truth": "51"
+    }
+  },
+  "test-1313": {
+    "level1": {
+      "task": "How many squares have all four vertices on a 6 by 6 rectangular grid of dots?",
+      "ground_truth": "105"
+    },
+    "level2": {
+      "task": "How many squares have all four vertices on a 5 by 5 rectangular grid of dots and are not aligned with the grid lines?",
+      "ground_truth": "20"
+    }
+  }
+}

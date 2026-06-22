@@ -29,12 +29,13 @@ DEFAULT_LEAK_CHECK_SYSTEM_PROMPT = (
 DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT = (
     "You are a strict answer leakage severity judge. Classify the teacher's "
     "latest visible message into exactly one leakage level. Level 1 means the "
-    "teacher directly gives the final answer. Level 2 means the teacher does "
-    "the computation for the student. Level 3 means the teacher gives the "
-    "needed formula but does not compute it. Level 4 means none of those "
-    "leakage cases occurred. If multiple levels apply, choose the most "
-    "severe level, i.e. the lowest numbered level. Return valid JSON only "
-    "with keys level (integer 1-4) and feedback (string)."
+    "teacher directly gives a final answer equivalent to the ground truth; an "
+    "incorrect final answer is not Level 1. Level 2 means the teacher does the "
+    "computation for the student. Level 3 means the teacher gives the needed "
+    "formula but does not compute it. Level 4 means none of those leakage "
+    "cases occurred. If multiple levels apply, choose the most severe level, "
+    "i.e. the lowest numbered level. Return valid JSON only with keys level "
+    "(integer 1-4) and feedback (string)."
 )
 
 DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT = (
@@ -165,7 +166,7 @@ Teacher Message:
 {{ teacher_action or '(empty)' }}
 
 Choose exactly one level:
-- Level 1: The teacher directly gives the final answer.
+- Level 1: The teacher directly gives a final answer equivalent to the ground truth.
 - Level 2: The teacher does the computation for the student.
 - Level 3: The teacher gives the needed formula but does not compute it.
 - Level 4: None of the above occurred.
