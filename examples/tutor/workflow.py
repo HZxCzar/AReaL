@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging as py_logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -179,6 +180,47 @@ _REWARD_COMPONENT_ALIASES = {
     "success_credit": "success",
 }
 
+LEAK_TERMINATION_REASON = "leak"
+
+
+def _rawbase_match_text(text: str) -> str:
+    text = str(text or "").lower()
+    for old, new in (
+        ("\\!", ""),
+        ("\\,", ""),
+        ("\\$", "$"),
+        ("$", ""),
+        (",", ""),
+        ("\\left", ""),
+        ("\\right", ""),
+        ("^\\circ", "degrees"),
+        ("°", "degrees"),
+    ):
+        text = text.replace(old, new)
+    return re.sub(r"\s+", "", text)
+
+
+def _rawbase_ground_truth_variants(ground_truth: str) -> set[str]:
+    ground_truth = str(ground_truth or "").strip()
+    variants = {ground_truth}
+    frac = re.fullmatch(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", ground_truth)
+    if frac is not None:
+        variants.add(f"{frac.group(1)}/{frac.group(2)}")
+    degree = re.search(r"[-+]?\d+(?:\.\d+)?", ground_truth)
+    if degree is not None and ("degree" in ground_truth or "\\circ" in ground_truth):
+        variants.add(f"{degree.group(0)} degrees")
+        variants.add(f"{degree.group(0)}^\\circ")
+        variants.add(f"{degree.group(0)}°")
+    return {variant for variant in variants if _rawbase_match_text(variant)}
+
+
+def _rawbase_ground_truth_in_message(ground_truth: str, teacher_action: str) -> bool:
+    message = _rawbase_match_text(teacher_action)
+    return any(
+        _rawbase_match_text(variant) in message
+        for variant in _rawbase_ground_truth_variants(ground_truth)
+    )
+
 
 def _safe_scalar(**metrics: Any) -> None:
     try:
@@ -236,6 +278,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         max_turns: int = 6,
         enable_thinking: bool = False,
         enable_leak_check: bool = True,
+        terminate_on_leak: bool = False,
         temperature: float = 1.0,
         top_p: float = 1.0,
         max_completion_tokens: int = 512,
@@ -243,9 +286,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         reasoning_parser: str = "qwen3",
         aux_mode: str = "api",
         aux_enable_thinking: bool = False,
-        aux_base_url: str = "http://127.0.0.1:30000/v1",
-        aux_model: str = "qwen-aux",
-        aux_api_key: str = "EMPTY",
+        aux_base_url: str = "https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1",
+        aux_model: str = "qwen3-4b",
+        aux_api_key: str = "${oc.env:INF_API_KEY}",
         aux_timeout: int = 120,
         aux_max_tokens: int = 1024,
         aux_temperature: float = 0.7,
@@ -297,6 +340,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.answer_scorer: AnswerScorer = get_answer_scorer(answer_scorer)
         self.enable_thinking = enable_thinking
         self.enable_leak_check = bool(enable_leak_check)
+        self.terminate_on_leak = bool(terminate_on_leak)
+        if self.terminate_on_leak and not self.enable_leak_check:
+            raise ValueError(
+                "terminate_on_leak=True requires enable_leak_check=True."
+            )
         self.gconfig = gconfig
         self.temperature = gconfig.temperature if gconfig is not None else temperature
         self.top_p = gconfig.top_p if gconfig is not None else top_p
@@ -644,6 +692,30 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 tutor_raw_output
             )
             public_before = public_history.summary
+            leak_result = self._pending_leak_check_result()
+            if bool(getattr(self, "terminate_on_leak", False)):
+                leak_result = await self._run_optional_leak_check(
+                    task,
+                    ground_truth,
+                    tutor_visible_output,
+                    aux_caller=aux_caller,
+                )
+                if leak_result.leaked:
+                    termination_reason = LEAK_TERMINATION_REASON
+                    turn_artifacts.append(
+                        TurnArtifact(
+                            turn_idx=turn_idx,
+                            tutor_state=tutor_state,
+                            tutor_prompt=self._build_tutor_prompt(tutor_state),
+                            tutor_response=response,
+                            tutor_raw_output=tutor_raw_output,
+                            tutor_visible_output=tutor_visible_output,
+                            leak_result=leak_result,
+                            public_history_before=public_before,
+                            public_history_after=public_before,
+                        )
+                    )
+                    break
 
             student_state = StudentTurnState(
                 task=task,
@@ -685,7 +757,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     tutor_response=response,
                     tutor_raw_output=tutor_raw_output,
                     tutor_visible_output=tutor_visible_output,
-                    leak_result=self._pending_leak_check_result(),
+                    leak_result=leak_result,
                     public_history_before=public_before,
                     public_history_after=next_public_history.summary,
                     student_state=student_state,
@@ -708,12 +780,17 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if judge_result.correct:
                 break
 
-        leak_count = await self._annotate_turn_leak_results(
-            task,
-            ground_truth,
-            turn_artifacts,
-            aux_caller=aux_caller,
-        )
+        if bool(getattr(self, "terminate_on_leak", False)):
+            leak_count = sum(
+                1 for artifact in turn_artifacts if artifact.leak_result.leaked
+            )
+        else:
+            leak_count = await self._annotate_turn_leak_results(
+                task,
+                ground_truth,
+                turn_artifacts,
+                aux_caller=aux_caller,
+            )
         episode_artifact = EpisodeArtifact(
             task=task,
             ground_truth=ground_truth,
@@ -1084,10 +1161,22 @@ class TutorAgentWorkflow(RolloutWorkflow):
         aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
     ) -> LeakCheckResult:
         del task
+        teacher_message = _strip_reasoning_for_context(teacher_action)
+        if not _rawbase_ground_truth_in_message(ground_truth, teacher_message):
+            return LeakCheckResult(
+                raw_output="",
+                leaked=False,
+                feedback="Ground truth not found in teacher message.",
+                parse_error=None,
+                raw_result={
+                    "method": "rawbase_exact_ground_truth",
+                    "prefilter": "no_ground_truth_match",
+                },
+            )
         prompt = render_prompt(
             RAWBASE_LEAK_CHECK_USER_TEMPLATE,
             ground_truth=ground_truth,
-            teacher_action=_strip_reasoning_for_context(teacher_action),
+            teacher_action=teacher_message,
         )
         result = await self._call_auxiliary_prompt(
             system_prompt=RAWBASE_LEAK_CHECK_SYSTEM_PROMPT,
@@ -1105,6 +1194,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         leak_result = parse_leak_check_result(result.text)
         leak_result.raw_result["method"] = "rawbase_exact_ground_truth"
+        leak_result.raw_result["prefilter"] = "ground_truth_match"
         return leak_result
 
     async def _call_auxiliary_prompt(
@@ -1675,6 +1765,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "stop/context_limit": float(
                 termination_reason == CONTEXT_BUDGET_TERMINATION_REASON
             ),
+            "stop/leak": float(termination_reason == LEAK_TERMINATION_REASON),
         }
         if success_round > 0:
             metrics["solve_turn"] = int(success_round)

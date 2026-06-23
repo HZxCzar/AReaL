@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from examples.tutor.core.types import JudgeResult
 from examples.tutor.scripts.filter_task import (
+    DEFAULT_TEACHER_BASE_URL,
     build_aux_request_params,
     build_teacher_request_params,
     classify_pre_solved_row,
@@ -186,7 +187,7 @@ def test_endpoint_resolution_supports_heterogeneous_student_and_teacher():
 
     defaults = make_request_args()
     assert resolve_student_base_url(defaults, config) == "http://config-student/v1"
-    assert resolve_teacher_base_url(defaults) == "http://127.0.0.1:30008/v1"
+    assert resolve_teacher_base_url(defaults) == DEFAULT_TEACHER_BASE_URL
 
     shared = make_request_args(base_url="http://shared/v1")
     assert resolve_student_base_url(shared, config) == "http://shared/v1"

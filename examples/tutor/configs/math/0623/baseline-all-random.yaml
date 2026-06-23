@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-baseline-overfit-8-gt
+trial_name: qwen8b-baseline-all-random
 
 seed: 42
 enable_offload: false
@@ -11,15 +11,30 @@ eval_workflow: ${workflow}
 answer_scorer: math
 max_turns: 10
 enable_thinking: true
-teacher_show_ground_truth: true
+teacher_show_ground_truth: false
 
 auxiliary_model:
-  mode: self
+  mode: api
   enable_thinking: false
+  base_url: https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1
+  model: qwen3-8b
+  api_key: ${oc.env:INF_API_KEY}
+  timeout: 120
   max_tokens: 1024
   temperature: 0.0
+  top_p: 1.0
   max_concurrent_calls: 4
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen48
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
   answer_judge_enabled: true
+  answer_judge_max_tokens: 256
 
 reward:
   success: 1.0
@@ -179,10 +194,11 @@ sglang:
 
 train_dataset:
   batch_size: 16
-  shuffle: false
+  shuffle: true
+  drop_last: true
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_llm_judge_overfit_8
+  path: examples/tutor/data/math_dataset_hard_all
   type: rl
   max_length: 16384
 
@@ -190,7 +206,7 @@ valid_dataset:
   batch_size: ${train_dataset.batch_size}
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_llm_judge_overfit_8
+  path: examples/tutor/data/math_dataset_hard_all
   type: rl
 
 saver:
@@ -215,7 +231,7 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: null
+  freq_steps: 10
   freq_secs: null
   max_samples: null
 
@@ -228,4 +244,4 @@ stats_logger:
     entity: hz-czar-stanford
     project: TAgent
     name: ${trial_name}
-    group: overfit8
+    group: baseline-all

@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-baseline-overfit-1-leak2e-1
+trial_name: qwen8b-baseline-overfit-1-gt
 
 seed: 42
 enable_offload: false
@@ -11,20 +11,35 @@ eval_workflow: ${workflow}
 answer_scorer: math
 max_turns: 10
 enable_thinking: true
-teacher_show_ground_truth: false
+teacher_show_ground_truth: true
 
 auxiliary_model:
-  mode: self
+  mode: api
   enable_thinking: false
+  base_url: https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1
+  model: qwen3-8b
+  api_key: ${oc.env:INF_API_KEY}
+  timeout: 120
   max_tokens: 1024
   temperature: 0.0
+  top_p: 1.0
   max_concurrent_calls: 4
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen48
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
   answer_judge_enabled: true
+  answer_judge_max_tokens: 256
 
 reward:
   success: 1.0
   assign_success_reward: false
-  leak_penalty: -0.2
+  leak_penalty: -0.05
   outcome_prior_turn_weight: 0.5
   outcome_credit_gamma: 0.9
   early_success_bonus: 0.0

@@ -14,9 +14,9 @@ enable_thinking: true
 teacher_show_ground_truth: true
 
 auxiliary_model:
-  base_url: http://127.0.0.1:30001/v1
-  model: default
-  api_key: EMPTY
+  base_url: https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1
+  model: qwen3-4b
+  api_key: ${oc.env:INF_API_KEY}
   timeout: 120
   max_tokens: 1024
   temperature: 0.7
@@ -24,7 +24,15 @@ auxiliary_model:
   max_concurrent_calls: 4
   request_params:
     seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen48
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
   answer_judge_enabled: true
+  answer_judge_max_tokens: 256
 
 reward:
   success: 1.0

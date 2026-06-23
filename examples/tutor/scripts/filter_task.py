@@ -39,9 +39,11 @@ DEFAULT_CONFIG_PATH = (
     "examples/tutor/configs/math/staged_leak/"
     "qwen8b-nonthinking-qwen4b-remote-overfit-8-generalize-staged-leak.yaml"
 )
-DEFAULT_STUDENT_BASE_URL = "http://127.0.0.1:30000/v1"
-DEFAULT_TEACHER_BASE_URL = "http://127.0.0.1:30008/v1"
-DEFAULT_MODEL = "default"
+DEFAULT_STUDENT_BASE_URL = "https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1"
+DEFAULT_TEACHER_BASE_URL = "https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1"
+DEFAULT_STUDENT_MODEL = "qwen3-4b"
+DEFAULT_TEACHER_MODEL = "qwen3-8b"
+DEFAULT_MODEL = DEFAULT_TEACHER_MODEL
 DEDICATED_REQUEST_PARAM_KEYS = {
     "max_completion_tokens",
     "max_tokens",
@@ -621,12 +623,12 @@ def resolve_student_model(args: argparse.Namespace, config: Any) -> str:
         args.student_model
         or args.model
         or getattr(config.auxiliary_model, "model", "")
-        or DEFAULT_MODEL
+        or DEFAULT_STUDENT_MODEL
     )
 
 
 def resolve_teacher_model(args: argparse.Namespace) -> str:
-    return args.teacher_model or args.model or DEFAULT_MODEL
+    return args.teacher_model or args.model or DEFAULT_TEACHER_MODEL
 
 
 def resolve_student_api_key(args: argparse.Namespace, config: Any) -> str:
@@ -734,6 +736,7 @@ def build_workflow(
         max_turns=config.max_turns,
         enable_thinking=config.enable_thinking,
         enable_leak_check=config.enable_leak_check,
+        terminate_on_leak=config.terminate_on_leak,
         aux_mode="api",
         aux_enable_thinking=bool(aux_thinking),
         aux_base_url=resolve_student_base_url(args, config),

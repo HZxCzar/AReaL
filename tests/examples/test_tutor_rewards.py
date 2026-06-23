@@ -6,7 +6,7 @@ import types
 import pytest
 
 from examples.tutor import workflow as tutor_workflow
-from examples.tutor.configs import TutorRewardConfig
+from examples.tutor.configs import TutorConfig, TutorRewardConfig
 from examples.tutor.core.callers import TextCallResult
 from examples.tutor.core.math import score_math_answer
 from examples.tutor.core.pairwise import PairwiseTutorEvaluator
@@ -115,6 +115,19 @@ def _outcome_computer(**overrides) -> EpisodeRewardComputer:
     }
     params.update(overrides)
     return EpisodeRewardComputer(**params)
+
+
+def test_tutor_config_rejects_leak_termination_without_leak_check():
+    with pytest.raises(ValueError, match="terminate_on_leak"):
+        TutorConfig(enable_leak_check=False, terminate_on_leak=True)
+
+
+def test_workflow_rejects_leak_termination_without_leak_check():
+    with pytest.raises(ValueError, match="terminate_on_leak"):
+        tutor_workflow.TutorAgentWorkflow(
+            enable_leak_check=False,
+            terminate_on_leak=True,
+        )
 
 
 def test_tutor_reward_config_validates_leak_penalty_modes():
@@ -647,23 +660,38 @@ def test_answer_judge_caches_repeated_comparisons():
     assert len(caller.calls) == 1
 
 
-def test_workflow_leak_does_not_skip_student_or_success(monkeypatch):
+def _minimal_episode_workflow(**overrides):
     workflow = tutor_workflow.TutorAgentWorkflow.__new__(
         tutor_workflow.TutorAgentWorkflow
     )
-    workflow.max_turns = 1
-    workflow.success_reward = 1.0
-    workflow.leak_penalty = -1.0
-    workflow.assign_success_reward = False
-    workflow.outcome_prior_turn_weight = 0.1
-    workflow.outcome_credit_gamma = 0.9
-    workflow.early_success_bonus = 0.0
-    workflow.enable_turn_penalty = False
-    workflow.turn_penalty = -0.01
-    workflow.length_penalty_threshold_chars = 0
-    workflow.length_penalty_per_100_chars = 0.0
-    workflow.length_penalty_min = 0.0
-    workflow.pairwise_reward_enabled = False
+    params = {
+        "max_turns": 1,
+        "success_reward": 1.0,
+        "leak_penalty": -1.0,
+        "leak_penalty_mode": "binary",
+        "leak_penalty_final_answer": 0.0,
+        "leak_penalty_compute": 0.0,
+        "leak_penalty_formula": 0.0,
+        "assign_success_reward": False,
+        "outcome_prior_turn_weight": 0.1,
+        "outcome_credit_gamma": 0.9,
+        "early_success_bonus": 0.0,
+        "enable_turn_penalty": False,
+        "turn_penalty": -0.01,
+        "length_penalty_threshold_chars": 0,
+        "length_penalty_per_100_chars": 0.0,
+        "length_penalty_min": 0.0,
+        "pairwise_reward_enabled": False,
+        "terminate_on_leak": False,
+    }
+    params.update(overrides)
+    for name, value in params.items():
+        setattr(workflow, name, value)
+    return workflow
+
+
+def test_workflow_leak_does_not_skip_student_or_success(monkeypatch):
+    workflow = _minimal_episode_workflow()
 
     response = types.SimpleNamespace(
         input_tokens=[1],
@@ -730,6 +758,157 @@ def test_workflow_leak_does_not_skip_student_or_success(monkeypatch):
         1.0
     )
     assert workflow.last_total_reward == pytest.approx(0.0)
+
+
+def test_workflow_leak_termination_skips_student_and_assigns_penalty(monkeypatch):
+    workflow = _minimal_episode_workflow(terminate_on_leak=True)
+
+    response = types.SimpleNamespace(
+        input_tokens=[1],
+        output_tokens=[2],
+        output_logprobs=[-0.1],
+        output_versions=[0],
+        input_len=1,
+        output_len=1,
+    )
+    student_calls = []
+    score_calls = []
+    leak_calls = []
+    stats = {}
+
+    workflow._make_actor_caller = lambda **_kwargs: object()
+    workflow._make_auxiliary_caller = lambda **_kwargs: object()
+    workflow._make_answer_judge_caller = lambda **_kwargs: None
+    workflow._build_tutor_prompt = lambda state: f"tutor prompt {state.turn_idx}"
+    workflow._build_student_prompt_from_state = lambda state: "student prompt"
+    workflow._log_rollout_stats = lambda **kwargs: stats.update(kwargs)
+    workflow._maybe_dump_debug_trace = lambda **_kwargs: None
+
+    async def generate_tutor_response(*_args, **_kwargs):
+        return response, "the answer is 42"
+
+    async def run_student(state, **_kwargs):
+        student_calls.append(state)
+        return "initial wrong answer", None
+
+    async def score_answer(*_args, **_kwargs):
+        score_calls.append(_args)
+        return _judge(False)
+
+    async def run_leak_check(task, ground_truth, teacher_action, **_kwargs):
+        leak_calls.append((task, ground_truth, teacher_action))
+        return _leak(True)
+
+    async def fail_update_history(**_kwargs):
+        raise AssertionError("history should not update after leak termination")
+
+    async def fail_annotate(*_args, **_kwargs):
+        raise AssertionError("leak results should already be annotated")
+
+    workflow._generate_tutor_response = generate_tutor_response
+    workflow._run_student = run_student
+    workflow._score_answer_async = score_answer
+    workflow._run_optional_leak_check = run_leak_check
+    workflow._run_public_summary_update = fail_update_history
+    workflow._annotate_turn_leak_results = fail_annotate
+
+    result = asyncio.run(
+        workflow._run_episode(
+            {"task": "task", "ground_truth": "42"},
+            external_client=object(),
+        )
+    )
+
+    assert result is not None
+    assert len(student_calls) == 1
+    assert len(score_calls) == 1
+    assert len(leak_calls) == 1
+    assert leak_calls[0][2] == "the answer is 42"
+    assert stats["termination_reason"] == "leak"
+    assert stats["leak_count"] == 1
+    assert workflow.last_traces[0].leaked is True
+    assert workflow.last_traces[0].judge_correct is False
+    assert workflow.last_traces[0].student_output == ""
+    assert (
+        workflow.last_traces[0].public_history_before
+        == "Student round 1:\ninitial wrong answer"
+    )
+    assert (
+        workflow.last_traces[0].public_history_after
+        == workflow.last_traces[0].public_history_before
+    )
+    assert workflow.last_traces[0].reward_components == {"leak": -1.0}
+    assert workflow.last_total_reward == pytest.approx(-1.0)
+
+
+def test_workflow_leak_termination_reuses_immediate_clean_checks(monkeypatch):
+    workflow = _minimal_episode_workflow(max_turns=2, terminate_on_leak=True)
+
+    response = types.SimpleNamespace(
+        input_tokens=[1],
+        output_tokens=[2],
+        output_logprobs=[-0.1],
+        output_versions=[0],
+        input_len=1,
+        output_len=1,
+    )
+    student_calls = []
+    leak_results = [_leak(False), _leak(True)]
+    tutor_outputs = ["first hint", "the answer is 42"]
+
+    workflow._make_actor_caller = lambda **_kwargs: object()
+    workflow._make_auxiliary_caller = lambda **_kwargs: object()
+    workflow._make_answer_judge_caller = lambda **_kwargs: None
+    workflow._build_tutor_prompt = lambda state: f"tutor prompt {state.turn_idx}"
+    workflow._build_student_prompt_from_state = lambda state: "student prompt"
+    workflow._log_rollout_stats = lambda **_kwargs: None
+    workflow._maybe_dump_debug_trace = lambda **_kwargs: None
+
+    async def generate_tutor_response(*_args, **_kwargs):
+        return response, tutor_outputs.pop(0)
+
+    async def run_student(state, **_kwargs):
+        student_calls.append(state)
+        if len(student_calls) == 1:
+            return "initial wrong answer", None
+        return "still wrong", None
+
+    async def score_answer(*_args, **_kwargs):
+        return _judge(False)
+
+    async def run_leak_check(*_args, **_kwargs):
+        return leak_results.pop(0)
+
+    async def update_history(**_kwargs):
+        return PublicHistoryState(summary="first turn kept", turn_count=1)
+
+    async def fail_annotate(*_args, **_kwargs):
+        raise AssertionError("immediate leak checks should not be rerun post-hoc")
+
+    workflow._generate_tutor_response = generate_tutor_response
+    workflow._run_student = run_student
+    workflow._score_answer_async = score_answer
+    workflow._run_optional_leak_check = run_leak_check
+    workflow._run_public_summary_update = update_history
+    workflow._annotate_turn_leak_results = fail_annotate
+
+    result = asyncio.run(
+        workflow._run_episode(
+            {"task": "task", "ground_truth": "42"},
+            external_client=object(),
+        )
+    )
+
+    assert result is not None
+    assert len(student_calls) == 2
+    assert [trace.leaked for trace in workflow.last_traces] == [False, True]
+    assert workflow.last_traces[0].student_output == "still wrong"
+    assert workflow.last_traces[0].public_history_after == "first turn kept"
+    assert workflow.last_traces[1].student_output == ""
+    assert workflow.last_traces[1].public_history_before == "first turn kept"
+    assert workflow.last_traces[1].public_history_after == "first turn kept"
+    assert workflow.last_traces[1].reward_components == {"leak": -1.0}
+    assert workflow.last_total_reward == pytest.approx(-1.0)
 
 
 def test_workflow_student_generalize_runs_after_success_from_same_context(monkeypatch):
@@ -1119,6 +1298,7 @@ def test_rollout_stats_uses_clean_metric_names_and_reward_breakdown(monkeypatch)
     assert captured["solve_turn"] == 2
     assert captured["stop/max_turns"] == 0.0
     assert captured["stop/context_limit"] == 0.0
+    assert captured["stop/leak"] == 0.0
 
     for old_key in (
         "num_turns",
@@ -1145,6 +1325,29 @@ def test_rollout_stats_uses_clean_metric_names_and_reward_breakdown(monkeypatch)
     for name, value in expected_components.items():
         assert captured[f"reward_component/{name}"] == pytest.approx(value)
         assert captured[f"reward_share/{name}"] == pytest.approx(abs(value) / total_abs)
+
+
+def test_rollout_stats_logs_leak_termination(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        tutor_workflow,
+        "_safe_scalar",
+        lambda **metrics: captured.update(metrics),
+    )
+    workflow = _metric_workflow()
+
+    workflow._log_rollout_stats(
+        total_reward=-1.0,
+        traces=[_trace(1, {"leak": -1.0}, leaked=True)],
+        termination_reason="leak",
+        pre_success=False,
+        leak_count=1,
+    )
+
+    assert captured["solved"] == pytest.approx(0.0)
+    assert captured["stop/max_turns"] == pytest.approx(0.0)
+    assert captured["stop/context_limit"] == pytest.approx(0.0)
+    assert captured["stop/leak"] == pytest.approx(1.0)
 
 
 def test_rollout_stats_routes_student_generalize_metrics_to_generalize(monkeypatch):

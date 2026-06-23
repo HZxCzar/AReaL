@@ -34,9 +34,9 @@ class TutorAuxiliaryModelConfig:
             )
         },
     )
-    base_url: str = field(default="http://127.0.0.1:30000/v1")
-    model: str = field(default="qwen-aux")
-    api_key: str = field(default="EMPTY")
+    base_url: str = field(default="https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1")
+    model: str = field(default="qwen3-4b")
+    api_key: str = field(default="${oc.env:INF_API_KEY}")
     timeout: int = field(default=120)
     max_tokens: int = field(default=2048)
     temperature: float = field(default=0.7)
@@ -217,6 +217,15 @@ class TutorConfig(GRPOConfig):
             )
         },
     )
+    terminate_on_leak: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Terminate the tutor rollout immediately when a leak is detected. "
+                "Requires enable_leak_check=True."
+            )
+        },
+    )
     teacher_show_ground_truth: bool = field(
         default=False,
         metadata={"help": "Whether teacher prompts include the ground-truth answer."},
@@ -245,3 +254,10 @@ class TutorConfig(GRPOConfig):
         default=10,
         metadata={"help": "Dump one readable tutor trace every N rollout episodes."},
     )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.terminate_on_leak and not self.enable_leak_check:
+            raise ValueError(
+                "terminate_on_leak=True requires enable_leak_check=True."
+            )

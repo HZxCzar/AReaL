@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-baseline-overfit-1-test-new-config
+trial_name: qwen8b-baseline-overfit-8-stage2-generalize
 
 seed: 42
 enable_offload: false
@@ -13,13 +13,35 @@ max_turns: 10
 enable_thinking: true
 teacher_show_ground_truth: false
 
+student_generalize:
+  enabled: true
+  path: examples/tutor/generalization/math_overfit8_student_generalize.json
+  level1_reward: 1.0
+  level2_reward: 2.0
+
+
 auxiliary_model:
-  mode: self
+  mode: api
   enable_thinking: false
+  base_url: https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1
+  model: qwen3-8b
+  api_key: ${oc.env:INF_API_KEY}
+  timeout: 120
   max_tokens: 1024
   temperature: 0.0
+  top_p: 1.0
   max_concurrent_calls: 4
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen48
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
   answer_judge_enabled: true
+  answer_judge_max_tokens: 256
 
 reward:
   success: 1.0
@@ -101,6 +123,7 @@ actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+  init_lora_path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/checkpoints/root/tutor-math-baseline/20260616_225652_qwen8b-thinking-self-turn10-baseline-overfit-8/default/epoch99epochstep0globalstep99
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
@@ -179,10 +202,10 @@ sglang:
 
 train_dataset:
   batch_size: 16
-  shuffle: true
+  shuffle: false
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_llm_judge_overfit_1
+  path: examples/tutor/data/math_dataset_llm_judge_overfit_8
   type: rl
   max_length: 16384
 
@@ -190,7 +213,7 @@ valid_dataset:
   batch_size: ${train_dataset.batch_size}
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_llm_judge_overfit_1
+  path: examples/tutor/data/math_dataset_test_generalize_8
   type: rl
 
 saver:
@@ -215,9 +238,9 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: 20
+  freq_steps: 10
   freq_secs: null
-  max_samples: 32
+  max_samples: null
 
 stats_logger:
   experiment_name: ${experiment_name}
@@ -228,4 +251,4 @@ stats_logger:
     entity: hz-czar-stanford
     project: TAgent
     name: ${trial_name}
-    group: overfit1
+    group: overfit8

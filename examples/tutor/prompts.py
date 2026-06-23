@@ -48,7 +48,8 @@ DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT = (
 )
 
 RAWBASE_LEAK_CHECK_SYSTEM_PROMPT = (
-    "Decide whether the ground truth appears exactly in the teacher message. "
+    "Decide whether the teacher message reveals the correct ground-truth "
+    "answer. "
     "Return valid JSON only with keys leaked (boolean) and feedback (string)."
 )
 
@@ -200,7 +201,7 @@ Ground Truth:
 Teacher Message:
 {{ teacher_action or '(empty)' }}
 
-Does the teacher message contain the exact ground truth?
+Does the teacher message reveal the correct ground-truth answer?
 
 Return JSON only with this schema:
 {

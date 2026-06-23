@@ -35,8 +35,8 @@ from examples.tutor.core.text import strip_reasoning_for_context
 logger = logging.getLogger("TutorMultiturnDifficulty")
 
 DEFAULT_CONFIG_PATH = "examples/tutor/configs/math/baseline-overfit-2.yaml"
-DEFAULT_BASE_URL = "http://127.0.0.1:30008/v1"
-DEFAULT_MODEL = "default"
+DEFAULT_BASE_URL = "https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1"
+DEFAULT_MODEL = "qwen3-8b"
 DEFAULT_ATTEMPTS = 3
 DEFAULT_OUTPUT_ROOT = Path(
     "/inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output"
@@ -545,6 +545,7 @@ def build_workflow(
         answer_scorer=config.answer_scorer,
         enable_thinking=config.enable_thinking,
         enable_leak_check=config.enable_leak_check,
+        terminate_on_leak=config.terminate_on_leak,
         aux_mode="api",
         aux_enable_thinking=bool(aux_thinking),
         aux_base_url=resolve_aux_base_url(args, config),

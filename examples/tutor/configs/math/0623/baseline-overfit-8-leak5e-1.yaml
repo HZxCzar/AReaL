@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-baseline-overfit-8-stage3-leak1.5
+trial_name: qwen8b-baseline-overfit-8-leak5e-1
 
 seed: 42
 enable_offload: false
@@ -14,17 +14,32 @@ enable_thinking: true
 teacher_show_ground_truth: false
 
 auxiliary_model:
-  mode: self
+  mode: api
   enable_thinking: false
+  base_url: https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1
+  model: qwen3-8b
+  api_key: ${oc.env:INF_API_KEY}
+  timeout: 120
   max_tokens: 1024
   temperature: 0.0
+  top_p: 1.0
   max_concurrent_calls: 4
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen48
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
   answer_judge_enabled: true
+  answer_judge_max_tokens: 256
 
 reward:
   success: 1.0
   assign_success_reward: false
-  leak_penalty: -1.5
+  leak_penalty: -0.5
   outcome_prior_turn_weight: 0.5
   outcome_credit_gamma: 0.9
   early_success_bonus: 0.0
@@ -101,7 +116,6 @@ actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
-  init_lora_path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/checkpoints/root/tutor-math-baseline/20260618_215337_qwen8b-thinking-self-turn10-baseline-overfit-8-stage2-leak1/default/epoch99epochstep0globalstep99
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true

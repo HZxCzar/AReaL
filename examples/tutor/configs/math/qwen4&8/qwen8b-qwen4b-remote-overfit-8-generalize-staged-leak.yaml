@@ -22,8 +22,8 @@ student_generalize:
 auxiliary_model:
   mode: api
   enable_thinking: false
-  base_url: https://hokk9k5mke5pcppbhpd5cqdp9akghkgq.openapi-qb-ai.sii.edu.cn/v1
-  model: default
+  base_url: https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1
+  model: qwen3-4b
   api_key: ${oc.env:INF_API_KEY}
   timeout: 120
   max_tokens: 2048
@@ -33,10 +33,12 @@ auxiliary_model:
   request_params:
     seed: 42
     extra_headers:
-      x-inspire-inference-key: tutor-train-qwen4b
+      x-inspire-inference-key: tutor-train-qwen48
     extra_body:
       top_k: 20
       min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
   answer_judge_enabled: true
   answer_judge_max_tokens: 256
 
