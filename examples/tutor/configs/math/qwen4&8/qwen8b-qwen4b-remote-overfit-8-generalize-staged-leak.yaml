@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-baseline-overfit-8
+trial_name: qwen8b-qwen4b-remote-overfit-8-generalize-staged-leak
 
 seed: 42
 enable_offload: false
@@ -10,21 +10,44 @@ workflow: examples.tutor.workflow.TutorAgentWorkflow
 eval_workflow: ${workflow}
 answer_scorer: math
 max_turns: 10
-enable_thinking: true
+enable_thinking: false
 teacher_show_ground_truth: false
 
+student_generalize:
+  enabled: true
+  path: examples/tutor/generalization/math_qwen4_8_overfit8_student_generalize.json
+  level1_reward: 0.5
+  level2_reward: 1.0
+
 auxiliary_model:
-  mode: self
+  mode: api
   enable_thinking: false
-  max_tokens: 1024
-  temperature: 0.0
+  base_url: https://hokk9k5mke5pcppbhpd5cqdp9akghkgq.openapi-qb-ai.sii.edu.cn/v1
+  model: default
+  api_key: ${oc.env:INF_API_KEY}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
   max_concurrent_calls: 4
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen4b
+    extra_body:
+      top_k: 20
+      min_p: 0
   answer_judge_enabled: true
+  answer_judge_max_tokens: 256
 
 reward:
   success: 1.0
+  leak_penalty_mode: staged
+  leak_penalty: null
+  leak_penalty_final_answer: -2.0
+  leak_penalty_compute: -0.5
+  leak_penalty_formula: -0.05
   assign_success_reward: false
-  leak_penalty: -0.05
   outcome_prior_turn_weight: 0.5
   outcome_credit_gamma: 0.9
   early_success_bonus: 0.0
@@ -79,21 +102,23 @@ rollout:
 gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 16384
+  max_new_tokens: 2048
   max_tokens: 24576
   greedy: false
-  temperature: 0.6
-  top_p: 1.0
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
   lora_name: default_lora
 
 eval_gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 16384
+  max_new_tokens: 2048
   max_tokens: 24576
   greedy: false
-  temperature: 0.6
-  top_p: 1.0
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
   lora_name: default_lora
 
 actor:
@@ -182,7 +207,7 @@ train_dataset:
   shuffle: false
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_overfit_8
+  path: examples/tutor/data/math_dataset_qwen4-8-overfit8
   type: rl
   max_length: 16384
 
@@ -190,7 +215,7 @@ valid_dataset:
   batch_size: ${train_dataset.batch_size}
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_overfit_8
+  path: examples/tutor/data/math_dataset_qwen4-8-overfit8
   type: rl
 
 saver:
@@ -228,4 +253,4 @@ stats_logger:
     entity: hz-czar-stanford
     project: TAgent
     name: ${trial_name}
-    group: overfit8
+    group: qwen4&8-overfit8

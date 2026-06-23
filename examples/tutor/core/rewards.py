@@ -29,10 +29,14 @@ class EpisodeRewardComputer:
         length_penalty_per_100_chars: float = 0.0,
         length_penalty_min: float = 0.0,
     ) -> None:
-        if leak_penalty_mode not in {"binary", "staged"}:
-            raise ValueError("leak_penalty_mode must be 'binary' or 'staged'.")
-        if leak_penalty_mode == "binary" and leak_penalty is None:
-            raise ValueError("leak_penalty must be set in binary leak penalty mode.")
+        if leak_penalty_mode not in {"binary", "staged", "rawbase"}:
+            raise ValueError(
+                "leak_penalty_mode must be 'binary', 'staged', or 'rawbase'."
+            )
+        if leak_penalty_mode in {"binary", "rawbase"} and leak_penalty is None:
+            raise ValueError(
+                "leak_penalty must be set in binary/rawbase leak penalty mode."
+            )
         staged_penalties = {
             1: ("leak_final_answer", leak_penalty_final_answer),
             2: ("leak_compute", leak_penalty_compute),
@@ -103,7 +107,7 @@ class EpisodeRewardComputer:
         return assignments
 
     def _leak_component(self, result: LeakCheckResult) -> tuple[str, float] | None:
-        if self.leak_penalty_mode == "binary":
+        if self.leak_penalty_mode in {"binary", "rawbase"}:
             if result.leaked:
                 return "leak", self.leak_penalty
             return None

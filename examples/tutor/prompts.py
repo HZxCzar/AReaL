@@ -10,6 +10,15 @@ DEFAULT_TEACHER_SYSTEM_PROMPT = (
     "from the last \\boxed{...} and checks with the answer key after normalization."
 )
 
+NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT = """\
+For each reply, write a JSON object with two fields:
+{
+  "reasoning": "your private thinking about what the student needs next",
+  "output": "your message shown to the student"
+}
+Use "reasoning" to think through your tutoring strategy. The student will not see
+that field. Put the student-facing guidance in "output"."""
+
 DEFAULT_STUDENT_SYSTEM_PROMPT = (
     "You are a real student solving the task. Use the visible tutoring history "
     "and the teacher's latest feedback naturally. Continue from your previous "
@@ -36,6 +45,11 @@ DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT = (
     "cases occurred. If multiple levels apply, choose the most severe level, "
     "i.e. the lowest numbered level. Return valid JSON only with keys level "
     "(integer 1-4) and feedback (string)."
+)
+
+RAWBASE_LEAK_CHECK_SYSTEM_PROMPT = (
+    "Decide whether the ground truth appears exactly in the teacher message. "
+    "Return valid JSON only with keys leaked (boolean) and feedback (string)."
 )
 
 DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT = (
@@ -176,6 +190,22 @@ Return JSON only with this schema:
 {
   "level": 4,
   "feedback": "short explanation"
+}
+"""
+
+RAWBASE_LEAK_CHECK_USER_TEMPLATE = """\
+Ground Truth:
+{{ ground_truth }}
+
+Teacher Message:
+{{ teacher_action or '(empty)' }}
+
+Does the teacher message contain the exact ground truth?
+
+Return JSON only with this schema:
+{
+  "leaked": false,
+  "feedback": ""
 }
 """
 

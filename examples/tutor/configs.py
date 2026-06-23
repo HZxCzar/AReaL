@@ -131,8 +131,10 @@ class TutorRewardConfig:
         default="binary",
         metadata={
             "help": "Leak penalty mode: 'binary' uses leaked=true/false, "
-            "'staged' uses leak levels 1-4.",
-            "choices": ["binary", "staged"],
+            "'staged' uses leak levels 1-4, and 'rawbase' asks the "
+            "auxiliary judge whether the public tutor output contains the "
+            "ground truth verbatim.",
+            "choices": ["binary", "staged", "rawbase"],
         },
     )
     leak_penalty: float | None = field(default=-1.0)
@@ -153,15 +155,16 @@ class TutorRewardConfig:
     )
 
     def __post_init__(self) -> None:
-        if self.leak_penalty_mode not in {"binary", "staged"}:
+        if self.leak_penalty_mode not in {"binary", "staged", "rawbase"}:
             raise ValueError(
-                "reward.leak_penalty_mode must be either 'binary' or 'staged'."
+                "reward.leak_penalty_mode must be one of: "
+                "'binary', 'staged', 'rawbase'."
             )
-        if self.leak_penalty_mode == "binary":
+        if self.leak_penalty_mode in {"binary", "rawbase"}:
             if self.leak_penalty is None:
                 raise ValueError(
                     "reward.leak_penalty must be set when "
-                    "reward.leak_penalty_mode='binary'."
+                    f"reward.leak_penalty_mode={self.leak_penalty_mode!r}."
                 )
             return
 

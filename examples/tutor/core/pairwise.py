@@ -27,6 +27,7 @@ TutorGenerator = Callable[[TutorTurnState, int], Awaitable[str]]
 StudentRunner = Callable[[StudentTurnState], Awaitable[tuple[str, str | None]]]
 LeakChecker = Callable[[str, str, str], Awaitable[LeakCheckResult]]
 AnswerScorer = Callable[[str, str, str], Awaitable[JudgeResult]]
+VisibleOutputExtractor = Callable[[str], str]
 
 
 @dataclass(slots=True)
@@ -124,6 +125,7 @@ class PairwiseTutorEvaluator:
         run_student: StudentRunner,
         run_leak_check: LeakChecker,
         score_answer: AnswerScorer,
+        visible_output_extractor: VisibleOutputExtractor = strip_reasoning_for_context,
         compare_all_turns: bool = True,
         judge_both_incorrect: bool = True,
         rng: random.Random | None = None,
@@ -134,6 +136,7 @@ class PairwiseTutorEvaluator:
         self.run_student = run_student
         self.run_leak_check = run_leak_check
         self.score_answer = score_answer
+        self.visible_output_extractor = visible_output_extractor
         self.compare_all_turns = compare_all_turns
         self.judge_both_incorrect = bool(judge_both_incorrect)
         self.rng = rng or random.Random()
@@ -178,7 +181,7 @@ class PairwiseTutorEvaluator:
             setattr(exc, "_fatal_rollout_error", True)
             raise
 
-        reference_visible_output = strip_reasoning_for_context(reference_raw_output)
+        reference_visible_output = self.visible_output_extractor(reference_raw_output)
         reference_leak = await self.run_leak_check(
             episode.task, episode.ground_truth, reference_visible_output
         )

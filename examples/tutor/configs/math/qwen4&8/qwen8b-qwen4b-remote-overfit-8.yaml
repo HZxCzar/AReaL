@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-nonthinking-qwen4b-remote-overfit-8
+trial_name: qwen8b-qwen4b-remote-overfit-8
 
 seed: 42
 enable_offload: false
@@ -230,7 +230,7 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: null
+  freq_steps: 10
   freq_secs: null
   max_samples: null
 

@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-baseline-overfit-8
+trial_name: qwen8b-baseline-overfit-8-rawbase
 
 seed: 42
 enable_offload: false
@@ -23,8 +23,9 @@ auxiliary_model:
 
 reward:
   success: 1.0
+  leak_penalty_mode: rawbase
   assign_success_reward: false
-  leak_penalty: -0.05
+  leak_penalty: -0.20
   outcome_prior_turn_weight: 0.5
   outcome_credit_gamma: 0.9
   early_success_bonus: 0.0

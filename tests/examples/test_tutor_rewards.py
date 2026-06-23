@@ -141,6 +141,13 @@ def test_tutor_reward_config_validates_leak_penalty_modes():
     )
     assert staged.leak_penalty_formula == pytest.approx(-0.1)
 
+    rawbase = TutorRewardConfig(leak_penalty_mode="rawbase", leak_penalty=-0.05)
+    assert rawbase.leak_penalty_mode == "rawbase"
+    assert rawbase.leak_penalty == pytest.approx(-0.05)
+
+    with pytest.raises(ValueError, match="leak_penalty"):
+        TutorRewardConfig(leak_penalty_mode="rawbase", leak_penalty=None)
+
 
 @pytest.mark.parametrize(
     ("level", "expected_leaked"),
@@ -210,6 +217,119 @@ def test_workflow_staged_mode_replaces_binary_default_system_prompt():
     assert "choose the most severe level" in prompt
 
 
+def test_non_thinking_teacher_system_prompt_requires_json_output():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.enable_thinking = False
+
+    prompt = workflow._resolve_teacher_system_prompt("base prompt")
+
+    assert prompt.startswith("base prompt")
+    assert tutor_workflow.NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT in prompt
+    assert '"reasoning"' in prompt
+    assert '"output"' in prompt
+
+
+def test_thinking_teacher_system_prompt_keeps_existing_format():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.enable_thinking = True
+
+    prompt = workflow._resolve_teacher_system_prompt("base prompt")
+
+    assert prompt == "base prompt"
+
+
+def test_non_thinking_tutor_visible_output_uses_json_output_only():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.enable_thinking = False
+
+    visible = workflow._extract_tutor_visible_output(
+        r'{"reasoning": "secret \boxed{42}", "output": "Try isolating x first."}'
+    )
+
+    assert visible == "Try isolating x first."
+
+
+def test_non_thinking_tutor_visible_output_falls_back_for_invalid_json():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.enable_thinking = False
+
+    visible = workflow._extract_tutor_visible_output(
+        "not json <think>private</think> visible hint"
+    )
+
+    assert visible == "not json  visible hint"
+
+
+def test_rawbase_leak_check_asks_llm_about_exact_public_ground_truth(monkeypatch):
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.enable_leak_check = True
+    workflow.leak_penalty_mode = "rawbase"
+    captured = {}
+
+    def fail_score_answer(*args, **kwargs):
+        raise AssertionError("rawbase should not use rule-based answer extraction")
+
+    async def call_auxiliary_prompt(**kwargs):
+        captured.update(kwargs)
+        return TextCallResult(text='{"leaked": true, "feedback": ""}')
+
+    monkeypatch.setattr(workflow, "_score_answer", fail_score_answer)
+    monkeypatch.setattr(workflow, "_call_auxiliary_prompt", call_auxiliary_prompt)
+
+    result = asyncio.run(
+        workflow._run_optional_leak_check(
+            "task",
+            "42",
+            "The value is 42, so continue from there.",
+        )
+    )
+
+    assert result.leaked is True
+    assert result.raw_result["method"] == "rawbase_exact_ground_truth"
+    assert captured["system_prompt"] == tutor_workflow.RAWBASE_LEAK_CHECK_SYSTEM_PROMPT
+    assert "Ground Truth:\n42" in captured["user_prompt"]
+    assert "The value is 42" in captured["user_prompt"]
+    assert captured["rid_prefix"] == "rawbase-leak-check"
+
+
+def test_rawbase_leak_check_ignores_private_reasoning_json_output(monkeypatch):
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.enable_thinking = False
+    workflow.enable_leak_check = True
+    workflow.leak_penalty_mode = "rawbase"
+    captured = {}
+
+    async def call_auxiliary_prompt(**kwargs):
+        captured.update(kwargs)
+        return TextCallResult(text='{"leaked": false, "feedback": ""}')
+
+    monkeypatch.setattr(workflow, "_call_auxiliary_prompt", call_auxiliary_prompt)
+
+    visible_output = workflow._extract_tutor_visible_output(
+        r'{"reasoning": "the answer is 42", "output": "Try factoring first."}'
+    )
+    result = asyncio.run(
+        workflow._run_rawbase_leak_check("task", "42", visible_output)
+    )
+
+    assert visible_output == "Try factoring first."
+    assert result.leaked is False
+    assert "Try factoring first." in captured["user_prompt"]
+    assert "the answer is 42" not in captured["user_prompt"]
+
+
 def test_default_success_reward_goes_to_success_turn_only():
     turns = [_turn(1), _turn(2), _turn(3, correct=True)]
     assignments = asyncio.run(
@@ -276,6 +396,22 @@ def test_staged_leak_penalty_uses_level_specific_components():
     assert assignments[3].reward_components == {}
     assert [assignment.reward for assignment in assignments] == pytest.approx(
         [-1.0, -0.5, -0.1, 0.0]
+    )
+
+
+def test_rawbase_leak_penalty_uses_binary_component():
+    turns = [_turn(1, leaked=True), _turn(2, leaked=False)]
+    assignments = asyncio.run(
+        _outcome_computer(
+            leak_penalty_mode="rawbase",
+            leak_penalty=-0.05,
+        ).compute(_episode(turns, termination_reason="max_turns"))
+    )
+
+    assert assignments[0].reward_components == {"leak": -0.05}
+    assert assignments[1].reward_components == {}
+    assert [assignment.reward for assignment in assignments] == pytest.approx(
+        [-0.05, 0.0]
     )
 
 

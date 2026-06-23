@@ -164,6 +164,9 @@ from examples.tutor.prompts import (
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
     DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT,
     LEAK_CHECK_USER_TEMPLATE,
+    NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT,
+    RAWBASE_LEAK_CHECK_SYSTEM_PROMPT,
+    RAWBASE_LEAK_CHECK_USER_TEMPLATE,
     STAGED_LEAK_CHECK_USER_TEMPLATE,
     STUDENT_STATE_USER_TEMPLATE,
     TEACHER_STATE_USER_TEMPLATE,
@@ -319,10 +322,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
             max(1, self.max_concurrent_aux_calls)
         )
         self.context_window_margin = int(context_window_margin)
-        if leak_penalty_mode not in {"binary", "staged"}:
-            raise ValueError("leak_penalty_mode must be 'binary' or 'staged'.")
-        if leak_penalty_mode == "binary" and leak_penalty is None:
-            raise ValueError("leak_penalty must be set in binary leak penalty mode.")
+        if leak_penalty_mode not in {"binary", "staged", "rawbase"}:
+            raise ValueError(
+                "leak_penalty_mode must be 'binary', 'staged', or 'rawbase'."
+            )
+        if leak_penalty_mode in {"binary", "rawbase"} and leak_penalty is None:
+            raise ValueError(
+                "leak_penalty must be set in binary/rawbase leak penalty mode."
+            )
         staged_values = {
             "leak_penalty_final_answer": leak_penalty_final_answer,
             "leak_penalty_compute": leak_penalty_compute,
@@ -359,7 +366,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.length_penalty_threshold_chars = int(length_penalty_threshold_chars)
         self.length_penalty_per_100_chars = float(length_penalty_per_100_chars)
         self.length_penalty_min = float(length_penalty_min)
-        self.teacher_system_prompt = teacher_system_prompt.strip()
+        self.teacher_system_prompt = self._resolve_teacher_system_prompt(
+            teacher_system_prompt
+        )
         self.teacher_user_prompt_template = (
             teacher_user_prompt_template or TEACHER_STATE_USER_TEMPLATE
         ).strip()
@@ -433,6 +442,27 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if not prompt or prompt == DEFAULT_LEAK_CHECK_SYSTEM_PROMPT:
             return DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT
         return prompt
+
+    def _resolve_teacher_system_prompt(self, prompt: str) -> str:
+        prompt = (prompt or "").strip()
+        if self.enable_thinking:
+            return prompt
+        if NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT in prompt:
+            return prompt
+        return (
+            f"{prompt}\n\n{NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT}"
+            if prompt
+            else NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT
+        ).strip()
+
+    def _extract_tutor_visible_output(self, raw_output: str) -> str:
+        if getattr(self, "enable_thinking", False):
+            return _strip_reasoning_for_context(raw_output)
+        parsed, _ = parse_json_dict(raw_output)
+        output = parsed.get("output") if isinstance(parsed, dict) else None
+        if isinstance(output, str):
+            return _strip_reasoning_for_context(output)
+        return _strip_reasoning_for_context(raw_output)
 
     def get_lora_versions_for_episode(
         self,
@@ -610,7 +640,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
                 termination_reason = CONTEXT_BUDGET_TERMINATION_REASON
                 break
-            tutor_visible_output = _strip_reasoning_for_context(tutor_raw_output)
+            tutor_visible_output = self._extract_tutor_visible_output(
+                tutor_raw_output
+            )
             public_before = public_history.summary
 
             student_state = StudentTurnState(
@@ -993,6 +1025,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 parse_error=None,
                 raw_result={"disabled": True},
             )
+        if getattr(self, "leak_penalty_mode", "binary") == "rawbase":
+            return await self._run_rawbase_leak_check(
+                task,
+                ground_truth,
+                teacher_action,
+                aux_caller=aux_caller,
+            )
         return await self._run_leak_check(
             task,
             ground_truth,
@@ -1035,6 +1074,38 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if getattr(self, "leak_penalty_mode", "binary") == "staged":
             return parse_staged_leak_check_result(result.text)
         return parse_leak_check_result(result.text)
+
+    async def _run_rawbase_leak_check(
+        self,
+        task: str,
+        ground_truth: str,
+        teacher_action: str,
+        *,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
+    ) -> LeakCheckResult:
+        del task
+        prompt = render_prompt(
+            RAWBASE_LEAK_CHECK_USER_TEMPLATE,
+            ground_truth=ground_truth,
+            teacher_action=_strip_reasoning_for_context(teacher_action),
+        )
+        result = await self._call_auxiliary_prompt(
+            system_prompt=RAWBASE_LEAK_CHECK_SYSTEM_PROMPT,
+            user_prompt=prompt,
+            aux_caller=aux_caller,
+            rid_prefix="rawbase-leak-check",
+        )
+        if result.error:
+            return LeakCheckResult(
+                raw_output="",
+                leaked=True,
+                feedback=f"Rawbase leak check failed: {result.error}",
+                parse_error=result.error,
+                raw_result={"method": "rawbase_exact_ground_truth"},
+            )
+        leak_result = parse_leak_check_result(result.text)
+        leak_result.raw_result["method"] = "rawbase_exact_ground_truth"
+        return leak_result
 
     async def _call_auxiliary_prompt(
         self,
@@ -1536,6 +1607,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_output,
                 answer_judge_caller=answer_judge_caller,
             ),
+            visible_output_extractor=self._extract_tutor_visible_output,
             compare_all_turns=self.pairwise_compare_all_turns,
             judge_both_incorrect=self.pairwise_judge_both_incorrect,
         )
