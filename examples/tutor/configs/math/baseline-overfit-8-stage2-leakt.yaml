@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-baseline-overfit-8-leakt
+trial_name: qwen8b-baseline-overfit-8-stage2-leakt
 
 seed: 42
 enable_offload: false
@@ -124,6 +124,7 @@ actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+  init_lora_path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/checkpoints/root/tutor-math-baseline/20260623_071239_qwen8b-baseline-overfit-8/default/epoch49epochstep0globalstep49
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
