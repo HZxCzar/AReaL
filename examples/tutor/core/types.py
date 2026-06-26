@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 FeedbackKind = Literal["none", "student_judged", "leak"]
+LeakHandlingMode = Literal["disabled", "reward_only", "terminate", "feedback"]
 
 
 @dataclass(slots=True)
@@ -38,6 +39,7 @@ class TutorPrivateFeedback:
     judge_correct: bool = False
     judge_feedback: str = ""
     leak_feedback: str = ""
+    leak_history: str = ""
 
 
 @dataclass(slots=True)
@@ -75,6 +77,7 @@ class TurnArtifact:
     student_output: str = ""
     student_error: str | None = None
     judge_result: JudgeResult | None = None
+    invalid_due_to_leak: bool = False
 
 
 @dataclass(slots=True)
@@ -112,3 +115,4 @@ class TurnTrace:
     public_history_before: str
     public_history_after: str
     leak_level: int | None = None
+    invalid_due_to_leak: bool = False

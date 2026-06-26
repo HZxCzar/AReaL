@@ -76,11 +76,54 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
     ):
         prompt = self._build_leak_check_prompt(task, ground_truth, teacher_action)
         messages = [
-            {"role": "system", "content": self.leak_check_system_prompt},
+            {
+                "role": "system",
+                "content": self._leak_check_system_prompt_for_current_mode(
+                    self.leak_check_system_prompt
+                ),
+            },
             {"role": "user", "content": prompt},
         ]
         self.trace_sink.append_messages("leak_check_input", messages)
         result = await super()._run_leak_check(
+            task,
+            ground_truth,
+            teacher_action,
+            aux_caller=aux_caller,
+        )
+        self.trace_sink.append("leak_check", result.raw_output or result.feedback)
+        return result
+
+    async def _run_rawbase_leak_check(
+        self,
+        task: str,
+        ground_truth: str,
+        teacher_action: str,
+        *,
+        aux_caller=None,
+    ):
+        teacher_message = tutor_workflow_module._strip_reasoning_for_context(
+            teacher_action
+        )
+        if tutor_workflow_module._rawbase_ground_truth_in_message(
+            ground_truth, teacher_message
+        ):
+            prompt = tutor_workflow_module.render_prompt(
+                tutor_workflow_module.RAWBASE_LEAK_CHECK_USER_TEMPLATE,
+                ground_truth=ground_truth,
+                teacher_action=teacher_message,
+            )
+            messages = [
+                {
+                    "role": "system",
+                    "content": self._leak_check_system_prompt_for_current_mode(
+                        tutor_workflow_module.RAWBASE_LEAK_CHECK_SYSTEM_PROMPT
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ]
+            self.trace_sink.append_messages("leak_check_input", messages)
+        result = await super()._run_rawbase_leak_check(
             task,
             ground_truth,
             teacher_action,
@@ -127,8 +170,7 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         max_turns=config.max_turns,
         answer_scorer=config.answer_scorer,
         enable_thinking=config.enable_thinking,
-        enable_leak_check=config.enable_leak_check,
-        terminate_on_leak=config.terminate_on_leak,
+        leak_handling_mode=config.leak_handling_mode,
         aux_mode=auxiliary_model.mode,
         aux_enable_thinking=auxiliary_model.enable_thinking,
         aux_base_url=auxiliary_model.base_url,
@@ -146,6 +188,8 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         leak_penalty_final_answer=reward.leak_penalty_final_answer,
         leak_penalty_compute=reward.leak_penalty_compute,
         leak_penalty_formula=reward.leak_penalty_formula,
+        leak_penalty_aggregation=reward.leak_penalty_aggregation,
+        leaked_success_reward_scale=reward.leaked_success_reward_scale,
         assign_success_reward=reward.assign_success_reward,
         outcome_prior_turn_weight=reward.outcome_prior_turn_weight,
         outcome_credit_gamma=reward.outcome_credit_gamma,

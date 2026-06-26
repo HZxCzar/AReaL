@@ -160,6 +160,12 @@ class PairwiseTutorEvaluator:
         *,
         reference_version: int,
     ) -> PairwiseTurnResult:
+        if current_turn.invalid_due_to_leak:
+            return self._skipped_result(
+                current_turn,
+                reference_version,
+                reason="current_turn_invalid_due_to_leak",
+            )
         if current_turn.student_state is None or current_turn.judge_result is None:
             return self._failure_result(
                 current_turn, reference_version, reason="missing_current_student_state"

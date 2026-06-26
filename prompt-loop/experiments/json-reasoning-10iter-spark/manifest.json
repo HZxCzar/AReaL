@@ -1,0 +1,74 @@
+{
+  "tmp_base": "/tmp/json_reasoning_10iter_spark",
+  "legacy_tmp": "/tmp/json_reasoning_iter_001",
+  "mapping": {
+    "iter_001": {
+      "result_tmp": "/tmp/json_reasoning_iter_001_result.json",
+      "analysis_tmp": "/tmp/json_reasoning_iter_001_analysis.md",
+      "next_prompt_tmp": "/tmp/json_reasoning_iter_001_next_prompt.md",
+      "result_summary_tmp": "/tmp/json_reasoning_iter_001_result_summary.json"
+    },
+    "iter_002": {
+      "result_tmp": "/tmp/json_reasoning_10iter_spark/iter_002_result.json",
+      "analysis_tmp": "/tmp/json_reasoning_10iter_spark/iter_002_analysis.md",
+      "next_prompt_tmp": "/tmp/json_reasoning_10iter_spark/iter_002_next_prompt.md",
+      "result_summary_tmp": "/tmp/json_reasoning_10iter_spark/iter_002_result_summary.json"
+    },
+    "iter_003": {
+      "result_tmp": "/tmp/json_reasoning_10iter_spark/iter_003_result.json",
+      "analysis_tmp": "/tmp/json_reasoning_10iter_spark/iter_003_analysis.md",
+      "next_prompt_tmp": "/tmp/json_reasoning_10iter_spark/iter_003_next_prompt.md",
+      "result_summary_tmp": "/tmp/json_reasoning_10iter_spark/iter_003_result_summary.json"
+    },
+    "iter_004": {
+      "result_tmp": "/tmp/json_reasoning_10iter_spark/iter_004_result.json",
+      "analysis_tmp": "/tmp/json_reasoning_10iter_spark/iter_004_analysis.md",
+      "next_prompt_tmp": "/tmp/json_reasoning_10iter_spark/iter_004_next_prompt.md",
+      "result_summary_tmp": "/tmp/json_reasoning_10iter_spark/iter_004_result_summary.json"
+    },
+    "iter_005": {
+      "result_tmp": "/tmp/json_reasoning_10iter_spark/iter_005_result.json",
+      "analysis_tmp": "/tmp/json_reasoning_10iter_spark/iter_005_analysis.md",
+      "next_prompt_tmp": "/tmp/json_reasoning_10iter_spark/iter_005_next_prompt.md",
+      "result_summary_tmp": "/tmp/json_reasoning_10iter_spark/iter_005_result_summary.json"
+    },
+    "iter_006": {
+      "result_tmp": "/tmp/json_reasoning_10iter_spark/iter_006_result.json",
+      "analysis_tmp": "/tmp/json_reasoning_10iter_spark/iter_006_analysis.md",
+      "next_prompt_tmp": "/tmp/json_reasoning_10iter_spark/iter_006_next_prompt.md",
+      "result_summary_tmp": "/tmp/json_reasoning_10iter_spark/iter_006_result_summary.json"
+    },
+    "iter_007": {
+      "result_tmp": "/tmp/json_reasoning_10iter_spark/iter_007_result.json",
+      "analysis_tmp": "/tmp/json_reasoning_10iter_spark/iter_007_analysis.md",
+      "next_prompt_tmp": "/tmp/json_reasoning_10iter_spark/iter_007_next_prompt.md",
+      "result_summary_tmp": "/tmp/json_reasoning_10iter_spark/iter_007_result_summary.json"
+    },
+    "iter_008": {
+      "result_tmp": "/tmp/json_reasoning_10iter_spark/iter_008_result.json",
+      "analysis_tmp": "/tmp/json_reasoning_10iter_spark/iter_008_analysis.md",
+      "next_prompt_tmp": "/tmp/json_reasoning_10iter_spark/iter_008_next_prompt.md",
+      "result_summary_tmp": "/tmp/json_reasoning_10iter_spark/iter_008_result_summary.json"
+    },
+    "iter_009": {
+      "result_tmp": "/tmp/json_reasoning_10iter_spark/iter_009_result.json",
+      "analysis_tmp": "/tmp/json_reasoning_10iter_spark/iter_009_analysis.md",
+      "next_prompt_tmp": "/tmp/json_reasoning_10iter_spark/iter_009_next_prompt.md",
+      "result_summary_tmp": "/tmp/json_reasoning_10iter_spark/iter_009_result_summary.json"
+    },
+    "iter_010": {
+      "result_tmp": "/tmp/json_reasoning_10iter_spark/iter_010_result.json",
+      "analysis_tmp": "/tmp/json_reasoning_10iter_spark/iter_010_analysis.md",
+      "next_prompt_tmp": "/tmp/json_reasoning_10iter_spark/iter_010_next_prompt.md",
+      "result_summary_tmp": "/tmp/json_reasoning_10iter_spark/iter_010_result_summary.json"
+    },
+    "plain_mode": {
+      "result_tmp": "/tmp/json_reasoning_10iter_spark/plain_run_result.json",
+      "analysis_tmp": "/tmp/json_reasoning_10iter_spark/plain_run_analysis.md",
+      "result_summary_tmp": "/tmp/json_reasoning_10iter_spark/plain_run_result_summary.json"
+    }
+  }
+}
+{
+  "ok": true
+}

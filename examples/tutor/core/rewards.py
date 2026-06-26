@@ -19,6 +19,8 @@ class EpisodeRewardComputer:
         leak_penalty_final_answer: float | None = None,
         leak_penalty_compute: float | None = None,
         leak_penalty_formula: float | None = None,
+        leak_penalty_aggregation: str = "turn",
+        leaked_success_reward_scale: float = 1.0,
         assign_success_reward: bool = False,
         outcome_prior_turn_weight: float = 0.1,
         outcome_credit_gamma: float = 0.9,
@@ -37,6 +39,10 @@ class EpisodeRewardComputer:
             raise ValueError(
                 "leak_penalty must be set in binary/rawbase leak penalty mode."
             )
+        if leak_penalty_aggregation not in {"turn", "episode"}:
+            raise ValueError("leak_penalty_aggregation must be 'turn' or 'episode'.")
+        if leaked_success_reward_scale < 0.0:
+            raise ValueError("leaked_success_reward_scale must be >= 0.")
         staged_penalties = {
             1: ("leak_final_answer", leak_penalty_final_answer),
             2: ("leak_compute", leak_penalty_compute),
@@ -60,6 +66,8 @@ class EpisodeRewardComputer:
             for level, (name, value) in staged_penalties.items()
         }
         self.assign_success_reward = assign_success_reward
+        self.leak_penalty_aggregation = leak_penalty_aggregation
+        self.leaked_success_reward_scale = float(leaked_success_reward_scale)
         self.outcome_prior_turn_weight = outcome_prior_turn_weight
         self.outcome_credit_gamma = outcome_credit_gamma
         self.early_success_bonus = early_success_bonus
@@ -77,11 +85,31 @@ class EpisodeRewardComputer:
     ) -> list[RewardAssignment]:
         pairwise_rewards = pairwise_rewards or {}
         success_artifact = self._success_artifact(episode)
-        success_credits = self._success_credits(episode.turns, success_artifact)
+        episode_leaked = any(
+            artifact.leak_result.leaked for artifact in episode.turns
+        )
+        success_scale = (
+            self.leaked_success_reward_scale if episode_leaked else 1.0
+        )
+        success_credits = self._success_credits(
+            episode.turns,
+            success_artifact,
+            success_reward_scale=success_scale,
+        )
+        episode_leak_component = (
+            self._episode_leak_component(episode.turns)
+            if self.leak_penalty_aggregation == "episode"
+            else None
+        )
         assignments: list[RewardAssignment] = []
         for artifact in episode.turns:
             components: dict[str, float] = {}
-            leak_component = self._leak_component(artifact.leak_result)
+            if episode_leak_component is None:
+                leak_component = self._leak_component(artifact.leak_result)
+            elif artifact.turn_idx == episode_leak_component[0]:
+                leak_component = episode_leak_component[1]
+            else:
+                leak_component = None
             if leak_component is not None:
                 name, value = leak_component
                 components[name] = value
@@ -122,18 +150,52 @@ class EpisodeRewardComputer:
         )
         return name, value
 
+    def _episode_leak_component(
+        self, turns: list[TurnArtifact]
+    ) -> tuple[int, tuple[str, float]] | None:
+        best_turn_idx: int | None = None
+        best_level: int | None = None
+        best_component: tuple[str, float] | None = None
+        for artifact in turns:
+            component = self._leak_component(artifact.leak_result)
+            if component is None:
+                continue
+            level = self._normalized_leak_level(artifact.leak_result)
+            if best_component is None or level < int(best_level):
+                best_turn_idx = int(artifact.turn_idx)
+                best_level = level
+                best_component = component
+        if best_turn_idx is None or best_component is None:
+            return None
+        return best_turn_idx, best_component
+
+    def _normalized_leak_level(self, result: LeakCheckResult) -> int:
+        if self.leak_penalty_mode != "staged":
+            return 1
+        level = result.leak_level
+        if level is None:
+            return 1 if result.leaked else 4
+        level = int(level)
+        return level if level in {1, 2, 3, 4} else 1
+
     def _success_artifact(
         self, episode: EpisodeArtifact
     ) -> TurnArtifact | None:
         if episode.termination_reason != "success":
             return None
         for artifact in episode.turns:
+            if artifact.invalid_due_to_leak:
+                continue
             if artifact.judge_result is not None and artifact.judge_result.correct:
                 return artifact
         return None
 
     def _success_credits(
-        self, turns: list[TurnArtifact], success_artifact: TurnArtifact | None
+        self,
+        turns: list[TurnArtifact],
+        success_artifact: TurnArtifact | None,
+        *,
+        success_reward_scale: float,
     ) -> dict[int, float]:
         if success_artifact is None:
             return {}
@@ -143,12 +205,16 @@ class EpisodeRewardComputer:
             early_fraction = 0.0
         else:
             early_fraction = max(0.0, (max_turns - success_turn) / (max_turns - 1))
-        budget = self.success_reward + self.early_success_bonus * early_fraction
+        budget = (
+            self.success_reward + self.early_success_bonus * early_fraction
+        ) * success_reward_scale
         if not self.assign_success_reward:
             return {success_turn: float(budget)}
 
         weights: dict[int, float] = {}
         for artifact in turns:
+            if artifact.invalid_due_to_leak:
+                continue
             turn_idx = int(artifact.turn_idx)
             if turn_idx > success_turn:
                 continue
@@ -209,4 +275,5 @@ def artifact_to_trace(
         public_history_before=artifact.public_history_before,
         public_history_after=artifact.public_history_after,
         leak_level=artifact.leak_result.leak_level,
+        invalid_due_to_leak=artifact.invalid_due_to_leak,
     )

@@ -152,6 +152,7 @@ from examples.tutor.core.types import (
     EpisodeArtifact,
     JudgeResult,
     LeakCheckResult,
+    LeakHandlingMode,
     PublicHistoryState,
     StudentTurnState,
     TurnArtifact,
@@ -164,6 +165,7 @@ from examples.tutor.prompts import (
     DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT,
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
     DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT,
+    FEEDBACK_LEAK_CHECK_SYSTEM_PROMPT_SUFFIX,
     LEAK_CHECK_USER_TEMPLATE,
     NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT,
     RAWBASE_LEAK_CHECK_SYSTEM_PROMPT,
@@ -181,6 +183,7 @@ _REWARD_COMPONENT_ALIASES = {
 }
 
 LEAK_TERMINATION_REASON = "leak"
+LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate", "feedback"}
 
 
 def _rawbase_match_text(text: str) -> str:
@@ -277,8 +280,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         answer_scorer: str = "aime",
         max_turns: int = 6,
         enable_thinking: bool = False,
-        enable_leak_check: bool = True,
-        terminate_on_leak: bool = False,
+        leak_handling_mode: LeakHandlingMode = "reward_only",
         temperature: float = 1.0,
         top_p: float = 1.0,
         max_completion_tokens: int = 512,
@@ -301,6 +303,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         leak_penalty_final_answer: float | None = None,
         leak_penalty_compute: float | None = None,
         leak_penalty_formula: float | None = None,
+        leak_penalty_aggregation: str = "turn",
+        leaked_success_reward_scale: float = 1.0,
         assign_success_reward: bool = False,
         outcome_prior_turn_weight: float = 0.1,
         outcome_credit_gamma: float = 0.9,
@@ -339,12 +343,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.answer_scorer_name = answer_scorer
         self.answer_scorer: AnswerScorer = get_answer_scorer(answer_scorer)
         self.enable_thinking = enable_thinking
-        self.enable_leak_check = bool(enable_leak_check)
-        self.terminate_on_leak = bool(terminate_on_leak)
-        if self.terminate_on_leak and not self.enable_leak_check:
+        if leak_handling_mode not in LEAK_HANDLING_MODES:
             raise ValueError(
-                "terminate_on_leak=True requires enable_leak_check=True."
+                "leak_handling_mode must be one of: 'disabled', "
+                "'reward_only', 'terminate', or 'feedback'."
             )
+        self.leak_handling_mode: LeakHandlingMode = leak_handling_mode
         self.gconfig = gconfig
         self.temperature = gconfig.temperature if gconfig is not None else temperature
         self.top_p = gconfig.top_p if gconfig is not None else top_p
@@ -390,6 +394,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     "staged leak penalty mode requires explicit values for "
                     f"{', '.join(missing)}."
                 )
+        if leak_penalty_aggregation not in {"turn", "episode"}:
+            raise ValueError("leak_penalty_aggregation must be 'turn' or 'episode'.")
+        if leaked_success_reward_scale < 0.0:
+            raise ValueError("leaked_success_reward_scale must be >= 0.")
 
         self.success_reward = float(success_reward)
         self.leak_penalty_mode = leak_penalty_mode
@@ -405,6 +413,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.leak_penalty_formula = (
             float(leak_penalty_formula) if leak_penalty_formula is not None else 0.0
         )
+        self.leak_penalty_aggregation = leak_penalty_aggregation
+        self.leaked_success_reward_scale = float(leaked_success_reward_scale)
         self.assign_success_reward = bool(assign_success_reward)
         self.outcome_prior_turn_weight = float(outcome_prior_turn_weight)
         self.outcome_credit_gamma = float(outcome_credit_gamma)
@@ -490,6 +500,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if not prompt or prompt == DEFAULT_LEAK_CHECK_SYSTEM_PROMPT:
             return DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT
         return prompt
+
+    def _leak_check_system_prompt_for_current_mode(self, prompt: str) -> str:
+        prompt = (prompt or "").strip()
+        if getattr(self, "leak_handling_mode", "reward_only") != "feedback":
+            return prompt
+        if FEEDBACK_LEAK_CHECK_SYSTEM_PROMPT_SUFFIX in prompt:
+            return prompt
+        return f"{prompt}\n\n{FEEDBACK_LEAK_CHECK_SYSTEM_PROMPT_SUFFIX}".strip()
 
     def _resolve_teacher_system_prompt(self, prompt: str) -> str:
         prompt = (prompt or "").strip()
@@ -693,14 +711,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
             public_before = public_history.summary
             leak_result = self._pending_leak_check_result()
-            if bool(getattr(self, "terminate_on_leak", False)):
+            if self.leak_handling_mode in {"terminate", "feedback"}:
                 leak_result = await self._run_optional_leak_check(
                     task,
                     ground_truth,
                     tutor_visible_output,
                     aux_caller=aux_caller,
                 )
-                if leak_result.leaked:
+                if self.leak_handling_mode == "terminate" and leak_result.leaked:
                     termination_reason = LEAK_TERMINATION_REASON
                     turn_artifacts.append(
                         TurnArtifact(
@@ -735,20 +753,29 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_answer,
                 answer_judge_caller=answer_judge_caller,
             )
+            invalid_due_to_leak = (
+                self.leak_handling_mode == "feedback" and leak_result.leaked
+            )
 
-            if judge_result.correct:
+            if judge_result.correct and not invalid_due_to_leak:
                 termination_reason = "success"
             else:
                 termination_reason = (
                     "max_turns" if turn_idx == self.max_turns else "continue"
                 )
 
-            next_public_history = await self._run_public_summary_update(
-                old_public_history=public_history,
-                previous_student_answer=previous_student_output,
-                tutor_visible_output=tutor_visible_output,
-                current_student_answer=student_answer,
-            )
+            if invalid_due_to_leak:
+                next_public_history = PublicHistoryState(
+                    summary=public_history.summary,
+                    turn_count=public_history.turn_count,
+                )
+            else:
+                next_public_history = await self._run_public_summary_update(
+                    old_public_history=public_history,
+                    previous_student_answer=previous_student_output,
+                    tutor_visible_output=tutor_visible_output,
+                    current_student_answer=student_answer,
+                )
             turn_artifacts.append(
                 TurnArtifact(
                     turn_idx=turn_idx,
@@ -765,31 +792,42 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     student_output=student_answer,
                     student_error=student_error,
                     judge_result=judge_result,
+                    invalid_due_to_leak=invalid_due_to_leak,
                 )
             )
 
-            public_history = next_public_history
-            previous_tutor_visible_output = tutor_visible_output
-            previous_student_output = student_answer
-            previous_feedback = TutorPrivateFeedback(
-                kind="student_judged",
-                student_output=student_answer,
-                judge_correct=judge_result.correct,
-                judge_feedback=judge_result.feedback,
-            )
-            if judge_result.correct:
+            if invalid_due_to_leak:
+                leak_feedback = self._private_leak_feedback(turn_idx, leak_result)
+                leak_history = self._private_leak_history(turn_artifacts)
+                previous_feedback = TutorPrivateFeedback(
+                    kind="leak",
+                    leak_feedback=leak_feedback,
+                    leak_history=leak_history,
+                )
+            else:
+                public_history = next_public_history
+                previous_tutor_visible_output = tutor_visible_output
+                previous_student_output = student_answer
+                previous_feedback = TutorPrivateFeedback(
+                    kind="student_judged",
+                    student_output=student_answer,
+                    judge_correct=judge_result.correct,
+                    judge_feedback=judge_result.feedback,
+                    leak_history=self._private_leak_history(turn_artifacts),
+                )
+            if judge_result.correct and not invalid_due_to_leak:
                 break
 
-        if bool(getattr(self, "terminate_on_leak", False)):
-            leak_count = sum(
-                1 for artifact in turn_artifacts if artifact.leak_result.leaked
-            )
-        else:
+        if self.leak_handling_mode == "reward_only":
             leak_count = await self._annotate_turn_leak_results(
                 task,
                 ground_truth,
                 turn_artifacts,
                 aux_caller=aux_caller,
+            )
+        else:
+            leak_count = sum(
+                1 for artifact in turn_artifacts if artifact.leak_result.leaked
             )
         episode_artifact = EpisodeArtifact(
             task=task,
@@ -818,6 +856,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
             leak_penalty_compute=getattr(self, "leak_penalty_compute", None),
             leak_penalty_formula=getattr(self, "leak_penalty_formula", None),
+            leak_penalty_aggregation=getattr(
+                self, "leak_penalty_aggregation", "turn"
+            ),
+            leaked_success_reward_scale=getattr(
+                self, "leaked_success_reward_scale", 1.0
+            ),
             assign_success_reward=self.assign_success_reward,
             outcome_prior_turn_weight=self.outcome_prior_turn_weight,
             outcome_credit_gamma=self.outcome_credit_gamma,
@@ -1094,7 +1138,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         *,
         aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
     ) -> LeakCheckResult:
-        if not self.enable_leak_check:
+        if self.leak_handling_mode == "disabled":
             return LeakCheckResult(
                 raw_output="",
                 leaked=False,
@@ -1130,7 +1174,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             _strip_reasoning_for_context(teacher_action),
         )
         result = await self._call_auxiliary_prompt(
-            system_prompt=self.leak_check_system_prompt,
+            system_prompt=self._leak_check_system_prompt_for_current_mode(
+                self.leak_check_system_prompt
+            ),
             user_prompt=prompt,
             aux_caller=aux_caller,
             rid_prefix="leak-check",
@@ -1179,7 +1225,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             teacher_action=teacher_message,
         )
         result = await self._call_auxiliary_prompt(
-            system_prompt=RAWBASE_LEAK_CHECK_SYSTEM_PROMPT,
+            system_prompt=self._leak_check_system_prompt_for_current_mode(
+                RAWBASE_LEAK_CHECK_SYSTEM_PROMPT
+            ),
             user_prompt=prompt,
             aux_caller=aux_caller,
             rid_prefix="rawbase-leak-check",
@@ -1190,12 +1238,74 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 leaked=True,
                 feedback=f"Rawbase leak check failed: {result.error}",
                 parse_error=result.error,
-                raw_result={"method": "rawbase_exact_ground_truth"},
+                raw_result={
+                    "method": "rawbase_exact_ground_truth",
+                    "prefilter": "ground_truth_match",
+                },
             )
         leak_result = parse_leak_check_result(result.text)
         leak_result.raw_result["method"] = "rawbase_exact_ground_truth"
         leak_result.raw_result["prefilter"] = "ground_truth_match"
         return leak_result
+
+    @staticmethod
+    def _compact_private_feedback(value: Any) -> str:
+        if isinstance(value, bool) or value is None:
+            return ""
+        if isinstance(value, str):
+            text = value
+        elif isinstance(value, (int, float)):
+            text = str(value)
+        elif isinstance(value, (list, tuple)):
+            parts = [
+                TutorAgentWorkflow._compact_private_feedback(item)
+                for item in value
+            ]
+            text = ", ".join(part for part in parts if part)
+        elif isinstance(value, dict):
+            parts = [
+                TutorAgentWorkflow._compact_private_feedback(item)
+                for item in value.values()
+            ]
+            text = ", ".join(part for part in parts if part)
+        else:
+            return ""
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) > 240:
+            return f"{text[:237].rstrip()}..."
+        return text
+
+    def _leak_feedback_text(self, leak_result: LeakCheckResult) -> str:
+        feedback = self._compact_private_feedback(leak_result.feedback)
+        feedback_lower = feedback.lower()
+        if feedback and "failed" not in feedback_lower:
+            return feedback
+        return "The leak checker did not provide a detailed reason."
+
+    def _private_leak_feedback(
+        self, turn_idx: int, leak_result: LeakCheckResult
+    ) -> str:
+        level = (
+            f" (leak level {leak_result.leak_level})"
+            if leak_result.leak_level is not None
+            else ""
+        )
+        feedback = self._leak_feedback_text(leak_result)
+        return (
+            f"Turn {turn_idx}: tutor output was rejected for answer leakage{level}. "
+            f"Leak feedback: {feedback}. "
+            "This turn and the student's response to it are invalid and were "
+            "not added to the student-visible history. Continue from the last "
+            "valid public state without using the invalid student response."
+        )
+
+    def _private_leak_history(self, turn_artifacts: list[TurnArtifact]) -> str:
+        entries = [
+            self._private_leak_feedback(artifact.turn_idx, artifact.leak_result)
+            for artifact in turn_artifacts
+            if artifact.invalid_due_to_leak
+        ]
+        return "\n".join(entries)
 
     async def _call_auxiliary_prompt(
         self,
@@ -1229,19 +1339,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
         else:
             entries.append(self._build_initial_public_summary(previous_student_answer))
 
-        tutor_round = old_public_history.turn_count + 1
-        student_round = old_public_history.turn_count + 2
+        turn_idx = old_public_history.turn_count + 1
         entries.append(
             self._format_public_history_entry(
                 "Tutor",
-                tutor_round,
+                turn_idx,
                 tutor_visible_output,
             )
         )
         entries.append(
             self._format_public_history_entry(
                 "Student",
-                student_round,
+                turn_idx,
                 current_student_answer,
             )
         )
@@ -1264,7 +1373,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             student_output=feedback.student_output or "(empty)",
             judge_correct=feedback.judge_correct,
             judge_feedback=feedback.judge_feedback or "(empty)",
-            leak_feedback=feedback.leak_feedback or "(empty)",
+            leak_feedback=feedback.leak_feedback or "",
+            leak_history=feedback.leak_history or "",
             current_round=state.turn_idx,
             max_turns=state.max_turns,
             remaining_rounds=max(state.max_turns - state.turn_idx + 1, 0),
@@ -1471,6 +1581,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if episode_artifact.termination_reason != "success":
             return None
         for artifact in episode_artifact.turns:
+            if artifact.invalid_due_to_leak:
+                continue
             if artifact.judge_result is not None and artifact.judge_result.correct:
                 return artifact
         return None
@@ -1565,7 +1677,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             (
                 idx
                 for idx, artifact in enumerate(turn_artifacts)
-                if artifact.judge_result is not None and artifact.judge_result.correct
+                if not artifact.invalid_due_to_leak
+                and artifact.judge_result is not None
+                and artifact.judge_result.correct
             ),
             None,
         )
@@ -1752,13 +1866,23 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_generalization_results: list[StudentGeneralizationResult] | None = None,
     ) -> None:
         success_round = next(
-            (trace.turn_idx for trace in traces if trace.judge_correct),
+            (
+                trace.turn_idx
+                for trace in traces
+                if trace.judge_correct and not trace.invalid_due_to_leak
+            ),
             0,
+        )
+        invalid_success_due_to_leak = sum(
+            1
+            for trace in traces
+            if trace.invalid_due_to_leak and trace.judge_correct
         )
         metrics = {
             "reward": float(total_reward),
             "turns": len(traces),
             "leaks": int(leak_count),
+            "invalid_success_due_to_leak": int(invalid_success_due_to_leak),
             "pre_solved": float(pre_success),
             "solved": float(success_round > 0),
             "stop/max_turns": float(termination_reason == "max_turns"),

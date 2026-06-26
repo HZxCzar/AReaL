@@ -12,6 +12,8 @@ from examples.tutor.prompts import (
 
 from areal.api.cli_args import EvaluatorConfig, GRPOConfig
 
+_LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate", "feedback"}
+
 
 @dataclass
 class TutorAuxiliaryModelConfig:
@@ -127,6 +129,16 @@ class TutorEvaluatorConfig(EvaluatorConfig):
 @dataclass
 class TutorRewardConfig:
     success: float = field(default=1.0)
+    leaked_success_reward_scale: float = field(
+        default=1.0,
+        metadata={
+            "help": (
+                "Multiplier applied to success reward when any tutor turn in "
+                "the episode leaked. Use 0.0 to give no success reward to "
+                "leaked-success episodes."
+            )
+        },
+    )
     leak_penalty_mode: str = field(
         default="binary",
         metadata={
@@ -141,6 +153,17 @@ class TutorRewardConfig:
     leak_penalty_final_answer: float | None = field(default=None)
     leak_penalty_compute: float | None = field(default=None)
     leak_penalty_formula: float | None = field(default=None)
+    leak_penalty_aggregation: str = field(
+        default="turn",
+        metadata={
+            "help": (
+                "Leak penalty aggregation: 'turn' applies the configured "
+                "penalty to every leaked turn; 'episode' applies one "
+                "saturated penalty per episode."
+            ),
+            "choices": ["turn", "episode"],
+        },
+    )
     assign_success_reward: bool = field(default=False)
     outcome_prior_turn_weight: float = field(default=0.1)
     outcome_credit_gamma: float = field(default=0.9)
@@ -159,6 +182,13 @@ class TutorRewardConfig:
             raise ValueError(
                 "reward.leak_penalty_mode must be one of: "
                 "'binary', 'staged', 'rawbase'."
+            )
+        if self.leaked_success_reward_scale < 0.0:
+            raise ValueError("reward.leaked_success_reward_scale must be >= 0.")
+        if self.leak_penalty_aggregation not in {"turn", "episode"}:
+            raise ValueError(
+                "reward.leak_penalty_aggregation must be one of: "
+                "'turn', 'episode'."
             )
         if self.leak_penalty_mode in {"binary", "rawbase"}:
             if self.leak_penalty is None:
@@ -208,22 +238,17 @@ class TutorConfig(GRPOConfig):
             "help": "Whether to enable thinking mode for the tutor rollout model."
         },
     )
-    enable_leak_check: bool = field(
-        default=True,
+    leak_handling_mode: str = field(
+        default="reward_only",
         metadata={
             "help": (
-                "Whether to check tutor outputs for answer leakage before showing "
-                "them to the student."
-            )
-        },
-    )
-    terminate_on_leak: bool = field(
-        default=False,
-        metadata={
-            "help": (
-                "Terminate the tutor rollout immediately when a leak is detected. "
-                "Requires enable_leak_check=True."
-            )
+                "Leak handling mode: 'disabled' skips leak checks; "
+                "'reward_only' checks after rollout and applies reward penalties; "
+                "'terminate' stops before the student sees leaked tutor output; "
+                "'feedback' calls the student, invalidates leaked turns, and "
+                "feeds persistent private leak feedback to later tutor turns."
+            ),
+            "choices": ["disabled", "reward_only", "terminate", "feedback"],
         },
     )
     teacher_show_ground_truth: bool = field(
@@ -257,7 +282,8 @@ class TutorConfig(GRPOConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.terminate_on_leak and not self.enable_leak_check:
+        if self.leak_handling_mode not in _LEAK_HANDLING_MODES:
             raise ValueError(
-                "terminate_on_leak=True requires enable_leak_check=True."
+                "leak_handling_mode must be one of: 'disabled', "
+                "'reward_only', 'terminate', or 'feedback'."
             )

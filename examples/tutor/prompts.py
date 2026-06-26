@@ -53,6 +53,14 @@ RAWBASE_LEAK_CHECK_SYSTEM_PROMPT = (
     "Return valid JSON only with keys leaked (boolean) and feedback (string)."
 )
 
+FEEDBACK_LEAK_CHECK_SYSTEM_PROMPT_SUFFIX = (
+    "Feedback mode is enabled. Use the existing feedback string as private "
+    "tutor-facing guidance: if leakage occurred, briefly explain the leakage "
+    "type and how the tutor should revise without quoting the ground-truth "
+    "answer or adding a final-answer-equivalent expression. Do not add new "
+    "JSON keys."
+)
+
 DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT = (
     "You are a strict math answer equivalence judge. Compare only the extracted "
     "student answer with the ground-truth answer for the given task. Mark correct "
@@ -91,8 +99,8 @@ Previous tutor output:
 
 Private feedback for the tutor:
 {% if feedback_kind == "leak" %}
-- Previous tutor output was flagged for leaking answer information.
-{% if show_ground_truth %}
+- Latest private event: a previous tutor turn was invalidated for answer leakage.
+{% if leak_feedback %}
 - Leak feedback: {{ leak_feedback }}
 {% endif %}
 {% elif feedback_kind == "student_judged" %}
@@ -101,6 +109,11 @@ Private feedback for the tutor:
 - Judge feedback: {{ judge_feedback }}
 {% else %}
 - No previous private feedback.
+{% endif %}
+{% if leak_history %}
+
+Private invalid-turn timeline for this episode:
+{{ leak_history }}
 {% endif %}
 
 Round: {{ current_round }}/{{ max_turns }}

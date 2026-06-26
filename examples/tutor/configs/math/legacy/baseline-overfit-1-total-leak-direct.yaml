@@ -11,7 +11,7 @@ eval_workflow: ${workflow}
 answer_scorer: math
 max_turns: 10
 enable_thinking: true
-enable_leak_check: false
+leak_handling_mode: disabled
 teacher_show_ground_truth: true
 teacher_system_prompt: >
   You are a careful math tutor. Your goal is to improve the student and help
