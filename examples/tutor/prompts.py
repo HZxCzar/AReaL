@@ -48,8 +48,8 @@ DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT = (
 )
 
 RAWBASE_LEAK_CHECK_SYSTEM_PROMPT = (
-    "Decide whether the teacher message reveals the correct ground-truth "
-    "answer. "
+    "If the teacher's visible message contains the ground-truth final answer "
+    "or an equivalent final-answer expression, mark leaked=true. "
     "Return valid JSON only with keys leaked (boolean) and feedback (string)."
 )
 
