@@ -102,27 +102,22 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
         *,
         aux_caller=None,
     ):
-        teacher_message = tutor_workflow_module._strip_reasoning_for_context(
-            teacher_action
+        teacher_message = self._extract_tutor_visible_output(teacher_action)
+        prompt = tutor_workflow_module.render_prompt(
+            tutor_workflow_module.RAWBASE_LEAK_CHECK_USER_TEMPLATE,
+            ground_truth=ground_truth,
+            teacher_action=teacher_message,
         )
-        if tutor_workflow_module._rawbase_ground_truth_in_message(
-            ground_truth, teacher_message
-        ):
-            prompt = tutor_workflow_module.render_prompt(
-                tutor_workflow_module.RAWBASE_LEAK_CHECK_USER_TEMPLATE,
-                ground_truth=ground_truth,
-                teacher_action=teacher_message,
-            )
-            messages = [
-                {
-                    "role": "system",
-                    "content": self._leak_check_system_prompt_for_current_mode(
-                        tutor_workflow_module.RAWBASE_LEAK_CHECK_SYSTEM_PROMPT
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ]
-            self.trace_sink.append_messages("leak_check_input", messages)
+        messages = [
+            {
+                "role": "system",
+                "content": self._leak_check_system_prompt_for_current_mode(
+                    tutor_workflow_module.RAWBASE_LEAK_CHECK_SYSTEM_PROMPT
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ]
+        self.trace_sink.append_messages("leak_check_input", messages)
         result = await super()._run_rawbase_leak_check(
             task,
             ground_truth,

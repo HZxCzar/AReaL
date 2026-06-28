@@ -145,7 +145,7 @@ class TutorRewardConfig:
             "help": "Leak penalty mode: 'binary' uses leaked=true/false, "
             "'staged' uses leak levels 1-4, and 'rawbase' asks the "
             "auxiliary judge whether the public tutor output contains the "
-            "ground truth verbatim.",
+            "final answer or an equivalent numeric expression.",
             "choices": ["binary", "staged", "rawbase"],
         },
     )

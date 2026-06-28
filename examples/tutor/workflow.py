@@ -186,45 +186,6 @@ LEAK_TERMINATION_REASON = "leak"
 LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate", "feedback"}
 
 
-def _rawbase_match_text(text: str) -> str:
-    text = str(text or "").lower()
-    for old, new in (
-        ("\\!", ""),
-        ("\\,", ""),
-        ("\\$", "$"),
-        ("$", ""),
-        (",", ""),
-        ("\\left", ""),
-        ("\\right", ""),
-        ("^\\circ", "degrees"),
-        ("°", "degrees"),
-    ):
-        text = text.replace(old, new)
-    return re.sub(r"\s+", "", text)
-
-
-def _rawbase_ground_truth_variants(ground_truth: str) -> set[str]:
-    ground_truth = str(ground_truth or "").strip()
-    variants = {ground_truth}
-    frac = re.fullmatch(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", ground_truth)
-    if frac is not None:
-        variants.add(f"{frac.group(1)}/{frac.group(2)}")
-    degree = re.search(r"[-+]?\d+(?:\.\d+)?", ground_truth)
-    if degree is not None and ("degree" in ground_truth or "\\circ" in ground_truth):
-        variants.add(f"{degree.group(0)} degrees")
-        variants.add(f"{degree.group(0)}^\\circ")
-        variants.add(f"{degree.group(0)}°")
-    return {variant for variant in variants if _rawbase_match_text(variant)}
-
-
-def _rawbase_ground_truth_in_message(ground_truth: str, teacher_action: str) -> bool:
-    message = _rawbase_match_text(teacher_action)
-    return any(
-        _rawbase_match_text(variant) in message
-        for variant in _rawbase_ground_truth_variants(ground_truth)
-    )
-
-
 def _safe_scalar(**metrics: Any) -> None:
     try:
         stats_tracker.get(workflow_context.stat_scope()).scalar(**metrics)
@@ -1207,18 +1168,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
     ) -> LeakCheckResult:
         del task
-        teacher_message = _strip_reasoning_for_context(teacher_action)
-        if not _rawbase_ground_truth_in_message(ground_truth, teacher_message):
-            return LeakCheckResult(
-                raw_output="",
-                leaked=False,
-                feedback="Ground truth not found in teacher message.",
-                parse_error=None,
-                raw_result={
-                    "method": "rawbase_exact_ground_truth",
-                    "prefilter": "no_ground_truth_match",
-                },
-            )
+        teacher_message = self._extract_tutor_visible_output(teacher_action)
         prompt = render_prompt(
             RAWBASE_LEAK_CHECK_USER_TEMPLATE,
             ground_truth=ground_truth,
@@ -1238,14 +1188,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 leaked=True,
                 feedback=f"Rawbase leak check failed: {result.error}",
                 parse_error=result.error,
-                raw_result={
-                    "method": "rawbase_exact_ground_truth",
-                    "prefilter": "ground_truth_match",
-                },
+                raw_result={"method": "rawbase_llm"},
             )
         leak_result = parse_leak_check_result(result.text)
-        leak_result.raw_result["method"] = "rawbase_exact_ground_truth"
-        leak_result.raw_result["prefilter"] = "ground_truth_match"
+        leak_result.raw_result["method"] = "rawbase_llm"
         return leak_result
 
     @staticmethod

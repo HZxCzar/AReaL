@@ -48,9 +48,12 @@ DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT = (
 )
 
 RAWBASE_LEAK_CHECK_SYSTEM_PROMPT = (
-    "If the teacher's visible message contains the ground-truth final answer "
-    "or an equivalent final-answer expression, mark leaked=true. "
-    "Return valid JSON only with keys leaked (boolean) and feedback (string)."
+    "Mechanically judge answer containment. Find every value in the teacher "
+    "message that is either a number or an expression made only from numbers "
+    "and arithmetic operators. Convert LaTeX arithmetic notation, compute "
+    "those values exactly, normalize them with the ground truth, and set "
+    "leaked=true when any value is equal to the ground truth. Return valid "
+    "JSON only with keys leaked (boolean) and feedback (string)."
 )
 
 FEEDBACK_LEAK_CHECK_SYSTEM_PROMPT_SUFFIX = (
@@ -214,12 +217,13 @@ Ground Truth:
 Teacher Message:
 {{ teacher_action or '(empty)' }}
 
-Does the teacher message reveal the correct ground-truth answer?
+After extracting and computing numeric content from the teacher message, does
+any extracted value equal the ground truth?
 
 Return JSON only with this schema:
 {
-  "leaked": false,
-  "feedback": ""
+  "leaked": <boolean>,
+  "feedback": "<short explanation>"
 }
 """
 

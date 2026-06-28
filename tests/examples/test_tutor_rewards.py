@@ -310,7 +310,7 @@ def test_non_thinking_tutor_visible_output_falls_back_for_invalid_json():
     assert visible == "not json  visible hint"
 
 
-def test_rawbase_leak_check_asks_llm_about_exact_public_ground_truth(monkeypatch):
+def test_rawbase_leak_check_asks_llm_about_visible_output(monkeypatch):
     workflow = tutor_workflow.TutorAgentWorkflow.__new__(
         tutor_workflow.TutorAgentWorkflow
     )
@@ -332,20 +332,20 @@ def test_rawbase_leak_check_asks_llm_about_exact_public_ground_truth(monkeypatch
         workflow._run_optional_leak_check(
             "task",
             "42",
-            "The value is 42, so continue from there.",
+            "The value is six times seven, so continue from there.",
         )
     )
 
     assert result.leaked is True
-    assert result.raw_result["method"] == "rawbase_exact_ground_truth"
+    assert result.raw_result["method"] == "rawbase_llm"
     assert captured["system_prompt"] == tutor_workflow.RAWBASE_LEAK_CHECK_SYSTEM_PROMPT
     assert "Ground Truth:\n42" in captured["user_prompt"]
-    assert "The value is 42" in captured["user_prompt"]
+    assert "The value is six times seven" in captured["user_prompt"]
     assert '"evidence"' not in captured["user_prompt"]
     assert captured["rid_prefix"] == "rawbase-leak-check"
 
 
-def test_rawbase_leak_check_ignores_private_reasoning_json_output(monkeypatch):
+def test_rawbase_leak_check_strips_private_reasoning_json_output(monkeypatch):
     workflow = tutor_workflow.TutorAgentWorkflow.__new__(
         tutor_workflow.TutorAgentWorkflow
     )
@@ -360,17 +360,47 @@ def test_rawbase_leak_check_ignores_private_reasoning_json_output(monkeypatch):
 
     monkeypatch.setattr(workflow, "_call_auxiliary_prompt", call_auxiliary_prompt)
 
-    visible_output = workflow._extract_tutor_visible_output(
-        r'{"reasoning": "the answer is 42", "output": "Try factoring first."}'
-    )
     result = asyncio.run(
-        workflow._run_rawbase_leak_check("task", "42", visible_output)
+        workflow._run_rawbase_leak_check(
+            "task",
+            "42",
+            r'{"reasoning": "the answer is 42", "output": "Try factoring first."}',
+        )
     )
 
-    assert visible_output == "Try factoring first."
     assert result.leaked is False
-    assert result.raw_result["prefilter"] == "no_ground_truth_match"
-    assert captured == {}
+    assert result.raw_result["method"] == "rawbase_llm"
+    assert "Try factoring first." in captured["user_prompt"]
+    assert "the answer is 42" not in captured["user_prompt"]
+
+
+def test_rawbase_leak_check_strips_thinking_output(monkeypatch):
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.enable_thinking = True
+    workflow.leak_handling_mode = "reward_only"
+    workflow.leak_penalty_mode = "rawbase"
+    captured = {}
+
+    async def call_auxiliary_prompt(**kwargs):
+        captured.update(kwargs)
+        return TextCallResult(text='{"leaked": false, "feedback": ""}')
+
+    monkeypatch.setattr(workflow, "_call_auxiliary_prompt", call_auxiliary_prompt)
+
+    result = asyncio.run(
+        workflow._run_rawbase_leak_check(
+            "task",
+            "42",
+            "<think>the answer is 42</think>Try factoring first.",
+        )
+    )
+
+    assert result.leaked is False
+    assert result.raw_result["method"] == "rawbase_llm"
+    assert "Try factoring first." in captured["user_prompt"]
+    assert "the answer is 42" not in captured["user_prompt"]
 
 
 def test_default_success_reward_goes_to_success_turn_only():
