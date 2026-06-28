@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-baseline-overfit-8-leakt-prompt-turn3
+trial_name: qwen8b-baseline-overfit-8-leakt-prompt
 
 seed: 42
 enable_offload: false
@@ -9,7 +9,7 @@ tokenizer_path: ${actor.path}
 workflow: examples.tutor.workflow.TutorAgentWorkflow
 eval_workflow: ${workflow}
 answer_scorer: math
-max_turns: 3
+max_turns: 10
 enable_thinking: true
 leak_handling_mode: terminate
 teacher_show_ground_truth: false
