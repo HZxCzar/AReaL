@@ -3,14 +3,56 @@ import random
 import sys
 from copy import deepcopy
 from datetime import datetime
+from typing import Any
 
 sys.path.append(str(pathlib.Path(__file__).parent))
 from configs import TutorConfig
+from core.generalization import (
+    load_student_generalize_bank,
+    validate_student_generalize_dataset,
+)
 
 from areal import PPOTrainer
 from areal.api.cli_args import load_expr_config
 from areal.dataset import get_custom_dataset
 from areal.utils.hf_utils import load_hf_tokenizer
+
+
+def _without_remote_dataset_loading(dataset_config: Any) -> Any:
+    local_config = deepcopy(dataset_config)
+    local_config.scheduling_spec = None
+    return local_config
+
+
+def _validate_student_generalize_datasets(config: TutorConfig, tokenizer: Any) -> None:
+    student_generalize = config.student_generalize
+    if not student_generalize.enabled:
+        return
+
+    bank = load_student_generalize_bank(student_generalize.path)
+    train_dataset = get_custom_dataset(
+        split="train",
+        dataset_config=_without_remote_dataset_loading(config.train_dataset),
+        tokenizer=tokenizer,
+    )
+    validate_student_generalize_dataset(
+        train_dataset,
+        split_name="train",
+        bank=bank,
+    )
+
+    if config.valid_dataset is None:
+        return
+    valid_dataset = get_custom_dataset(
+        split="test",
+        dataset_config=_without_remote_dataset_loading(config.valid_dataset),
+        tokenizer=tokenizer,
+    )
+    validate_student_generalize_dataset(
+        valid_dataset,
+        split_name="test",
+        bank=bank,
+    )
 
 
 def main(args):
@@ -29,6 +71,7 @@ def main(args):
     reward = config.reward
     pairwise = reward.pairwise
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
+    _validate_student_generalize_datasets(config, tokenizer)
 
     train_dataset = get_custom_dataset(
         split="train",
