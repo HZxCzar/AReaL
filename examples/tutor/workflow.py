@@ -176,6 +176,7 @@ from examples.tutor.prompts import (
     RAWBASE_LEAK_CHECK_USER_TEMPLATE,
     STAGED_LEAK_CHECK_USER_TEMPLATE,
     STUDENT_STATE_USER_TEMPLATE,
+    STUDENT_TRANSFER_USER_TEMPLATE,
     TEACHER_STATE_USER_TEMPLATE,
     render_prompt,
 )
@@ -1561,6 +1562,25 @@ student's work are actually valid.
             teacher_feedback=state.latest_tutor_visible_output or "(none)",
         )
 
+    def _build_student_transfer_prompt(
+        self,
+        *,
+        original_task: str,
+        transfer_task: str,
+        public_history: PublicHistoryState,
+        previous_student_output: str,
+        teacher_feedback: str,
+    ) -> str:
+        return render_prompt(
+            STUDENT_TRANSFER_USER_TEMPLATE,
+            original_task=original_task,
+            public_history=public_history.summary
+            or "No previous visible tutoring history.",
+            previous_student_output=previous_student_output or "(empty)",
+            teacher_feedback=teacher_feedback or "(none)",
+            transfer_task=transfer_task,
+        )
+
     def _build_leak_check_prompt(
         self, task: str, ground_truth: str, teacher_action: str
     ) -> str:
@@ -1797,18 +1817,25 @@ student's work are actually valid.
                 )
                 continue
 
-            state = StudentTurnState(
-                task=case.task,
-                public_history=PublicHistoryState(
-                    summary=success_history.summary,
-                    turn_count=success_history.turn_count,
-                ),
+            transfer_prompt = self._build_student_transfer_prompt(
+                original_task=episode_artifact.task,
+                transfer_task=case.task,
+                public_history=success_history,
                 previous_student_output=success_turn.student_output,
-                latest_tutor_visible_output=success_turn.tutor_visible_output,
+                teacher_feedback=success_turn.tutor_visible_output,
             )
-            student_output, student_error = await self._run_student(
-                state, aux_caller=aux_caller
+            student_result = await self._call_auxiliary_prompt(
+                system_prompt=self.student_system_prompt,
+                user_prompt=transfer_prompt,
+                aux_caller=aux_caller,
+                rid_prefix=f"student-transfer-{level}-{success_history.turn_count}",
             )
+            if student_result.error:
+                student_output = ""
+                student_error = student_result.error
+            else:
+                student_output = student_result.text
+                student_error = None
             student_output = _strip_reasoning_for_context(student_output)
             judge_result = None
             reward = 0.0

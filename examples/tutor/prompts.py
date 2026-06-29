@@ -156,6 +156,31 @@ continue, make your next answer attempt. If you are stuck, briefly say what is
 confusing and ask one short question.
 """
 
+STUDENT_TRANSFER_USER_TEMPLATE = """\
+Original task:
+{{ original_task }}
+
+Previous conversation history for the original task:
+{{ public_history }}
+
+Your previous answer on the original task:
+{{ previous_student_output }}
+
+Latest teacher feedback on the original task:
+{{ teacher_feedback }}
+
+Now solve a new related transfer task. Use the previous conversation only as a
+source of reusable methods, checks, and concepts. Do not continue the original
+task, and do not reuse the original numerical answer unless you independently
+derive it for the new task.
+
+New transfer task:
+{{ transfer_task }}
+
+Reply as the student with your answer attempt for the new transfer task. If you
+are stuck, briefly say what is confusing and ask one short question.
+"""
+
 SUMMARY_USER_TEMPLATE = """\
 Existing public history summary:
 {{ old_public_summary }}
