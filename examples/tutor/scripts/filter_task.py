@@ -774,7 +774,6 @@ def build_workflow(
         answer_judge_enabled=auxiliary_model.answer_judge_enabled,
         answer_judge_max_tokens=auxiliary_model.answer_judge_max_tokens,
         answer_judge_system_prompt=config.answer_judge_system_prompt,
-        summary_system_prompt=config.summary_system_prompt,
         tokenizer_path=config.tokenizer_path,
         model_context_length=config.sglang.context_length,
         pairwise_reward_enabled=pairwise.enabled,

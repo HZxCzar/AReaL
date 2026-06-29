@@ -196,7 +196,6 @@ def build_workflow(config: Any, max_turns: int, *, hide_ground_truth: bool) -> A
         answer_judge_enabled=auxiliary_model.answer_judge_enabled,
         answer_judge_max_tokens=auxiliary_model.answer_judge_max_tokens,
         answer_judge_system_prompt=config.answer_judge_system_prompt,
-        summary_system_prompt=config.summary_system_prompt,
         debug_trace_dir="",
         max_train_sample_tokens=config.gconfig.max_tokens,
         tokenizer_path=resolve_local_tokenizer_path(config.tokenizer_path),

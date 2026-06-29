@@ -84,19 +84,45 @@ DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT = (
     "only with key correct (boolean)."
 )
 
-DEFAULT_SUMMARY_SYSTEM_PROMPT = (
-    "You summarize only public tutoring history. You may use only the visible "
-    "student and tutor messages provided by the user. Do not infer from hidden "
-    "solutions, judge feedback, leak feedback, or any private answer key. Return "
-    "valid JSON only."
-)
-
 PAIRWISE_STUDENT_COMPARISON_SYSTEM_PROMPT = (
     "You are a strict math tutoring evaluator. Compare two anonymized student "
     "replies after different private tutor hints. Judge only the student replies "
     "and the visible pre-turn state; do not infer from tutor wording. Return valid "
     "JSON only."
 )
+
+NO_VISIBLE_TUTORING_HISTORY = "No visible tutoring history yet."
+NO_PREVIOUS_VISIBLE_TUTORING_HISTORY = "No previous visible tutoring history."
+EMPTY_PLACEHOLDER = "(empty)"
+NONE_PLACEHOLDER = "(none)"
+NONE_YET_PLACEHOLDER = "(none yet)"
+INITIAL_TEACHER_FEEDBACK_PLACEHOLDER = "(none, produce the first answer attempt)"
+LEAK_CHECK_DISABLED_FEEDBACK = "Leak check disabled."
+LEAK_CHECK_PENDING_FEEDBACK = "Leak check pending."
+LEAK_CHECK_NO_DETAIL_FEEDBACK = (
+    "The leak checker did not provide a detailed reason."
+)
+LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE = "Leak check failed: {error}"
+RAWBASE_LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE = "Rawbase leak check failed: {error}"
+PRIVATE_LEAK_LEVEL_SUFFIX_TEMPLATE = " (leak level {leak_level})"
+PRIVATE_LEAK_FEEDBACK_TEMPLATE = (
+    "Turn {turn_idx}: tutor output was rejected for answer leakage{level}. "
+    "Leak feedback: {feedback}. "
+    "This turn and the student's response to it are invalid and were "
+    "not added to the student-visible history. Continue from the last "
+    "valid public state without using the invalid student response."
+)
+PUBLIC_HISTORY_ENTRY_TEMPLATE = "{speaker} round {round_idx}:\n{visible_text}"
+
+TEACHER_PRE_SOLVE_FILTER_CONTEXT_TEMPLATE = """\
+Private teacher solution draft hidden from the student:
+The following text is the teacher's private solution generated before
+tutoring. Treat it as a hidden answer-draft and reasoning reference for the tutor only.
+Use it only to keep your teaching path consistent and to check which parts of the student's work are actually valid.
+
+<teacher_private_solution_draft mode="filter_solver">
+{{ raw_output }}
+</teacher_private_solution_draft>"""
 
 TEACHER_STATE_USER_TEMPLATE = """\
 Task:
@@ -181,32 +207,6 @@ Reply as the student with your answer attempt for the new transfer task. If you
 are stuck, briefly say what is confusing and ask one short question.
 """
 
-SUMMARY_USER_TEMPLATE = """\
-Existing public history summary:
-{{ old_public_summary }}
-
-Previous visible student answer:
-{{ previous_student_answer }}
-
-Visible tutor guidance:
-{{ tutor_output }}
-
-Current visible student answer:
-{{ current_student_answer }}
-
-Create an updated public state summary for future tutor and student turns.
-Use only the visible text above. Do not include ground truth, judge correctness,
-leak feedback, or hidden solution details.
-
-Return JSON only:
-{
-  "student_progress": "what the student has visibly tried or established",
-  "visible_tutor_guidance": "important guidance that was actually shown",
-  "student_current_misconception": "likely issue inferred only from visible text",
-  "latest_student_state": "concise description of the latest visible student state"
-}
-"""
-
 LEAK_CHECK_USER_TEMPLATE = """\
 Task:
 {{ task }}
@@ -282,7 +282,7 @@ when the right-hand side is equivalent. Do not use any hidden student reasoning.
 
 Return JSON only with this schema:
 {
-  "correct": false
+  "correct": true or false
 }
 """
 

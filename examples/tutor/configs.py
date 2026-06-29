@@ -5,7 +5,6 @@ from examples.tutor.prompts import (
     DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT,
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
     DEFAULT_STUDENT_SYSTEM_PROMPT,
-    DEFAULT_SUMMARY_SYSTEM_PROMPT,
     DEFAULT_TEACHER_SYSTEM_PROMPT,
     TEACHER_STATE_USER_TEMPLATE,
 )
@@ -132,10 +131,9 @@ class TutorTeacherPreConfig:
         metadata={
             "help": (
                 "Teacher pre-solve prompt mode. 'filter_solver' uses the same "
-                "clean solver context as tutor dataset filtering; 'task' uses "
-                "the tutor prompt as private preparation."
+                "clean solver context as tutor dataset filtering."
             ),
-            "choices": ["filter_solver", "task"],
+            "choices": ["filter_solver"],
         },
     )
     attempts: int = field(
@@ -158,10 +156,8 @@ class TutorTeacherPreConfig:
     )
 
     def __post_init__(self) -> None:
-        if self.mode not in {"filter_solver", "task"}:
-            raise ValueError(
-                "teacher_pre.mode must be one of: 'filter_solver', 'task'."
-            )
+        if self.mode != "filter_solver":
+            raise ValueError("teacher_pre.mode must be 'filter_solver'.")
         if int(self.attempts) < 1:
             raise ValueError("teacher_pre.attempts must be >= 1.")
 
@@ -321,7 +317,6 @@ class TutorConfig(GRPOConfig):
     student_system_prompt: str = field(default=DEFAULT_STUDENT_SYSTEM_PROMPT)
     leak_check_system_prompt: str = field(default=DEFAULT_LEAK_CHECK_SYSTEM_PROMPT)
     answer_judge_system_prompt: str = field(default=DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT)
-    summary_system_prompt: str = field(default=DEFAULT_SUMMARY_SYSTEM_PROMPT)
     debug_trace_dir: str = field(
         default="",
         metadata={

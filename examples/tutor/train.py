@@ -146,7 +146,6 @@ def main(args):
         answer_judge_enabled=auxiliary_model.answer_judge_enabled,
         answer_judge_max_tokens=auxiliary_model.answer_judge_max_tokens,
         answer_judge_system_prompt=config.answer_judge_system_prompt,
-        summary_system_prompt=config.summary_system_prompt,
         debug_trace_dir=config.debug_trace_dir or None,
         debug_trace_every_n_rollouts=config.debug_trace_every_n_rollouts,
         max_train_sample_tokens=config.gconfig.max_tokens,

@@ -167,16 +167,31 @@ from examples.tutor.prompts import (
     DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT,
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
     DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT,
+    EMPTY_PLACEHOLDER,
     FEEDBACK_LEAK_CHECK_SYSTEM_PROMPT_SUFFIX,
     FILTER_SOLVER_SYSTEM_PROMPT,
     FILTER_SOLVER_USER_TEMPLATE,
+    INITIAL_TEACHER_FEEDBACK_PLACEHOLDER,
+    LEAK_CHECK_DISABLED_FEEDBACK,
+    LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE,
+    LEAK_CHECK_NO_DETAIL_FEEDBACK,
+    LEAK_CHECK_PENDING_FEEDBACK,
     LEAK_CHECK_USER_TEMPLATE,
+    NO_PREVIOUS_VISIBLE_TUTORING_HISTORY,
+    NO_VISIBLE_TUTORING_HISTORY,
     NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT,
+    NONE_PLACEHOLDER,
+    NONE_YET_PLACEHOLDER,
+    PRIVATE_LEAK_FEEDBACK_TEMPLATE,
+    PRIVATE_LEAK_LEVEL_SUFFIX_TEMPLATE,
+    PUBLIC_HISTORY_ENTRY_TEMPLATE,
+    RAWBASE_LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE,
     RAWBASE_LEAK_CHECK_SYSTEM_PROMPT,
     RAWBASE_LEAK_CHECK_USER_TEMPLATE,
     STAGED_LEAK_CHECK_USER_TEMPLATE,
     STUDENT_STATE_USER_TEMPLATE,
     STUDENT_TRANSFER_USER_TEMPLATE,
+    TEACHER_PRE_SOLVE_FILTER_CONTEXT_TEMPLATE,
     TEACHER_STATE_USER_TEMPLATE,
     render_prompt,
 )
@@ -293,7 +308,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         answer_judge_enabled: bool = False,
         answer_judge_max_tokens: int = 256,
         answer_judge_system_prompt: str = DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT,
-        summary_system_prompt: str = "",
         debug_trace_dir: str | None = None,
         debug_trace_every_n_rollouts: int = 1,
         max_train_sample_tokens: int | None = None,
@@ -404,10 +418,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.teacher_show_ground_truth = bool(teacher_show_ground_truth)
         self.teacher_pre_enabled = bool(teacher_pre_enabled)
         self.teacher_pre_mode = (teacher_pre_mode or "filter_solver").strip()
-        if self.teacher_pre_mode not in {"filter_solver", "task"}:
-            raise ValueError(
-                "teacher_pre_mode must be one of: 'filter_solver', 'task'."
-            )
+        if self.teacher_pre_mode != "filter_solver":
+            raise ValueError("teacher_pre_mode must be 'filter_solver'.")
         self.teacher_pre_attempts = int(teacher_pre_attempts)
         if self.teacher_pre_attempts < 1:
             raise ValueError("teacher_pre_attempts must be >= 1.")
@@ -420,7 +432,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.answer_judge_max_tokens = max(1, int(answer_judge_max_tokens))
         self.answer_judge_system_prompt = answer_judge_system_prompt.strip()
         self._answer_judge_cache: dict[tuple[str, str, str], JudgeResult] = {}
-        self.summary_system_prompt = summary_system_prompt.strip()
         self.debug_trace_dir = debug_trace_dir.strip() if debug_trace_dir else ""
         self.debug_trace_every_n_rollouts = max(1, int(debug_trace_every_n_rollouts))
         self.max_train_sample_tokens = max_train_sample_tokens
@@ -639,7 +650,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 task=task,
                 public_history=PublicHistoryState(),
                 previous_student_output="",
-                latest_tutor_visible_output="(none, produce the first answer attempt)",
+                latest_tutor_visible_output=INITIAL_TEACHER_FEEDBACK_PLACEHOLDER,
             ),
             aux_caller=aux_caller,
         )
@@ -1082,46 +1093,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return self.max_completion_tokens
 
     def _build_teacher_pre_solve_prompt(self, *, task: str) -> str:
-        if self.teacher_pre_mode == "filter_solver":
-            return FILTER_SOLVER_USER_TEMPLATE.format(task=task)
-        base_prompt = render_prompt(
-            self.teacher_user_prompt_template,
-            task=task,
-            ground_truth="",
-            show_ground_truth=False,
-            public_history="No visible tutoring history yet.",
-            previous_tutor_output="(none yet)",
-            feedback_kind="none",
-            student_output="(empty)",
-            judge_correct=False,
-            judge_feedback="(empty)",
-            leak_history="",
-            leak_feedback="(empty)",
-            current_round=0,
-            max_turns=self.max_turns,
-            remaining_rounds=self.max_turns,
-        )
-        return f"""{base_prompt.rstrip()}
-
-Private preparation mode:
-This is not a visible tutor turn. Before tutoring starts, solve the task privately
-so you have a stable reference path for later teaching. The student will not see
-this response, and it will not be added to public history or checked for visible
-answer leakage.
-
-Do not ask the student anything here. Work out the complete solution for your own
-use. If your system prompt requires a JSON response, obey that format; the entire
-response is still hidden teacher preparation.
-"""
+        return FILTER_SOLVER_USER_TEMPLATE.format(task=task)
 
     def _build_teacher_pre_solve_messages(self, *, task: str) -> list[dict[str, str]]:
-        system_prompt = (
-            FILTER_SOLVER_SYSTEM_PROMPT
-            if self.teacher_pre_mode == "filter_solver"
-            else self.teacher_system_prompt
-        )
         return [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": FILTER_SOLVER_SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": self._build_teacher_pre_solve_prompt(task=task),
@@ -1241,7 +1217,7 @@ response is still hidden teacher preparation.
         return LeakCheckResult(
             raw_output="",
             leaked=False,
-            feedback="Leak check pending.",
+            feedback=LEAK_CHECK_PENDING_FEEDBACK,
             parse_error=None,
             raw_result={"pending": True},
         )
@@ -1285,7 +1261,7 @@ response is still hidden teacher preparation.
             return LeakCheckResult(
                 raw_output="",
                 leaked=False,
-                feedback="Leak check disabled.",
+                feedback=LEAK_CHECK_DISABLED_FEEDBACK,
                 parse_error=None,
                 raw_result={"disabled": True},
             )
@@ -1328,7 +1304,9 @@ response is still hidden teacher preparation.
             return LeakCheckResult(
                 raw_output="",
                 leaked=True,
-                feedback=f"Leak check failed: {result.error}",
+                feedback=LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE.format(
+                    error=result.error
+                ),
                 parse_error=result.error,
                 raw_result={},
                 leak_level=(
@@ -1368,7 +1346,9 @@ response is still hidden teacher preparation.
             return LeakCheckResult(
                 raw_output="",
                 leaked=True,
-                feedback=f"Rawbase leak check failed: {result.error}",
+                feedback=RAWBASE_LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE.format(
+                    error=result.error
+                ),
                 parse_error=result.error,
                 raw_result={"method": "rawbase_llm"},
             )
@@ -1407,23 +1387,23 @@ response is still hidden teacher preparation.
         feedback_lower = feedback.lower()
         if feedback and "failed" not in feedback_lower:
             return feedback
-        return "The leak checker did not provide a detailed reason."
+        return LEAK_CHECK_NO_DETAIL_FEEDBACK
 
     def _private_leak_feedback(
         self, turn_idx: int, leak_result: LeakCheckResult
     ) -> str:
         level = (
-            f" (leak level {leak_result.leak_level})"
+            PRIVATE_LEAK_LEVEL_SUFFIX_TEMPLATE.format(
+                leak_level=leak_result.leak_level
+            )
             if leak_result.leak_level is not None
             else ""
         )
         feedback = self._leak_feedback_text(leak_result)
-        return (
-            f"Turn {turn_idx}: tutor output was rejected for answer leakage{level}. "
-            f"Leak feedback: {feedback}. "
-            "This turn and the student's response to it are invalid and were "
-            "not added to the student-visible history. Continue from the last "
-            "valid public state without using the invalid student response."
+        return PRIVATE_LEAK_FEEDBACK_TEMPLATE.format(
+            turn_idx=turn_idx,
+            level=level,
+            feedback=feedback,
         )
 
     def _private_leak_history(self, turn_artifacts: list[TurnArtifact]) -> str:
@@ -1493,13 +1473,13 @@ response is still hidden teacher preparation.
             task=state.task,
             ground_truth=state.ground_truth,
             show_ground_truth=self.teacher_show_ground_truth,
-            public_history=state.public_history.summary
-            or "No visible tutoring history yet.",
-            previous_tutor_output=state.previous_tutor_visible_output or "(none yet)",
+            public_history=state.public_history.summary or NO_VISIBLE_TUTORING_HISTORY,
+            previous_tutor_output=state.previous_tutor_visible_output
+            or NONE_YET_PLACEHOLDER,
             feedback_kind=feedback.kind,
-            student_output=feedback.student_output or "(empty)",
+            student_output=feedback.student_output or EMPTY_PLACEHOLDER,
             judge_correct=feedback.judge_correct,
-            judge_feedback=feedback.judge_feedback or "(empty)",
+            judge_feedback=feedback.judge_feedback or EMPTY_PLACEHOLDER,
             leak_feedback=feedback.leak_feedback or "",
             leak_history=feedback.leak_history or "",
             current_round=state.turn_idx,
@@ -1520,46 +1500,20 @@ response is still hidden teacher preparation.
         ).strip()
         if not teacher_pre_solve.accepted or not raw_output:
             return prompt
-        if teacher_pre_solve.mode == "filter_solver":
-            return f"""{prompt.rstrip()}
-
-Private teacher solution draft hidden from the student:
-The following text is the teacher's private solution attempt generated before
-tutoring using the same clean solver-style context as the filtering step. Treat
-it as a hidden answer-draft and reasoning reference for the tutor only. It may
-contain a final answer or final-answer-equivalent computation, so do not quote
-it, do not reveal its final answer, and do not reveal any equivalent final
-computation in the student-facing output. Use it only to keep your teaching path
-consistent and to check which parts of the student's work are actually valid.
-
-<teacher_private_solution_draft mode="filter_solver">
-{raw_output}
-</teacher_private_solution_draft>
-"""
-        return f"""{prompt.rstrip()}
-
-Private teacher preparation hidden from the student:
-The following text is the teacher's private preparation generated before
-tutoring. Treat it as a hidden solution-draft and teaching reference for the
-tutor only. It may contain a final answer or final-answer-equivalent
-computation, so do not quote it, do not reveal its final answer, and do not
-reveal any equivalent final computation in the student-facing output. Use it
-only to keep your teaching path consistent and to check which parts of the
-student's work are actually valid.
-
-<teacher_private_preparation>
-{raw_output}
-</teacher_private_preparation>
-"""
+        context = render_prompt(
+            TEACHER_PRE_SOLVE_FILTER_CONTEXT_TEMPLATE,
+            raw_output=raw_output,
+        )
+        return f"{prompt.rstrip()}\n\n{context}\n"
 
     def _build_student_prompt_from_state(self, state: StudentTurnState) -> str:
         return render_prompt(
             STUDENT_STATE_USER_TEMPLATE,
             task=state.task,
             public_history=state.public_history.summary
-            or "No previous visible tutoring history.",
-            previous_student_output=state.previous_student_output or "(empty)",
-            teacher_feedback=state.latest_tutor_visible_output or "(none)",
+            or NO_PREVIOUS_VISIBLE_TUTORING_HISTORY,
+            previous_student_output=state.previous_student_output or EMPTY_PLACEHOLDER,
+            teacher_feedback=state.latest_tutor_visible_output or NONE_PLACEHOLDER,
         )
 
     def _build_student_transfer_prompt(
@@ -1575,9 +1529,9 @@ student's work are actually valid.
             STUDENT_TRANSFER_USER_TEMPLATE,
             original_task=original_task,
             public_history=public_history.summary
-            or "No previous visible tutoring history.",
-            previous_student_output=previous_student_output or "(empty)",
-            teacher_feedback=teacher_feedback or "(none)",
+            or NO_PREVIOUS_VISIBLE_TUTORING_HISTORY,
+            previous_student_output=previous_student_output or EMPTY_PLACEHOLDER,
+            teacher_feedback=teacher_feedback or NONE_PLACEHOLDER,
             transfer_task=transfer_task,
         )
 
@@ -1603,7 +1557,11 @@ student's work are actually valid.
         self, speaker: str, round_idx: int, text: str
     ) -> str:
         visible_text = _strip_reasoning_for_context(text)
-        return f"{speaker} round {round_idx}:\n{visible_text}"
+        return PUBLIC_HISTORY_ENTRY_TEMPLATE.format(
+            speaker=speaker,
+            round_idx=round_idx,
+            visible_text=visible_text,
+        )
 
     def _score_answer(
         self, task: str, ground_truth: str, student_answer: str

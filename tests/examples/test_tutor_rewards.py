@@ -134,21 +134,14 @@ def test_workflow_rejects_invalid_leak_handling_mode():
         tutor_workflow.TutorAgentWorkflow(leak_handling_mode="invalid")
 
 
-@pytest.mark.parametrize(
-    ("mode", "tag"),
-    [
-        ("filter_solver", "teacher_private_solution_draft"),
-        ("task", "teacher_private_preparation"),
-    ],
-)
-def test_teacher_pre_context_strips_hidden_thinking(mode, tag):
+def test_teacher_pre_context_strips_hidden_thinking():
     workflow = tutor_workflow.TutorAgentWorkflow.__new__(
         tutor_workflow.TutorAgentWorkflow
     )
     workflow.teacher_pre_enabled = True
     teacher_pre_solve = TeacherPreSolveResult(
         enabled=True,
-        mode=mode,
+        mode="filter_solver",
         accepted=True,
         raw_output="<think>hidden final-answer reasoning</think>\nVisible solution plan.",
     )
@@ -157,7 +150,7 @@ def test_teacher_pre_context_strips_hidden_thinking(mode, tag):
         "Base tutor prompt.", teacher_pre_solve
     )
 
-    assert tag in prompt
+    assert "teacher_private_solution_draft" in prompt
     assert "Visible solution plan." in prompt
     assert "<think>" not in prompt
     assert "hidden final-answer reasoning" not in prompt
