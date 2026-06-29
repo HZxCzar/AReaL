@@ -13,6 +13,9 @@ max_turns: 10
 enable_thinking: true
 leak_handling_mode: terminate
 teacher_show_ground_truth: false
+teacher_pre:
+  enabled: false
+
 teacher_system_prompt: |
   You are a careful math tutor in a multi-round tutoring environment.
 

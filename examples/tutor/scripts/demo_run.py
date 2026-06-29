@@ -56,7 +56,9 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
             {"role": "user", "content": prompt},
         ]
         self.trace_sink.append_messages(f"{label}_input", messages)
-        result = await (aux_caller or self._make_auxiliary_caller(engine=None)).call_text(
+        result = await (
+            aux_caller or self._make_auxiliary_caller(engine=None)
+        ).call_text(
             messages,
             rid_prefix=label,
         )
@@ -156,6 +158,7 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
 def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[str, Any]:
     auxiliary_model = config.auxiliary_model
     reward = config.reward
+    teacher_pre = config.teacher_pre
     return dict(
         trace_sink=trace_sink,
         tokenizer=config.tokenizer_path,
@@ -197,6 +200,10 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         teacher_system_prompt=config.teacher_system_prompt,
         teacher_user_prompt_template=config.teacher_user_prompt_template,
         teacher_show_ground_truth=config.teacher_show_ground_truth,
+        teacher_pre_enabled=teacher_pre.enabled,
+        teacher_pre_mode=teacher_pre.mode,
+        teacher_pre_attempts=teacher_pre.attempts,
+        teacher_pre_max_tokens=teacher_pre.max_tokens,
         student_system_prompt=config.student_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
         answer_judge_enabled=auxiliary_model.answer_judge_enabled,
@@ -221,7 +228,9 @@ async def _run_one(
     workflow = DemoTutorWorkflow(**build_workflow_kwargs(config, sink))
     teacher_extra_kwargs = {"base_url": teacher_base_url, "api_key": teacher_api_key}
     base_client = make_teacher_client(teacher_extra_kwargs)
-    logged_teacher = LoggedTeacherClient(base_client, sink, model_override=teacher_model)
+    logged_teacher = LoggedTeacherClient(
+        base_client, sink, model_override=teacher_model
+    )
 
     def _factory(_extra_kwargs):
         return logged_teacher

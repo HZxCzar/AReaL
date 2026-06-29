@@ -33,14 +33,22 @@ sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_TUTOR_DIR))
 
 from examples.tutor.core.types import PublicHistoryState, StudentTurnState  # noqa: E402
+from examples.tutor.prompts import (  # noqa: E402
+    FILTER_SOLVER_SYSTEM_PROMPT,
+    FILTER_SOLVER_USER_TEMPLATE,
+)
 
 
 DEFAULT_CONFIG_PATH = (
     "examples/tutor/configs/math/staged_leak/"
     "qwen8b-nonthinking-qwen4b-remote-overfit-8-generalize-staged-leak.yaml"
 )
-DEFAULT_STUDENT_BASE_URL = "https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1"
-DEFAULT_TEACHER_BASE_URL = "https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1"
+DEFAULT_STUDENT_BASE_URL = (
+    "https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1"
+)
+DEFAULT_TEACHER_BASE_URL = (
+    "https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1"
+)
 DEFAULT_STUDENT_MODEL = "qwen3-4b"
 DEFAULT_TEACHER_MODEL = "qwen3-8b"
 DEFAULT_MODEL = DEFAULT_TEACHER_MODEL
@@ -50,17 +58,8 @@ DEDICATED_REQUEST_PARAM_KEYS = {
     "temperature",
     "top_p",
 }
-DEFAULT_SOLVER_SYSTEM_PROMPT = (
-    "You are a careful math solver. Solve the problem independently. "
-    "Show your reasoning if useful. Put the final answer in the last "
-    "\\boxed{...}. Do not use any answer key or hidden solution."
-)
-DEFAULT_SOLVER_USER_TEMPLATE = """\
-Task:
-{task}
-
-Solve the problem. Put your final answer in \\boxed{{}}.
-"""
+DEFAULT_SOLVER_SYSTEM_PROMPT = FILTER_SOLVER_SYSTEM_PROMPT
+DEFAULT_SOLVER_USER_TEMPLATE = FILTER_SOLVER_USER_TEMPLATE
 
 
 @dataclass(slots=True)
@@ -470,9 +469,7 @@ def _generation_params(
     return params
 
 
-def student_generation_params(
-    args: argparse.Namespace, config: Any
-) -> dict[str, Any]:
+def student_generation_params(args: argparse.Namespace, config: Any) -> dict[str, Any]:
     auxiliary_model = config.auxiliary_model
     max_tokens = (
         _positive_int(args.student_max_tokens)
@@ -504,9 +501,7 @@ def student_generation_params(
     )
 
 
-def teacher_generation_params(
-    args: argparse.Namespace, config: Any
-) -> dict[str, Any]:
+def teacher_generation_params(args: argparse.Namespace, config: Any) -> dict[str, Any]:
     max_tokens = (
         _positive_int(args.teacher_max_tokens)
         or _positive_int(args.max_tokens)
@@ -525,7 +520,9 @@ def teacher_generation_params(
         args.teacher_top_p
         if args.teacher_top_p is not None
         else (
-            args.top_p if args.top_p is not None else getattr(config.gconfig, "top_p", None)
+            args.top_p
+            if args.top_p is not None
+            else getattr(config.gconfig, "top_p", None)
         )
     )
     return _generation_params(
@@ -728,6 +725,7 @@ def build_workflow(
     auxiliary_model = config.auxiliary_model
     reward = config.reward
     pairwise = reward.pairwise
+    teacher_pre = config.teacher_pre
     aux_thinking = resolve_thinking(
         args.thinking, bool(auxiliary_model.enable_thinking)
     )
@@ -767,6 +765,10 @@ def build_workflow(
         teacher_system_prompt=config.teacher_system_prompt,
         teacher_user_prompt_template=config.teacher_user_prompt_template,
         teacher_show_ground_truth=config.teacher_show_ground_truth,
+        teacher_pre_enabled=teacher_pre.enabled,
+        teacher_pre_mode=teacher_pre.mode,
+        teacher_pre_attempts=teacher_pre.attempts,
+        teacher_pre_max_tokens=teacher_pre.max_tokens,
         student_system_prompt=config.student_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
         answer_judge_enabled=auxiliary_model.answer_judge_enabled,

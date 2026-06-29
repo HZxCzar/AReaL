@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 FeedbackKind = Literal["none", "student_judged", "leak"]
@@ -43,6 +43,25 @@ class TutorPrivateFeedback:
 
 
 @dataclass(slots=True)
+class TeacherPreSolveAttempt:
+    attempt: int
+    raw_output: str
+    error: str | None
+    accepted: bool
+    judge_result: JudgeResult | None = None
+
+
+@dataclass(slots=True)
+class TeacherPreSolveResult:
+    enabled: bool
+    mode: str
+    accepted: bool
+    attempts: list[TeacherPreSolveAttempt] = field(default_factory=list)
+    raw_output: str = ""
+    error: str | None = None
+
+
+@dataclass(slots=True)
 class TutorTurnState:
     task: str
     ground_truth: str
@@ -51,6 +70,7 @@ class TutorTurnState:
     previous_feedback: TutorPrivateFeedback
     turn_idx: int
     max_turns: int
+    teacher_pre_solve_result: TeacherPreSolveResult | None = None
 
 
 @dataclass(slots=True)
@@ -92,6 +112,7 @@ class EpisodeArtifact:
     pre_success: bool
     leak_count: int
     latest_student_answer: str
+    teacher_pre_solve_result: TeacherPreSolveResult | None = None
 
 
 @dataclass(slots=True)

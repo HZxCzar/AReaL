@@ -5,9 +5,6 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from areal.api import ModelRequest, ModelResponse
-from areal.api.cli_args import GenerationHyperparameters
-
 from examples.common.chat_budget import ChatContextBudget
 from examples.common.openai_utils import AsyncLLMCaller
 from examples.tutor.core.generation_budget import (
@@ -17,6 +14,9 @@ from examples.tutor.core.generation_budget import (
     raise_if_over_budget,
 )
 from examples.tutor.core.text import strip_reasoning_for_context
+
+from areal.api import ModelRequest, ModelResponse
+from areal.api.cli_args import GenerationHyperparameters
 
 
 @dataclass(slots=True)
@@ -260,14 +260,20 @@ class AReaLEngineActorCaller:
         *,
         lora_version: int | None,
         rid_prefix: str,
+        max_completion_tokens: int | None = None,
     ) -> ActorCallResult:
         metadata: dict[str, Any] = {}
         if lora_version is not None:
             metadata["lora_version"] = int(lora_version)
+        completion_budget = (
+            self.max_completion_tokens
+            if max_completion_tokens is None
+            else max(1, int(max_completion_tokens))
+        )
         result = await self.chat_caller.generate(
             messages,
             gconfig=self.gconfig,
-            max_completion_tokens=self.max_completion_tokens,
+            max_completion_tokens=completion_budget,
             max_train_sample_tokens=self.max_train_sample_tokens,
             metadata=metadata,
             rid_prefix=rid_prefix,
@@ -307,8 +313,14 @@ class ExternalActorCaller:
         *,
         lora_version: int | None,
         rid_prefix: str,
+        max_completion_tokens: int | None = None,
     ) -> ActorCallResult:
         del lora_version, rid_prefix
+        completion_budget = (
+            self.max_completion_tokens
+            if max_completion_tokens is None
+            else max(1, int(max_completion_tokens))
+        )
         input_ids = apply_chat_template(
             self.tokenizer,
             messages,
@@ -317,7 +329,7 @@ class ExternalActorCaller:
         budget = prepare_train_sample_generation_config(
             input_ids=input_ids,
             gconfig=None,
-            max_completion_tokens=self.max_completion_tokens,
+            max_completion_tokens=completion_budget,
             max_train_sample_tokens=self.max_train_sample_tokens,
         )
         raise_if_over_budget(budget)

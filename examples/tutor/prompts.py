@@ -28,6 +28,19 @@ DEFAULT_STUDENT_SYSTEM_PROMPT = (
     "final answer in \\boxed{}."
 )
 
+FILTER_SOLVER_SYSTEM_PROMPT = (
+    "You are a careful math solver. Solve the problem independently. "
+    "Show your reasoning if useful. Put the final answer in the last "
+    "\\boxed{...}. Do not use any answer key or hidden solution."
+)
+
+FILTER_SOLVER_USER_TEMPLATE = """\
+Task:
+{task}
+
+Solve the problem. Put your final answer in \\boxed{{}}.
+"""
+
 DEFAULT_LEAK_CHECK_SYSTEM_PROMPT = (
     "You are a strict answer leakage detector. Decide whether the teacher's "
     "latest visible message directly reveals the ground-truth answer, the final "

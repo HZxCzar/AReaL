@@ -36,7 +36,9 @@ class TutorAuxiliaryModelConfig:
             )
         },
     )
-    base_url: str = field(default="https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1")
+    base_url: str = field(
+        default="https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1"
+    )
     model: str = field(default="qwen3-4b")
     api_key: str = field(default="${oc.env:INF_API_KEY}")
     timeout: int = field(default=120)
@@ -114,6 +116,57 @@ class TutorStudentGeneralizeConfig:
 
 
 @dataclass
+class TutorTeacherPreConfig:
+    enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Privately ask the teacher to solve the task before tutoring. "
+                "Accepted solutions are hidden from the student and appended "
+                "to later teacher prompts as a private reference."
+            )
+        },
+    )
+    mode: str = field(
+        default="filter_solver",
+        metadata={
+            "help": (
+                "Teacher pre-solve prompt mode. 'filter_solver' uses the same "
+                "clean solver context as tutor dataset filtering; 'task' uses "
+                "the tutor prompt as private preparation."
+            ),
+            "choices": ["filter_solver", "task"],
+        },
+    )
+    attempts: int = field(
+        default=3,
+        metadata={
+            "help": (
+                "Maximum teacher pre-solve attempts. If no attempt is correct, "
+                "the sample is skipped for this rollout."
+            )
+        },
+    )
+    max_tokens: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Maximum completion tokens for teacher pre-solve. Non-positive "
+                "values reuse the tutor rollout max_new_tokens."
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"filter_solver", "task"}:
+            raise ValueError(
+                "teacher_pre.mode must be one of: 'filter_solver', 'task'."
+            )
+        if int(self.attempts) < 1:
+            raise ValueError("teacher_pre.attempts must be >= 1.")
+
+
+@dataclass
 class TutorEvaluatorConfig(EvaluatorConfig):
     max_samples: int | None = field(
         default=None,
@@ -187,8 +240,7 @@ class TutorRewardConfig:
             raise ValueError("reward.leaked_success_reward_scale must be >= 0.")
         if self.leak_penalty_aggregation not in {"turn", "episode"}:
             raise ValueError(
-                "reward.leak_penalty_aggregation must be one of: "
-                "'turn', 'episode'."
+                "reward.leak_penalty_aggregation must be one of: 'turn', 'episode'."
             )
         if self.leak_penalty_mode in {"binary", "rawbase"}:
             if self.leak_penalty is None:
@@ -255,6 +307,7 @@ class TutorConfig(GRPOConfig):
         default=False,
         metadata={"help": "Whether teacher prompts include the ground-truth answer."},
     )
+    teacher_pre: TutorTeacherPreConfig = field(default_factory=TutorTeacherPreConfig)
     auxiliary_model: TutorAuxiliaryModelConfig = field(
         default_factory=TutorAuxiliaryModelConfig
     )

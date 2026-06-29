@@ -155,6 +155,8 @@ from examples.tutor.core.types import (
     LeakHandlingMode,
     PublicHistoryState,
     StudentTurnState,
+    TeacherPreSolveAttempt,
+    TeacherPreSolveResult,
     TurnArtifact,
     TurnTrace,
     TutorPrivateFeedback,
@@ -166,6 +168,8 @@ from examples.tutor.prompts import (
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
     DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT,
     FEEDBACK_LEAK_CHECK_SYSTEM_PROMPT_SUFFIX,
+    FILTER_SOLVER_SYSTEM_PROMPT,
+    FILTER_SOLVER_USER_TEMPLATE,
     LEAK_CHECK_USER_TEMPLATE,
     NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT,
     RAWBASE_LEAK_CHECK_SYSTEM_PROMPT,
@@ -183,6 +187,7 @@ _REWARD_COMPONENT_ALIASES = {
 }
 
 LEAK_TERMINATION_REASON = "leak"
+TEACHER_PRE_SKIPPED_TERMINATION_REASON = "pre_solve_skipped"
 LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate", "feedback"}
 
 
@@ -278,6 +283,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_system_prompt: str = "",
         teacher_user_prompt_template: str | None = None,
         teacher_show_ground_truth: bool = False,
+        teacher_pre_enabled: bool = False,
+        teacher_pre_mode: str = "filter_solver",
+        teacher_pre_attempts: int = 3,
+        teacher_pre_max_tokens: int = 0,
         student_system_prompt: str = "",
         leak_check_system_prompt: str = "",
         answer_judge_enabled: bool = False,
@@ -392,6 +401,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
             teacher_user_prompt_template or TEACHER_STATE_USER_TEMPLATE
         ).strip()
         self.teacher_show_ground_truth = bool(teacher_show_ground_truth)
+        self.teacher_pre_enabled = bool(teacher_pre_enabled)
+        self.teacher_pre_mode = (teacher_pre_mode or "filter_solver").strip()
+        if self.teacher_pre_mode not in {"filter_solver", "task"}:
+            raise ValueError(
+                "teacher_pre_mode must be one of: 'filter_solver', 'task'."
+            )
+        self.teacher_pre_attempts = int(teacher_pre_attempts)
+        if self.teacher_pre_attempts < 1:
+            raise ValueError("teacher_pre_attempts must be >= 1.")
+        self.teacher_pre_max_tokens = int(teacher_pre_max_tokens)
         self.student_system_prompt = student_system_prompt.strip()
         self.leak_check_system_prompt = self._resolve_leak_check_system_prompt(
             leak_check_system_prompt
@@ -423,6 +442,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.last_history: list[dict[str, Any]] = []
         self.last_traces: list[TurnTrace] = []
         self.last_student_generalization_results: list[StudentGeneralizationResult] = []
+        self.last_teacher_pre_solve_result: TeacherPreSolveResult | None = None
         self.last_total_reward = 0.0
         self.tokenizer = (
             load_hf_tokenizer(tokenizer) if isinstance(tokenizer, str) else tokenizer
@@ -575,6 +595,43 @@ class TutorAgentWorkflow(RolloutWorkflow):
         answer_judge_caller = self._make_answer_judge_caller(
             chat_caller=aux_chat_caller
         )
+        teacher_pre_solve_result: TeacherPreSolveResult | None = None
+        self.last_teacher_pre_solve_result = None
+        if getattr(self, "teacher_pre_enabled", False):
+            teacher_pre_solve_result = await self._run_teacher_pre_solve(
+                task,
+                ground_truth,
+                actor_caller=actor_caller,
+                answer_judge_caller=answer_judge_caller,
+                lora_version=episode_lora_version,
+            )
+            self.last_teacher_pre_solve_result = teacher_pre_solve_result
+            if not teacher_pre_solve_result.accepted:
+                self.last_history = []
+                self.last_traces = []
+                self.last_student_generalization_results = []
+                self.last_total_reward = 0.0
+                self._log_rollout_stats(
+                    total_reward=0.0,
+                    traces=[],
+                    termination_reason=TEACHER_PRE_SKIPPED_TERMINATION_REASON,
+                    pre_success=False,
+                    leak_count=0,
+                    teacher_pre_solve_result=teacher_pre_solve_result,
+                )
+                self._maybe_dump_debug_trace(
+                    task=task,
+                    ground_truth=ground_truth,
+                    initial_student_answer="",
+                    latest_student_answer="",
+                    total_reward=0.0,
+                    traces=[],
+                    termination_reason=TEACHER_PRE_SKIPPED_TERMINATION_REASON,
+                    pre_success=False,
+                    leak_count=0,
+                    teacher_pre_solve_result=teacher_pre_solve_result,
+                )
+                return None
 
         initial_student_answer, initial_student_error = await self._run_student(
             StudentTurnState(
@@ -609,6 +666,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 pre_success=True,
                 leak_count=0,
                 latest_student_answer=initial_student_answer,
+                teacher_pre_solve_result=teacher_pre_solve_result,
             )
             self._log_rollout_stats(
                 total_reward=0.0,
@@ -616,6 +674,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 termination_reason=episode_artifact.termination_reason,
                 pre_success=episode_artifact.pre_success,
                 leak_count=episode_artifact.leak_count,
+                teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
             )
             self._maybe_dump_debug_trace(
                 task=episode_artifact.task,
@@ -627,6 +686,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 termination_reason=episode_artifact.termination_reason,
                 pre_success=episode_artifact.pre_success,
                 leak_count=episode_artifact.leak_count,
+                teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
             )
             return None
 
@@ -652,6 +712,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 previous_feedback=previous_feedback,
                 turn_idx=turn_idx,
                 max_turns=self.max_turns,
+                teacher_pre_solve_result=teacher_pre_solve_result,
             )
             try:
                 response, tutor_raw_output = await self._generate_tutor_response(
@@ -667,9 +728,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
                 termination_reason = CONTEXT_BUDGET_TERMINATION_REASON
                 break
-            tutor_visible_output = self._extract_tutor_visible_output(
-                tutor_raw_output
-            )
+            tutor_visible_output = self._extract_tutor_visible_output(tutor_raw_output)
             public_before = public_history.summary
             leak_result = self._pending_leak_check_result()
             if self.leak_handling_mode in {"terminate", "feedback"}:
@@ -801,6 +860,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             pre_success=False,
             leak_count=leak_count,
             latest_student_answer=previous_student_output,
+            teacher_pre_solve_result=teacher_pre_solve_result,
         )
         student_generalization_results = await self._run_student_generalization(
             data,
@@ -812,14 +872,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
             success_reward=self.success_reward,
             leak_penalty=self.leak_penalty,
             leak_penalty_mode=getattr(self, "leak_penalty_mode", "binary"),
-            leak_penalty_final_answer=getattr(
-                self, "leak_penalty_final_answer", None
-            ),
+            leak_penalty_final_answer=getattr(self, "leak_penalty_final_answer", None),
             leak_penalty_compute=getattr(self, "leak_penalty_compute", None),
             leak_penalty_formula=getattr(self, "leak_penalty_formula", None),
-            leak_penalty_aggregation=getattr(
-                self, "leak_penalty_aggregation", "turn"
-            ),
+            leak_penalty_aggregation=getattr(self, "leak_penalty_aggregation", "turn"),
             leaked_success_reward_scale=getattr(
                 self, "leaked_success_reward_scale", 1.0
             ),
@@ -886,6 +942,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             pre_success=episode_artifact.pre_success,
             leak_count=episode_artifact.leak_count,
             student_generalization_results=student_generalization_results,
+            teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
         )
         self._maybe_dump_debug_trace(
             task=episode_artifact.task,
@@ -898,6 +955,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             pre_success=episode_artifact.pre_success,
             leak_count=episode_artifact.leak_count,
             student_generalization_results=student_generalization_results,
+            teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
         )
         if not results:
             return None
@@ -1015,6 +1073,129 @@ class TutorAgentWorkflow(RolloutWorkflow):
             context_length=self.teacher_context_budget.context_length,
             context_window_margin=self.context_window_margin,
             semaphore=self._self_aux_semaphore,
+        )
+
+    def _teacher_pre_solve_tokens(self) -> int:
+        if self.teacher_pre_max_tokens > 0:
+            return self.teacher_pre_max_tokens
+        return self.max_completion_tokens
+
+    def _build_teacher_pre_solve_prompt(self, *, task: str) -> str:
+        if self.teacher_pre_mode == "filter_solver":
+            return FILTER_SOLVER_USER_TEMPLATE.format(task=task)
+        base_prompt = render_prompt(
+            self.teacher_user_prompt_template,
+            task=task,
+            ground_truth="",
+            show_ground_truth=False,
+            public_history="No visible tutoring history yet.",
+            previous_tutor_output="(none yet)",
+            feedback_kind="none",
+            student_output="(empty)",
+            judge_correct=False,
+            judge_feedback="(empty)",
+            leak_history="",
+            leak_feedback="(empty)",
+            current_round=0,
+            max_turns=self.max_turns,
+            remaining_rounds=self.max_turns,
+        )
+        return f"""{base_prompt.rstrip()}
+
+Private preparation mode:
+This is not a visible tutor turn. Before tutoring starts, solve the task privately
+so you have a stable reference path for later teaching. The student will not see
+this response, and it will not be added to public history or checked for visible
+answer leakage.
+
+Do not ask the student anything here. Work out the complete solution for your own
+use. If your system prompt requires a JSON response, obey that format; the entire
+response is still hidden teacher preparation.
+"""
+
+    def _build_teacher_pre_solve_messages(self, *, task: str) -> list[dict[str, str]]:
+        system_prompt = (
+            FILTER_SOLVER_SYSTEM_PROMPT
+            if self.teacher_pre_mode == "filter_solver"
+            else self.teacher_system_prompt
+        )
+        return [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": self._build_teacher_pre_solve_prompt(task=task),
+            },
+        ]
+
+    async def _run_teacher_pre_solve(
+        self,
+        task: str,
+        ground_truth: str,
+        *,
+        actor_caller: AReaLEngineActorCaller | ExternalActorCaller,
+        answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
+        lora_version: int | None,
+    ) -> TeacherPreSolveResult:
+        attempts: list[TeacherPreSolveAttempt] = []
+        messages = self._build_teacher_pre_solve_messages(task=task)
+        max_completion_tokens = self._teacher_pre_solve_tokens()
+        for attempt_idx in range(1, self.teacher_pre_attempts + 1):
+            try:
+                result = await actor_caller.generate(
+                    messages,
+                    lora_version=lora_version,
+                    rid_prefix=f"teacher-pre-{attempt_idx}",
+                    max_completion_tokens=max_completion_tokens,
+                )
+            except Exception as exc:
+                attempts.append(
+                    TeacherPreSolveAttempt(
+                        attempt=attempt_idx,
+                        raw_output="",
+                        error=str(exc),
+                        accepted=False,
+                        judge_result=None,
+                    )
+                )
+                continue
+
+            raw_output = str(result.raw_text or "").strip()
+            judge_result = await self._score_answer_async(
+                task,
+                ground_truth,
+                raw_output,
+                answer_judge_caller=answer_judge_caller,
+            )
+            accepted = bool(judge_result.correct)
+            attempts.append(
+                TeacherPreSolveAttempt(
+                    attempt=attempt_idx,
+                    raw_output=raw_output,
+                    error=None,
+                    accepted=accepted,
+                    judge_result=judge_result,
+                )
+            )
+            if accepted:
+                return TeacherPreSolveResult(
+                    enabled=True,
+                    mode=self.teacher_pre_mode,
+                    accepted=True,
+                    attempts=attempts,
+                    raw_output=raw_output,
+                    error=None,
+                )
+
+        return TeacherPreSolveResult(
+            enabled=True,
+            mode=self.teacher_pre_mode,
+            accepted=False,
+            attempts=attempts,
+            raw_output="",
+            error=(
+                "no correct teacher pre-solve after "
+                f"{self.teacher_pre_attempts} attempts"
+            ),
         )
 
     async def _generate_tutor_response(
@@ -1204,8 +1385,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             text = str(value)
         elif isinstance(value, (list, tuple)):
             parts = [
-                TutorAgentWorkflow._compact_private_feedback(item)
-                for item in value
+                TutorAgentWorkflow._compact_private_feedback(item) for item in value
             ]
             text = ", ".join(part for part in parts if part)
         elif isinstance(value, dict):
@@ -1307,7 +1487,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
 
     def _build_tutor_prompt(self, state: TutorTurnState) -> str:
         feedback = state.previous_feedback
-        return render_prompt(
+        prompt = render_prompt(
             self.teacher_user_prompt_template,
             task=state.task,
             ground_truth=state.ground_truth,
@@ -1325,6 +1505,49 @@ class TutorAgentWorkflow(RolloutWorkflow):
             max_turns=state.max_turns,
             remaining_rounds=max(state.max_turns - state.turn_idx + 1, 0),
         )
+        return self._append_teacher_pre_solve_context(
+            prompt, state.teacher_pre_solve_result
+        )
+
+    def _append_teacher_pre_solve_context(
+        self, prompt: str, teacher_pre_solve: TeacherPreSolveResult | None
+    ) -> str:
+        if not getattr(self, "teacher_pre_enabled", False) or teacher_pre_solve is None:
+            return prompt
+        raw_output = str(teacher_pre_solve.raw_output or "").strip()
+        if not teacher_pre_solve.accepted or not raw_output:
+            return prompt
+        if teacher_pre_solve.mode == "filter_solver":
+            return f"""{prompt.rstrip()}
+
+Private teacher solution draft hidden from the student:
+The following text is the teacher's private solution attempt generated before
+tutoring using the same clean solver-style context as the filtering step. Treat
+it as a hidden answer-draft and reasoning reference for the tutor only. It may
+contain a final answer or final-answer-equivalent computation, so do not quote
+it, do not reveal its final answer, and do not reveal any equivalent final
+computation in the student-facing output. Use it only to keep your teaching path
+consistent and to check which parts of the student's work are actually valid.
+
+<teacher_private_solution_draft mode="filter_solver">
+{raw_output}
+</teacher_private_solution_draft>
+"""
+        return f"""{prompt.rstrip()}
+
+Private teacher preparation hidden from the student:
+The following text is the teacher's private preparation generated before
+tutoring. Treat it as a hidden solution-draft and teaching reference for the
+tutor only. It may contain a final answer or final-answer-equivalent
+computation, so do not quote it, do not reveal its final answer, and do not
+reveal any equivalent final computation in the student-facing output. Use it
+only to keep your teaching path consistent and to check which parts of the
+student's work are actually valid.
+
+<teacher_private_preparation>
+{raw_output}
+</teacher_private_preparation>
+"""
 
     def _build_student_prompt_from_state(self, state: StudentTurnState) -> str:
         return render_prompt(
@@ -1352,7 +1575,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
 
     def _build_initial_public_summary(self, initial_student_answer: str) -> str:
-        return self._format_public_history_entry("Student", 1, initial_student_answer)
+        return self._format_public_history_entry("Student", 0, initial_student_answer)
 
     def _format_public_history_entry(
         self, speaker: str, round_idx: int, text: str
@@ -1699,6 +1922,43 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "public_history": result.public_history,
         }
 
+    @staticmethod
+    def _teacher_pre_solve_result_to_json(
+        result: TeacherPreSolveResult,
+    ) -> dict[str, Any]:
+        return {
+            "enabled": bool(result.enabled),
+            "mode": result.mode,
+            "accepted": bool(result.accepted),
+            "raw_output": result.raw_output,
+            "error": result.error,
+            "attempt_count": len(result.attempts),
+            "attempts": [
+                {
+                    "attempt": attempt.attempt,
+                    "raw_output": attempt.raw_output,
+                    "error": attempt.error,
+                    "accepted": bool(attempt.accepted),
+                    "judge_correct": (
+                        bool(attempt.judge_result.correct)
+                        if attempt.judge_result is not None
+                        else False
+                    ),
+                    "judge_feedback": (
+                        attempt.judge_result.feedback
+                        if attempt.judge_result is not None
+                        else ""
+                    ),
+                    "judge_raw_result": (
+                        dict(attempt.judge_result.raw_result)
+                        if attempt.judge_result is not None
+                        else {}
+                    ),
+                }
+                for attempt in result.attempts
+            ],
+        }
+
     def _should_run_pairwise_reward(
         self, engine: Any | None, turn_artifacts: list[TurnArtifact]
     ) -> bool:
@@ -1810,6 +2070,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         pre_success: bool,
         leak_count: int,
         student_generalization_results: list[StudentGeneralizationResult] | None = None,
+        teacher_pre_solve_result: TeacherPreSolveResult | None = None,
     ) -> None:
         success_round = next(
             (
@@ -1820,9 +2081,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             0,
         )
         invalid_success_due_to_leak = sum(
-            1
-            for trace in traces
-            if trace.invalid_due_to_leak and trace.judge_correct
+            1 for trace in traces if trace.invalid_due_to_leak and trace.judge_correct
         )
         metrics = {
             "reward": float(total_reward),
@@ -1836,7 +2095,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 termination_reason == CONTEXT_BUDGET_TERMINATION_REASON
             ),
             "stop/leak": float(termination_reason == LEAK_TERMINATION_REASON),
+            "stop/teacher_pre_skipped": float(
+                termination_reason == TEACHER_PRE_SKIPPED_TERMINATION_REASON
+            ),
         }
+        if teacher_pre_solve_result is not None:
+            metrics["teacher_pre/accepted"] = float(teacher_pre_solve_result.accepted)
+            metrics["teacher_pre/attempts"] = float(
+                len(teacher_pre_solve_result.attempts)
+            )
         if success_round > 0:
             metrics["solve_turn"] = int(success_round)
 
@@ -1917,6 +2184,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         pre_success: bool,
         leak_count: int,
         student_generalization_results: list[StudentGeneralizationResult] | None = None,
+        teacher_pre_solve_result: TeacherPreSolveResult | None = None,
     ) -> None:
         if not self.debug_trace_dir:
             return
@@ -1943,6 +2211,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "initial_student_answer": initial_student_answer,
                 "latest_student_answer": latest_student_answer,
                 "turns": [trace_to_json(trace) for trace in traces],
+                "teacher_pre_solve": (
+                    self._teacher_pre_solve_result_to_json(teacher_pre_solve_result)
+                    if teacher_pre_solve_result is not None
+                    else None
+                ),
                 "student_generalization": [
                     self._student_generalization_result_to_json(result)
                     for result in (student_generalization_results or [])

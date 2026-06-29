@@ -145,6 +145,7 @@ def build_workflow(config: Any, max_turns: int, *, hide_ground_truth: bool) -> A
 
     auxiliary_model = config.auxiliary_model
     reward = config.reward
+    teacher_pre = config.teacher_pre
     return TutorAgentWorkflow(
         temperature=config.gconfig.temperature,
         top_p=config.gconfig.top_p,
@@ -186,6 +187,10 @@ def build_workflow(config: Any, max_turns: int, *, hide_ground_truth: bool) -> A
         teacher_show_ground_truth=(
             bool(config.teacher_show_ground_truth) and not hide_ground_truth
         ),
+        teacher_pre_enabled=teacher_pre.enabled,
+        teacher_pre_mode=teacher_pre.mode,
+        teacher_pre_attempts=teacher_pre.attempts,
+        teacher_pre_max_tokens=teacher_pre.max_tokens,
         student_system_prompt=config.student_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
         answer_judge_enabled=auxiliary_model.answer_judge_enabled,
@@ -222,9 +227,7 @@ def print_judge_result(result: Any) -> None:
 
 
 def read_tutor_message(turn_idx: int) -> str | None:
-    print(
-        f"\nTutor turn {turn_idx}: enter your feedback. End with a single '.' line."
-    )
+    print(f"\nTutor turn {turn_idx}: enter your feedback. End with a single '.' line.")
     print("Commands: /quit exits, /empty sends an empty tutor message.")
     lines: list[str] = []
     while True:
@@ -393,7 +396,9 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
                 history.append(record)
                 previous_feedback = TutorPrivateFeedback(
                     kind="leak",
-                    leak_feedback=workflow._private_leak_feedback(turn_idx, leak_result),
+                    leak_feedback=workflow._private_leak_feedback(
+                        turn_idx, leak_result
+                    ),
                 )
                 termination_reason = "leak"
                 print("\nLeak check: LEAKED. Terminating before student call.")

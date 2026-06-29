@@ -18,6 +18,8 @@ from examples.tutor.core.types import (
     LeakCheckResult,
     PublicHistoryState,
     StudentTurnState,
+    TeacherPreSolveAttempt,
+    TeacherPreSolveResult,
     TurnArtifact,
     TurnTrace,
     TutorPrivateFeedback,
@@ -188,9 +190,7 @@ def test_parse_staged_leak_check_result_maps_levels(level, expected_leaked):
 
 
 def test_parse_staged_leak_check_result_fails_closed_to_level_one():
-    invalid_level = parse_staged_leak_check_result(
-        '{"level": 5, "feedback": "bad"}'
-    )
+    invalid_level = parse_staged_leak_check_result('{"level": 5, "feedback": "bad"}')
     invalid_json = parse_staged_leak_check_result("not json")
 
     assert invalid_level.leaked is True
@@ -401,6 +401,104 @@ def test_rawbase_leak_check_strips_thinking_output(monkeypatch):
     assert result.raw_result["method"] == "rawbase_llm"
     assert "Try factoring first." in captured["user_prompt"]
     assert "the answer is 42" not in captured["user_prompt"]
+
+
+def test_initial_public_summary_uses_student_round_zero():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+
+    assert (
+        workflow._build_initial_public_summary("initial wrong answer")
+        == "Student round 0:\ninitial wrong answer"
+    )
+
+
+def test_teacher_pre_solve_context_is_hidden_in_tutor_prompt():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.teacher_pre_enabled = True
+    workflow.teacher_show_ground_truth = False
+    workflow.teacher_user_prompt_template = tutor_workflow.TEACHER_STATE_USER_TEMPLATE
+
+    result = TeacherPreSolveResult(
+        enabled=True,
+        mode="filter_solver",
+        accepted=True,
+        attempts=[
+            TeacherPreSolveAttempt(
+                attempt=1,
+                raw_output="private solution with \\boxed{42}",
+                error=None,
+                accepted=True,
+                judge_result=_judge(True),
+            )
+        ],
+        raw_output="private solution with \\boxed{42}",
+    )
+    state = TutorTurnState(
+        task="task",
+        ground_truth="42",
+        public_history=PublicHistoryState("Student round 0:\nwrong", 0),
+        previous_tutor_visible_output="",
+        previous_feedback=TutorPrivateFeedback(
+            kind="student_judged",
+            student_output="wrong",
+            judge_correct=False,
+            judge_feedback="Incorrect.",
+        ),
+        turn_idx=1,
+        max_turns=3,
+        teacher_pre_solve_result=result,
+    )
+
+    prompt = workflow._build_tutor_prompt(state)
+
+    assert "Private teacher solution draft hidden from the student" in prompt
+    assert '<teacher_private_solution_draft mode="filter_solver">' in prompt
+    assert "private solution with \\boxed{42}" in prompt
+
+
+def test_teacher_pre_solve_retries_until_correct(monkeypatch):
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.teacher_pre_mode = "filter_solver"
+    workflow.teacher_pre_attempts = 3
+    workflow.teacher_pre_max_tokens = 128
+    workflow.max_completion_tokens = 512
+
+    outputs = ["wrong", "solution \\boxed{42}"]
+    calls = []
+
+    class FakeActor:
+        async def generate(self, messages, **kwargs):
+            calls.append((messages, kwargs))
+            return types.SimpleNamespace(raw_text=outputs[len(calls) - 1])
+
+    async def score_answer(task, ground_truth, answer, *, answer_judge_caller):
+        del task, ground_truth, answer_judge_caller
+        return _judge("\\boxed{42}" in answer)
+
+    monkeypatch.setattr(workflow, "_score_answer_async", score_answer)
+
+    result = asyncio.run(
+        workflow._run_teacher_pre_solve(
+            "task",
+            "42",
+            actor_caller=FakeActor(),
+            answer_judge_caller=None,
+            lora_version=7,
+        )
+    )
+
+    assert result.accepted is True
+    assert result.raw_output == "solution \\boxed{42}"
+    assert [attempt.accepted for attempt in result.attempts] == [False, True]
+    assert len(calls) == 2
+    assert calls[0][1]["max_completion_tokens"] == 128
+    assert calls[0][1]["lora_version"] == 7
 
 
 def test_default_success_reward_goes_to_success_turn_only():
@@ -819,6 +917,56 @@ def _minimal_episode_workflow(**overrides):
     return workflow
 
 
+def test_workflow_teacher_pre_solve_failure_skips_sample(monkeypatch):
+    workflow = _minimal_episode_workflow(teacher_pre_enabled=True)
+    stats = {}
+    pre_result = TeacherPreSolveResult(
+        enabled=True,
+        mode="filter_solver",
+        accepted=False,
+        attempts=[
+            TeacherPreSolveAttempt(
+                attempt=1,
+                raw_output="wrong",
+                error=None,
+                accepted=False,
+                judge_result=_judge(False),
+            )
+        ],
+        error="no correct teacher pre-solve after 1 attempts",
+    )
+
+    workflow._make_actor_caller = lambda **_kwargs: object()
+    workflow._make_auxiliary_caller = lambda **_kwargs: object()
+    workflow._make_answer_judge_caller = lambda **_kwargs: None
+    workflow._log_rollout_stats = lambda **kwargs: stats.update(kwargs)
+    workflow._maybe_dump_debug_trace = lambda **_kwargs: None
+
+    async def run_teacher_pre_solve(*_args, **_kwargs):
+        return pre_result
+
+    async def fail_run_student(*_args, **_kwargs):
+        raise AssertionError("student should not run after failed teacher pre-solve")
+
+    monkeypatch.setattr(workflow, "_run_teacher_pre_solve", run_teacher_pre_solve)
+    monkeypatch.setattr(workflow, "_run_student", fail_run_student)
+
+    result = asyncio.run(
+        workflow._run_episode(
+            {"task": "task", "ground_truth": "42"},
+            external_client=object(),
+        )
+    )
+
+    assert result is None
+    assert workflow.last_teacher_pre_solve_result is pre_result
+    assert workflow.last_history == []
+    assert workflow.last_traces == []
+    assert workflow.last_total_reward == pytest.approx(0.0)
+    assert stats["termination_reason"] == "pre_solve_skipped"
+    assert stats["teacher_pre_solve_result"] is pre_result
+
+
 def test_workflow_reward_only_leak_does_not_skip_student_or_success(monkeypatch):
     workflow = _minimal_episode_workflow()
 
@@ -960,7 +1108,7 @@ def test_workflow_leak_termination_skips_student_and_assigns_penalty(monkeypatch
     assert workflow.last_traces[0].student_output == ""
     assert (
         workflow.last_traces[0].public_history_before
-        == "Student round 1:\ninitial wrong answer"
+        == "Student round 0:\ninitial wrong answer"
     )
     assert (
         workflow.last_traces[0].public_history_after
@@ -1040,7 +1188,9 @@ def test_workflow_leak_termination_reuses_immediate_clean_checks(monkeypatch):
     assert workflow.last_total_reward == pytest.approx(-1.0)
 
 
-def test_workflow_feedback_mode_invalidates_leaked_student_success_and_persists_private_history(monkeypatch):
+def test_workflow_feedback_mode_invalidates_leaked_student_success_and_persists_private_history(
+    monkeypatch,
+):
     workflow = _minimal_episode_workflow(max_turns=3, leak_handling_mode="feedback")
 
     response = types.SimpleNamespace(
@@ -1123,12 +1273,10 @@ def test_workflow_feedback_mode_invalidates_leaked_student_success_and_persists_
     assert stats["traces"][2].invalid_due_to_leak is False
     assert stats["traces"][0].reward_components == {"leak": -1.0}
     assert stats["traces"][1].reward_components == {"leak": -1.0}
-    assert stats["traces"][2].reward_components["success_credit"] == pytest.approx(
-        1.0
-    )
+    assert stats["traces"][2].reward_components["success_credit"] == pytest.approx(1.0)
     assert workflow.last_total_reward == pytest.approx(-1.0)
 
-    first_public_history = "Student round 1:\ninitial wrong answer"
+    first_public_history = "Student round 0:\ninitial wrong answer"
     assert student_calls[1].previous_student_output == "initial wrong answer"
     assert student_calls[2].previous_student_output == "initial wrong answer"
     assert student_calls[3].previous_student_output == "initial wrong answer"

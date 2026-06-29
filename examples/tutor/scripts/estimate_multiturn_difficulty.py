@@ -35,7 +35,9 @@ from examples.tutor.core.text import strip_reasoning_for_context
 logger = logging.getLogger("TutorMultiturnDifficulty")
 
 DEFAULT_CONFIG_PATH = "examples/tutor/configs/math/baseline-overfit-2.yaml"
-DEFAULT_BASE_URL = "https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1"
+DEFAULT_BASE_URL = (
+    "https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1"
+)
 DEFAULT_MODEL = "qwen3-8b"
 DEFAULT_ATTEMPTS = 3
 DEFAULT_OUTPUT_ROOT = Path(
@@ -423,7 +425,9 @@ def tutor_generation_request_params(config: Any) -> dict[str, Any]:
 
 
 def build_tutor_request_params(args: argparse.Namespace, config: Any) -> dict[str, Any]:
-    params = merge_dicts(tutor_generation_request_params(config), load_request_params(args))
+    params = merge_dicts(
+        tutor_generation_request_params(config), load_request_params(args)
+    )
     params = merge_dicts(params, load_tutor_request_params(args))
     return with_thinking_param(
         params,
@@ -433,7 +437,9 @@ def build_tutor_request_params(args: argparse.Namespace, config: Any) -> dict[st
 
 def build_aux_request_params(args: argparse.Namespace, config: Any) -> dict[str, Any]:
     auxiliary_model = config.auxiliary_model
-    params = merge_dicts(dict(auxiliary_model.request_params), load_request_params(args))
+    params = merge_dicts(
+        dict(auxiliary_model.request_params), load_request_params(args)
+    )
     params = merge_dicts(params, load_aux_request_params(args))
     return with_thinking_param(
         params,
@@ -468,12 +474,7 @@ def resolve_aux_model(args: argparse.Namespace, config: Any) -> str:
 
 
 def resolve_tutor_api_key(args: argparse.Namespace) -> str:
-    return (
-        args.tutor_api_key
-        or args.api_key
-        or os.getenv("OPENAI_API_KEY")
-        or "EMPTY"
-    )
+    return args.tutor_api_key or args.api_key or os.getenv("OPENAI_API_KEY") or "EMPTY"
 
 
 def resolve_aux_api_key(args: argparse.Namespace, config: Any) -> str:
@@ -535,7 +536,10 @@ def build_workflow(
     auxiliary_model = config.auxiliary_model
     reward = config.reward
     pairwise = reward.pairwise
-    aux_thinking = resolve_thinking(args.thinking, bool(auxiliary_model.enable_thinking))
+    teacher_pre = config.teacher_pre
+    aux_thinking = resolve_thinking(
+        args.thinking, bool(auxiliary_model.enable_thinking)
+    )
     return OfflineDifficultyWorkflow(
         tokenizer=config.tokenizer_path,
         temperature=config.gconfig.temperature,
@@ -576,6 +580,10 @@ def build_workflow(
         teacher_system_prompt=config.teacher_system_prompt,
         teacher_user_prompt_template=config.teacher_user_prompt_template,
         teacher_show_ground_truth=config.teacher_show_ground_truth,
+        teacher_pre_enabled=teacher_pre.enabled,
+        teacher_pre_mode=teacher_pre.mode,
+        teacher_pre_attempts=teacher_pre.attempts,
+        teacher_pre_max_tokens=teacher_pre.max_tokens,
         student_system_prompt=config.student_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
         answer_judge_enabled=auxiliary_model.answer_judge_enabled,
@@ -628,8 +636,7 @@ def write_attempt_trace(
     split_dir = trace_dir / safe_path_token(split_name)
     split_dir.mkdir(parents=True, exist_ok=True)
     file_path = split_dir / (
-        f"row_{index:08d}_id_{safe_path_token(item_id)}"
-        f"_attempt_{attempt_idx:02d}.json"
+        f"row_{index:08d}_id_{safe_path_token(item_id)}_attempt_{attempt_idx:02d}.json"
     )
     trace_payload = dict(payload)
     trace_payload.update(
@@ -772,9 +779,7 @@ async def run_split(
 def aggregate_attempts(attempts: list[AttemptResult]) -> dict[str, Any]:
     completed = [attempt for attempt in attempts if attempt.error is None]
     success_count = sum(1 for attempt in completed if attempt.success)
-    success_rate = (
-        float(success_count / len(completed)) if completed else None
-    )
+    success_rate = float(success_count / len(completed)) if completed else None
     avg_turns = (
         float(sum(attempt.num_turns for attempt in completed) / len(completed))
         if completed
@@ -814,7 +819,9 @@ def result_metadata(result: RowDifficultyResult) -> dict[str, Any]:
     return aggregate_attempts(result.attempts)
 
 
-def merge_result_metadata(row: dict[str, Any], result: RowDifficultyResult) -> dict[str, Any]:
+def merge_result_metadata(
+    row: dict[str, Any], result: RowDifficultyResult
+) -> dict[str, Any]:
     new_row = dict(row)
     metadata = dict(new_row.get("metadata") or {})
     metadata.update(result_metadata(result))
@@ -910,7 +917,9 @@ def partial_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.partial")
 
 
-def write_csv(path: Path, *, split_results: dict[str, list[RowDifficultyResult]]) -> None:
+def write_csv(
+    path: Path, *, split_results: dict[str, list[RowDifficultyResult]]
+) -> None:
     fieldnames = [
         "split",
         "index",
@@ -969,9 +978,7 @@ async def main_async(args: argparse.Namespace) -> None:
         Path(args.output).resolve() if args.output else default_output_path(input_path)
     )
     report_path = (
-        Path(args.report).resolve()
-        if args.report
-        else default_report_path(output_path)
+        Path(args.report).resolve() if args.report else default_report_path(output_path)
     )
     csv_path = Path(args.csv).resolve() if args.csv else default_csv_path(output_path)
     attempts = max(1, int(args.attempts))
@@ -1110,7 +1117,9 @@ async def main_async(args: argparse.Namespace) -> None:
             trace_dir=trace_dir,
             on_result=_write_partial,
         )
-        all_error_ids = [result.item_id for result in results if result.error is not None]
+        all_error_ids = [
+            result.item_id for result in results if result.error is not None
+        ]
         if all_error_ids and not args.keep_on_error:
             raise RuntimeError(
                 "All attempts failed for row ids "
@@ -1150,7 +1159,9 @@ async def main_async(args: argparse.Namespace) -> None:
             )
         shutil.rmtree(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_dataset = DatasetDict(output_splits) if is_dataset_dict else output_splits["train"]
+    output_dataset = (
+        DatasetDict(output_splits) if is_dataset_dict else output_splits["train"]
+    )
     output_dataset.save_to_disk(str(output_path))
     logger.info("Saved metadata-labeled dataset to %s", output_path)
 

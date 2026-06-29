@@ -68,6 +68,7 @@ def main(args):
     config, _ = load_expr_config(args, TutorConfig)
     auxiliary_model = config.auxiliary_model
     student_generalize = config.student_generalize
+    teacher_pre = config.teacher_pre
     reward = config.reward
     pairwise = reward.pairwise
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
@@ -136,6 +137,10 @@ def main(args):
         teacher_system_prompt=config.teacher_system_prompt,
         teacher_user_prompt_template=config.teacher_user_prompt_template,
         teacher_show_ground_truth=config.teacher_show_ground_truth,
+        teacher_pre_enabled=teacher_pre.enabled,
+        teacher_pre_mode=teacher_pre.mode,
+        teacher_pre_attempts=teacher_pre.attempts,
+        teacher_pre_max_tokens=teacher_pre.max_tokens,
         student_system_prompt=config.student_system_prompt,
         leak_check_system_prompt=config.leak_check_system_prompt,
         answer_judge_enabled=auxiliary_model.answer_judge_enabled,
