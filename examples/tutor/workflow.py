@@ -1514,7 +1514,9 @@ response is still hidden teacher preparation.
     ) -> str:
         if not getattr(self, "teacher_pre_enabled", False) or teacher_pre_solve is None:
             return prompt
-        raw_output = str(teacher_pre_solve.raw_output or "").strip()
+        raw_output = _strip_reasoning_for_context(
+            str(teacher_pre_solve.raw_output or "")
+        ).strip()
         if not teacher_pre_solve.accepted or not raw_output:
             return prompt
         if teacher_pre_solve.mode == "filter_solver":
