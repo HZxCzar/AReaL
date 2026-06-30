@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-baseline-overfit-1-hard-leakt-prompt-2
+trial_name: qwen8b-baseline-overfit-1-hard-leakt-prompt-2-pre
 
 seed: 42
 enable_offload: false
@@ -14,7 +14,7 @@ enable_thinking: true
 leak_handling_mode: terminate
 teacher_show_ground_truth: false
 teacher_pre:
-  enabled: false
+  enabled: true
   mode: filter_solver
   attempts: 3
   max_tokens: 0
