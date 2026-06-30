@@ -1369,6 +1369,7 @@ def test_workflow_student_generalize_runs_after_success_from_same_context(monkey
     workflow.student_generalize_enabled = True
     workflow.student_generalize_level_rewards = {"level1": 0.2, "level2": 0.5}
     workflow.student_generalize_bank = {}
+    workflow.student_system_prompt = ""
 
     response = types.SimpleNamespace(
         input_tokens=[1],
@@ -1379,6 +1380,7 @@ def test_workflow_student_generalize_runs_after_success_from_same_context(monkey
         output_len=1,
     )
     student_calls = []
+    transfer_calls = []
     score_calls = []
     judge_results = [_judge(False), _judge(True), _judge(True), _judge(False)]
 
@@ -1398,10 +1400,14 @@ def test_workflow_student_generalize_runs_after_success_from_same_context(monkey
         outputs = [
             "initial wrong",
             "original solved",
-            "level1 solved",
-            "level2 wrong",
         ]
         return outputs[len(student_calls) - 1], None
+
+    async def call_auxiliary_prompt(**kwargs):
+        transfer_calls.append(kwargs)
+        outputs = ["level1 solved", "level2 wrong"]
+        output = outputs[len(transfer_calls) - 1]
+        return TextCallResult(text=output, raw_text=output, error=None)
 
     async def score_answer(task, ground_truth, student_output, **_kwargs):
         score_calls.append((task, ground_truth, student_output))
@@ -1415,6 +1421,7 @@ def test_workflow_student_generalize_runs_after_success_from_same_context(monkey
 
     workflow._generate_tutor_response = generate_tutor_response
     workflow._run_student = run_student
+    workflow._call_auxiliary_prompt = call_auxiliary_prompt
     workflow._score_answer_async = score_answer
     workflow._run_optional_leak_check = run_leak_check
     workflow._run_public_summary_update = update_history
@@ -1446,12 +1453,15 @@ def test_workflow_student_generalize_runs_after_success_from_same_context(monkey
     assert [state.task for state in student_calls] == [
         "original task",
         "original task",
-        "level1 task",
-        "level2 task",
     ]
-    assert student_calls[2].public_history.summary == "success context"
-    assert student_calls[3].public_history.summary == "success context"
-    assert student_calls[2].public_history is not student_calls[3].public_history
+    assert len(transfer_calls) == 2
+    assert transfer_calls[0]["system_prompt"] == ""
+    assert "success context" in transfer_calls[0]["user_prompt"]
+    assert "success context" in transfer_calls[1]["user_prompt"]
+    assert "level1 task" in transfer_calls[0]["user_prompt"]
+    assert "level2 task" in transfer_calls[1]["user_prompt"]
+    assert "original solved" in transfer_calls[0]["user_prompt"]
+    assert "last tutor hint" in transfer_calls[1]["user_prompt"]
     assert score_calls[-2:] == [
         ("level1 task", "43", "level1 solved"),
         ("level2 task", "44", "level2 wrong"),
@@ -1887,10 +1897,12 @@ def test_rollout_stats_routes_student_generalize_metrics_to_generalize(monkeypat
         "reward_component/student_generalize_level2"
     ] == pytest.approx(0.0)
     assert generalize_metrics["student_level1_attempted"] == pytest.approx(1.0)
+    assert generalize_metrics["student_level1_success"] == pytest.approx(1.0)
     assert generalize_metrics[
         "student_level1_correct_given_attempted"
     ] == pytest.approx(1.0)
     assert generalize_metrics["student_level2_attempted"] == pytest.approx(0.0)
+    assert generalize_metrics["student_level2_success"] == pytest.approx(0.0)
     assert generalize_metrics["student_level2_skipped"] == pytest.approx(1.0)
     assert "student_level2_correct_given_attempted" not in generalize_metrics
     assert "teacher_success" not in generalize_metrics
@@ -1922,10 +1934,12 @@ def test_generalize_stats_includes_eval_teacher_success(monkeypatch):
 
     assert generalize_metrics["teacher_success"] == pytest.approx(1.0)
     assert generalize_metrics["student_level1_attempted"] == pytest.approx(1.0)
+    assert generalize_metrics["student_level1_success"] == pytest.approx(0.0)
     assert generalize_metrics[
         "student_level1_correct_given_attempted"
     ] == pytest.approx(0.0)
     assert generalize_metrics["student_level2_attempted"] == pytest.approx(0.0)
+    assert generalize_metrics["student_level2_success"] == pytest.approx(0.0)
 
 
 def test_generalize_stats_logs_unattempted_levels(monkeypatch):
@@ -1943,7 +1957,9 @@ def test_generalize_stats_logs_unattempted_levels(monkeypatch):
     )
 
     assert generalize_metrics["student_level1_attempted"] == pytest.approx(0.0)
+    assert generalize_metrics["student_level1_success"] == pytest.approx(0.0)
     assert generalize_metrics["student_level2_attempted"] == pytest.approx(0.0)
+    assert generalize_metrics["student_level2_success"] == pytest.approx(0.0)
     assert "student_level1_correct_given_attempted" not in generalize_metrics
     assert "student_level2_correct_given_attempted" not in generalize_metrics
 

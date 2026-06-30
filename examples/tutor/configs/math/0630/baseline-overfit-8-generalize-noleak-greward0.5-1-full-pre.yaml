@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-baseline-overfit-8-generalize-noleak-greward0.5-1-full
+trial_name: qwen8b-baseline-overfit-8-generalize-noleak-greward0.5-1-full-pre
 
 seed: 42
 enable_offload: false
@@ -13,6 +13,11 @@ max_turns: 10
 enable_thinking: true
 leak_handling_mode: disabled
 teacher_show_ground_truth: false
+teacher_pre:
+  enabled: true
+  mode: filter_solver
+  attempts: 3
+  max_tokens: 0
 
 student_generalize:
   enabled: true
@@ -250,4 +255,4 @@ stats_logger:
     entity: hz-czar-stanford
     project: TAgent
     name: ${trial_name}
-    group: generalize-8
+    group: overfit8

@@ -1875,13 +1875,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 (result for result in results if result.level == level), None
             )
             attempted = bool(level_result is not None and level_result.attempted)
+            correct = bool(
+                attempted
+                and level_result is not None
+                and level_result.judge_result is not None
+                and level_result.judge_result.correct
+            )
             metrics[f"student_{level}_attempted"] = float(attempted)
+            metrics[f"student_{level}_success"] = float(correct)
             if attempted:
-                correct = bool(
-                    level_result is not None
-                    and level_result.judge_result is not None
-                    and level_result.judge_result.correct
-                )
                 metrics[f"student_{level}_correct_given_attempted"] = float(correct)
             elif level_result is not None and level_result.skipped:
                 metrics[f"student_{level}_skipped"] = 1.0
