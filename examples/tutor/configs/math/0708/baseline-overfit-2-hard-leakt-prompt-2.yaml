@@ -297,4 +297,4 @@ stats_logger:
     entity: hz-czar-stanford
     project: TAgent
     name: ${trial_name}
-    group: overfit-1-hard
+    group: overfit-2-hard
