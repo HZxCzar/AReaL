@@ -152,6 +152,7 @@ def main(args):
         tokenizer_path=config.tokenizer_path,
         model_context_length=config.sglang.context_length,
         student_generalize_enabled=student_generalize.enabled,
+        student_generalize_mode=student_generalize.mode,
         student_generalize_path=student_generalize.path,
         student_generalize_level1_reward=student_generalize.level1_reward,
         student_generalize_level2_reward=student_generalize.level2_reward,

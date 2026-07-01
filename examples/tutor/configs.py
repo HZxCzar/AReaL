@@ -12,6 +12,7 @@ from examples.tutor.prompts import (
 from areal.api.cli_args import EvaluatorConfig, GRPOConfig
 
 _LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate", "feedback"}
+_STUDENT_GENERALIZE_MODES = {"only_success", "always"}
 
 
 @dataclass
@@ -101,6 +102,18 @@ class TutorStudentGeneralizeConfig:
             )
         },
     )
+    mode: str = field(
+        default="only_success",
+        metadata={
+            "help": (
+                "When to run student generalization tests: 'only_success' keeps "
+                "the current post-success behavior, while 'always' runs after "
+                "every completed tutor rollout except pre-solved and "
+                "teacher-pre-solve skipped samples."
+            ),
+            "choices": ["only_success", "always"],
+        },
+    )
     path: str = field(
         default="",
         metadata={
@@ -112,6 +125,13 @@ class TutorStudentGeneralizeConfig:
     )
     level1_reward: float = field(default=0.2)
     level2_reward: float = field(default=0.5)
+
+    def __post_init__(self) -> None:
+        if self.mode not in _STUDENT_GENERALIZE_MODES:
+            raise ValueError(
+                "student_generalize.mode must be one of: "
+                "'only_success', 'always'."
+            )
 
 
 @dataclass

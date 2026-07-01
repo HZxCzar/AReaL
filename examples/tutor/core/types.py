@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 FeedbackKind = Literal["none", "student_judged", "leak"]
 LeakHandlingMode = Literal["disabled", "reward_only", "terminate", "feedback"]
+StudentGeneralizeMode = Literal["only_success", "always"]
 
 
 @dataclass(slots=True)

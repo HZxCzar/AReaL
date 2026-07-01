@@ -154,6 +154,7 @@ from examples.tutor.core.types import (
     LeakCheckResult,
     LeakHandlingMode,
     PublicHistoryState,
+    StudentGeneralizeMode,
     StudentTurnState,
     TeacherPreSolveAttempt,
     TeacherPreSolveResult,
@@ -229,6 +230,7 @@ def _reward_component_key(name: str) -> str:
 
 
 _STUDENT_GENERALIZE_LEVELS = ("level1", "level2")
+_STUDENT_GENERALIZE_MODES = {"only_success", "always"}
 
 
 @dataclass(slots=True)
@@ -252,6 +254,15 @@ class StudentGeneralizationResult:
     judge_result: JudgeResult | None = None
     reward: float = 0.0
     public_history: str = ""
+    reward_turn_idx: int | None = None
+
+
+@dataclass(slots=True)
+class StudentGeneralizationAnchor:
+    public_history: PublicHistoryState
+    previous_student_output: str
+    teacher_feedback: str
+    reward_turn_idx: int | None
 
 
 class TutorAgentWorkflow(RolloutWorkflow):
@@ -315,6 +326,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         model_context_length: int | None = None,
         context_window_margin: int = 256,
         student_generalize_enabled: bool = False,
+        student_generalize_mode: StudentGeneralizeMode | str = "only_success",
         student_generalize_path: str = "",
         student_generalize_level1_reward: float = 0.2,
         student_generalize_level2_reward: float = 0.5,
@@ -436,6 +448,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.debug_trace_every_n_rollouts = max(1, int(debug_trace_every_n_rollouts))
         self.max_train_sample_tokens = max_train_sample_tokens
         self.student_generalize_enabled = bool(student_generalize_enabled)
+        self.student_generalize_mode = (
+            student_generalize_mode or "only_success"
+        ).strip()
+        if self.student_generalize_mode not in _STUDENT_GENERALIZE_MODES:
+            raise ValueError(
+                "student_generalize_mode must be 'only_success' or 'always'."
+            )
         self.student_generalize_path = student_generalize_path.strip()
         self.student_generalize_level_rewards = {
             "level1": float(student_generalize_level1_reward),
@@ -1736,6 +1755,57 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 return artifact
         return None
 
+    @staticmethod
+    def _turn_generalization_anchor(
+        artifact: TurnArtifact,
+    ) -> StudentGeneralizationAnchor:
+        turn_count = 0
+        if artifact.student_state is not None:
+            turn_count = artifact.student_state.public_history.turn_count + 1
+        return StudentGeneralizationAnchor(
+            public_history=PublicHistoryState(
+                summary=artifact.public_history_after,
+                turn_count=turn_count,
+            ),
+            previous_student_output=artifact.student_output,
+            teacher_feedback=artifact.tutor_visible_output,
+            reward_turn_idx=int(artifact.turn_idx),
+        )
+
+    @staticmethod
+    def _is_student_generalization_reward_turn(artifact: TurnArtifact) -> bool:
+        return (
+            artifact.student_state is not None
+            and not artifact.invalid_due_to_leak
+            and not artifact.leak_result.leaked
+        )
+
+    def _student_generalization_anchor(
+        self, episode_artifact: EpisodeArtifact
+    ) -> StudentGeneralizationAnchor | None:
+        success_turn = self._success_turn(episode_artifact)
+        if success_turn is not None:
+            return self._turn_generalization_anchor(success_turn)
+
+        if getattr(self, "student_generalize_mode", "only_success") == "only_success":
+            return None
+
+        for artifact in reversed(episode_artifact.turns):
+            if self._is_student_generalization_reward_turn(artifact):
+                return self._turn_generalization_anchor(artifact)
+
+        return StudentGeneralizationAnchor(
+            public_history=PublicHistoryState(
+                summary=self._build_initial_public_summary(
+                    episode_artifact.initial_student_answer
+                ),
+                turn_count=0,
+            ),
+            previous_student_output=episode_artifact.initial_student_answer,
+            teacher_feedback="",
+            reward_turn_idx=None,
+        )
+
     async def _run_student_generalization(
         self,
         data: dict[str, Any],
@@ -1747,20 +1817,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if not bool(getattr(self, "student_generalize_enabled", False)):
             return []
 
-        success_turn = self._success_turn(episode_artifact)
-        if success_turn is None:
+        anchor = self._student_generalization_anchor(episode_artifact)
+        if anchor is None:
             return []
 
         cases = self._student_generalization_cases(data)
-        success_turn_count = 0
-        if success_turn.student_state is not None:
-            success_turn_count = (
-                success_turn.student_state.public_history.turn_count + 1
-            )
-        success_history = PublicHistoryState(
-            summary=success_turn.public_history_after,
-            turn_count=success_turn_count,
-        )
         results: list[StudentGeneralizationResult] = []
         for level in _STUDENT_GENERALIZE_LEVELS:
             case = cases.get(level)
@@ -1770,7 +1831,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                         level=level,
                         skipped=True,
                         skip_reason="missing_variant",
-                        public_history=success_history.summary,
+                        public_history=anchor.public_history.summary,
+                        reward_turn_idx=anchor.reward_turn_idx,
                     )
                 )
                 continue
@@ -1778,15 +1840,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
             transfer_prompt = self._build_student_transfer_prompt(
                 original_task=episode_artifact.task,
                 transfer_task=case.task,
-                public_history=success_history,
-                previous_student_output=success_turn.student_output,
-                teacher_feedback=success_turn.tutor_visible_output,
+                public_history=anchor.public_history,
+                previous_student_output=anchor.previous_student_output,
+                teacher_feedback=anchor.teacher_feedback,
             )
             student_result = await self._call_auxiliary_prompt(
                 system_prompt=self.student_system_prompt,
                 user_prompt=transfer_prompt,
                 aux_caller=aux_caller,
-                rid_prefix=f"student-transfer-{level}-{success_history.turn_count}",
+                rid_prefix=f"student-transfer-{level}-{anchor.public_history.turn_count}",
             )
             if student_result.error:
                 student_output = ""
@@ -1816,7 +1878,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     student_error=student_error,
                     judge_result=judge_result,
                     reward=reward,
-                    public_history=success_history.summary,
+                    public_history=anchor.public_history.summary,
+                    reward_turn_idx=anchor.reward_turn_idx,
                 )
             )
         return results
@@ -1839,11 +1902,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
             None,
         )
-        if success_idx is None:
-            return
-        assignment = assignments[success_idx]
+        assignment_by_turn_idx = {
+            int(artifact.turn_idx): assignment
+            for artifact, assignment in zip(turn_artifacts, assignments, strict=True)
+        }
         for result in student_generalization_results:
             if not result.reward:
+                continue
+            assignment = None
+            if result.reward_turn_idx is not None:
+                assignment = assignment_by_turn_idx.get(int(result.reward_turn_idx))
+            if assignment is None and success_idx is not None:
+                assignment = assignments[success_idx]
+            if assignment is None:
                 continue
             key = f"student_generalize_{result.level}"
             assignment.reward_components[key] = assignment.reward_components.get(
@@ -1908,6 +1979,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "judge_correct": bool(judge.correct) if judge is not None else False,
             "judge_feedback": judge.feedback if judge is not None else "",
             "reward": float(result.reward),
+            "reward_turn_idx": result.reward_turn_idx,
             "public_history": result.public_history,
         }
 

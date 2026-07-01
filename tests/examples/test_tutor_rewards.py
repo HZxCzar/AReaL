@@ -6,7 +6,11 @@ import types
 import pytest
 
 from examples.tutor import workflow as tutor_workflow
-from examples.tutor.configs import TutorConfig, TutorRewardConfig
+from examples.tutor.configs import (
+    TutorConfig,
+    TutorRewardConfig,
+    TutorStudentGeneralizeConfig,
+)
 from examples.tutor.core.callers import TextCallResult
 from examples.tutor.core.math import score_math_answer
 from examples.tutor.core.pairwise import PairwiseTutorEvaluator
@@ -106,6 +110,15 @@ def _episode(turns: list[TurnArtifact], termination_reason: str) -> EpisodeArtif
         leak_count=sum(1 for turn in turns if turn.leak_result.leaked),
         latest_student_answer="latest",
     )
+
+
+def test_student_generalize_config_defaults_to_only_success():
+    assert TutorStudentGeneralizeConfig().mode == "only_success"
+
+
+def test_student_generalize_config_rejects_invalid_mode():
+    with pytest.raises(ValueError, match="student_generalize.mode"):
+        TutorStudentGeneralizeConfig(mode="sometimes")
 
 
 def _outcome_computer(**overrides) -> EpisodeRewardComputer:
@@ -959,7 +972,11 @@ def _minimal_episode_workflow(**overrides):
 
 
 def test_workflow_teacher_pre_solve_failure_skips_sample(monkeypatch):
-    workflow = _minimal_episode_workflow(teacher_pre_enabled=True)
+    workflow = _minimal_episode_workflow(
+        teacher_pre_enabled=True,
+        student_generalize_enabled=True,
+        student_generalize_mode="always",
+    )
     stats = {}
     pre_result = TeacherPreSolveResult(
         enabled=True,
@@ -989,8 +1006,12 @@ def test_workflow_teacher_pre_solve_failure_skips_sample(monkeypatch):
     async def fail_run_student(*_args, **_kwargs):
         raise AssertionError("student should not run after failed teacher pre-solve")
 
+    async def fail_generalization(*_args, **_kwargs):
+        raise AssertionError("generalization should not run after teacher pre-skip")
+
     monkeypatch.setattr(workflow, "_run_teacher_pre_solve", run_teacher_pre_solve)
     monkeypatch.setattr(workflow, "_run_student", fail_run_student)
+    monkeypatch.setattr(workflow, "_run_student_generalization", fail_generalization)
 
     result = asyncio.run(
         workflow._run_episode(
@@ -1006,6 +1027,49 @@ def test_workflow_teacher_pre_solve_failure_skips_sample(monkeypatch):
     assert workflow.last_total_reward == pytest.approx(0.0)
     assert stats["termination_reason"] == "pre_solve_skipped"
     assert stats["teacher_pre_solve_result"] is pre_result
+
+
+def test_workflow_pre_solved_sample_skips_always_generalization(monkeypatch):
+    workflow = _minimal_episode_workflow(
+        student_generalize_enabled=True,
+        student_generalize_mode="always",
+    )
+    stats = {}
+    student_calls = []
+
+    workflow._make_actor_caller = lambda **_kwargs: object()
+    workflow._make_auxiliary_caller = lambda **_kwargs: object()
+    workflow._make_answer_judge_caller = lambda **_kwargs: None
+    workflow._log_rollout_stats = lambda **kwargs: stats.update(kwargs)
+    workflow._maybe_dump_debug_trace = lambda **_kwargs: None
+
+    async def run_student(state, **_kwargs):
+        student_calls.append(state)
+        return "already solved", None
+
+    async def score_answer(*_args, **_kwargs):
+        return _judge(True)
+
+    async def fail_generalization(*_args, **_kwargs):
+        raise AssertionError("generalization should not run after pre-solved sample")
+
+    monkeypatch.setattr(workflow, "_run_student", run_student)
+    monkeypatch.setattr(workflow, "_score_answer_async", score_answer)
+    monkeypatch.setattr(workflow, "_run_student_generalization", fail_generalization)
+
+    result = asyncio.run(
+        workflow._run_episode(
+            {"task": "task", "ground_truth": "42"},
+            external_client=object(),
+        )
+    )
+
+    assert result is None
+    assert len(student_calls) == 1
+    assert workflow.last_student_generalization_results == []
+    assert workflow.last_total_reward == pytest.approx(0.0)
+    assert stats["termination_reason"] == "pre_solved"
+    assert stats["pre_success"] is True
 
 
 def test_workflow_reward_only_leak_does_not_skip_student_or_success(monkeypatch):
@@ -1479,6 +1543,154 @@ def test_workflow_student_generalize_runs_after_success_from_same_context(monkey
     ] == pytest.approx(0.2)
     assert "student_generalize_level2" not in workflow.last_traces[0].reward_components
     assert workflow.last_total_reward == pytest.approx(1.2)
+
+
+def test_student_generalize_only_success_skips_failed_rollout(monkeypatch):
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_generalize_enabled = True
+    workflow.student_generalize_mode = "only_success"
+    workflow.student_generalize_level_rewards = {"level1": 0.2, "level2": 0.5}
+    workflow.student_generalize_bank = {}
+
+    async def fail_call(*args, **kwargs):
+        raise AssertionError("generalization should not run after failed rollout")
+
+    workflow._call_auxiliary_prompt = fail_call
+    results = asyncio.run(
+        workflow._run_student_generalization(
+            {
+                "id": "sample-1",
+                "metadata": {
+                    "student_generalize": {
+                        "level1": {"task": "level1", "ground_truth": "1"},
+                        "level2": {"task": "level2", "ground_truth": "2"},
+                    }
+                },
+            },
+            _episode([_turn(1, correct=False)], termination_reason="max_turns"),
+            aux_caller=object(),
+            answer_judge_caller=None,
+        )
+    )
+
+    assert results == []
+
+
+def test_student_generalize_always_rewards_final_valid_failed_turn(monkeypatch):
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_generalize_enabled = True
+    workflow.student_generalize_mode = "always"
+    workflow.student_generalize_level_rewards = {"level1": 0.2, "level2": 0.5}
+    workflow.student_generalize_bank = {}
+    workflow.student_system_prompt = ""
+
+    turn1 = _turn(1, correct=False, tutor_output="first hint")
+    turn1.public_history_after = "turn 1 context"
+    turn1.student_output = "turn 1 wrong"
+    turn2 = _turn(2, correct=False, tutor_output="final hint")
+    turn2.student_state = StudentTurnState(
+        task="task",
+        public_history=PublicHistoryState(summary="turn 1 context", turn_count=1),
+        previous_student_output="turn 1 wrong",
+        latest_tutor_visible_output="final hint",
+    )
+    turn2.public_history_after = "turn 2 context"
+    turn2.student_output = "turn 2 wrong"
+    episode = _episode([turn1, turn2], termination_reason="max_turns")
+
+    transfer_calls = []
+    judge_results = [_judge(True), _judge(False)]
+
+    async def call_auxiliary_prompt(**kwargs):
+        transfer_calls.append(kwargs)
+        output = "level1 solved" if len(transfer_calls) == 1 else "level2 wrong"
+        return TextCallResult(text=output, raw_text=output, error=None)
+
+    async def score_answer(*_args, **_kwargs):
+        return judge_results.pop(0)
+
+    workflow._call_auxiliary_prompt = call_auxiliary_prompt
+    workflow._score_answer_async = score_answer
+
+    results = asyncio.run(
+        workflow._run_student_generalization(
+            {
+                "metadata": {
+                    "student_generalize": {
+                        "level1": {"task": "level1 task", "ground_truth": "1"},
+                        "level2": {"task": "level2 task", "ground_truth": "2"},
+                    }
+                }
+            },
+            episode,
+            aux_caller=object(),
+            answer_judge_caller=None,
+        )
+    )
+    assignments = [
+        types.SimpleNamespace(reward=0.0, reward_components={}),
+        types.SimpleNamespace(reward=0.0, reward_components={}),
+    ]
+    workflow._apply_student_generalization_rewards(
+        [turn1, turn2], assignments, results
+    )
+
+    assert [result.reward_turn_idx for result in results] == [2, 2]
+    assert [result.reward for result in results] == pytest.approx([0.2, 0.0])
+    assert "turn 2 context" in transfer_calls[0]["user_prompt"]
+    assert "turn 2 wrong" in transfer_calls[0]["user_prompt"]
+    assert "final hint" in transfer_calls[0]["user_prompt"]
+    assert assignments[0].reward == pytest.approx(0.0)
+    assert assignments[1].reward == pytest.approx(0.2)
+    assert assignments[1].reward_components["student_generalize_level1"] == (
+        pytest.approx(0.2)
+    )
+
+
+def test_student_generalize_always_uses_previous_valid_turn_before_leak():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_generalize_mode = "always"
+    turn1 = _turn(1, correct=False, tutor_output="safe hint")
+    turn1.public_history_after = "safe context"
+    turn1.student_output = "safe wrong"
+    leaked_turn = _turn(2, leaked=True, tutor_output="leaked hint")
+    leaked_turn.student_state = None
+    leaked_turn.student_output = ""
+    leaked_turn.judge_result = None
+    leaked_turn.public_history_after = "safe context"
+
+    anchor = workflow._student_generalization_anchor(
+        _episode([turn1, leaked_turn], termination_reason="leak")
+    )
+
+    assert anchor is not None
+    assert anchor.reward_turn_idx == 1
+    assert anchor.public_history.summary == "safe context"
+    assert anchor.previous_student_output == "safe wrong"
+    assert anchor.teacher_feedback == "safe hint"
+
+
+def test_student_generalize_always_without_valid_turn_uses_initial_log_only_context():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_generalize_mode = "always"
+
+    anchor = workflow._student_generalization_anchor(
+        _episode([], termination_reason=tutor_workflow.CONTEXT_BUDGET_TERMINATION_REASON)
+    )
+
+    assert anchor is not None
+    assert anchor.reward_turn_idx is None
+    assert "Student round 0" in anchor.public_history.summary
+    assert "initial" in anchor.public_history.summary
+    assert anchor.previous_student_output == "initial"
 
 
 def test_student_generalize_missing_variants_skips_without_student_call(monkeypatch):
