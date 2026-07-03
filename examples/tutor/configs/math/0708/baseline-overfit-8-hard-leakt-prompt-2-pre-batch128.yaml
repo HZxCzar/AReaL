@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-baseline-overfit-4-hard-leakt-prompt-2-pre-batch64
+trial_name: qwen8b-baseline-overfit-8-hard-leakt-prompt-2-pre-batch128
 
 seed: 42
 enable_offload: false
@@ -128,7 +128,7 @@ rollout:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   tokenizer_path: ${tokenizer_path}
-  max_concurrent_rollouts: 64
+  max_concurrent_rollouts: 128
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 2
@@ -239,7 +239,7 @@ sglang:
   random_seed: ${seed}
   skip_tokenizer_init: true
   dtype: ${actor.dtype}
-  max_running_requests: 16
+  max_running_requests: 32
   context_length: 40960
   mem_fraction_static: 0.75
   enable_lora: ${actor.use_lora}
@@ -247,11 +247,11 @@ sglang:
   max_loaded_loras: 16
 
 train_dataset:
-  batch_size: 64
+  batch_size: 128
   shuffle: false
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_overfit_4_hard_batch64
+  path: examples/tutor/data/math_dataset_overfit8_generalization_batch128
   type: rl
   max_length: 16384
 
@@ -259,7 +259,7 @@ valid_dataset:
   batch_size: ${train_dataset.batch_size}
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_overfit_4_hard_batch64
+  path: examples/tutor/data/math_dataset_overfit8_generalization_batch128
   type: rl
 
 saver:
@@ -297,4 +297,4 @@ stats_logger:
     entity: hz-czar-stanford
     project: TAgent
     name: ${trial_name}
-    group: overfit-4-hard
+    group: overfit-8
