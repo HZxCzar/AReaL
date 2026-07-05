@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-baseline-overfit-8-generalize-051020-lora-batch128
+trial_name: qwen8b-baseline-overfit-8-generalize-051020-lora-batch128-rebn-nomean
 
 seed: 42
 enable_offload: false
@@ -154,7 +154,7 @@ actor:
   behave_imp_weight_cap: 5.0
   reward_norm: null
   adv_norm:
-    mean_level: batch
+    mean_level: null
     std_level: batch
   weight_update_mode: disk
   use_lora: ${rollout.use_lora}
