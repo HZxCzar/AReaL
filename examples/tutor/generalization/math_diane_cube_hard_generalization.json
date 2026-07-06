@@ -1,0 +1,26 @@
+{
+  "train-1801": {
+    "compute_graph": "Count ordered stamp denomination strings summing to 10, with at most d copies of denomination d; copies of the same denomination are indistinguishable.",
+    "level2_compute_graph": "Use the same valid ordered rows. If a row has length m, insert two distinct zero-cent seals into two different gaps, contributing (m + 1) * m variants.",
+    "level1": {
+      "task": "A postal clerk records a strip of stamps only by the left-to-right denomination sequence. Diane has one 1-cent stamp, two identical 2-cent stamps, three identical 3-cent stamps, and so on through nine identical 9-cent stamps. How many different recorded sequences have total postage exactly 10 cents?",
+      "ground_truth": "88"
+    },
+    "level2": {
+      "task": "First choose one of Diane's valid left-to-right stamp sequences worth exactly 10 cents, using the same supply of stamps. Then place two different zero-cent inspection seals into two different gaps of the sequence, where a gap may be before the first stamp, after the last stamp, or between neighboring stamps. How many final sealed strips are possible?",
+      "ground_truth": "1370"
+    }
+  },
+  "train-2131": {
+    "compute_graph": "Build valid towers with cube sizes 1 through 8 and rule top <= lower + 2; recurrence T_2 = 2 and T_{m+1} = 3T_m gives T = 2 * 3^6, then reduce mod 1000.",
+    "level2_compute_graph": "Use the same T valid towers, then choose one of the 7 adjacent contacts in the tower to instrument before reducing mod 1000.",
+    "level1": {
+      "task": "Eight prototype crates have distinct side lengths 1 through 8. They must be stacked in a single vertical column, and if a crate of side length u sits directly on a crate of side length k, then u cannot exceed k + 2. Let T be the number of legal stack orders using all eight crates. What is T modulo 1000?",
+      "ground_truth": "458"
+    },
+    "level2": {
+      "task": "After a legal tower of the eight crates is built under the same rule, an engineer chooses exactly one of the seven contacts between neighboring crates and installs a sensor on that contact. Counting both the tower order and the chosen contact, what is the number of possibilities modulo 1000?",
+      "ground_truth": "206"
+    }
+  }
+}
