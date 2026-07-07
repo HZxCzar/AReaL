@@ -3,7 +3,7 @@ trial_name: qwen8b-baseline-overfit-2-generalize-001020-lora-batch128-rebn-nomea
 
 seed: 42
 enable_offload: false
-total_train_epochs: 200
+total_train_epochs: 150
 tokenizer_path: ${actor.path}
 
 workflow: examples.tutor.workflow.TutorAgentWorkflow
