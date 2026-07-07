@@ -1,0 +1,14 @@
+{
+  "train-1801": {
+    "compute_graph": "Count ordered stamp denomination strings summing to 10, with at most d copies of denomination d; copies of the same denomination are indistinguishable.",
+    "level2_compute_graph": "Use the same valid ordered rows. If a row has length m, insert two distinct zero-cent seals into two different gaps, contributing (m + 1) * m variants.",
+    "level1": {
+      "task": "A postal clerk records a strip of stamps only by the left-to-right denomination sequence. Diane has one 1-cent stamp, two identical 2-cent stamps, three identical 3-cent stamps, and so on through nine identical 9-cent stamps. How many different recorded sequences have total postage exactly 10 cents?",
+      "ground_truth": "88"
+    },
+    "level2": {
+      "task": "First choose one of Diane's valid left-to-right stamp sequences worth exactly 10 cents, using the same supply of stamps. Then place two different zero-cent inspection seals into two different gaps of the sequence, where a gap may be before the first stamp, after the last stamp, or between neighboring stamps. How many final sealed strips are possible?",
+      "ground_truth": "1370"
+    }
+  }
+}
