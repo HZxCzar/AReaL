@@ -1,0 +1,194 @@
+{
+  "train-927": {
+    "compute_graph": "For an n-row triangular rod-and-connector frame, rods = 3 * (1 + 2 + ... + n) and connectors = 1 + 2 + ... + (n + 1). The original asks rods + connectors for n = 8.",
+    "level2_compute_graph": "Keep n = 8, but count a decorative bead at every connector, so total = rods + connectors + connector_beads.",
+    "level1": {
+      "task": "A workshop builds triangular display frames from unit rods and small connectors. In an n-row frame, the rods appear in rows of 3, 6, 9, and so on, while the connectors form a triangular array with one more row than the rods. How many total rods and connectors are used in an eight-row frame?",
+      "ground_truth": "153"
+    },
+    "level2": {
+      "task": "The same workshop builds an eight-row triangular frame. It uses the usual unit rods and connectors, and then places one colored bead on every connector. Counting rods, connectors, and beads, how many pieces are used?",
+      "ground_truth": "198"
+    }
+  },
+  "train-1801": {
+    "compute_graph": "Count ordered sequences of stamp denominations summing to 10, with at most d copies of denomination d and identical copies indistinguishable.",
+    "level2_compute_graph": "After each valid ordered stamp row, insert one distinct 0-cent seal in any gap, so each length-m row contributes m + 1 variants.",
+    "level1": {
+      "task": "Diane is arranging postage across an envelope. She owns one 1-cent stamp, two identical 2-cent stamps, continuing through nine identical 9-cent stamps. How many ordered rows of stamps make exactly 10 cents, if swapping identical stamps, rotating stamps, or flipping stamps does not create a new row?",
+      "ground_truth": "88"
+    },
+    "level2": {
+      "task": "Diane first chooses an ordered row of postage stamps worth exactly 10 cents using the same stamp supply: one 1-cent stamp, two identical 2-cent stamps, and so on through nine identical 9-cent stamps. She then inserts one distinct gold 0-cent seal somewhere in the row, either before all stamps, after all stamps, or between two neighboring stamps. How many final rows are possible?",
+      "ground_truth": "389"
+    }
+  },
+  "train-2131": {
+    "compute_graph": "For cube sizes 1 through 8 and top cube size at most k + 2 above a cube of size k, inserting the next largest cube gives T = 2 * 3^6; the original asks T mod 1000.",
+    "level2_compute_graph": "Count the same valid towers, then choose one of the 8 cubes to mark as featured before reducing mod 1000.",
+    "level1": {
+      "task": "Eight cubes have edge lengths 1 through 8, one cube of each size. A tower uses all eight cubes, and a cube placed directly on top of a cube of edge length k must have edge length at most k + 2. If T is the number of possible towers, what is the remainder when T is divided by 1000?",
+      "ground_truth": "458"
+    },
+    "level2": {
+      "task": "Eight cubes have edge lengths 1 through 8, one cube of each size. A tower uses all eight cubes, and a cube placed directly on top of a cube of edge length k must have edge length at most k + 2. After building a valid tower, exactly one cube is chosen to receive a gold label. How many labeled valid towers are there, modulo 1000?",
+      "ground_truth": "664"
+    }
+  },
+  "train-1705": {
+    "compute_graph": "Present value P satisfies P * (1.05)^10 = 500000, rounded to cents.",
+    "level2_compute_graph": "Present value P plus an ordinary annuity satisfies P * (1.05)^10 + 12000 * (((1.05)^10 - 1) / 0.05) = 500000.",
+    "level1": {
+      "task": "A trust fund should be worth $500,000 exactly ten years from now. If a single deposit earns 5% interest compounded once per year, what deposit is needed today? Round to the nearest cent.",
+      "ground_truth": "\\$306,\\!956.63"
+    },
+    "level2": {
+      "task": "A trust fund should be worth $500,000 after ten years. A single deposit is made today, and an additional $12,000 is deposited at the end of each of the next ten years. If all money earns 5% interest compounded annually, what single deposit is needed today? Round to the nearest cent.",
+      "ground_truth": "\\$214,\\!295.81"
+    }
+  },
+  "train-1912": {
+    "compute_graph": "All positive integers appear on the first nontrivial diagonal of Pascal's triangle; the smallest four-digit entry is 1000 and the next is 1001.",
+    "level2_compute_graph": "Exclude the two outer diagonals on each side, then sort remaining four-digit binomial coefficients; the second smallest is requested.",
+    "level1": {
+      "task": "Looking through all entries of Pascal's triangle, what is the second smallest entry that has exactly four digits?",
+      "ground_truth": "1001"
+    },
+    "level2": {
+      "task": "Ignore the outer 1s and also ignore the neighboring diagonal 1, 2, 3, 4, ... on both sides of Pascal's triangle. Among the remaining entries, what is the second smallest four-digit number that appears?",
+      "ground_truth": "1035"
+    }
+  },
+  "train-2138": {
+    "compute_graph": "Dynamic program over length n sequences ending in A or B: A-runs have even length and B-runs have odd length; original asks a_14 + b_14.",
+    "level2_compute_graph": "Use the same dynamic program and constraints but ask only for sequences ending in A, i.e. a_14.",
+    "level1": {
+      "task": "A signal string uses only the symbols A and B. Every maximal block of consecutive A's must have even length, and every maximal block of consecutive B's must have odd length. How many valid strings have length 14?",
+      "ground_truth": "172"
+    },
+    "level2": {
+      "task": "A signal string uses only the symbols A and B. Every maximal block of consecutive A's must have even length, every maximal block of consecutive B's must have odd length, and the string must end with A. How many valid strings have length 14?",
+      "ground_truth": "80"
+    }
+  },
+  "train-2346": {
+    "compute_graph": "In the side-4 triangular toothpick grid, each of the 10 upward unit triangles requires a distinct removed edge; removing all 10 horizontal toothpicks destroys every triangle.",
+    "level2_compute_graph": "Only downward-pointing unit triangles need to be destroyed; there are 6 such unit triangles with distinct horizontal top edges.",
+    "level1": {
+      "task": "A triangular lattice is made from 30 identical toothpicks, with four unit toothpicks along each side and all internal lattice segments included. What is the fewest number of toothpicks that must be removed so that no triangles of any size remain?",
+      "ground_truth": "10"
+    },
+    "level2": {
+      "task": "In the same triangular lattice made from 30 toothpicks with four unit toothpicks along each side, what is the fewest number of toothpicks that must be removed so that no downward-pointing unit triangles remain?",
+      "ground_truth": "6"
+    }
+  },
+  "train-456": {
+    "compute_graph": "Iterate the piecewise function by divisibility by 3 and 7 from x = 2; the orbit is 2, 5, 8, 11, 14, 42, 2, 5, so f^a(2) = f(2) first occurs at a = 7.",
+    "level2_compute_graph": "Use the same orbit but ask when the iteration first returns to the starting value 2, which occurs at a = 6.",
+    "level1": {
+      "task": "Let f(x) = x/21 when x is divisible by both 3 and 7, f(x) = 3x when x is divisible by 7 but not 3, f(x) = 7x when x is divisible by 3 but not 7, and f(x) = x + 3 otherwise. If f^a means applying f a times, what is the smallest integer a greater than 1 such that f^a(2) equals f(2)?",
+      "ground_truth": "7"
+    },
+    "level2": {
+      "task": "Let f(x) = x/21 when x is divisible by both 3 and 7, f(x) = 3x when x is divisible by 7 but not 3, f(x) = 7x when x is divisible by 3 but not 7, and f(x) = x + 3 otherwise. If f^a means applying f a times, what is the smallest positive integer a such that f^a(2) = 2?",
+      "ground_truth": "6"
+    }
+  },
+  "test-1527": {
+    "compute_graph": "Count 9! colorings of a 3 by 3 grid, subtract placements where the purple and green beads occupy one of 20 adjacent unordered pairs with either order, then divide by the 8 grid symmetries.",
+    "level2_compute_graph": "Fix the purple bead in a specified corner of an oriented grid; the green bead has 5 allowed cells and the remaining 7 beads permute freely.",
+    "level1": {
+      "task": "Nine differently colored beads are placed on a 3 by 3 square tray. The purple and green beads may not touch horizontally, vertically, or diagonally. Placements that differ only by a rotation or reflection of the square tray are considered the same. How many placements are possible?",
+      "ground_truth": "20160"
+    },
+    "level2": {
+      "task": "Nine differently colored beads are placed on a fixed, oriented 3 by 3 square tray. The purple bead must be in the upper-left corner, and the green bead may not touch it horizontally, vertically, or diagonally. How many placements are possible?",
+      "ground_truth": "25200"
+    }
+  },
+  "test-1593": {
+    "compute_graph": "A fixed 3 by 6 board splits into three forced 3 by 2 stages; each stage has 2 tilings by two identical L-trominoes, giving 2^3.",
+    "level2_compute_graph": "Extend the same 3 by 2 stage recurrence to a 3 by 8 board, giving 2^4 tilings.",
+    "level1": {
+      "task": "A fixed 3 by 6 rectangle is to be tiled by six identical L-shaped trominoes, each made from three unit squares. How many tiling patterns are possible?",
+      "ground_truth": "8"
+    },
+    "level2": {
+      "task": "A fixed 3 by 8 rectangle is to be tiled by eight identical L-shaped trominoes, each made from three unit squares. How many tiling patterns are possible?",
+      "ground_truth": "16"
+    }
+  },
+  "test-2072": {
+    "compute_graph": "For points (-1,0), (2,4), (2,-4), the three parallelogram choices have side-length pairs (5,5), (5,8), and (5,8), so the perimeters are 20, 26, and 26; original asks max - min.",
+    "level2_compute_graph": "Use the same three possible perimeters but ask for their sum.",
+    "level1": {
+      "task": "Three vertices of a parallelogram are (-1,0), (2,4), and (2,-4). Among all possible fourth vertices, what is the positive difference between the greatest possible perimeter and the least possible perimeter?",
+      "ground_truth": "6"
+    },
+    "level2": {
+      "task": "Three vertices of a parallelogram are (-1,0), (2,4), and (2,-4). Considering the three possible choices for the fourth vertex, what is the sum of the three possible perimeters?",
+      "ground_truth": "72"
+    }
+  },
+  "test-2397": {
+    "compute_graph": "Count monic quadratic equations whose multiset of roots is closed under c -> c^2 - 2.",
+    "level2_compute_graph": "Count monic equations of degree 1 or 2 whose root multiset is closed under the same map.",
+    "level1": {
+      "task": "How many quadratic equations of the form x^2 + ax + b = 0 have the property that, whenever c is a root, c^2 - 2 is also a root?",
+      "ground_truth": "6"
+    },
+    "level2": {
+      "task": "How many monic equations of degree 1 or 2 have the property that, whenever c is a root, c^2 - 2 is also a root?",
+      "ground_truth": "8"
+    }
+  },
+  "test-2454": {
+    "compute_graph": "A Fibonacci-type sequence has seventh term 5a_1 + 8a_2. Minimize a shared value N for two nondecreasing nonnegative integer pairs with different first terms.",
+    "level2_compute_graph": "Move the target to the eighth term, 8a_1 + 13a_2, and repeat the same minimization.",
+    "level1": {
+      "task": "Two non-decreasing sequences of nonnegative integers have different first terms. In each sequence, every term from the third onward is the sum of the two previous terms, and the seventh term is N. What is the smallest possible value of N?",
+      "ground_truth": "104"
+    },
+    "level2": {
+      "task": "Two non-decreasing sequences of nonnegative integers have different first terms. In each sequence, every term from the third onward is the sum of the two previous terms, and the eighth term is N. What is the smallest possible value of N?",
+      "ground_truth": "273"
+    }
+  },
+  "test-2504": {
+    "compute_graph": "Scale variables to transform the expression into (1/20)abc / ((1+a)(a+b)(b+c)(c+81)); AM-GM gives denominator at least 256abc.",
+    "level2_compute_graph": "Use the equality point from the same AM-GM graph, then return x + y + z instead of the maximum value.",
+    "level1": {
+      "task": "For positive real numbers x, y, and z, find the maximum value of xyz / ((1 + 5x)(4x + 3y)(5y + 6z)(z + 18)).",
+      "ground_truth": "1/5120"
+    },
+    "level2": {
+      "task": "For positive real numbers x, y, and z, the expression xyz / ((1 + 5x)(4x + 3y)(5y + 6z)(z + 18)) attains its maximum at one point. What is x + y + z at that point?",
+      "ground_truth": "9"
+    }
+  },
+  "test-2645": {
+    "compute_graph": "Factor 2000x^6 + 100x^5 + 10x^3 + x - 2 as (20x^2 + x - 2)(100x^4 + 10x^2 + 1); the two real roots come from the quadratic, and the original asks their squared difference.",
+    "level2_compute_graph": "Use the same quadratic factor but ask for the sum of its two real roots.",
+    "level1": {
+      "task": "The equation 2000x^6 + 100x^5 + 10x^3 + x - 2 = 0 has two real roots. Compute the square of the difference between those two roots.",
+      "ground_truth": "161/400"
+    },
+    "level2": {
+      "task": "The equation 2000x^6 + 100x^5 + 10x^3 + x - 2 = 0 has two real roots. Compute the sum of those two real roots.",
+      "ground_truth": "-1/20"
+    }
+  },
+  "test-3695": {
+    "compute_graph": "For a regular pentagon and regular hexagon sharing a side on the same side, subtract the pentagon interior angle 108 from the hexagon interior angle 120.",
+    "level2_compute_graph": "Place the pentagon and hexagon on opposite sides, so the smaller angle is 360 - (108 + 120).",
+    "level1": {
+      "task": "A regular pentagon and a regular hexagon lie in the same plane and share a common side AD on the same side of that side. What is the degree measure of the angle between the side from A of the pentagon and the side from A of the hexagon?",
+      "ground_truth": "12"
+    },
+    "level2": {
+      "task": "A regular pentagon and a regular hexagon lie in the same plane and share a common side AD, but the polygons are on opposite sides of line AD. What is the smaller degree measure of the angle between the side from A of the pentagon and the side from A of the hexagon?",
+      "ground_truth": "132"
+    }
+  }
+}

@@ -18,7 +18,7 @@ teacher_show_ground_truth: false
 student_generalize:
   enabled: true
   mode: always
-  path: examples/tutor/generalization/math_overfit_8_generalization.json
+  path: examples/tutor/generalization/legacy/math_overfit_8_generalization.json
   level1_reward: 1.0
   level2_reward: 2.0
 

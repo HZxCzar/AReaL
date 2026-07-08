@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-baseline-overfit-2-generalize-001020-lora-batch128-rebn-nomean-new
+trial_name: qwen8b-baseline-overfit-1-generalization-001020-lora-batch128-rebn-nomean-4
 
 seed: 42
 enable_offload: false
@@ -17,7 +17,7 @@ teacher_show_ground_truth: false
 
 student_generalize:
   enabled: true
-  path: examples/tutor/generalization/math_diane_cube_hard_generalization.json
+  path: examples/tutor/data/math-generalization/math_dataset_4_generalization_batch128_generalization.json
   level1_reward: 1.0
   level2_reward: 2.0
 
@@ -205,7 +205,7 @@ train_dataset:
   shuffle: false
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_2_hard_generalization_batch128
+  path: examples/tutor/data/math-generalization/math_dataset_4_generalization_batch128
   type: rl
   max_length: 16384
 
@@ -213,7 +213,7 @@ valid_dataset:
   batch_size: ${train_dataset.batch_size}
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_2_hard_generalization_batch128
+  path: examples/tutor/data/math-generalization/math_dataset_4_generalization_batch128
   type: rl
 
 saver:
@@ -238,7 +238,7 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: 10
+  freq_steps: 5
   freq_secs: null
   max_samples: null
 
@@ -251,4 +251,4 @@ stats_logger:
     entity: hz-czar-stanford
     project: TAgent
     name: ${trial_name}
-    group: generalize-2
+    group: generalize-1

@@ -1,9 +1,9 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-baseline-overfit-8-generalize-051020-lora
+trial_name: qwen8b-baseline-overfit-2-generalize-051020-lora-batch128-rebn-nomean
 
 seed: 42
 enable_offload: false
-total_train_epochs: 200
+total_train_epochs: 150
 tokenizer_path: ${actor.path}
 
 workflow: examples.tutor.workflow.TutorAgentWorkflow
@@ -17,7 +17,7 @@ teacher_show_ground_truth: false
 
 student_generalize:
   enabled: true
-  path: examples/tutor/generalization/legacy/math_overfit_8_generalization.json
+  path: examples/tutor/generalization/math_diane_cube_hard_generalization.json
   level1_reward: 1.0
   level2_reward: 2.0
 
@@ -82,7 +82,7 @@ rollout:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   tokenizer_path: ${tokenizer_path}
-  max_concurrent_rollouts: 4
+  max_concurrent_rollouts: 128
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 2
@@ -155,7 +155,7 @@ actor:
   behave_imp_weight_cap: 5.0
   reward_norm: null
   adv_norm:
-    mean_level: batch
+    mean_level: null
     std_level: batch
   weight_update_mode: disk
   use_lora: ${rollout.use_lora}
@@ -193,7 +193,7 @@ sglang:
   random_seed: ${seed}
   skip_tokenizer_init: true
   dtype: ${actor.dtype}
-  max_running_requests: 2
+  max_running_requests: 32
   context_length: 40960
   mem_fraction_static: 0.75
   enable_lora: ${actor.use_lora}
@@ -201,11 +201,11 @@ sglang:
   max_loaded_loras: 16
 
 train_dataset:
-  batch_size: 16
+  batch_size: 128
   shuffle: false
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_overfit8_generalization
+  path: examples/tutor/data/math_dataset_2_hard_generalization_batch128
   type: rl
   max_length: 16384
 
@@ -213,14 +213,14 @@ valid_dataset:
   batch_size: ${train_dataset.batch_size}
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_overfit8_generalization
+  path: examples/tutor/data/math_dataset_2_hard_generalization_batch128
   type: rl
 
 saver:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
-  freq_epochs: 20
+  freq_epochs: 10
   freq_steps: null
   freq_secs: null
 
@@ -229,7 +229,7 @@ recover:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
-  freq_epochs: 20
+  freq_epochs: 10
   freq_steps: null
   freq_secs: 3600
 
@@ -251,4 +251,4 @@ stats_logger:
     entity: hz-czar-stanford
     project: TAgent
     name: ${trial_name}
-    group: generalize-8
+    group: generalize-2
