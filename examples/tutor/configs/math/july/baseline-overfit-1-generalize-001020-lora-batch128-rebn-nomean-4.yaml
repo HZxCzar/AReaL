@@ -17,7 +17,7 @@ teacher_show_ground_truth: false
 
 student_generalize:
   enabled: true
-  path: examples/tutor/data/math-generalization/math_dataset_4_generalization_batch128_generalization.json
+  path: examples/tutor/generalization/version2/math_overfit_8_independent_hard_generalization.json
   level1_reward: 1.0
   level2_reward: 2.0
 

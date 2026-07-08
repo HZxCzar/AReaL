@@ -1,0 +1,145 @@
+{
+  "source_dataset": "examples/tutor/data/math_dataset_overfit8_generalization_batch128",
+  "source_generalization": "examples/tutor/generalization/math_overfit_8_generalization.json",
+  "train_test_duplicate_ids": [],
+  "train_test_duplicate_tasks": [],
+  "datasets": [
+    {
+      "name": "math_dataset_1_generalization_batch128",
+      "dataset_path": "examples/tutor/data/math-generalization/math_dataset_1_generalization_batch128",
+      "generalization_path": "examples/tutor/data/math-generalization/math_dataset_1_generalization_batch128_generalization.json",
+      "train_id": "train-927",
+      "train_rows": 128,
+      "test_ids": [
+        "test-1527",
+        "test-1593",
+        "test-2072",
+        "test-2397",
+        "test-2454",
+        "test-2504",
+        "test-2645",
+        "test-3695"
+      ]
+    },
+    {
+      "name": "math_dataset_2_generalization_batch128",
+      "dataset_path": "examples/tutor/data/math-generalization/math_dataset_2_generalization_batch128",
+      "generalization_path": "examples/tutor/data/math-generalization/math_dataset_2_generalization_batch128_generalization.json",
+      "train_id": "train-1801",
+      "train_rows": 128,
+      "test_ids": [
+        "test-1527",
+        "test-1593",
+        "test-2072",
+        "test-2397",
+        "test-2454",
+        "test-2504",
+        "test-2645",
+        "test-3695"
+      ]
+    },
+    {
+      "name": "math_dataset_3_generalization_batch128",
+      "dataset_path": "examples/tutor/data/math-generalization/math_dataset_3_generalization_batch128",
+      "generalization_path": "examples/tutor/data/math-generalization/math_dataset_3_generalization_batch128_generalization.json",
+      "train_id": "train-2131",
+      "train_rows": 128,
+      "test_ids": [
+        "test-1527",
+        "test-1593",
+        "test-2072",
+        "test-2397",
+        "test-2454",
+        "test-2504",
+        "test-2645",
+        "test-3695"
+      ]
+    },
+    {
+      "name": "math_dataset_4_generalization_batch128",
+      "dataset_path": "examples/tutor/data/math-generalization/math_dataset_4_generalization_batch128",
+      "generalization_path": "examples/tutor/data/math-generalization/math_dataset_4_generalization_batch128_generalization.json",
+      "train_id": "train-1705",
+      "train_rows": 128,
+      "test_ids": [
+        "test-1527",
+        "test-1593",
+        "test-2072",
+        "test-2397",
+        "test-2454",
+        "test-2504",
+        "test-2645",
+        "test-3695"
+      ]
+    },
+    {
+      "name": "math_dataset_5_generalization_batch128",
+      "dataset_path": "examples/tutor/data/math-generalization/math_dataset_5_generalization_batch128",
+      "generalization_path": "examples/tutor/data/math-generalization/math_dataset_5_generalization_batch128_generalization.json",
+      "train_id": "train-1912",
+      "train_rows": 128,
+      "test_ids": [
+        "test-1527",
+        "test-1593",
+        "test-2072",
+        "test-2397",
+        "test-2454",
+        "test-2504",
+        "test-2645",
+        "test-3695"
+      ]
+    },
+    {
+      "name": "math_dataset_6_generalization_batch128",
+      "dataset_path": "examples/tutor/data/math-generalization/math_dataset_6_generalization_batch128",
+      "generalization_path": "examples/tutor/data/math-generalization/math_dataset_6_generalization_batch128_generalization.json",
+      "train_id": "train-2138",
+      "train_rows": 128,
+      "test_ids": [
+        "test-1527",
+        "test-1593",
+        "test-2072",
+        "test-2397",
+        "test-2454",
+        "test-2504",
+        "test-2645",
+        "test-3695"
+      ]
+    },
+    {
+      "name": "math_dataset_7_generalization_batch128",
+      "dataset_path": "examples/tutor/data/math-generalization/math_dataset_7_generalization_batch128",
+      "generalization_path": "examples/tutor/data/math-generalization/math_dataset_7_generalization_batch128_generalization.json",
+      "train_id": "train-2346",
+      "train_rows": 128,
+      "test_ids": [
+        "test-1527",
+        "test-1593",
+        "test-2072",
+        "test-2397",
+        "test-2454",
+        "test-2504",
+        "test-2645",
+        "test-3695"
+      ]
+    },
+    {
+      "name": "math_dataset_8_generalization_batch128",
+      "dataset_path": "examples/tutor/data/math-generalization/math_dataset_8_generalization_batch128",
+      "generalization_path": "examples/tutor/data/math-generalization/math_dataset_8_generalization_batch128_generalization.json",
+      "train_id": "train-456",
+      "train_rows": 128,
+      "test_ids": [
+        "test-1527",
+        "test-1593",
+        "test-2072",
+        "test-2397",
+        "test-2454",
+        "test-2504",
+        "test-2645",
+        "test-3695"
+      ]
+    }
+  ],
+  "legacy_source_generalization": "examples/tutor/generalization/legacy/math_overfit_8_generalization.json"
+}

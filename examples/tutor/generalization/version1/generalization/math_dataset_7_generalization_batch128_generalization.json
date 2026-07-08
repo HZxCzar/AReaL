@@ -1,0 +1,110 @@
+{
+  "train-2346": {
+    "compute_graph": "A side-n triangular toothpick lattice has total toothpicks 3n(n+1)/2. From total 19323, recover n = 113. Each of the n(n+1)/2 upward unit triangles needs a distinct removed edge, and removing one full direction destroys every triangle.",
+    "level2_compute_graph": "In the side-5 triangular toothpick lattice, hit every triangular cycle whose side length is at least 2; a minimum hitting set has size 6.",
+    "level1": {
+      "task": "A complete triangular toothpick lattice is formed with the same number of unit toothpicks along each side and with every internal unit segment parallel to a side present. The finished lattice contains 19,323 toothpicks in all. What is the fewest toothpicks that must be removed so that no triangular cycle of any size remains?",
+      "ground_truth": "6441"
+    },
+    "level2": {
+      "task": "A larger triangular lattice has five unit toothpicks along each side, again with every internal unit segment parallel to a side present. Unit triangles may remain, but every triangular cycle whose side length is at least two unit toothpicks must be destroyed. What is the fewest toothpicks that must be removed?",
+      "ground_truth": "6"
+    }
+  },
+  "test-1527": {
+    "compute_graph": "Count 9! colorings of a 3 by 3 grid, subtract placements where purple and green occupy one of 20 adjacent unordered pairs in either order, then divide by 8 symmetries.",
+    "level2_compute_graph": "Fix a third bead at the center, count ordered nonadjacent purple/green placements among the 8 outer cells, permute the remaining 6 beads, then divide by 8 symmetries.",
+    "level1": {
+      "task": "Nine distinct ceremonial badges are placed one per cell on a 3 by 3 square board. The purple and green badges are incompatible and may not occupy cells sharing a side or a corner. Boards that differ only by a rotation or reflection are considered the same. How many boards are possible?",
+      "ground_truth": "20160"
+    },
+    "level2": {
+      "task": "The same 3 by 3 board is used with nine distinct badges, and boards related by a rotation or reflection are still considered the same. The blue badge is required to occupy the center cell. The purple and green badges may not occupy cells sharing a side or a corner. How many boards are possible?",
+      "ground_truth": "2880"
+    }
+  },
+  "test-1593": {
+    "compute_graph": "A fixed 3 by 6 rectangle splits into three forced 3 by 2 stages, each with 2 L-tromino tilings, giving 2^3.",
+    "level2_compute_graph": "Extend the same forced 3 by 2 stage recurrence to a fixed 3 by 10 rectangle, giving 2^5.",
+    "level1": {
+      "task": "A fixed 3 by 6 storage tray is to be exactly covered by six identical L-tromino tiles, each made from three unit squares. Rotating or flipping a tile is allowed, but the tray itself is fixed in place. How many tilings are possible?",
+      "ground_truth": "8"
+    },
+    "level2": {
+      "task": "A fixed 3 by 10 storage tray is to be exactly covered by ten identical L-tromino tiles, each made from three unit squares. Rotating or flipping a tile is allowed, but the tray itself is fixed in place. How many tilings are possible?",
+      "ground_truth": "32"
+    }
+  },
+  "test-2072": {
+    "compute_graph": "For points (-1,0), (2,4), (2,-4), the three parallelogram choices have perimeters 20, 26, and 26; return max - min.",
+    "level2_compute_graph": "Use the same three possible perimeters 20, 26, and 26, then sum their squares.",
+    "level1": {
+      "task": "Three survey stakes are at (-1,0), (2,4), and (2,-4). They are known to be three vertices of a parallelogram, but it is not known which one is opposite the missing vertex. Across all possible fourth vertices, what is the difference between the greatest and least possible perimeters?",
+      "ground_truth": "6"
+    },
+    "level2": {
+      "task": "Using the same three survey stakes, form each of the three possible parallelograms by choosing a different given stake as the vertex opposite the missing one. What is the sum of the squares of the three possible perimeters?",
+      "ground_truth": "1752"
+    }
+  },
+  "test-2397": {
+    "compute_graph": "Count monic quadratic root multisets closed under c -> c^2 - 2.",
+    "level2_compute_graph": "Add the two monic linear equations whose single root is fixed by c -> c^2 - 2 to the six quadratic equations.",
+    "level1": {
+      "task": "Let T(c) = c^2 - 2. How many monic quadratic equations have the property that their multiset of roots is closed under T, meaning that applying T to any root gives another root of the same equation?",
+      "ground_truth": "6"
+    },
+    "level2": {
+      "task": "Let T(c) = c^2 - 2. Count all monic equations of degree 1 or degree 2 whose multiset of roots is closed under T, meaning that applying T to any root gives another root of the same equation.",
+      "ground_truth": "8"
+    }
+  },
+  "test-2454": {
+    "compute_graph": "The seventh term is 5a_1 + 8a_2. Minimize a common value N for two nondecreasing nonnegative integer pairs with different first terms.",
+    "level2_compute_graph": "Move the target to the ninth term, 13a_1 + 21a_2, and repeat the same minimization.",
+    "level1": {
+      "task": "Two nondecreasing sequences of nonnegative integers follow the Fibonacci rule after their first two terms: each later term is the sum of the two preceding terms. The two sequences have different first terms but the same seventh term N. What is the smallest possible N?",
+      "ground_truth": "104"
+    },
+    "level2": {
+      "task": "Two nondecreasing sequences of nonnegative integers follow the same Fibonacci rule after their first two terms. The two sequences have different first terms but the same ninth term N. What is the smallest possible N?",
+      "ground_truth": "714"
+    }
+  },
+  "test-2504": {
+    "compute_graph": "Scale variables to transform the expression into (1/20)abc / ((1+a)(a+b)(b+c)(c+81)); AM-GM gives denominator at least 256abc.",
+    "level2_compute_graph": "Use the same AM-GM equality point a=3, b=9, c=27, hence x=3/5, y=12/5, z=6, then compute 1/x + 1/y + 1/z.",
+    "level1": {
+      "task": "For positive real numbers x, y, and z, determine the maximum possible value of xyz / ((1 + 5x)(4x + 3y)(5y + 6z)(z + 18)).",
+      "ground_truth": "\\frac{1}{5120}"
+    },
+    "level2": {
+      "task": "For positive real numbers x, y, and z, the expression xyz / ((1 + 5x)(4x + 3y)(5y + 6z)(z + 18)) has a unique maximizing point. At that point, what is 1/x + 1/y + 1/z?",
+      "ground_truth": "\\frac{9}{4}"
+    }
+  },
+  "test-2645": {
+    "compute_graph": "Factor 2000x^6 + 100x^5 + 10x^3 + x - 2 as (20x^2 + x - 2)(100x^4 + 10x^2 + 1); the real roots come from the quadratic and their squared difference is 161/400.",
+    "level2_compute_graph": "Use the same quadratic factor. If roots are r and s, compute r^2 + s^2 = (r+s)^2 - 2rs.",
+    "level1": {
+      "task": "The polynomial 2000x^6 + 100x^5 + 10x^3 + x - 2 has exactly two real zeros. What is the square of the distance between those two real zeros on the number line?",
+      "ground_truth": "\\frac{161}{400}"
+    },
+    "level2": {
+      "task": "Let r and s be the two real zeros of 2000x^6 + 100x^5 + 10x^3 + x - 2. Compute r^2 + s^2.",
+      "ground_truth": "\\frac{81}{400}"
+    }
+  },
+  "test-3695": {
+    "compute_graph": "For regular 113-gon and 137-gon sharing a side on the same side, subtract their interior angles: 360 * (1/113 - 1/137) = 8640/15481.",
+    "level2_compute_graph": "Place the regular 17-gon and 29-gon on opposite sides; smaller angle = 360 - ((180 - 360/17) + (180 - 360/29)) = 16560/493.",
+    "level1": {
+      "task": "A regular 113-gon and a regular 137-gon share the side AD and lie in the same half-plane determined by line AD. At endpoint A, compare the side of the 113-gon leaving A with the side of the 137-gon leaving A. If the degree measure of the angle between those two sides is p/q in lowest terms, find p + q.",
+      "ground_truth": "24121"
+    },
+    "level2": {
+      "task": "A regular 17-gon and a regular 29-gon share the side AD, but the two polygons lie on opposite sides of line AD. At endpoint A, the smaller angle between the side of the 17-gon leaving A and the side of the 29-gon leaving A has degree measure p/q in lowest terms. Find p + q.",
+      "ground_truth": "17053"
+    }
+  }
+}
