@@ -183,6 +183,8 @@ from examples.tutor.prompts import (
     NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT,
     NONE_PLACEHOLDER,
     NONE_YET_PLACEHOLDER,
+    POLARIS_FILTER_SOLVER_USER_TEMPLATE,
+    POLARIS_INSTRUCTION,
     PRIVATE_LEAK_FEEDBACK_TEMPLATE,
     PRIVATE_LEAK_LEVEL_SUFFIX_TEMPLATE,
     PUBLIC_HISTORY_ENTRY_TEMPLATE,
@@ -270,7 +272,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self,
         gconfig: Any | None = None,
         tokenizer: str | Any | None = None,
-        answer_scorer: str = "aime",
+        dataset_type: str = "aime",
+        answer_scorer: str = "auto",
         max_turns: int = 6,
         enable_thinking: bool = False,
         leak_handling_mode: LeakHandlingMode = "reward_only",
@@ -337,8 +340,20 @@ class TutorAgentWorkflow(RolloutWorkflow):
         pairwise_judge_both_incorrect: bool = True,
     ):
         self.max_turns = max_turns
-        self.answer_scorer_name = answer_scorer
-        self.answer_scorer: AnswerScorer = get_answer_scorer(answer_scorer)
+        self.dataset_type = (dataset_type or "").strip().lower()
+        if self.dataset_type not in {"aime", "math", "polaris"}:
+            raise ValueError("dataset_type must be one of: 'aime', 'math', 'polaris'.")
+        answer_scorer_name = (answer_scorer or "auto").strip().lower()
+        if answer_scorer_name == "auto":
+            answer_scorer_name = self.dataset_type
+        elif answer_scorer_name != self.dataset_type:
+            raise ValueError(
+                "answer_scorer must be 'auto' or match dataset_type; "
+                f"got dataset_type={self.dataset_type!r}, "
+                f"answer_scorer={answer_scorer_name!r}."
+            )
+        self.answer_scorer_name = answer_scorer_name
+        self.answer_scorer: AnswerScorer = get_answer_scorer(answer_scorer_name)
         self.enable_thinking = enable_thinking
         if leak_handling_mode not in LEAK_HANDLING_MODES:
             raise ValueError(
@@ -441,6 +456,17 @@ class TutorAgentWorkflow(RolloutWorkflow):
             leak_check_system_prompt
         )
         self.answer_judge_enabled = bool(answer_judge_enabled)
+        if self.dataset_type == "polaris":
+            if self.leak_handling_mode != "disabled":
+                raise ValueError(
+                    "dataset_type='polaris' is incompatible with leak checks; "
+                    "set leak_handling_mode='disabled'."
+                )
+            if self.answer_judge_enabled:
+                raise ValueError(
+                    "dataset_type='polaris' uses the Polaris rule judge and is "
+                    "incompatible with answer_judge_enabled=true."
+                )
         self.answer_judge_max_tokens = max(1, int(answer_judge_max_tokens))
         self.answer_judge_system_prompt = answer_judge_system_prompt.strip()
         self._answer_judge_cache: dict[tuple[str, str, str], JudgeResult] = {}
@@ -664,7 +690,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
                 return None
 
-        initial_student_answer, initial_student_error = await self._run_student(
+        initial_student_answer_raw, initial_student_error = await self._run_student(
             StudentTurnState(
                 task=task,
                 public_history=PublicHistoryState(),
@@ -673,11 +699,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
             aux_caller=aux_caller,
         )
-        initial_student_answer = _strip_reasoning_for_context(initial_student_answer)
+        initial_student_answer = _strip_reasoning_for_context(
+            initial_student_answer_raw
+        )
         initial_judge_result = await self._score_answer_async(
             task,
             ground_truth,
-            initial_student_answer,
+            initial_student_answer_raw,
             answer_judge_caller=answer_judge_caller,
         )
         if initial_judge_result.correct:
@@ -793,15 +821,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 latest_tutor_visible_output=tutor_visible_output,
             )
             student_prompt = self._build_student_prompt_from_state(student_state)
-            student_answer, student_error = await self._run_student(
+            student_answer_raw, student_error = await self._run_student(
                 student_state,
                 aux_caller=aux_caller,
             )
-            student_answer = _strip_reasoning_for_context(student_answer)
+            student_answer = _strip_reasoning_for_context(student_answer_raw)
             judge_result = await self._score_answer_async(
                 task,
                 ground_truth,
-                student_answer,
+                student_answer_raw,
                 answer_judge_caller=answer_judge_caller,
             )
             invalid_due_to_leak = (
@@ -1112,6 +1140,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return self.max_completion_tokens
 
     def _build_teacher_pre_solve_prompt(self, *, task: str) -> str:
+        if getattr(self, "dataset_type", "aime") == "polaris":
+            return POLARIS_FILTER_SOLVER_USER_TEMPLATE.format(task=task)
         return FILTER_SOLVER_USER_TEMPLATE.format(task=task)
 
     def _build_teacher_pre_solve_messages(self, *, task: str) -> list[dict[str, str]]:
@@ -1323,9 +1353,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             return LeakCheckResult(
                 raw_output="",
                 leaked=True,
-                feedback=LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE.format(
-                    error=result.error
-                ),
+                feedback=LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE.format(error=result.error),
                 parse_error=result.error,
                 raw_result={},
                 leak_level=(
@@ -1412,9 +1440,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self, turn_idx: int, leak_result: LeakCheckResult
     ) -> str:
         level = (
-            PRIVATE_LEAK_LEVEL_SUFFIX_TEMPLATE.format(
-                leak_level=leak_result.leak_level
-            )
+            PRIVATE_LEAK_LEVEL_SUFFIX_TEMPLATE.format(leak_level=leak_result.leak_level)
             if leak_result.leak_level is not None
             else ""
         )
@@ -1526,6 +1552,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return f"{prompt.rstrip()}\n\n{context}\n"
 
     def _build_student_prompt_from_state(self, state: StudentTurnState) -> str:
+        if (
+            getattr(self, "dataset_type", "aime") == "polaris"
+            and not state.public_history.summary
+            and not state.previous_student_output
+            and state.public_history.turn_count == 0
+        ):
+            return f"{state.task}\n\n{POLARIS_INSTRUCTION}"
         return render_prompt(
             STUDENT_STATE_USER_TEMPLATE,
             task=state.task,
@@ -1852,18 +1885,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
             if student_result.error:
                 student_output = ""
+                student_output_raw = ""
                 student_error = student_result.error
             else:
-                student_output = student_result.text
+                student_output_raw = student_result.text
                 student_error = None
-            student_output = _strip_reasoning_for_context(student_output)
+            student_output = _strip_reasoning_for_context(student_output_raw)
             judge_result = None
             reward = 0.0
             if student_error is None:
                 judge_result = await self._score_answer_async(
                     case.task,
                     case.ground_truth,
-                    student_output,
+                    student_output_raw,
                     answer_judge_caller=answer_judge_caller,
                 )
                 if judge_result.correct:

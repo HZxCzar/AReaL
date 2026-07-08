@@ -546,6 +546,7 @@ def build_workflow(
         top_p=config.gconfig.top_p,
         max_completion_tokens=config.gconfig.max_new_tokens,
         max_turns=config.max_turns,
+        dataset_type=config.dataset_type,
         answer_scorer=config.answer_scorer,
         enable_thinking=config.enable_thinking,
         leak_handling_mode=config.leak_handling_mode,

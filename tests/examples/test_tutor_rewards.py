@@ -139,7 +139,7 @@ def _outcome_computer(**overrides) -> EpisodeRewardComputer:
 
 def test_tutor_config_rejects_invalid_leak_handling_mode():
     with pytest.raises(ValueError, match="leak_handling_mode"):
-        TutorConfig(leak_handling_mode="invalid")
+        TutorConfig(dataset_type="math", leak_handling_mode="invalid")
 
 
 def test_workflow_rejects_invalid_leak_handling_mode():
@@ -1635,9 +1635,7 @@ def test_student_generalize_always_rewards_final_valid_failed_turn(monkeypatch):
         types.SimpleNamespace(reward=0.0, reward_components={}),
         types.SimpleNamespace(reward=0.0, reward_components={}),
     ]
-    workflow._apply_student_generalization_rewards(
-        [turn1, turn2], assignments, results
-    )
+    workflow._apply_student_generalization_rewards([turn1, turn2], assignments, results)
 
     assert [result.reward_turn_idx for result in results] == [2, 2]
     assert [result.reward for result in results] == pytest.approx([0.2, 0.0])
@@ -1683,7 +1681,9 @@ def test_student_generalize_always_without_valid_turn_uses_initial_log_only_cont
     workflow.student_generalize_mode = "always"
 
     anchor = workflow._student_generalization_anchor(
-        _episode([], termination_reason=tutor_workflow.CONTEXT_BUDGET_TERMINATION_REASON)
+        _episode(
+            [], termination_reason=tutor_workflow.CONTEXT_BUDGET_TERMINATION_REASON
+        )
     )
 
     assert anchor is not None

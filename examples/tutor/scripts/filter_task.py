@@ -36,6 +36,7 @@ from examples.tutor.core.types import PublicHistoryState, StudentTurnState  # no
 from examples.tutor.prompts import (  # noqa: E402
     FILTER_SOLVER_SYSTEM_PROMPT,
     FILTER_SOLVER_USER_TEMPLATE,
+    POLARIS_FILTER_SOLVER_USER_TEMPLATE,
 )
 
 
@@ -730,6 +731,7 @@ def build_workflow(
         args.thinking, bool(auxiliary_model.enable_thinking)
     )
     return TutorAgentWorkflow(
+        dataset_type=config.dataset_type,
         answer_scorer=config.answer_scorer,
         max_turns=config.max_turns,
         enable_thinking=config.enable_thinking,
@@ -1180,7 +1182,12 @@ async def main_async(args: argparse.Namespace) -> None:
         concurrency=max_concurrency,
     )
     system_prompt = load_prompt(args.system_prompt_file, DEFAULT_SOLVER_SYSTEM_PROMPT)
-    user_template = load_prompt(args.user_template_file, DEFAULT_SOLVER_USER_TEMPLATE)
+    default_user_template = (
+        POLARIS_FILTER_SOLVER_USER_TEMPLATE
+        if config.dataset_type == "polaris"
+        else DEFAULT_SOLVER_USER_TEMPLATE
+    )
+    user_template = load_prompt(args.user_template_file, default_user_template)
 
     loaded = load_from_disk(str(input_path))
     is_dataset_dict = isinstance(loaded, DatasetDict)

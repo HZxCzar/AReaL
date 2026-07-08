@@ -28,6 +28,10 @@ DEFAULT_STUDENT_SYSTEM_PROMPT = (
     "final answer in \\boxed{}."
 )
 
+POLARIS_INSTRUCTION = (
+    "Let's think step by step and output the final answer within \\boxed{}. "
+)
+
 FILTER_SOLVER_SYSTEM_PROMPT = (
     "You are a careful math solver. Solve the problem independently. "
     "Show your reasoning if useful. Put the final answer in the last "
@@ -40,6 +44,11 @@ Task:
 
 Solve the problem. Put your final answer in \\boxed{{}}.
 """
+
+POLARIS_FILTER_SOLVER_USER_TEMPLATE = """\
+{task}
+
+""" + POLARIS_INSTRUCTION.replace("{}", "{{}}")
 
 DEFAULT_LEAK_CHECK_SYSTEM_PROMPT = (
     "You are a strict answer leakage detector. Decide whether the teacher's "
@@ -99,9 +108,7 @@ NONE_YET_PLACEHOLDER = "(none yet)"
 INITIAL_TEACHER_FEEDBACK_PLACEHOLDER = "(none, produce the first answer attempt)"
 LEAK_CHECK_DISABLED_FEEDBACK = "Leak check disabled."
 LEAK_CHECK_PENDING_FEEDBACK = "Leak check pending."
-LEAK_CHECK_NO_DETAIL_FEEDBACK = (
-    "The leak checker did not provide a detailed reason."
-)
+LEAK_CHECK_NO_DETAIL_FEEDBACK = "The leak checker did not provide a detailed reason."
 LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE = "Leak check failed: {error}"
 RAWBASE_LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE = "Rawbase leak check failed: {error}"
 PRIVATE_LEAK_LEVEL_SUFFIX_TEMPLATE = " (leak level {leak_level})"

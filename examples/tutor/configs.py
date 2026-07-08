@@ -9,9 +9,11 @@ from examples.tutor.prompts import (
     TEACHER_STATE_USER_TEMPLATE,
 )
 
-from areal.api.cli_args import EvaluatorConfig, GRPOConfig
+from areal.api.cli_args import MISSING, EvaluatorConfig, GRPOConfig
 
 _LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate", "feedback"}
+_DATASET_TYPES = {"aime", "math", "polaris"}
+_ANSWER_SCORERS = {"auto", "aime", "math", "polaris"}
 _STUDENT_GENERALIZE_MODES = {"only_success", "always"}
 
 
@@ -129,8 +131,7 @@ class TutorStudentGeneralizeConfig:
     def __post_init__(self) -> None:
         if self.mode not in _STUDENT_GENERALIZE_MODES:
             raise ValueError(
-                "student_generalize.mode must be one of: "
-                "'only_success', 'always'."
+                "student_generalize.mode must be one of: 'only_success', 'always'."
             )
 
 
@@ -292,11 +293,18 @@ class TutorConfig(GRPOConfig):
         default="examples.tutor.workflow.TutorAgentWorkflow",
         metadata={"help": "Evaluation workflow import path."},
     )
-    answer_scorer: str = field(
-        default="aime",
+    dataset_type: str = field(
+        default=MISSING,
         metadata={
-            "help": "Answer scorer used by tutor workflow.",
-            "choices": ["aime", "math"],
+            "help": "Tutor dataset source type.",
+            "choices": ["aime", "math", "polaris"],
+        },
+    )
+    answer_scorer: str = field(
+        default="auto",
+        metadata={
+            "help": "Answer scorer used by tutor workflow. 'auto' follows dataset_type.",
+            "choices": ["auto", "aime", "math", "polaris"],
         },
     )
     max_turns: int = field(default=6, metadata={"help": "Maximum teacher turns."})
@@ -350,8 +358,37 @@ class TutorConfig(GRPOConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.dataset_type is MISSING or str(self.dataset_type) == "???":
+            raise ValueError("dataset_type must be one of: 'aime', 'math', 'polaris'.")
+        self.dataset_type = str(self.dataset_type).strip().lower()
+        if self.dataset_type not in _DATASET_TYPES:
+            raise ValueError("dataset_type must be one of: 'aime', 'math', 'polaris'.")
+        self.answer_scorer = str(self.answer_scorer).strip().lower()
+        if self.answer_scorer not in _ANSWER_SCORERS:
+            raise ValueError(
+                "answer_scorer must be one of: 'auto', 'aime', 'math', 'polaris'."
+            )
+        if self.answer_scorer == "auto":
+            self.answer_scorer = self.dataset_type
+        elif self.answer_scorer != self.dataset_type:
+            raise ValueError(
+                "answer_scorer must be 'auto' or match dataset_type; "
+                f"got dataset_type={self.dataset_type!r}, "
+                f"answer_scorer={self.answer_scorer!r}."
+            )
         if self.leak_handling_mode not in _LEAK_HANDLING_MODES:
             raise ValueError(
                 "leak_handling_mode must be one of: 'disabled', "
                 "'reward_only', 'terminate', or 'feedback'."
             )
+        if self.dataset_type == "polaris":
+            if self.leak_handling_mode != "disabled":
+                raise ValueError(
+                    "dataset_type='polaris' is incompatible with leak checks; "
+                    "set leak_handling_mode='disabled'."
+                )
+            if self.auxiliary_model.answer_judge_enabled:
+                raise ValueError(
+                    "dataset_type='polaris' uses the Polaris rule judge and is "
+                    "incompatible with auxiliary_model.answer_judge_enabled=true."
+                )

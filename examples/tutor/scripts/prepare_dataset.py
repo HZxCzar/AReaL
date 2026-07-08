@@ -6,25 +6,30 @@ _THIS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _THIS_DIR.parents[1]
 sys.path.append(str(_REPO_ROOT))
 
-from examples.tutor.data_formats.aime import build_aime_splits
-from examples.tutor.data_formats.math import build_math_splits
+from examples.tutor.data_formats.aime import build_aime_splits  # noqa: E402
+from examples.tutor.data_formats.math import build_math_splits  # noqa: E402
+from examples.tutor.data_formats.polaris import (  # noqa: E402
+    DEFAULT_POLARIS_DATASET,
+    build_polaris_splits,
+)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--format",
-        choices=["aime", "math"],
+        choices=["aime", "math", "polaris"],
         default="aime",
         help="Input data format to convert into tutor DatasetDict rows.",
     )
     parser.add_argument("--manifest")
     parser.add_argument("--output", required=True)
-    parser.add_argument("--test-size", type=int, default=1)
+    parser.add_argument("--test-size", type=int, default=None)
     parser.add_argument("--train-ids", type=Path, default=None)
     parser.add_argument("--test-ids", type=Path, default=None)
     parser.add_argument("--train-jsonl", type=Path, default=None)
     parser.add_argument("--test-jsonl", type=Path, default=None)
+    parser.add_argument("--hf-dataset", default=None)
     args = parser.parse_args()
 
     output_path = Path(args.output).resolve()
@@ -32,22 +37,35 @@ def main():
     if args.format == "aime":
         if not args.manifest:
             raise ValueError("--manifest is required when --format=aime")
+        if args.hf_dataset:
+            raise ValueError("--hf-dataset requires --format=polaris")
         if args.train_jsonl or args.test_jsonl:
             raise ValueError("--train-jsonl/--test-jsonl require --format=math")
         train_rows, test_rows = build_aime_splits(
             manifest_path=Path(args.manifest).resolve(),
-            test_size=args.test_size,
+            test_size=args.test_size if args.test_size is not None else 1,
             train_ids_path=args.train_ids.resolve() if args.train_ids else None,
             test_ids_path=args.test_ids.resolve() if args.test_ids else None,
         )
-    else:
+    elif args.format == "math":
         if args.manifest or args.train_ids or args.test_ids:
             raise ValueError("AIME manifest split args require --format=aime")
+        if args.hf_dataset:
+            raise ValueError("--hf-dataset requires --format=polaris")
         if not args.train_jsonl or not args.test_jsonl:
             raise ValueError("--train-jsonl and --test-jsonl are required for MATH")
         train_rows, test_rows = build_math_splits(
             train_jsonl_path=args.train_jsonl.resolve(),
             test_jsonl_path=args.test_jsonl.resolve(),
+        )
+    else:
+        if args.manifest or args.train_ids or args.test_ids:
+            raise ValueError("AIME manifest split args require --format=aime")
+        if args.train_jsonl or args.test_jsonl:
+            raise ValueError("--train-jsonl/--test-jsonl require --format=math")
+        train_rows, test_rows = build_polaris_splits(
+            dataset_path=args.hf_dataset or DEFAULT_POLARIS_DATASET,
+            test_size=args.test_size if args.test_size is not None else 1024,
         )
 
     try:

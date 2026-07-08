@@ -102,6 +102,7 @@ def main(args):
     workflow_kwargs = dict(
         gconfig=config.gconfig,
         tokenizer=config.tokenizer_path,
+        dataset_type=config.dataset_type,
         answer_scorer=config.answer_scorer,
         max_turns=config.max_turns,
         enable_thinking=config.enable_thinking,

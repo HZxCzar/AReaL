@@ -5,7 +5,7 @@ from typing import Literal
 
 from .types import JudgeResult
 
-AnswerScorerName = Literal["aime", "math"]
+AnswerScorerName = Literal["aime", "math", "polaris"]
 AnswerScorer = Callable[[str, str, str], JudgeResult]
 
 
@@ -19,4 +19,8 @@ def get_answer_scorer(name: str) -> AnswerScorer:
         from .math import score_math_answer
 
         return score_math_answer
-    raise ValueError("answer_scorer must be one of: aime, math")
+    if normalized == "polaris":
+        from .polaris import score_polaris_answer
+
+        return score_polaris_answer
+    raise ValueError("answer_scorer must be one of: aime, math, polaris")

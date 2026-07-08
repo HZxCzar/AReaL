@@ -8,6 +8,7 @@ tokenizer_path: ${actor.path}
 
 workflow: examples.tutor.workflow.TutorAgentWorkflow
 eval_workflow: ${workflow}
+dataset_type: math
 answer_scorer: math
 max_turns: 10
 enable_thinking: false

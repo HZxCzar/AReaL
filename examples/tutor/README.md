@@ -10,7 +10,7 @@ transcript text.
 Prepare a HuggingFace dataset on disk from an AIME manifest:
 
 ```bash
-python3 examples/tutor/prepare_dataset.py \
+python3 examples/tutor/scripts/prepare_dataset.py \
   --format aime \
   --manifest /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AgentGym-RL/examples/tutor/aime_manifest.json \
   --train-ids /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AgentGym-RL/AgentGym-RL/AgentItemId/tutor_train.json \
@@ -32,29 +32,36 @@ the last `N` samples as test data.
 To convert the checked-in MATH JSONL files under `examples/tutor/raw_data/`:
 
 ```bash
-python3 examples/tutor/prepare_dataset.py \
+python3 examples/tutor/scripts/prepare_dataset.py \
   --format math \
   --train-jsonl examples/tutor/raw_data/math_train.jsonl \
   --test-jsonl examples/tutor/raw_data/math_test.jsonl \
   --output examples/tutor/data/math_dataset
 ```
 
-Then point training/eval at that saved dataset and switch the answer scorer:
+To download and convert Polaris:
+
+```bash
+python3 examples/tutor/scripts/prepare_dataset.py \
+  --format polaris \
+  --output examples/tutor/data/polaris_dataset
+```
+
+Then point training/eval at that saved dataset and switch the dataset type:
 
 ```bash
 python3 examples/tutor/train.py \
   --config examples/tutor/config.yaml \
-  answer_scorer=math \
+  dataset_type=math \
   train_dataset.path=examples/tutor/data/math_dataset \
   valid_dataset.path=examples/tutor/data/math_dataset \
   scheduler.type=local
 ```
 
-`answer_scorer=aime` uses the AIME exact-match scorer, while `answer_scorer=math`
-uses the lm-eval/Hendrycks MATH boxed-answer extraction and string-normalized exact
-match. Both scorers extract the student's final answer from the last `\boxed{...}` or
-`\fbox{...}` in the student response.
-Pass the same `answer_scorer=math` and dataset path overrides to
+`answer_scorer=auto` follows `dataset_type`; explicit scorers must match the dataset
+type. `dataset_type=polaris` uses the Polaris boxed-answer rule judge and is
+incompatible with leak checks, so set `leak_handling_mode=disabled` for Polaris runs.
+Pass the same `dataset_type` and dataset path overrides to
 `filter_task.py`, `manual_tutor.py`, or `demo_run.py` when using MATH rows.
 
 ## Filter Tasks
