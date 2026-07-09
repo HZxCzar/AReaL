@@ -1,10 +1,10 @@
 {
   "train-927": {
     "original_compute_graph": "Infer the 8-row triangular grid count: rods = 3 * (1 + 2 + ... + 8), connectors = 1 + 2 + ... + 9, then add rods and connectors for the total piece count.",
-    "level1_compute_graph": "Use the same 8-row triangular grid count: rods = 3 * (1 + 2 + ... + 8), connectors = 1 + 2 + ... + 9, then add rods and connectors for the total piece count.",
+    "level1_compute_graph": "Use the 8-row triangular lattice count in a trail-network setting: trail segments = 3 * (1 + 2 + ... + 8), signposts = 1 + 2 + ... + 9, then add segments and signposts.",
     "level2_compute_graph": "Keep an 8-row triangular truss, then add two washers to each interior connector of the triangular connector array. Interior connectors = 45 - 24.",
     "level1": {
-      "task": "A stage-light rig is built from an 8-row triangular grid. The rig uses one metal rod for every unit grid segment in each of the three grid directions, and one connector hub at every grid vertex. How many rods and connector hubs are used altogether?",
+      "task": "A park trail system is laid out on an 8-row triangular lattice. Every unit edge of the lattice becomes one trail segment, and every lattice vertex receives one signpost. How many trail segments and signposts are there altogether?",
       "ground_truth": "153"
     },
     "level2": {
@@ -14,10 +14,10 @@
   },
   "train-1801": {
     "original_compute_graph": "Count ordered stamp denomination strings summing to 10, with at most d copies of denomination d and copies of the same denomination indistinguishable.",
-    "level1_compute_graph": "Count ordered stamp denomination strings summing to 10, with at most d copies of denomination d and copies of the same denomination indistinguishable.",
+    "level1_compute_graph": "Count ordered tile-label strings summing to 10, with at most d copies of label d and copies of the same label indistinguishable.",
     "level2_compute_graph": "Use the same valid ordered rows. If a row has length m, insert two distinct zero-cent seals into two different gaps, contributing (m + 1) * m variants.",
     "level1": {
-      "task": "A postal clerk records a strip of stamps only by the left-to-right denomination sequence. Diane has one 1-cent stamp, two identical 2-cent stamps, three identical 3-cent stamps, and so on through nine identical 9-cent stamps. How many different recorded sequences have total postage exactly 10 cents?",
+      "task": "A lab builds coded sample bracelets from numbered tiles. It has one tile labeled 1, two identical tiles labeled 2, three identical tiles labeled 3, and so on through nine identical tiles labeled 9. The bracelet record is only the left-to-right label sequence. How many different records have label sum exactly 10?",
       "ground_truth": "88"
     },
     "level2": {
@@ -27,10 +27,10 @@
   },
   "train-2131": {
     "original_compute_graph": "Count permutations of cube sizes 1 through 8 satisfying top <= lower + 2 for each adjacent pair; recurrence gives T = 2 * 3^6, then reduce T modulo 1000.",
-    "level1_compute_graph": "Count permutations of crate sizes 1 through 8 satisfying top <= lower + 2 for each adjacent pair; recurrence gives T = 2 * 3^6, then reduce T modulo 1000.",
+    "level1_compute_graph": "Count permutations of job priorities 1 through 8 satisfying next <= previous + 2 for each adjacent pair; recurrence gives T = 2 * 3^6, then reduce T modulo 1000.",
     "level2_compute_graph": "Use the same T valid towers, then choose one of the 7 adjacent contacts in the tower to instrument before reducing mod 1000.",
     "level1": {
-      "task": "Eight prototype crates have distinct side lengths 1 through 8. They must be stacked in a single vertical column, and if a crate of side length u sits directly on a crate of side length k, then u cannot exceed k + 2. Let T be the number of legal stack orders using all eight crates. What is T modulo 1000?",
+      "task": "A batch scheduler must arrange eight jobs in a single line. The jobs have distinct priority numbers 1 through 8. If a job of priority u is placed immediately after a job of priority k, then u cannot exceed k + 2. Let T be the number of legal schedules using all eight jobs. What is T modulo 1000?",
       "ground_truth": "458"
     },
     "level2": {
@@ -40,11 +40,11 @@
   },
   "train-1705": {
     "original_compute_graph": "Solve the present-value equation P * (1.05)^10 = 500000 and round P to cents.",
-    "level1_compute_graph": "Solve the present-value equation P * (1.05)^10 = 500000 and round P to cents.",
+    "level1_compute_graph": "Solve the growth equation P * (1.05)^10 = 500000 and round P to the nearest hundredth.",
     "level2_compute_graph": "Present value P plus scheduled gifts at the ends of years 3, 6, and 9 satisfies P * (1.05)^10 + 25000 * ((1.05)^7 + (1.05)^4 + 1.05) = 500000.",
     "level1": {
-      "task": "A grant office must make a single deposit today so that, after exactly ten annual 5% compounding periods and with no later deposits, the account balance is $500,000. What deposit is required today? Round to the nearest cent.",
-      "ground_truth": "\\$306,\\!956.63"
+      "task": "A bioreactor culture grows by 5% during each of ten equal growth periods. No cells are added after the start. How many cells must be present initially for the culture to contain 500,000 cells after the tenth growth period? Round to the nearest hundredth.",
+      "ground_truth": "306956.63"
     },
     "level2": {
       "task": "A grant office wants an account balance of $500,000 after ten annual 5% compounding periods. It will make one deposit today. Separate donors will add $25,000 at the end of year 3, $25,000 at the end of year 6, and $25,000 at the end of year 9. What deposit is required today? Round to the nearest cent.",
@@ -53,10 +53,10 @@
   },
   "train-1912": {
     "original_compute_graph": "View Pascal's triangle by distinct values. The linear diagonal contains every positive integer, so the two smallest distinct four-digit values are 1000 and 1001.",
-    "level1_compute_graph": "View Pascal's triangle by distinct values. The linear diagonal contains every positive integer, so the two smallest distinct four-digit values are 1000 and 1001.",
+    "level1_compute_graph": "View all binomial coefficients from expansions of (x+y)^n by distinct coefficient values. The linear coefficients contain every positive integer, so the two smallest distinct four-digit values are 1000 and 1001.",
     "level2_compute_graph": "Ignore the outer 1 diagonals and the adjacent linear diagonals. The smallest distinct four-digit values then include C(14,4) = 1001, C(46,2) = 1035, and C(47,2) = 1081.",
     "level1": {
-      "task": "Read Pascal's triangle as a set of numerical values, not as a list of repeated positions from the left and right sides. What is the second smallest distinct value in the triangle that has exactly four digits?",
+      "task": "Look across the coefficients appearing in all polynomial expansions of (x+y)^n for nonnegative integers n. Treat repeated coefficient values as one value. What is the second smallest distinct coefficient that has exactly four digits?",
       "ground_truth": "1001"
     },
     "level2": {
@@ -66,10 +66,10 @@
   },
   "train-2138": {
     "original_compute_graph": "Dynamic program over length-14 binary strings ending in A or B, enforcing even A-runs and odd B-runs; compute total valid strings a_14 + b_14.",
-    "level1_compute_graph": "Dynamic program over length-14 binary status logs ending in A or B, enforcing even A-runs and odd B-runs; compute total valid logs a_14 + b_14.",
+    "level1_compute_graph": "Dynamic program over length-14 signal strips ending in H or L, enforcing even H-runs and odd L-runs; compute total valid strips h_14 + l_14.",
     "level2_compute_graph": "Use the same run constraints, but count length-18 strings with exactly five maximal runs and the middle run length fixed at 4.",
     "level1": {
-      "task": "A binary status log is written with the letters A and B. Every maximal uninterrupted stretch of A's must have even length, while every maximal uninterrupted stretch of B's must have odd length. How many length-14 logs are possible?",
+      "task": "A signal strip is written with the symbols H and L. Every maximal uninterrupted stretch of H symbols must have even length, while every maximal uninterrupted stretch of L symbols must have odd length. How many length-14 signal strips are possible?",
       "ground_truth": "172"
     },
     "level2": {
@@ -79,10 +79,10 @@
   },
   "train-2346": {
     "original_compute_graph": "The 30-toothpick figure is a side-4 complete triangular toothpick lattice. Removing one whole direction destroys every triangular cycle, and each direction class has 4*5/2 toothpicks.",
-    "level1_compute_graph": "In a side-1234567 complete triangular toothpick lattice, removing one whole direction destroys every triangular cycle, and each direction class has 1234567*1234568/2 toothpicks.",
+    "level1_compute_graph": "In a side-1234567 complete triangular beam lattice, removing one whole direction destroys every triangular closed beam loop, and each direction class has 1234567*1234568/2 beams.",
     "level2_compute_graph": "A side-n triangular toothpick lattice has (n - 1)(n - 2)/2 interior junctions and 3n boundary junctions. From their difference 11619, recover n = 157, then remove one full direction, n(n+1)/2 toothpicks, to destroy all triangular cycles.",
     "level1": {
-      "task": "A complete triangular toothpick lattice has 1,234,567 unit toothpicks along each outer side, with every internal unit segment parallel to a side present. What is the fewest toothpicks that must be removed so that no triangular cycle of any size remains?",
+      "task": "A laser security grid is built as a complete triangular lattice with 1,234,567 unit beam segments along each outer side, and every internal unit beam segment parallel to a side is present. What is the fewest beam segments that must be switched off so that no triangular closed beam loop of any size remains?",
       "ground_truth": "762078456028"
     },
     "level2": {
@@ -92,10 +92,10 @@
   },
   "train-456": {
     "original_compute_graph": "Iterate the piecewise divisibility map from 2; the orbit is 2 -> 5 -> 8 -> 11 -> 14 -> 42 -> 2, so f^a(2) = f(2) first recurs at a = 7.",
-    "level1_compute_graph": "Iterate the same piecewise divisibility map from 2; the orbit is 2 -> 5 -> 8 -> 11 -> 14 -> 42 -> 2, so f^a(2) = f(2) first recurs at a = 7.",
+    "level1_compute_graph": "Iterate the piecewise divisibility update from register value 2; the orbit is 2 -> 5 -> 8 -> 11 -> 14 -> 42 -> 2, so the first post-update value first recurs after 7 updates.",
     "level2_compute_graph": "Use the same period-6 orbit from 2. The indices with f^a(2) = f(2) are a = 1 mod 6; multiply 7, 13, ..., 2023 modulo 1000.",
     "level1": {
-      "task": "A machine transforms a positive integer x as follows: divide x by 21 if x is divisible by both 3 and 7; multiply x by 3 if x is divisible by 7 but not by 3; multiply x by 7 if x is divisible by 3 but not by 7; otherwise add 3. Starting from 2, let f^a mean applying the machine a times. What is the smallest integer a greater than 1 for which f^a(2) equals the first output f(2)?",
+      "task": "An inspection counter stores a positive integer x. On each tick, it divides x by 21 if x is divisible by both 3 and 7; multiplies x by 3 if x is divisible by 7 but not by 3; multiplies x by 7 if x is divisible by 3 but not by 7; and otherwise adds 3. The counter starts at 2. What is the smallest tick number greater than 1 at which the counter reading equals the reading after the first tick?",
       "ground_truth": "7"
     },
     "level2": {
@@ -105,10 +105,10 @@
   },
   "test-1527": {
     "original_compute_graph": "Count placements of 9 distinct beads on a 3 by 3 grid. Exclude purple-green king-adjacent placements using the 20 adjacent unordered cell pairs, then divide by 8 dihedral symmetries.",
-    "level1_compute_graph": "Count placements of 9 distinct badges on a 3 by 3 grid. Exclude purple-green king-adjacent placements using the 20 adjacent unordered cell pairs, then divide by 8 dihedral symmetries.",
+    "level1_compute_graph": "Count assignments of 9 distinct teams to a 3 by 3 room grid. Exclude violet-green king-adjacent room assignments using the 20 adjacent unordered cell pairs, then divide by 8 dihedral symmetries.",
     "level2_compute_graph": "Fix a third bead at the center, count ordered nonadjacent purple/green placements among the 8 outer cells, permute the remaining 6 beads, then divide by 8 symmetries.",
     "level1": {
-      "task": "Nine distinct ceremonial badges are placed one per cell on a 3 by 3 square board. The purple and green badges are incompatible and may not occupy cells sharing a side or a corner. Boards related by a rotation or reflection are identified as equivalent. How many boards are possible?",
+      "task": "Nine distinct project teams are assigned one per room in a 3 by 3 office grid. The Violet team and the Green team may not occupy rooms that share a side or a corner. Office assignments related by rotating or reflecting the square floor plan are identified as equivalent. How many assignments are possible?",
       "ground_truth": "20160"
     },
     "level2": {
@@ -118,10 +118,10 @@
   },
   "test-1593": {
     "original_compute_graph": "Tile a fixed 3 by 6 rectangle with L-trominoes. The board decomposes into three independent 3 by 2 stages, each with 2 tilings, giving 2^3.",
-    "level1_compute_graph": "Tile a fixed 3 by 6 rectangle with L-trominoes. The board decomposes into three independent 3 by 2 stages, each with 2 tilings, giving 2^3.",
+    "level1_compute_graph": "Fill a fixed 3 by 6 circuit region with L-shaped tri-cell modules. The region decomposes into three independent 3 by 2 stages, each with 2 fillings, giving 2^3.",
     "level2_compute_graph": "Extend the same forced 3 by 2 stage recurrence to a fixed 3 by 10 rectangle, giving 2^5.",
     "level1": {
-      "task": "A fixed 3 by 6 storage tray is to be exactly covered by six identical L-tromino tiles, each made from three unit squares. Rotating or flipping a tile is allowed, but the tray itself is fixed in place. How many tilings are possible?",
+      "task": "A fixed 3 by 6 circuit region is to be exactly filled by six identical L-shaped modules, each made from three unit cells. Rotating or flipping a module is allowed, but the circuit region itself is fixed in place. How many fillings are possible?",
       "ground_truth": "8"
     },
     "level2": {
@@ -131,10 +131,10 @@
   },
   "test-2072": {
     "original_compute_graph": "For the three given points, the possible parallelograms have adjacent side pairs (5,5), (5,8), and (5,8), so perimeters are 20, 26, and 26; return max - min.",
-    "level1_compute_graph": "For the three survey points, the possible parallelograms have adjacent side pairs (5,5), (5,8), and (5,8), so perimeters are 20, 26, and 26; return max - min.",
+    "level1_compute_graph": "For the three graphics points, the possible parallelograms have adjacent side pairs (5,5), (5,8), and (5,8), so perimeters are 20, 26, and 26; return max - min.",
     "level2_compute_graph": "Use the same three possible perimeters 20, 26, and 26, then sum their squares.",
     "level1": {
-      "task": "Three survey stakes are at (-1,0), (2,4), and (2,-4). They are known to be three vertices of a parallelogram, but it is not known which one is opposite the missing vertex. Across all possible fourth vertices, what is the difference between the greatest and least possible perimeters?",
+      "task": "A graphics program receives three marked points at (-1,0), (2,4), and (2,-4). They are three vertices of a parallelogram, but the program has not been told which marked point is opposite the missing vertex. Across all possible fourth vertices, what is the difference between the greatest and least possible perimeters?",
       "ground_truth": "6"
     },
     "level2": {
@@ -144,10 +144,10 @@
   },
   "test-2397": {
     "original_compute_graph": "Count size-2 multisets of roots closed under T(c) = c^2 - 2; each closed multiset gives one monic quadratic equation.",
-    "level1_compute_graph": "Count size-2 multisets of roots closed under T(c) = c^2 - 2; each closed multiset gives one monic quadratic equation.",
+    "level1_compute_graph": "Count size-2 stored-value multisets closed under T(c) = c^2 - 2; each closed multiset gives one monic quadratic state equation.",
     "level2_compute_graph": "Add the two monic linear equations whose single root is fixed by c -> c^2 - 2 to the six quadratic equations.",
     "level1": {
-      "task": "Let T(c) = c^2 - 2. How many monic quadratic equations have the property that their multiset of roots is closed under T, meaning that applying T to any root gives another root of that equation?",
+      "task": "A two-slot algebraic device stores the two roots of a monic quadratic state equation. The device is stable if applying T(c) = c^2 - 2 to any stored value produces a value already stored in the same two-slot multiset. How many monic quadratic state equations are stable?",
       "ground_truth": "6"
     },
     "level2": {
@@ -157,10 +157,10 @@
   },
   "test-2454": {
     "original_compute_graph": "For a Fibonacci-rule sequence with first terms a_1, a_2, the seventh term is 5a_1 + 8a_2. Minimize a common value N attainable by two nondecreasing nonnegative pairs with different first terms.",
-    "level1_compute_graph": "For a Fibonacci-rule sequence with first terms a_1, a_2, the seventh term is 5a_1 + 8a_2. Minimize a common value N attainable by two nondecreasing nonnegative pairs with different first terms.",
+    "level1_compute_graph": "For a Fibonacci-rule production counter with first readings a_1, a_2, the seventh reading is 5a_1 + 8a_2. Minimize a common seventh reading N attainable by two nondecreasing nonnegative starts with different first readings.",
     "level2_compute_graph": "Move the target to the ninth term, 13a_1 + 21a_2, and repeat the same minimization.",
     "level1": {
-      "task": "Two nondecreasing sequences of nonnegative integers follow the Fibonacci rule after their first two terms: each later term is the sum of the two preceding terms. The two sequences have different first terms but a common seventh term N. What is the smallest possible N?",
+      "task": "Two production counters start with nonnegative integer readings and then update by replacing each later reading with the sum of the two preceding readings. In each counter's history, the readings never decrease. The two counters have different first readings but the same seventh reading N. What is the smallest possible N?",
       "ground_truth": "104"
     },
     "level2": {
@@ -170,10 +170,10 @@
   },
   "test-2504": {
     "original_compute_graph": "Scale variables to transform the expression into (1/20)abc / ((1+a)(a+b)(b+c)(c+81)); AM-GM gives the denominator lower bound 256abc and maximum 1/5120.",
-    "level1_compute_graph": "Scale variables to transform the expression into (1/20)abc / ((1+a)(a+b)(b+c)(c+81)); AM-GM gives the denominator lower bound 256abc and maximum 1/5120.",
+    "level1_compute_graph": "Scale the positive control settings to transform the reliability score into (1/20)abc / ((1+a)(a+b)(b+c)(c+81)); AM-GM gives the denominator lower bound 256abc and maximum 1/5120.",
     "level2_compute_graph": "Use the same AM-GM equality point a=3, b=9, c=27, hence x=3/5, y=12/5, z=6, then compute 1/x + 1/y + 1/z.",
     "level1": {
-      "task": "For positive real numbers x, y, and z, determine the maximum possible value of xyz / ((1 + 5x)(4x + 3y)(5y + 6z)(z + 18)).",
+      "task": "A reliability score for three positive control settings x, y, and z is defined as xyz / ((1 + 5x)(4x + 3y)(5y + 6z)(z + 18)). What is the maximum possible reliability score?",
       "ground_truth": "\\frac{1}{5120}"
     },
     "level2": {
@@ -183,10 +183,10 @@
   },
   "test-2645": {
     "original_compute_graph": "Factor 2000x^6 + 100x^5 + 10x^3 + x - 2 as (20x^2 + x - 2)(100x^4 + 10x^2 + 1); the two real roots come from the quadratic, and their squared difference is 161/400.",
-    "level1_compute_graph": "Factor 2000x^6 + 100x^5 + 10x^3 + x - 2 as (20x^2 + x - 2)(100x^4 + 10x^2 + 1); the two real roots come from the quadratic, and their squared distance is 161/400.",
+    "level1_compute_graph": "Factor the calibration curve 2000x^6 + 100x^5 + 10x^3 + x - 2 as (20x^2 + x - 2)(100x^4 + 10x^2 + 1); the two real zero crossings come from the quadratic, and their squared horizontal distance is 161/400.",
     "level2_compute_graph": "Use the same quadratic factor. If roots are r and s, compute r^2 + s^2 = (r+s)^2 - 2rs.",
     "level1": {
-      "task": "The polynomial 2000x^6 + 100x^5 + 10x^3 + x - 2 has exactly two real zeros. What is the square of the distance between those two real zeros on the number line?",
+      "task": "A calibration curve is modeled by p(x) = 2000x^6 + 100x^5 + 10x^3 + x - 2. The curve has exactly two real zero crossings. What is the square of the horizontal distance between those two crossings?",
       "ground_truth": "\\frac{161}{400}"
     },
     "level2": {
@@ -196,10 +196,10 @@
   },
   "test-3695": {
     "original_compute_graph": "For a regular pentagon and hexagon sharing a side on the same side, subtract the relevant endpoint directions; angle = 360 * (6 - 5) / (5 * 6) = 12 degrees.",
-    "level1_compute_graph": "For two regular polygons sharing a side on the same side, subtract the relevant endpoint directions. With a 113-gon and a 137-gon, angle = 360 * (137 - 113) / (113 * 137) = 8640/15481 degrees.",
+    "level1_compute_graph": "For two robotic regular-path traces sharing a side on the same side, subtract the relevant endpoint directions. With 113 and 137 sides, angle = 360 * (137 - 113) / (113 * 137) = 8640/15481 degrees.",
     "level2_compute_graph": "For two regular polygons on opposite sides, smaller angle = 360/n + 360/m. With a 997-gon and 1009-gon, angle = 722160/1005973 degrees in lowest terms, so p + q = 1728133.",
     "level1": {
-      "task": "A regular 113-gon and a regular 137-gon share the side AD and lie on one side of line AD. At endpoint A, compare the side of the 113-gon leaving A with the side of the 137-gon leaving A. What is the degree measure of the angle between those two sides? Give the answer as a reduced fraction if needed.",
+      "task": "Two drawing robots start with the same segment AD and trace regular closed paths on one side of line AD. One path has 113 equal sides and the other has 137 equal sides. At endpoint A, compare the outgoing side of the 113-sided path with the outgoing side of the 137-sided path. What is the degree measure of the angle between those two outgoing sides? Give the answer as a reduced fraction if needed.",
       "ground_truth": "\\frac{8640}{15481}"
     },
     "level2": {
