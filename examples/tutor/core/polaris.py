@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from areal.reward import get_math_verify_worker
+from math_verify import parse, verify
+from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 
 from .math import (
     is_equiv,
@@ -13,6 +14,11 @@ from .math import (
 )
 from .text import strip_reasoning_for_context
 from .types import JudgeResult
+
+_POLARIS_MATH_VERIFY_TARGETS = (
+    ExprExtractionConfig(try_extract_without_anchor=True),
+    LatexExtractionConfig(),
+)
 
 
 def score_polaris_answer(
@@ -94,8 +100,29 @@ def grade_answer_mathd(model_answer: str, ground_truth: str) -> bool:
 
 
 def grade_answer_sympy(model_answer: str, ground_truth: str) -> bool:
-    worker = get_math_verify_worker()
-    return bool(worker.verify(f"\\boxed{{{model_answer}}}", str(ground_truth)))
+    try:
+        parsed_target = parse(
+            str(ground_truth),
+            _POLARIS_MATH_VERIFY_TARGETS,
+            parsing_timeout=None,
+        )
+        parsed_prediction = parse(
+            f"\\boxed{{{model_answer}}}",
+            _POLARIS_MATH_VERIFY_TARGETS,
+            parsing_timeout=None,
+        )
+        if not parsed_target or not parsed_prediction:
+            return False
+        return bool(
+            verify(
+                parsed_target,
+                parsed_prediction,
+                float_rounding=6,
+                timeout_seconds=None,
+            )
+        )
+    except Exception:
+        return False
 
 
 def _result(

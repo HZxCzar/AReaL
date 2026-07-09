@@ -1,5 +1,5 @@
-experiment_name: tutor-polaris-baseline
-trial_name: qwen8b-polaris-001020-lora-batch128-rebn-nomean-1
+experiment_name: tutor-math-baseline
+trial_name: qwen8b-baseline-overfit-1-generalization-001020-lora-batch128-3-pre
 
 seed: 42
 enable_offload: false
@@ -8,27 +8,23 @@ tokenizer_path: ${actor.path}
 
 workflow: examples.tutor.workflow.TutorAgentWorkflow
 eval_workflow: ${workflow}
-dataset_type: polaris
-answer_scorer: polaris
+dataset_type: math
+answer_scorer: math
 max_turns: 10
 enable_thinking: true
 leak_handling_mode: disabled
 teacher_show_ground_truth: false
+teacher_pre:
+  enabled: true
+  mode: filter_solver
+  attempts: 3
+  max_tokens: 0
 
 student_generalize:
   enabled: true
-  mode: only_success
-  path: ""
+  path: examples/tutor/generalization/version2/math_overfit_8_independent_hard_generalization.json
   level1_reward: 1.0
   level2_reward: 2.0
-
-polaris_processing:
-  enabled: true
-  output_path: examples/tutor/data/polaris_dataset_generalize_seed42_train0p98_gen0p5
-  train_ratio: 0.98
-  generalize_ratio: 0.5
-  reuse_generalize_tasks: true
-  overwrite: false
 
 auxiliary_model:
   mode: api
@@ -50,7 +46,7 @@ auxiliary_model:
       min_p: 0
       chat_template_kwargs:
         enable_thinking: false
-  answer_judge_enabled: false
+  answer_judge_enabled: true
   answer_judge_max_tokens: 256
 
 reward:
@@ -164,7 +160,7 @@ actor:
   behave_imp_weight_cap: 5.0
   reward_norm: null
   adv_norm:
-    mean_level: null
+    mean_level: batch
     std_level: batch
   weight_update_mode: disk
   use_lora: ${rollout.use_lora}
@@ -214,7 +210,7 @@ train_dataset:
   shuffle: false
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/polaris_dataset
+  path: examples/tutor/data/math-generalization/math_dataset_3_generalization_batch128
   type: rl
   max_length: 16384
 
@@ -222,7 +218,7 @@ valid_dataset:
   batch_size: ${train_dataset.batch_size}
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/polaris_dataset
+  path: examples/tutor/data/math-generalization/math_dataset_3_generalization_batch128
   type: rl
 
 saver:
@@ -260,4 +256,4 @@ stats_logger:
     entity: hz-czar-stanford
     project: TAgent
     name: ${trial_name}
-    group: polaris
+    group: generalize-1

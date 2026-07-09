@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from examples.tutor.configs import TutorAuxiliaryModelConfig, TutorConfig
-from examples.tutor.core.polaris import score_polaris_answer
+from examples.tutor.core.polaris import grade_answer_sympy, score_polaris_answer
 from examples.tutor.core.text import strip_reasoning_for_context
 from examples.tutor.core.types import PublicHistoryState, StudentTurnState
 from examples.tutor.data_formats.polaris import (
@@ -64,6 +66,13 @@ def test_polaris_scorer_uses_boxed_mathd_equivalence():
     assert result.correct
     assert result.raw_result["method"] == "polaris_mathd_sympy_rule"
     assert result.raw_result["mathd_correct"]
+
+
+def test_polaris_sympy_fallback_is_thread_safe():
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(grade_answer_sympy, "1/2", "\\frac{1}{2}")
+
+    assert future.result()
 
 
 def test_polaris_scorer_strips_thinking_before_extracting_answer():
