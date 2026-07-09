@@ -136,6 +136,66 @@ class TutorStudentGeneralizeConfig:
 
 
 @dataclass
+class TutorPolarisProcessingConfig:
+    enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "For dataset_type='polaris', derive deterministic train/test "
+                "splits plus per-split generalization pools before training."
+            )
+        },
+    )
+    output_path: str = field(
+        default="",
+        metadata={
+            "help": (
+                "Where to save the derived Polaris dataset. If empty, a path "
+                "next to train_dataset.path is generated from seed and ratios."
+            )
+        },
+    )
+    train_ratio: float = field(
+        default=0.98,
+        metadata={"help": "Fraction of source Polaris rows assigned to train."},
+    )
+    generalize_ratio: float = field(
+        default=0.5,
+        metadata={
+            "help": (
+                "Fraction of each train/test split reserved as the corresponding "
+                "generalization pool."
+            )
+        },
+    )
+    reuse_generalize_tasks: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Allow multiple main samples to share the same generalization "
+                "probe. Recommended when keeping a larger main training set."
+            )
+        },
+    )
+    overwrite: bool = field(
+        default=False,
+        metadata={"help": "Overwrite an existing derived Polaris dataset."},
+    )
+    sidecar_filename: str = field(
+        default="student_generalize.json",
+        metadata={"help": "JSON sidecar filename under the derived dataset path."},
+    )
+
+    def __post_init__(self) -> None:
+        if not 0.0 < float(self.train_ratio) < 1.0:
+            raise ValueError("polaris_processing.train_ratio must be in (0, 1).")
+        if not 0.0 < float(self.generalize_ratio) < 1.0:
+            raise ValueError("polaris_processing.generalize_ratio must be in (0, 1).")
+        if not self.sidecar_filename.strip():
+            raise ValueError("polaris_processing.sidecar_filename must be non-empty.")
+
+
+@dataclass
 class TutorTeacherPreConfig:
     enabled: bool = field(
         default=False,
@@ -338,6 +398,9 @@ class TutorConfig(GRPOConfig):
     student_generalize: TutorStudentGeneralizeConfig = field(
         default_factory=TutorStudentGeneralizeConfig
     )
+    polaris_processing: TutorPolarisProcessingConfig = field(
+        default_factory=TutorPolarisProcessingConfig
+    )
     evaluator: TutorEvaluatorConfig = field(default_factory=TutorEvaluatorConfig)
     reward: TutorRewardConfig = field(default_factory=TutorRewardConfig)
     teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
@@ -392,3 +455,7 @@ class TutorConfig(GRPOConfig):
                     "dataset_type='polaris' uses the Polaris rule judge and is "
                     "incompatible with auxiliary_model.answer_judge_enabled=true."
                 )
+        elif self.polaris_processing.enabled:
+            raise ValueError(
+                "polaris_processing.enabled=true requires dataset_type='polaris'."
+            )

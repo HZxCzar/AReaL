@@ -11,6 +11,10 @@ from core.generalization import (
     load_student_generalize_bank,
     validate_student_generalize_dataset,
 )
+from core.polaris_generalization import (
+    default_polaris_generalization_output_path,
+    prepare_polaris_generalization_dataset,
+)
 
 from areal import PPOTrainer
 from areal.api.cli_args import load_expr_config
@@ -55,6 +59,51 @@ def _validate_student_generalize_datasets(config: TutorConfig, tokenizer: Any) -
     )
 
 
+def _prepare_polaris_generalization_data(config: TutorConfig) -> None:
+    processing = config.polaris_processing
+    if config.dataset_type != "polaris" or not processing.enabled:
+        return
+    if not config.student_generalize.enabled:
+        raise ValueError(
+            "polaris_processing.enabled=true requires student_generalize.enabled=true."
+        )
+    valid_dataset_config = config.valid_dataset
+    if (
+        valid_dataset_config is not None
+        and valid_dataset_config.path != config.train_dataset.path
+    ):
+        raise ValueError(
+            "polaris_processing expects train_dataset.path and valid_dataset.path "
+            "to point at the same source Polaris dataset before processing."
+        )
+
+    output_path = processing.output_path.strip()
+    if not output_path:
+        output_path = str(
+            default_polaris_generalization_output_path(
+                config.train_dataset.path,
+                seed=config.seed,
+                train_ratio=processing.train_ratio,
+                generalize_ratio=processing.generalize_ratio,
+            )
+        )
+
+    result = prepare_polaris_generalization_dataset(
+        source_path=config.train_dataset.path,
+        output_path=output_path,
+        seed=config.seed,
+        train_ratio=processing.train_ratio,
+        generalize_ratio=processing.generalize_ratio,
+        reuse_generalize_tasks=processing.reuse_generalize_tasks,
+        overwrite=processing.overwrite,
+        sidecar_filename=processing.sidecar_filename,
+    )
+    config.train_dataset.path = str(result.dataset_path)
+    if valid_dataset_config is not None:
+        valid_dataset_config.path = str(result.dataset_path)
+    config.student_generalize.path = str(result.sidecar_path)
+
+
 def main(args):
     config_path = pathlib.Path(args[args.index("--config") + 1])
     has_trial_name_override = any(arg.startswith("trial_name=") for arg in args)
@@ -71,6 +120,7 @@ def main(args):
     teacher_pre = config.teacher_pre
     reward = config.reward
     pairwise = reward.pairwise
+    _prepare_polaris_generalization_data(config)
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
     _validate_student_generalize_datasets(config, tokenizer)
 

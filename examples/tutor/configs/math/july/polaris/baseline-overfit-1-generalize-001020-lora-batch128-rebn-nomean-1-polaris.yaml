@@ -16,10 +16,19 @@ leak_handling_mode: disabled
 teacher_show_ground_truth: false
 
 student_generalize:
-  enabled: false
+  enabled: true
+  mode: only_success
   path: ""
   level1_reward: 1.0
   level2_reward: 2.0
+
+polaris_processing:
+  enabled: true
+  output_path: examples/tutor/data/polaris_dataset_generalize_seed42_train0p98_gen0p5
+  train_ratio: 0.98
+  generalize_ratio: 0.5
+  reuse_generalize_tasks: true
+  overwrite: false
 
 auxiliary_model:
   mode: api
