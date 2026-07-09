@@ -225,6 +225,7 @@ evaluator:
   freq_epochs: 1
   freq_steps: null
   freq_secs: null
+  average_rollouts: 3
 
 stats_logger:
   experiment_name: ${experiment_name}

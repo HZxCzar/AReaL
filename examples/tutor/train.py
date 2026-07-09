@@ -16,7 +16,6 @@ from core.polaris_generalization import (
     prepare_polaris_generalization_dataset,
 )
 
-from areal import PPOTrainer
 from areal.api.cli_args import load_expr_config
 from areal.dataset import get_custom_dataset
 from areal.utils.hf_utils import load_hf_tokenizer
@@ -104,7 +103,28 @@ def _prepare_polaris_generalization_data(config: TutorConfig) -> None:
     config.student_generalize.path = str(result.sidecar_path)
 
 
+def _apply_eval_average_rollouts(config: TutorConfig) -> None:
+    if config.eval_gconfig is None:
+        config.eval_gconfig = config.gconfig.new()
+    config.eval_gconfig = config.eval_gconfig.new(
+        n_samples=config.evaluator.average_rollouts
+    )
+
+
+def _build_eval_workflow_kwargs(
+    workflow_kwargs: dict[str, Any], config: TutorConfig
+) -> dict[str, Any]:
+    if config.eval_gconfig is None:
+        raise ValueError("eval_gconfig must be set before building eval workflow.")
+    eval_workflow_kwargs = workflow_kwargs.copy()
+    eval_workflow_kwargs["gconfig"] = config.eval_gconfig.new(n_samples=1)
+    eval_workflow_kwargs["pairwise_reward_enabled"] = False
+    return eval_workflow_kwargs
+
+
 def main(args):
+    from areal import PPOTrainer
+
     config_path = pathlib.Path(args[args.index("--config") + 1])
     has_trial_name_override = any(arg.startswith("trial_name=") for arg in args)
     if not has_trial_name_override:
@@ -115,6 +135,7 @@ def main(args):
         )
         args = [*args, f"trial_name={datetime.now():%Y%m%d_%H%M%S}_{trial_name}"]
     config, _ = load_expr_config(args, TutorConfig)
+    _apply_eval_average_rollouts(config)
     auxiliary_model = config.auxiliary_model
     student_generalize = config.student_generalize
     teacher_pre = config.teacher_pre
@@ -214,9 +235,7 @@ def main(args):
         pairwise_judge_both_incorrect=pairwise.judge_both_incorrect,
     )
 
-    eval_workflow_kwargs = workflow_kwargs.copy()
-    eval_workflow_kwargs["gconfig"] = config.eval_gconfig.new(n_samples=1)
-    eval_workflow_kwargs["pairwise_reward_enabled"] = False
+    eval_workflow_kwargs = _build_eval_workflow_kwargs(workflow_kwargs, config)
 
     with PPOTrainer(
         config,

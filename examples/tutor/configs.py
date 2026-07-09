@@ -254,6 +254,20 @@ class TutorEvaluatorConfig(EvaluatorConfig):
             )
         },
     )
+    average_rollouts: int = field(
+        default=3,
+        metadata={
+            "help": (
+                "Number of independent tutor rollout episodes to run for each "
+                "validation sample. Metrics are averaged over rollout attempts."
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        self.average_rollouts = int(self.average_rollouts)
+        if self.average_rollouts < 1:
+            raise ValueError("evaluator.average_rollouts must be >= 1.")
 
 
 @dataclass
