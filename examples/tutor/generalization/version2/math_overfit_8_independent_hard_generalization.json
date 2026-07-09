@@ -40,11 +40,11 @@
   },
   "train-1705": {
     "original_compute_graph": "Solve the present-value equation P * (1.05)^10 = 500000 and round P to cents.",
-    "level1_compute_graph": "Solve the growth equation P * (1.04)^12 = 800000 and round P to the nearest hundredth.",
+    "level1_compute_graph": "In each pass, added = ending/5, so ending = starting + ending/5 and hence ending = (5/4) * starting. Solve P * (5/4)^6 = 1000000, giving P = 262144.",
     "level2_compute_graph": "Present value P plus scheduled gifts at the ends of years 4, 8, and 11 satisfies P * (1.04)^12 + 18000 * ((1.04)^8 + (1.04)^4 + 1.04) = 700000.",
     "level1": {
-      "task": "A bioreactor culture grows by 4% during each of twelve equal growth periods. No cells are added after the start. How many cells must be present initially for the culture to contain 800,000 cells after the twelfth growth period? Round to the nearest hundredth.",
-      "ground_truth": "499677.64"
+      "task": "A damaged archive is rebuilt through six identical restoration passes. During each pass, the number of files added in that pass is exactly one fifth of the number of files present at the end of that pass. No files are added in any other way. The archive contains 1,000,000 files after the sixth pass. How many files did it contain before the first pass?",
+      "ground_truth": "262144"
     },
     "level2": {
       "task": "A grant office wants an account balance of $700,000 after twelve annual 4% compounding periods. It will make one deposit today. Separate donors will add $18,000 at the end of year 4, $18,000 at the end of year 8, and $18,000 at the end of year 11. What deposit is required today? Round to the nearest cent.",
@@ -92,28 +92,28 @@
   },
   "train-456": {
     "original_compute_graph": "Iterate the piecewise divisibility map from 2; the orbit is 2 -> 5 -> 8 -> 11 -> 14 -> 42 -> 2, so f^a(2) = f(2) first recurs at a = 7.",
-    "level1_compute_graph": "Iterate the piecewise divisibility update from register value 3 using divisors 2 and 5; the orbit is 3 -> 5 -> 10 -> 1 -> 3 -> 5, so the first post-update value first recurs after 5 updates.",
-    "level2_compute_graph": "Use the same period-4 orbit from 3. The indices with f^a(3) = f(3) are a = 1 mod 4; multiply 5, 9, ..., 2029 modulo 1000.",
+    "level1_compute_graph": "Iterate the piecewise divisibility map using divisors 4 and 6, recognizing that 'divisible by both' means divisible by lcm(4,6) = 12. From 1 the orbit is 1 -> 2 -> 3 -> 4 -> 12 -> 1 -> 2, so f^a(1) = f(1) first recurs at a = 6.",
+    "level2_compute_graph": "Use the same period-5 orbit from 1, so f^a(1) = f(1) exactly when a = 1 mod 5. Restrict a to perfect squares at most 2026: a = k^2 has residue 1 mod 5 exactly when k = 1 or 4 mod 5. For 1 <= k <= 45 there are 18 such k; exclude a = 1, leaving 17 exponents.",
     "level1": {
-      "task": "An inspection counter stores a positive integer x. On each tick, it divides x by 10 if x is divisible by both 2 and 5; multiplies x by 2 if x is divisible by 5 but not by 2; multiplies x by 5 if x is divisible by 2 but not by 5; and otherwise adds 2. The counter starts at 3. What is the smallest tick number greater than 1 at which the counter reading equals the reading after the first tick?",
-      "ground_truth": "5"
+      "task": "A register applies the following update to a positive integer x. If x is divisible by both 4 and 6, replace x by x/12. If x is divisible by 6 but not by 4, replace x by 2x. If x is divisible by 4 but not by 6, replace x by 3x. Otherwise replace x by x+1. Starting from 1, let f^a(1) denote the value after a updates. What is the smallest integer a greater than 1 for which f^a(1)=f(1)?",
+      "ground_truth": "6"
     },
     "level2": {
-      "task": "A machine transforms a positive integer x as follows: divide x by 10 if x is divisible by both 2 and 5; multiply x by 2 if x is divisible by 5 but not by 2; multiply x by 5 if x is divisible by 2 but not by 5; otherwise add 2. Starting from 3, let f^a mean applying the machine a times. Take all integers a with 1 < a <= 2030 for which f^a(3) equals the first output f(3). What is the remainder when the product of all those integers a is divided by 1000?",
-      "ground_truth": "625"
+      "task": "A register updates a positive integer x by dividing by 12 when x is divisible by both 4 and 6, multiplying by 2 when x is divisible by 6 but not 4, multiplying by 3 when x is divisible by 4 but not 6, and adding 1 otherwise. Starting from 1, let f^a(1) be the value after a updates. How many perfect-square integers a satisfy 1<a<=2026 and f^a(1)=f(1)?",
+      "ground_truth": "17"
     }
   },
   "test-1527": {
     "original_compute_graph": "Count placements of 9 distinct beads on a 3 by 3 grid. Exclude purple-green king-adjacent placements using the 20 adjacent unordered cell pairs, then divide by 8 dihedral symmetries.",
-    "level1_compute_graph": "Count placements of 16 distinct teams on a 4 by 4 room grid. Exclude violet-green king-adjacent room assignments using the 42 adjacent unordered cell pairs, then divide by 8 dihedral symmetries.",
-    "level2_compute_graph": "Fix a third badge at the center of a 5 by 5 board, count ordered nonadjacent purple/green placements among the 24 non-center cells, permute the remaining 22 badges, then divide by 8 symmetries.",
+    "level1_compute_graph": "On a 4 by 4 toroidal grid, every cell has 8 king-neighbors, so there are 16 * 8 / 2 = 64 forbidden unordered cell pairs. Count 16 * 15 - 2 * 64 = 112 ordered nonadjacent placements for the two distinguished teams, permute the other 14 teams, and divide by 8 free dihedral symmetries: 112 * 14! / 8 = 1220496076800.",
+    "level2_compute_graph": "On a 5 by 5 toroidal grid there are 25 * 8 / 2 = 100 king-adjacent unordered pairs. Fix a third badge at the marked origin; deleting that cell and its 8 incident pairs leaves 92 forbidden pairs among the other 24 cells. Thus there are 2 * (C(24,2) - 92) = 368 ordered nonadjacent purple/green placements. Permute the other 22 badges and divide by the 8 origin-fixing dihedral symmetries: 368 * 22! / 8 = 51704033477769953280000.",
     "level1": {
-      "task": "Sixteen distinct project teams are assigned one per room in a 4 by 4 office grid. The Violet team and the Green team may not occupy rooms that share a side or a corner. Office assignments related by rotating or reflecting the square floor plan are identified as equivalent. How many assignments are possible?",
-      "ground_truth": "1699976678400"
+      "task": "Sixteen distinct processes are assigned one per node of a 4 by 4 cyclic processor array. Rows and columns are indexed modulo 4: the left and right edges wrap together, and the top and bottom edges wrap together. Two different nodes are neighbors when their cyclic row distance and cyclic column distance are both at most 1. The Violet and Green processes may not occupy neighboring nodes. Assignments related by a rotation or reflection of the square array are identified. How many assignments are possible?",
+      "ground_truth": "1220496076800"
     },
     "level2": {
-      "task": "Twenty-five distinct ceremonial badges are placed one per cell on a 5 by 5 square board. Boards related by a rotation or reflection are identified as equivalent. The blue badge must occupy the center cell. The purple and green badges are incompatible and may not occupy cells sharing a side or a corner. How many boards are possible?",
-      "ground_truth": "59572038572213207040000"
+      "task": "Twenty-five distinct routing tokens are placed one per node of a 5 by 5 cyclic square array whose row and column indices are taken modulo 5. Two different nodes are neighbors when their cyclic row distance and cyclic column distance are both at most 1. A blue token is fixed at the marked node (0,0). The purple and green tokens may not occupy neighboring nodes. Arrangements related by a rotation or reflection about the marked node are identified. How many arrangements are possible?",
+      "ground_truth": "51704033477769953280000"
     }
   },
   "test-1593": {
@@ -196,15 +196,15 @@
   },
   "test-3695": {
     "original_compute_graph": "For a regular pentagon and hexagon sharing a side on the same side, subtract the relevant endpoint directions; angle = 360 * (6 - 5) / (5 * 6) = 12 degrees.",
-    "level1_compute_graph": "For two robotic regular-path traces sharing a side on the same side, subtract the relevant endpoint directions. With 113 and 137 sides, angle = 360 * (137 - 113) / (113 * 137) = 8640/15481 degrees.",
-    "level2_compute_graph": "For two regular polygons on opposite sides, smaller angle = 360/n + 360/m. With a 1547-gon and a 1729-gon, angle = 12960/29393 degrees in lowest terms after reducing by the shared factor 91, so p + q = 42353.",
+    "level1_compute_graph": "Translate modular labels into physical pointer motion. On the 8-mark clockwise dial, 0 -> 1 is 360/8 degrees clockwise. On the 18-mark counterclockwise-labeled dial, 0 -> 17 is 360/18 degrees clockwise. Subtract the two same-direction rotations: 360/8 - 360/18 = 25 degrees.",
+    "level2_compute_graph": "Recover side counts from diagonal counts: 27 gives n = 9 and 170 gives n = 20. For polygons on opposite sides of their shared side, add endpoint deviations: 360/9 + 360/20 = 58 degrees.",
     "level1": {
-      "task": "Two drawing robots start with the same segment AD and trace regular closed paths on one side of line AD. One path has 113 equal sides and the other has 137 equal sides. At endpoint A, compare the outgoing side of the 113-sided path with the outgoing side of the 137-sided path. What is the degree measure of the angle between those two outgoing sides? Give the answer as a reduced fraction if needed.",
-      "ground_truth": "\\frac{8640}{15481}"
+      "task": "Two circular instrument dials are superimposed with their mark-0 rays aligned. Dial A has 8 equally spaced marks labeled 0,1,...,7 in clockwise order, and its pointer moves from mark 0 to mark 1. Dial B has 18 equally spaced marks labeled 0,1,...,17 in counterclockwise order, and its pointer moves from mark 0 to mark 17. What is the smaller angle, in degrees, between the two final pointer rays?",
+      "ground_truth": "25"
     },
     "level2": {
-      "task": "A regular 1547-gon and a regular 1729-gon share the side AD, but the two polygons lie on opposite sides of line AD. At endpoint A, the smaller angle between the side of the 1547-gon leaving A and the side of the 1729-gon leaving A has degree measure p/q in lowest terms. Find p + q.",
-      "ground_truth": "42353"
+      "task": "Two regular convex polygons share exactly the side AD, with their interiors on opposite sides of line AD. One polygon has 27 diagonals in total, and the other has 170 diagonals in total. At A, each polygon has one side other than AD. What is the degree measure of the smaller angle between those two nonshared sides?",
+      "ground_truth": "58"
     }
   }
 }
