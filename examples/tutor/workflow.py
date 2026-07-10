@@ -4,10 +4,11 @@ import asyncio
 import json
 import logging as py_logging
 import os
+import random
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +122,10 @@ from examples.common.openai_utils import (
     make_teacher_client,
 )
 from examples.common.parsing import parse_json_dict
+from examples.tutor.configs import (
+    TUTOR_EVAL_STUDENT_FIELD,
+    TutorStudentModelConfig,
+)
 from examples.tutor.core.callers import (
     ApiAuxiliaryCaller,
     AReaLEngineActorCaller,
@@ -276,6 +281,23 @@ class StudentGeneralizationAnchor:
     reward_turn_idx: int | None
 
 
+@dataclass(slots=True)
+class StudentModelRuntime:
+    name: str
+    model: str
+    weight: float
+    caller: ApiAuxiliaryCaller
+    confidence_caller: ApiAuxiliaryCaller | None = None
+
+
+@dataclass(slots=True)
+class SelectedStudent:
+    name: str
+    model: str
+    caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller
+    confidence_caller: ApiAuxiliaryCaller | None = None
+
+
 class TutorAgentWorkflow(RolloutWorkflow):
     def __init__(
         self,
@@ -302,6 +324,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         aux_top_p: float | None = None,
         max_concurrent_aux_calls: int = 8,
         aux_request_params: dict[str, Any] | None = None,
+        student_models: list[dict[str, Any]] | None = None,
         success_reward: float = 1.0,
         leak_penalty: float | None = -1.0,
         leak_penalty_mode: str = "binary",
@@ -393,6 +416,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.aux_top_p = aux_top_p
         self.aux_request_params = dict(aux_request_params or {})
         self.max_concurrent_aux_calls = int(max_concurrent_aux_calls)
+        self._student_model_configs = self._normalize_student_model_configs(
+            student_models
+        )
         self._self_aux_semaphore = asyncio.Semaphore(
             max(1, self.max_concurrent_aux_calls)
         )
@@ -521,10 +547,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     "student generalization level rewards must be positive when "
                     "confidence reward is enabled."
                 )
-            if self.aux_mode != "api":
+            if self.aux_mode != "api" and not self._student_model_configs:
                 raise ValueError(
                     "student generalization confidence requires "
-                    "auxiliary_model.mode='api'."
+                    "auxiliary_model.mode='api' or a non-empty student_models API pool."
                 )
         self.student_generalize_bank = (
             self._load_student_generalize_bank(self.student_generalize_path)
@@ -573,8 +599,138 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     api_caller,
                     request_overrides={"logprobs": True},
                 )
+        self.student_model_runtimes = self._build_student_model_runtimes(
+            tokenizer_path=tokenizer_path,
+            context_length=model_context_length,
+            context_window_margin=context_window_margin,
+        )
         self.tokenizer_path = tokenizer_path
         self.model_context_length = model_context_length
+
+    @staticmethod
+    def _normalize_student_model_configs(
+        student_models: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        seen_names: set[str] = set()
+        for raw_config in student_models or []:
+            if isinstance(raw_config, TutorStudentModelConfig):
+                config = raw_config
+            elif isinstance(raw_config, dict):
+                config = TutorStudentModelConfig(**raw_config)
+            else:
+                raise TypeError(
+                    "student_models entries must be dictionaries or "
+                    "TutorStudentModelConfig instances."
+                )
+            if config.name in seen_names:
+                raise ValueError("student_models names must be unique.")
+            seen_names.add(config.name)
+            normalized.append(asdict(config))
+
+        if normalized and not any(config["weight"] > 0.0 for config in normalized):
+            raise ValueError(
+                "student_models must contain at least one student with positive weight."
+            )
+        return normalized
+
+    def _build_student_model_runtimes(
+        self,
+        *,
+        tokenizer_path: str | None,
+        context_length: int | None,
+        context_window_margin: int,
+    ) -> dict[str, StudentModelRuntime]:
+        runtimes: dict[str, StudentModelRuntime] = {}
+        for student in self._student_model_configs:
+            config = AuxModelConfig(
+                base_url=student["base_url"],
+                model=student["model"],
+                api_key=student["api_key"],
+                timeout=student["timeout"],
+                max_tokens=student["max_tokens"],
+                temperature=student["temperature"],
+                top_p=student["top_p"],
+                max_concurrency=student["max_concurrent_calls"],
+                request_params=student["request_params"],
+                tokenizer_path=tokenizer_path,
+                context_length=context_length,
+                context_window_margin=context_window_margin,
+            )
+            api_caller = AsyncLLMCaller(config)
+            runtimes[student["name"]] = StudentModelRuntime(
+                name=student["name"],
+                model=student["model"],
+                weight=student["weight"],
+                caller=ApiAuxiliaryCaller(api_caller),
+                confidence_caller=(
+                    ApiAuxiliaryCaller(
+                        api_caller,
+                        request_overrides={"logprobs": True},
+                    )
+                    if self.student_generalize_confidence_enabled
+                    else None
+                ),
+            )
+        return runtimes
+
+    def _select_student(
+        self,
+        data: dict[str, Any],
+        *,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller,
+    ) -> SelectedStudent:
+        try:
+            is_eval = bool(getattr(workflow_context.get(), "is_eval", False))
+        except Exception:
+            is_eval = False
+        forced_name = (
+            str(data.get(TUTOR_EVAL_STUDENT_FIELD) or "").strip() if is_eval else ""
+        )
+
+        student_model_runtimes = getattr(self, "student_model_runtimes", {})
+        if student_model_runtimes:
+            if forced_name:
+                runtime = student_model_runtimes.get(forced_name)
+                if runtime is None:
+                    raise ValueError(
+                        f"Unknown forced evaluation student {forced_name!r}; expected "
+                        f"one of {sorted(student_model_runtimes)}."
+                    )
+            else:
+                runtimes = list(student_model_runtimes.values())
+                runtime = random.choices(
+                    runtimes,
+                    weights=[item.weight for item in runtimes],
+                    k=1,
+                )[0]
+            return SelectedStudent(
+                name=runtime.name,
+                model=runtime.model,
+                caller=runtime.caller,
+                confidence_caller=runtime.confidence_caller,
+            )
+
+        if forced_name:
+            raise ValueError(
+                "A forced evaluation student requires non-empty student_models."
+            )
+        legacy_name = (
+            getattr(self, "aux_model", "legacy-student")
+            if getattr(self, "aux_mode", "api") == "api"
+            else "self"
+        )
+        return SelectedStudent(
+            name=legacy_name,
+            model=legacy_name,
+            caller=aux_caller,
+            confidence_caller=getattr(self, "confidence_aux_caller", None),
+        )
+
+    @staticmethod
+    def _student_metric_name(name: str) -> str:
+        normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_.-")
+        return normalized or "unknown"
 
     def _resolve_leak_check_system_prompt(self, prompt: str) -> str:
         prompt = (prompt or "").strip()
@@ -694,8 +850,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             external_client=external_client,
         )
         aux_caller = self._make_auxiliary_caller(chat_caller=aux_chat_caller)
+        selected_student = self._select_student(data, aux_caller=aux_caller)
+        student_caller = selected_student.caller
         student_generalize_caller = self._make_student_generalization_caller(
-            aux_caller=aux_caller,
+            aux_caller=student_caller,
+            confidence_caller=selected_student.confidence_caller,
         )
         answer_judge_caller = self._make_answer_judge_caller(
             chat_caller=aux_chat_caller
@@ -723,6 +882,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     pre_success=False,
                     leak_count=0,
                     teacher_pre_solve_result=teacher_pre_solve_result,
+                    student_name=selected_student.name,
                 )
                 self._maybe_dump_debug_trace(
                     task=task,
@@ -735,6 +895,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     pre_success=False,
                     leak_count=0,
                     teacher_pre_solve_result=teacher_pre_solve_result,
+                    student_name=selected_student.name,
+                    student_model=selected_student.model,
                 )
                 return None
 
@@ -745,7 +907,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 previous_student_output="",
                 latest_tutor_visible_output=INITIAL_TEACHER_FEEDBACK_PLACEHOLDER,
             ),
-            aux_caller=aux_caller,
+            aux_caller=student_caller,
         )
         initial_student_answer = _strip_reasoning_for_context(
             initial_student_answer_raw
@@ -774,6 +936,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 leak_count=0,
                 latest_student_answer=initial_student_answer,
                 teacher_pre_solve_result=teacher_pre_solve_result,
+                student_name=selected_student.name,
+                student_model=selected_student.model,
             )
             self._log_rollout_stats(
                 total_reward=0.0,
@@ -782,6 +946,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 pre_success=episode_artifact.pre_success,
                 leak_count=episode_artifact.leak_count,
                 teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
+                student_name=selected_student.name,
+                student_call_failed=bool(initial_student_error),
             )
             self._maybe_dump_debug_trace(
                 task=episode_artifact.task,
@@ -794,6 +960,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 pre_success=episode_artifact.pre_success,
                 leak_count=episode_artifact.leak_count,
                 teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
+                student_name=selected_student.name,
+                student_model=selected_student.model,
             )
             return None
 
@@ -871,7 +1039,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             student_prompt = self._build_student_prompt_from_state(student_state)
             student_answer_raw, student_error = await self._run_student(
                 student_state,
-                aux_caller=aux_caller,
+                aux_caller=student_caller,
             )
             student_answer = _strip_reasoning_for_context(student_answer_raw)
             judge_result = await self._score_answer_async(
@@ -968,6 +1136,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             leak_count=leak_count,
             latest_student_answer=previous_student_output,
             teacher_pre_solve_result=teacher_pre_solve_result,
+            student_name=selected_student.name,
+            student_model=selected_student.model,
         )
         student_generalization_results = await self._run_student_generalization(
             data,
@@ -1003,6 +1173,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 episode_lora_version=episode_lora_version,
                 chat_caller=actor_chat_caller,
                 aux_caller=aux_caller,
+                student_caller=student_caller,
                 answer_judge_caller=answer_judge_caller,
             )
             pairwise_rewards = {
@@ -1050,6 +1221,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             leak_count=episode_artifact.leak_count,
             student_generalization_results=student_generalization_results,
             teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
+            student_name=selected_student.name,
+            student_call_failed=bool(
+                initial_student_error
+                or any(artifact.student_error for artifact in turn_artifacts)
+            ),
         )
         self._maybe_dump_debug_trace(
             task=episode_artifact.task,
@@ -1063,6 +1239,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             leak_count=episode_artifact.leak_count,
             student_generalization_results=student_generalization_results,
             teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
+            student_name=selected_student.name,
+            student_model=selected_student.model,
         )
         if not results:
             return None
@@ -1146,10 +1324,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self,
         *,
         aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller,
+        confidence_caller: ApiAuxiliaryCaller | None = None,
     ) -> ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller:
         if not getattr(self, "student_generalize_confidence_enabled", False):
             return aux_caller
-        confidence_caller = getattr(self, "confidence_aux_caller", None)
+        confidence_caller = confidence_caller or getattr(
+            self, "confidence_aux_caller", None
+        )
         if confidence_caller is None:
             raise RuntimeError(
                 "student generalization confidence requires an auxiliary API "
@@ -2222,6 +2403,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         chat_caller: AReaLEngineChatCaller | None,
         aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller,
         answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
+        student_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
     ):
         if episode_lora_version is None or chat_caller is None:
             return []
@@ -2242,7 +2424,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             reward_scale=self.pairwise_reward_scale,
             reward_caller=aux_caller,
             generate_reference_tutor=generate_reference_tutor,
-            run_student=lambda state: self._run_student(state, aux_caller=aux_caller),
+            run_student=lambda state: self._run_student(
+                state, aux_caller=student_caller or aux_caller
+            ),
             run_leak_check=lambda task,
             ground_truth,
             teacher_action: self._run_optional_leak_check(
@@ -2313,6 +2497,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         leak_count: int,
         student_generalization_results: list[StudentGeneralizationResult] | None = None,
         teacher_pre_solve_result: TeacherPreSolveResult | None = None,
+        student_name: str = "",
+        student_call_failed: bool = False,
     ) -> None:
         success_round = next(
             (
@@ -2348,6 +2534,25 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         if success_round > 0:
             metrics["solve_turn"] = int(success_round)
+
+        configured_student_names = list(
+            getattr(self, "student_model_runtimes", {}).keys()
+        )
+        if not configured_student_names and student_name:
+            configured_student_names = [student_name]
+        for configured_name in configured_student_names:
+            metric_name = self._student_metric_name(configured_name)
+            metrics[f"student/{metric_name}/selected"] = float(
+                configured_name == student_name
+            )
+        if student_name:
+            metric_name = self._student_metric_name(student_name)
+            prefix = f"student/{metric_name}"
+            metrics[f"{prefix}/solved"] = float(success_round > 0)
+            metrics[f"{prefix}/pre_solved"] = float(pre_success)
+            metrics[f"{prefix}/reward"] = float(total_reward)
+            metrics[f"{prefix}/turns"] = float(len(traces))
+            metrics[f"{prefix}/call_failed"] = float(student_call_failed)
 
         metrics.update(self._reward_component_metrics(traces))
         self._log_generalize_stats(
@@ -2429,6 +2634,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         leak_count: int,
         student_generalization_results: list[StudentGeneralizationResult] | None = None,
         teacher_pre_solve_result: TeacherPreSolveResult | None = None,
+        student_name: str = "",
+        student_model: str = "",
     ) -> None:
         if not self.debug_trace_dir:
             return
@@ -2450,6 +2657,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "num_turns": len(traces),
                 "pre_success": bool(pre_success),
                 "leak_count": int(leak_count),
+                "student": {
+                    "name": student_name,
+                    "model": student_model,
+                },
                 "task": task,
                 "ground_truth": ground_truth,
                 "initial_student_answer": initial_student_answer,

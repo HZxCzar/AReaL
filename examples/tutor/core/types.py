@@ -114,6 +114,8 @@ class EpisodeArtifact:
     leak_count: int
     latest_student_answer: str
     teacher_pre_solve_result: TeacherPreSolveResult | None = None
+    student_name: str = ""
+    student_model: str = ""
 
 
 @dataclass(slots=True)

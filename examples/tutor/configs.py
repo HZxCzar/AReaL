@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -15,6 +16,9 @@ _LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate", "feedback"}
 _DATASET_TYPES = {"aime", "math", "polaris"}
 _ANSWER_SCORERS = {"auto", "aime", "math", "polaris"}
 _STUDENT_GENERALIZE_MODES = {"only_success", "always"}
+_STUDENT_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+TUTOR_EVAL_STUDENT_FIELD = "__tutor_student_name"
 
 
 @dataclass
@@ -70,6 +74,88 @@ class TutorAuxiliaryModelConfig:
         default=256,
         metadata={"help": "Maximum completion tokens for answer judge JSON output."},
     )
+
+
+@dataclass
+class TutorStudentModelConfig:
+    name: str = field(
+        default=MISSING,
+        metadata={
+            "help": (
+                "Unique student identifier used for rollout selection, traces, and "
+                "per-student metrics. Use letters, digits, dots, underscores, or dashes."
+            )
+        },
+    )
+    base_url: str = field(
+        default=MISSING,
+        metadata={"help": "OpenAI-compatible API base URL for this student."},
+    )
+    model: str = field(
+        default=MISSING,
+        metadata={"help": "Model name sent to chat.completions.create."},
+    )
+    weight: float = field(
+        default=1.0,
+        metadata={
+            "help": (
+                "Non-negative training rollout sampling weight. Weights are "
+                "normalized across all configured students."
+            )
+        },
+    )
+    api_key: str = field(default="EMPTY")
+    timeout: int = field(default=120)
+    max_tokens: int = field(default=2048)
+    temperature: float = field(default=0.7)
+    top_p: float | None = field(default=None)
+    max_concurrent_calls: int = field(default=8)
+    request_params: dict[str, Any] = field(
+        default_factory=dict,
+        metadata={
+            "help": (
+                "Additional OpenAI chat.completions.create keyword arguments. "
+                "Use extra_body for backend-specific parameters."
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        missing = [
+            field_name
+            for field_name in ("name", "base_url", "model")
+            if getattr(self, field_name) is None
+            or getattr(self, field_name) is MISSING
+            or str(getattr(self, field_name)).strip() in {"", "???"}
+        ]
+        if missing:
+            raise ValueError(
+                "student_models entries require non-empty values for: "
+                f"{', '.join(missing)}."
+            )
+
+        self.name = str(self.name).strip()
+        self.base_url = str(self.base_url).strip()
+        self.model = str(self.model).strip()
+        if not _STUDENT_MODEL_NAME_PATTERN.fullmatch(self.name):
+            raise ValueError(
+                "student_models.name must start with a letter or digit and contain "
+                "only letters, digits, dots, underscores, or dashes."
+            )
+        if not self.base_url or not self.model:
+            raise ValueError("student_models base_url and model must be non-empty.")
+        self.weight = float(self.weight)
+        if self.weight < 0.0:
+            raise ValueError("student_models.weight must be non-negative.")
+        self.timeout = int(self.timeout)
+        if self.timeout <= 0:
+            raise ValueError("student_models.timeout must be positive.")
+        self.max_tokens = int(self.max_tokens)
+        if self.max_tokens <= 0:
+            raise ValueError("student_models.max_tokens must be positive.")
+        self.max_concurrent_calls = int(self.max_concurrent_calls)
+        if self.max_concurrent_calls <= 0:
+            raise ValueError("student_models.max_concurrent_calls must be positive.")
 
 
 @dataclass
@@ -453,6 +539,15 @@ class TutorConfig(GRPOConfig):
     auxiliary_model: TutorAuxiliaryModelConfig = field(
         default_factory=TutorAuxiliaryModelConfig
     )
+    student_models: list[TutorStudentModelConfig] = field(
+        default_factory=list,
+        metadata={
+            "help": (
+                "Optional pool of API students sampled once per training episode. "
+                "An empty list preserves the legacy auxiliary_model student behavior."
+            )
+        },
+    )
     student_generalize: TutorStudentGeneralizeConfig = field(
         default_factory=TutorStudentGeneralizeConfig
     )
@@ -479,6 +574,15 @@ class TutorConfig(GRPOConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        student_names = [student.name for student in self.student_models]
+        if len(student_names) != len(set(student_names)):
+            raise ValueError("student_models names must be unique.")
+        if self.student_models and not any(
+            student.weight > 0.0 for student in self.student_models
+        ):
+            raise ValueError(
+                "student_models must contain at least one student with positive weight."
+            )
         if self.dataset_type is MISSING or str(self.dataset_type) == "???":
             raise ValueError("dataset_type must be one of: 'aime', 'math', 'polaris'.")
         self.dataset_type = str(self.dataset_type).strip().lower()

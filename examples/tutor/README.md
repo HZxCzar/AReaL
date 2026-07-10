@@ -1,9 +1,9 @@
 # Tutor AgentWorkflow
 
 This example ports the old `agentenv-tutor` logic into an AReaL-native `AgentWorkflow`.
-Only the teacher model is trained. The student and leak checker are external
-auxiliary calls; public history is maintained locally as visible student/tutor
-transcript text.
+Only the teacher model is trained. Students can be sampled from an external API pool,
+while leak and answer judges remain fixed auxiliary calls; public history is maintained
+locally as visible student/tutor transcript text.
 
 ## Dataset
 
@@ -61,8 +61,8 @@ python3 examples/tutor/train.py \
 `answer_scorer=auto` follows `dataset_type`; explicit scorers must match the dataset
 type. `dataset_type=polaris` uses the Polaris boxed-answer rule judge and is
 incompatible with leak checks, so set `leak_handling_mode=disabled` for Polaris runs.
-Pass the same `dataset_type` and dataset path overrides to
-`filter_task.py`, `manual_tutor.py`, or `demo_run.py` when using MATH rows.
+Pass the same `dataset_type` and dataset path overrides to `filter_task.py`,
+`manual_tutor.py`, or `demo_run.py` when using MATH rows.
 
 ## Filter Tasks
 
@@ -70,8 +70,8 @@ Before training, regenerate the train/test task filter with the configured LLM a
 judge fallback. The filter first drops rows that the external student can solve without
 tutor feedback, then keeps only rows that the external teacher can solve independently.
 For the full old 8B self-filter and current 4B+8B runbooks, see
-[`FILTER_RUNBOOK.md`](FILTER_RUNBOOK.md).
-Use explicit student and teacher endpoints when the two models differ:
+[`FILTER_RUNBOOK.md`](FILTER_RUNBOOK.md). Use explicit student and teacher endpoints
+when the two models differ:
 
 ```bash
 python3 examples/tutor/scripts/filter_task.py \
@@ -131,13 +131,62 @@ python3 examples/tutor/train.py \
   scheduler.type=local
 ```
 
-Update `aux_base_url` and `aux_model` in the config to point at the external student
-and leak-check service.
+`auxiliary_model` is the fixed leak/answer/pairwise judge. To train against a mix of API
+students, configure any number of entries under `student_models`:
 
-Set auxiliary API call parameters directly under `auxiliary_model` in YAML. Common
-parameters use dedicated fields such as `max_tokens`, `temperature`, and `top_p`; put
-additional OpenAI request kwargs under `request_params`, including backend-specific
-`extra_body` values.
+```yaml
+auxiliary_model:
+  mode: api
+  base_url: https://your-openai-compatible-endpoint.example/v1
+  model: qwen3-8b
+  api_key: ${oc.env:INF_API_KEY}
+
+student_models:
+  - name: qwen3-4b
+    weight: 0.5
+    base_url: ${auxiliary_model.base_url}
+    model: qwen3-4b
+    api_key: ${auxiliary_model.api_key}
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    request_params:
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+  - name: qwen3-8b
+    weight: 0.5
+    base_url: ${auxiliary_model.base_url}
+    model: qwen3-8b
+    api_key: ${auxiliary_model.api_key}
+    max_tokens: 1024
+    temperature: 0.0
+    top_p: 1.0
+    request_params:
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+```
+
+Training samples one student per episode according to `weight` and keeps that student
+for the initial answer, all tutor turns, generalization probes, and pairwise reference
+replay. Evaluation ignores the weights and runs the complete validation set for every
+configured student; `evaluator.average_rollouts` is applied independently to each
+student. An empty `student_models` list preserves the legacy behavior where
+`auxiliary_model` is also the student.
+
+Per-student metrics are emitted automatically under `rollout/student/<name>/...` and
+`eval-rollout/student/<name>/...`, including `selected`, `solved`, `pre_solved`,
+`reward`, `turns`, and `call_failed`. Existing overall rollout metrics remain unchanged.
+The complete two-student example is
+`configs/math/july/baseline-overfit-1-generalize-001020-lora-batch128-rebn-nomean-5-mixed-students.yaml`.
+
+Set common API parameters through their dedicated fields and place backend-specific
+OpenAI request values under `request_params.extra_body`.
+
+```bash
+bash examples/tutor/run_official.sh examples/tutor/configs/math/july/baseline-overfit-1-generalize-001020-lora-batch128-rebn-nomean-5-mixed-students.yaml
+```
 
 ```bash
 cd /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL

@@ -2,11 +2,12 @@ import pathlib
 import random
 import sys
 from copy import deepcopy
+from dataclasses import asdict
 from datetime import datetime
 from typing import Any
 
 sys.path.append(str(pathlib.Path(__file__).parent))
-from configs import TutorConfig
+from configs import TUTOR_EVAL_STUDENT_FIELD, TutorConfig
 from core.generalization import (
     load_student_generalize_bank,
     validate_student_generalize_dataset,
@@ -111,6 +112,24 @@ def _apply_eval_average_rollouts(config: TutorConfig) -> None:
     )
 
 
+def _expand_eval_dataset_for_students(dataset: Any, student_names: list[str]) -> Any:
+    if not student_names:
+        return dataset
+    if TUTOR_EVAL_STUDENT_FIELD in dataset.column_names:
+        raise ValueError(
+            f"Validation dataset already contains reserved column "
+            f"{TUTOR_EVAL_STUDENT_FIELD!r}."
+        )
+
+    from datasets import concatenate_datasets
+
+    expanded = [
+        dataset.add_column(TUTOR_EVAL_STUDENT_FIELD, [name] * len(dataset))
+        for name in student_names
+    ]
+    return concatenate_datasets(expanded)
+
+
 def _build_eval_workflow_kwargs(
     workflow_kwargs: dict[str, Any], config: TutorConfig
 ) -> dict[str, Any]:
@@ -156,7 +175,9 @@ def main(args):
         eval_max_samples = int(eval_max_samples)
         if eval_max_samples <= 0:
             eval_max_samples = None
-    if eval_max_samples is not None and valid_dataset_config is not None:
+    if (
+        eval_max_samples is not None or config.student_models
+    ) and valid_dataset_config is not None:
         valid_dataset_config = deepcopy(valid_dataset_config)
         valid_dataset_config.scheduling_spec = None
 
@@ -169,6 +190,10 @@ def main(args):
         rng = random.Random(config.seed)
         eval_indices = sorted(rng.sample(range(len(valid_dataset)), k=eval_max_samples))
         valid_dataset = valid_dataset.select(eval_indices)
+    valid_dataset = _expand_eval_dataset_for_students(
+        valid_dataset,
+        [student.name for student in config.student_models],
+    )
 
     workflow_kwargs = dict(
         gconfig=config.gconfig,
@@ -189,6 +214,7 @@ def main(args):
         aux_top_p=auxiliary_model.top_p,
         max_concurrent_aux_calls=auxiliary_model.max_concurrent_calls,
         aux_request_params=auxiliary_model.request_params,
+        student_models=[asdict(student) for student in config.student_models],
         success_reward=reward.success,
         leak_penalty=reward.leak_penalty,
         leak_penalty_mode=reward.leak_penalty_mode,
