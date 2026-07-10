@@ -8,6 +8,12 @@ LeakHandlingMode = Literal["disabled", "reward_only", "terminate", "feedback"]
 StudentGeneralizeMode = Literal["only_success", "always"]
 
 
+@dataclass(frozen=True, slots=True)
+class PromptPoolSelection:
+    index: int
+    suffix: str
+
+
 @dataclass(slots=True)
 class JudgeResult:
     raw_output: str
@@ -72,6 +78,7 @@ class TutorTurnState:
     turn_idx: int
     max_turns: int
     teacher_pre_solve_result: TeacherPreSolveResult | None = None
+    teacher_prompt_selection: PromptPoolSelection | None = None
 
 
 @dataclass(slots=True)
@@ -80,6 +87,7 @@ class StudentTurnState:
     public_history: PublicHistoryState
     previous_student_output: str
     latest_tutor_visible_output: str
+    student_prompt_selection: PromptPoolSelection | None = None
 
 
 @dataclass(slots=True)
@@ -116,6 +124,8 @@ class EpisodeArtifact:
     teacher_pre_solve_result: TeacherPreSolveResult | None = None
     student_name: str = ""
     student_model: str = ""
+    teacher_prompt_selection: PromptPoolSelection | None = None
+    student_prompt_selection: PromptPoolSelection | None = None
 
 
 @dataclass(slots=True)

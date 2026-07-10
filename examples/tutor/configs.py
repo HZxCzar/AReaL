@@ -77,6 +77,28 @@ class TutorAuxiliaryModelConfig:
 
 
 @dataclass
+class TutorPromptPoolConfig:
+    teacher_path: str = field(
+        default="",
+        metadata={
+            "help": (
+                "Optional JSON string-array of teacher strategy suffixes sampled "
+                "once per training episode."
+            )
+        },
+    )
+    student_path: str = field(
+        default="",
+        metadata={
+            "help": (
+                "Optional JSON string-array of student behavior suffixes sampled "
+                "once per training episode."
+            )
+        },
+    )
+
+
+@dataclass
 class TutorStudentModelConfig:
     name: str = field(
         default=MISSING,
@@ -535,6 +557,7 @@ class TutorConfig(GRPOConfig):
         default=False,
         metadata={"help": "Whether teacher prompts include the ground-truth answer."},
     )
+    prompt_pool: TutorPromptPoolConfig = field(default_factory=TutorPromptPoolConfig)
     teacher_pre: TutorTeacherPreConfig = field(default_factory=TutorTeacherPreConfig)
     auxiliary_model: TutorAuxiliaryModelConfig = field(
         default_factory=TutorAuxiliaryModelConfig

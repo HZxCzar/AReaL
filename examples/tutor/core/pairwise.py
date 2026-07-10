@@ -203,6 +203,9 @@ class PairwiseTutorEvaluator:
             public_history=current_turn.student_state.public_history,
             previous_student_output=current_turn.student_state.previous_student_output,
             latest_tutor_visible_output=reference_visible_output,
+            student_prompt_selection=(
+                current_turn.student_state.student_prompt_selection
+            ),
         )
         reference_student_output, reference_student_error = await self.run_student(
             reference_student_state

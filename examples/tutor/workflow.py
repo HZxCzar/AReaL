@@ -133,6 +133,7 @@ from examples.tutor.core.callers import (
     AReaLEngineChatCaller,
     ExternalActorCaller,
     TextCallResult,
+    apply_chat_template,
 )
 from examples.tutor.core.confidence import compute_answer_token_confidence
 from examples.tutor.core.generation_budget import (
@@ -159,6 +160,7 @@ from examples.tutor.core.types import (
     JudgeResult,
     LeakCheckResult,
     LeakHandlingMode,
+    PromptPoolSelection,
     PublicHistoryState,
     StudentGeneralizeMode,
     StudentTurnState,
@@ -214,6 +216,39 @@ _REWARD_COMPONENT_ALIASES = {
 LEAK_TERMINATION_REASON = "leak"
 TEACHER_PRE_SKIPPED_TERMINATION_REASON = "pre_solve_skipped"
 LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate", "feedback"}
+
+
+def load_prompt_pool(path: str, *, role: str) -> tuple[str, ...]:
+    normalized_path = str(path or "").strip()
+    if not normalized_path:
+        return ()
+
+    file_path = Path(normalized_path)
+    try:
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"{role} prompt pool file not found: {file_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"{role} prompt pool must be valid JSON: {file_path}: {exc.msg}"
+        ) from exc
+
+    if not isinstance(payload, list) or not payload:
+        raise ValueError(
+            f"{role} prompt pool must be a non-empty JSON string array: {file_path}"
+        )
+
+    prompts: list[str] = []
+    for index, raw_prompt in enumerate(payload):
+        if not isinstance(raw_prompt, str) or not raw_prompt.strip():
+            raise ValueError(
+                f"{role} prompt pool entry {index} must be a non-empty string: "
+                f"{file_path}"
+            )
+        prompts.append(raw_prompt.strip())
+    if len(set(prompts)) != len(prompts):
+        raise ValueError(f"{role} prompt pool entries must be unique: {file_path}")
+    return tuple(prompts)
 
 
 def _safe_scalar(**metrics: Any) -> None:
@@ -343,6 +378,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         length_penalty_per_100_chars: float = -0.005,
         length_penalty_min: float = -0.1,
         teacher_system_prompt: str = "",
+        teacher_prompt_pool_path: str = "",
         teacher_user_prompt_template: str | None = None,
         teacher_show_ground_truth: bool = False,
         teacher_pre_enabled: bool = False,
@@ -350,6 +386,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_pre_attempts: int = 3,
         teacher_pre_max_tokens: int = 0,
         student_system_prompt: str = "",
+        student_prompt_pool_path: str = "",
+        prompt_pool_seed: int = 0,
         leak_check_system_prompt: str = "",
         answer_judge_enabled: bool = False,
         answer_judge_max_tokens: int = 256,
@@ -476,6 +514,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.teacher_system_prompt = self._resolve_teacher_system_prompt(
             teacher_system_prompt
         )
+        self.teacher_prompt_pool = load_prompt_pool(
+            teacher_prompt_pool_path, role="teacher"
+        )
         self.teacher_user_prompt_template = (
             teacher_user_prompt_template or TEACHER_STATE_USER_TEMPLATE
         ).strip()
@@ -489,6 +530,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError("teacher_pre_attempts must be >= 1.")
         self.teacher_pre_max_tokens = int(teacher_pre_max_tokens)
         self.student_system_prompt = student_system_prompt.strip()
+        self.student_prompt_pool = load_prompt_pool(
+            student_prompt_pool_path, role="student"
+        )
+        self.prompt_pool_seed = int(prompt_pool_seed)
+        self._teacher_prompt_pool_fallback_rng = random.Random(
+            f"{self.prompt_pool_seed}:teacher:fallback"
+        )
+        self._student_prompt_pool_fallback_rng = random.Random(
+            f"{self.prompt_pool_seed}:student:fallback"
+        )
         self.leak_check_system_prompt = self._resolve_leak_check_system_prompt(
             leak_check_system_prompt
         )
@@ -760,6 +811,41 @@ class TutorAgentWorkflow(RolloutWorkflow):
             else NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT
         ).strip()
 
+    def _sample_prompt_pool(
+        self, pool: tuple[str, ...], *, role: str
+    ) -> PromptPoolSelection | None:
+        if not pool:
+            return None
+        try:
+            ctx = workflow_context.get()
+            if bool(getattr(ctx, "is_eval", False)):
+                return None
+            task_id = getattr(ctx, "task_id", None)
+        except Exception:
+            task_id = None
+
+        if task_id is not None:
+            rng = random.Random(f"{self.prompt_pool_seed}:{role}:{int(task_id)}")
+        elif role == "teacher":
+            rng = self._teacher_prompt_pool_fallback_rng
+        else:
+            rng = self._student_prompt_pool_fallback_rng
+        index = rng.randrange(len(pool))
+        return PromptPoolSelection(index=index, suffix=pool[index])
+
+    @staticmethod
+    def _append_prompt_pool_suffix(
+        base_prompt: str, selection: PromptPoolSelection | None
+    ) -> str:
+        if selection is None:
+            return base_prompt
+        return f"{base_prompt.rstrip()}\n\n{selection.suffix}".strip()
+
+    def _student_system_prompt_for_selection(
+        self, selection: PromptPoolSelection | None
+    ) -> str:
+        return self._append_prompt_pool_suffix(self.student_system_prompt, selection)
+
     def _extract_tutor_visible_output(self, raw_output: str) -> str:
         if getattr(self, "enable_thinking", False):
             return _strip_reasoning_for_context(raw_output)
@@ -813,6 +899,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
         task = str(data["task"])
         ground_truth = str(data["ground_truth"])
         trajectory_id = uuid.uuid4().int & ((1 << 63) - 1)
+        teacher_prompt_selection = self._sample_prompt_pool(
+            getattr(self, "teacher_prompt_pool", ()), role="teacher"
+        )
+        student_prompt_selection = self._sample_prompt_pool(
+            getattr(self, "student_prompt_pool", ()), role="student"
+        )
         self.last_student_generalization_results = []
         turn_artifacts: list[TurnArtifact] = []
         leak_count = 0
@@ -897,6 +989,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     teacher_pre_solve_result=teacher_pre_solve_result,
                     student_name=selected_student.name,
                     student_model=selected_student.model,
+                    teacher_prompt_selection=teacher_prompt_selection,
+                    student_prompt_selection=student_prompt_selection,
                 )
                 return None
 
@@ -906,6 +1000,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 public_history=PublicHistoryState(),
                 previous_student_output="",
                 latest_tutor_visible_output=INITIAL_TEACHER_FEEDBACK_PLACEHOLDER,
+                student_prompt_selection=student_prompt_selection,
             ),
             aux_caller=student_caller,
         )
@@ -938,6 +1033,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 teacher_pre_solve_result=teacher_pre_solve_result,
                 student_name=selected_student.name,
                 student_model=selected_student.model,
+                teacher_prompt_selection=teacher_prompt_selection,
+                student_prompt_selection=student_prompt_selection,
             )
             self._log_rollout_stats(
                 total_reward=0.0,
@@ -962,6 +1059,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
                 student_name=selected_student.name,
                 student_model=selected_student.model,
+                teacher_prompt_selection=teacher_prompt_selection,
+                student_prompt_selection=student_prompt_selection,
             )
             return None
 
@@ -988,6 +1087,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 turn_idx=turn_idx,
                 max_turns=self.max_turns,
                 teacher_pre_solve_result=teacher_pre_solve_result,
+                teacher_prompt_selection=teacher_prompt_selection,
             )
             try:
                 response, tutor_raw_output = await self._generate_tutor_response(
@@ -1035,6 +1135,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 public_history=public_history,
                 previous_student_output=previous_student_output,
                 latest_tutor_visible_output=tutor_visible_output,
+                student_prompt_selection=student_prompt_selection,
             )
             student_prompt = self._build_student_prompt_from_state(student_state)
             student_answer_raw, student_error = await self._run_student(
@@ -1138,6 +1239,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             teacher_pre_solve_result=teacher_pre_solve_result,
             student_name=selected_student.name,
             student_model=selected_student.model,
+            teacher_prompt_selection=teacher_prompt_selection,
+            student_prompt_selection=student_prompt_selection,
         )
         student_generalization_results = await self._run_student_generalization(
             data,
@@ -1205,6 +1308,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 reward=assignment.reward,
                 trajectory_id=trajectory_id,
                 turn_idx=artifact.turn_idx,
+                input_tokens_override=(
+                    self._clean_tutor_input_tokens(artifact)
+                    if artifact.tutor_state.teacher_prompt_selection is not None
+                    else None
+                ),
             )
             for artifact, assignment in zip(turn_artifacts, assignments, strict=True)
         ]
@@ -1241,6 +1349,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
             student_name=selected_student.name,
             student_model=selected_student.model,
+            teacher_prompt_selection=teacher_prompt_selection,
+            student_prompt_selection=student_prompt_selection,
         )
         if not results:
             return None
@@ -1496,7 +1606,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
     ) -> tuple[str, str | None]:
         prompt = self._build_student_prompt_from_state(state)
         result = await self._call_auxiliary_prompt(
-            system_prompt=self.student_system_prompt,
+            system_prompt=self._student_system_prompt_for_selection(
+                state.student_prompt_selection
+            ),
             user_prompt=prompt,
             aux_caller=aux_caller,
             rid_prefix=f"student-{state.public_history.turn_count}",
@@ -2129,7 +2241,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 teacher_feedback=anchor.teacher_feedback,
             )
             student_result = await self._call_auxiliary_prompt(
-                system_prompt=self.student_system_prompt,
+                system_prompt=self._student_system_prompt_for_selection(
+                    episode_artifact.student_prompt_selection
+                ),
                 user_prompt=transfer_prompt,
                 aux_caller=aux_caller,
                 rid_prefix=f"student-transfer-{level}-{anchor.public_history.turn_count}",
@@ -2473,9 +2587,28 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self, tutor_state: TutorTurnState
     ) -> list[dict[str, str]]:
         return [
-            {"role": "system", "content": self.teacher_system_prompt},
+            {
+                "role": "system",
+                "content": self._append_prompt_pool_suffix(
+                    self.teacher_system_prompt,
+                    tutor_state.teacher_prompt_selection,
+                ),
+            },
             {"role": "user", "content": self._build_tutor_prompt(tutor_state)},
         ]
+
+    def _clean_tutor_input_tokens(self, artifact: TurnArtifact) -> list[int]:
+        tokenizer = (
+            getattr(artifact.tutor_response, "tokenizer", None) or self.tokenizer
+        )
+        return apply_chat_template(
+            tokenizer,
+            [
+                {"role": "system", "content": self.teacher_system_prompt},
+                {"role": "user", "content": artifact.tutor_prompt},
+            ],
+            enable_thinking=self.enable_thinking,
+        )
 
     def _generation_config(self):
         if self.gconfig is not None and hasattr(self.gconfig, "new"):
@@ -2636,6 +2769,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_pre_solve_result: TeacherPreSolveResult | None = None,
         student_name: str = "",
         student_model: str = "",
+        teacher_prompt_selection: PromptPoolSelection | None = None,
+        student_prompt_selection: PromptPoolSelection | None = None,
     ) -> None:
         if not self.debug_trace_dir:
             return
@@ -2660,6 +2795,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "student": {
                     "name": student_name,
                     "model": student_model,
+                },
+                "prompt_pool": {
+                    "teacher": (
+                        asdict(teacher_prompt_selection)
+                        if teacher_prompt_selection is not None
+                        else None
+                    ),
+                    "student": (
+                        asdict(student_prompt_selection)
+                        if student_prompt_selection is not None
+                        else None
+                    ),
                 },
                 "task": task,
                 "ground_truth": ground_truth,

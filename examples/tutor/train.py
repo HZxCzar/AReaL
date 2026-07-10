@@ -138,6 +138,8 @@ def _build_eval_workflow_kwargs(
     eval_workflow_kwargs = workflow_kwargs.copy()
     eval_workflow_kwargs["gconfig"] = config.eval_gconfig.new(n_samples=1)
     eval_workflow_kwargs["pairwise_reward_enabled"] = False
+    eval_workflow_kwargs["teacher_prompt_pool_path"] = ""
+    eval_workflow_kwargs["student_prompt_pool_path"] = ""
     return eval_workflow_kwargs
 
 
@@ -233,6 +235,7 @@ def main(args):
         length_penalty_per_100_chars=reward.length_penalty_per_100_chars,
         length_penalty_min=reward.length_penalty_min,
         teacher_system_prompt=config.teacher_system_prompt,
+        teacher_prompt_pool_path=config.prompt_pool.teacher_path,
         teacher_user_prompt_template=config.teacher_user_prompt_template,
         teacher_show_ground_truth=config.teacher_show_ground_truth,
         teacher_pre_enabled=teacher_pre.enabled,
@@ -240,6 +243,8 @@ def main(args):
         teacher_pre_attempts=teacher_pre.attempts,
         teacher_pre_max_tokens=teacher_pre.max_tokens,
         student_system_prompt=config.student_system_prompt,
+        student_prompt_pool_path=config.prompt_pool.student_path,
+        prompt_pool_seed=config.seed,
         leak_check_system_prompt=config.leak_check_system_prompt,
         answer_judge_enabled=auxiliary_model.answer_judge_enabled,
         answer_judge_max_tokens=auxiliary_model.answer_judge_max_tokens,
