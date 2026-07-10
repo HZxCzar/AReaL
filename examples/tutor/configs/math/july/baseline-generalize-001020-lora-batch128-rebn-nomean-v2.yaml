@@ -123,7 +123,7 @@ actor:
   backend: "fsdp:d2p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-32B/snapshots/9216db5781bf21249d130ec9da846c4624c16137
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
