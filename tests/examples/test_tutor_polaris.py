@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from examples.tutor.configs import TutorAuxiliaryModelConfig, TutorConfig
-from examples.tutor.core.polaris import grade_answer_sympy, score_polaris_answer
+from examples.tutor.core import polaris
+from examples.tutor.core.polaris import (
+    grade_answer_sympy,
+    score_polaris_answer,
+    score_polaris_answer_async,
+)
 from examples.tutor.core.text import strip_reasoning_for_context
 from examples.tutor.core.types import PublicHistoryState, StudentTurnState
 from examples.tutor.data_formats.polaris import (
@@ -73,6 +80,104 @@ def test_polaris_sympy_fallback_is_thread_safe():
         future = executor.submit(grade_answer_sympy, "1/2", "\\frac{1}{2}")
 
     assert future.result()
+
+
+def test_polaris_sympy_fallback_uses_bounded_math_verify(monkeypatch):
+    parse_timeouts = []
+    verify_timeouts = []
+
+    def fake_parse(value, extraction_config, *, parsing_timeout):
+        del extraction_config
+        parse_timeouts.append(parsing_timeout)
+        return [value]
+
+    def fake_verify(gold, target, *, float_rounding, timeout_seconds):
+        del gold, target, float_rounding
+        verify_timeouts.append(timeout_seconds)
+        return True
+
+    monkeypatch.setattr(polaris, "parse", fake_parse)
+    monkeypatch.setattr(polaris, "verify", fake_verify)
+
+    assert grade_answer_sympy("1/2", "\\frac{1}{2}")
+    assert parse_timeouts == [
+        polaris._POLARIS_PARSE_TIMEOUT_SECONDS,
+        polaris._POLARIS_PARSE_TIMEOUT_SECONDS,
+    ]
+    assert verify_timeouts == [polaris._POLARIS_VERIFY_TIMEOUT_SECONDS]
+
+
+@pytest.mark.asyncio
+async def test_polaris_async_scorer_does_not_block_event_loop(monkeypatch):
+    expected = score_polaris_answer("Compute one half.", "1/2", "\\boxed{1/2}")
+    executor = ThreadPoolExecutor(max_workers=1)
+
+    def slow_score(task, ground_truth, student_answer):
+        del task, ground_truth, student_answer
+        time.sleep(0.1)
+        return expected
+
+    monkeypatch.setattr(polaris, "_get_score_executor", lambda: executor)
+    monkeypatch.setattr(polaris, "score_polaris_answer", slow_score)
+    try:
+        score_task = asyncio.create_task(
+            score_polaris_answer_async("task", "answer", "student")
+        )
+        await asyncio.sleep(0.01)
+
+        assert not score_task.done()
+        assert await score_task == expected
+    finally:
+        executor.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_polaris_async_scorer_timeout_uses_fast_exact_fallback(monkeypatch):
+    executor = ThreadPoolExecutor(max_workers=1)
+
+    def stuck_score(task, ground_truth, student_answer):
+        del task, ground_truth, student_answer
+        time.sleep(0.1)
+        raise AssertionError("late scorer result should be ignored")
+
+    monkeypatch.setattr(polaris, "_get_score_executor", lambda: executor)
+    monkeypatch.setattr(polaris, "score_polaris_answer", stuck_score)
+    monkeypatch.setattr(polaris, "_POLARIS_SCORE_TIMEOUT_SECONDS", 0.01)
+    try:
+        result = await score_polaris_answer_async(
+            "Compute one half.",
+            "\\frac{1}{2}",
+            "The final answer is \\boxed{1/2}.",
+        )
+
+        assert result.correct
+        assert result.raw_result["mathd_correct"]
+        assert "timed out" in result.raw_result["scoring_error"]
+    finally:
+        executor.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_workflow_uses_async_polaris_scorer(monkeypatch):
+    workflow = TutorAgentWorkflow.__new__(TutorAgentWorkflow)
+    workflow.dataset_type = "polaris"
+    workflow.answer_judge_enabled = False
+    expected = score_polaris_answer("task", "7", "\\boxed{7}")
+
+    async def fake_async_score(task, ground_truth, student_answer):
+        assert (task, ground_truth, student_answer) == ("task", "7", "\\boxed{7}")
+        return expected
+
+    monkeypatch.setattr(polaris, "score_polaris_answer_async", fake_async_score)
+
+    result = await workflow._score_answer_async(
+        "task",
+        "7",
+        "\\boxed{7}",
+        answer_judge_caller=None,
+    )
+
+    assert result == expected
 
 
 def test_polaris_scorer_strips_thinking_before_extracting_answer():

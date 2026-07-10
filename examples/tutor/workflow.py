@@ -1628,7 +1628,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
         *,
         answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
     ) -> JudgeResult:
-        exact_result = self._score_answer(task, ground_truth, student_answer)
+        if getattr(self, "dataset_type", "aime") == "polaris":
+            from examples.tutor.core.polaris import score_polaris_answer_async
+
+            exact_result = await score_polaris_answer_async(
+                task, ground_truth, student_answer
+            )
+        else:
+            exact_result = self._score_answer(task, ground_truth, student_answer)
         if exact_result.correct or not self.answer_judge_enabled:
             return exact_result
 

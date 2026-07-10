@@ -1,0 +1,100 @@
+2026-07-09 15:14:50.462  [2026-07-09 22:14:50 DP4] Prefill batch, #new-seq: 1, #new-token: 4278, #cached-token: 142, token usage: 0.01, #running-req: 0, #queue-req: 0, cuda graph: True, input throughput (token/s): 1082.65
+2026-07-09 15:14:50.428  [2026-07-09 22:14:50 DP6] Decode batch, #running-req: 1, #token: 2399, token usage: 0.00, cuda graph: True, gen throughput (token/s): 186.74, #queue-req: 0
+2026-07-09 15:14:50.418  [2026-07-09 22:14:50 DP2] Decode batch, #running-req: 1, #token: 5808, token usage: 0.01, cuda graph: True, gen throughput (token/s): 181.77, #queue-req: 0
+2026-07-09 15:14:50.334  [2026-07-09 22:14:50 DP3] Decode batch, #running-req: 2, #token: 20015, token usage: 0.02, cuda graph: True, gen throughput (token/s): 146.92, #queue-req: 0
+2026-07-09 15:14:50.333  [2026-07-09 22:14:50 DP5] Decode batch, #running-req: 1, #token: 2311, token usage: 0.00, cuda graph: True, gen throughput (token/s): 186.90, #queue-req: 0
+2026-07-09 15:14:50.277  2026-07-09 22:14:50,277 INFO ModelRouter: 10.252.171.137 - "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-07-09 15:14:50.277  [2026-07-09 22:14:50] INFO:     10.245.205.138:0 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-07-09 15:14:50.276  [2026-07-09 22:14:50 DP1] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, cuda graph: True, gen throughput (token/s): 180.14, #queue-req: 0
+2026-07-09 15:14:50.214  [2026-07-09 22:14:50 DP6] Decode batch, #running-req: 1, #token: 2359, token usage: 0.00, cuda graph: True, gen throughput (token/s): 186.82, #queue-req: 0
+2026-07-09 15:14:50.198  [2026-07-09 22:14:50 DP2] Decode batch, #running-req: 1, #token: 5768, token usage: 0.01, cuda graph: True, gen throughput (token/s): 251.97, #queue-req: 0
+2026-07-09 15:14:50.119  [2026-07-09 22:14:50 DP5] Decode batch, #running-req: 1, #token: 2271, token usage: 0.00, cuda graph: True, gen throughput (token/s): 187.02, #queue-req: 0
+2026-07-09 15:14:50.116  2026-07-09 22:14:50,115 INFO ModelRouter: 10.252.174.137 - "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-07-09 15:14:50.115  [2026-07-09 22:14:50] INFO:     10.245.205.138:0 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-07-09 15:14:50.099  [2026-07-09 22:14:50 DP3] Prefill batch, #new-seq: 1, #new-token: 2074, #cached-token: 0, token usage: 0.02, #running-req: 1, #queue-req: 0, cuda graph: True, input throughput (token/s): 107852.99
+2026-07-09 15:14:50.067  2026-07-09 22:14:50,067 INFO ModelRouter: 10.252.171.137 - "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-07-09 15:14:50.067  [2026-07-09 22:14:50] INFO:     10.245.205.138:0 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-07-09 15:14:50.054  [2026-07-09 22:14:50 DP1] Decode batch, #running-req: 1, #token: 7343, token usage: 0.01, cuda graph: True, gen throughput (token/s): 179.95, #queue-req: 0
+2026-07-09 15:14:50.023  [2026-07-09 22:14:50 DP3] Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 515, token usage: 0.02, #running-req: 1, #queue-req: 0, cuda graph: True, input throughput (token/s): 1415.62
+2026-07-09 15:14:50.000  [2026-07-09 22:14:50 DP6] Decode batch, #running-req: 1, #token: 2319, token usage: 0.00, cuda graph: True, gen throughput (token/s): 186.92, #queue-req: 0
+2026-07-09 15:14:49.985  [2026-07-09 22:14:49 DP0] Decode batch, #running-req: 1, #token: 2838, token usage: 0.00, cuda graph: True, gen throughput (token/s): 185.88, #queue-req: 0
+2026-07-09 15:14:49.972  [2026-07-09 22:14:49 DP2] Decode batch, #running-req: 2, #token: 10571, token usage: 0.01, cuda graph: True, gen throughput (token/s): 147.36, #queue-req: 0
+2026-07-09 15:14:49.905  [2026-07-09 22:14:49 DP5] Decode batch, #running-req: 1, #token: 2231, token usage: 0.00, cuda graph: True, gen throughput (token/s): 352.84, #queue-req: 0
+2026-07-09 15:14:49.896  2026-07-09 22:14:49,895 INFO ModelRouter: 10.252.171.137 - "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-07-09 15:14:49.895  [2026-07-09 22:14:49] INFO:     10.245.123.152:0 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-07-09 15:14:49.895  [2026-07-09 22:14:49 DP2] Prefill batch, #new-seq: 1, #new-token: 5181, #cached-token: 533, token usage: 0.01, #running-req: 1, #queue-req: 0, cuda graph: True, input throughput (token/s): 6856.25
+2026-07-09 15:14:49.851  2026-07-09 22:14:49,851 INFO ModelRouter: 10.252.174.137 - "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-07-09 15:14:49.851  [2026-07-09 22:14:49] INFO:     10.245.123.152:0 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-07-09 15:14:49.832  [2026-07-09 22:14:49 DP1] Decode batch, #running-req: 1, #token: 7303, token usage: 0.01, cuda graph: True, gen throughput (token/s): 92.53, #queue-req: 0
+2026-07-09 15:14:49.803  [2026-07-09 22:14:49 DP3] Decode batch, #running-req: 1, #token: 9242, token usage: 0.01, cuda graph: True, gen throughput (token/s): 177.46, #queue-req: 0
+2026-07-09 15:14:49.798  [2026-07-09 22:14:49 DP1] Prefill batch, #new-seq: 1, #new-token: 7209, #cached-token: 87, token usage: 0.01, #running-req: 0, #queue-req: 0, cuda graph: True, input throughput (token/s): 3079.56
+2026-07-09 15:14:49.786  [2026-07-09 22:14:49 DP6] Decode batch, #running-req: 1, #token: 2279, token usage: 0.00, cuda graph: True, gen throughput (token/s): 187.06, #queue-req: 0
+2026-07-09 15:14:49.770  [2026-07-09 22:14:49 DP0] Decode batch, #running-req: 1, #token: 2798, token usage: 0.00, cuda graph: True, gen throughput (token/s): 165.04, #queue-req: 0
+2026-07-09 15:14:49.710  [2026-07-09 22:14:49 DP4] Decode batch, #running-req: 1, #token: 2113, token usage: 0.00, cuda graph: True, gen throughput (token/s): 187.27, #queue-req: 0
+2026-07-09 15:14:49.681  [2026-07-09 22:14:49 DP5] Decode batch, #running-req: 2, #token: 4603, token usage: 0.01, cuda graph: True, gen throughput (token/s): 356.43, #queue-req: 0
+2026-07-09 15:14:49.614  2026-07-09 22:14:49,614 INFO ModelRouter: 10.252.174.137 - "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-07-09 15:14:49.614  [2026-07-09 22:14:49] INFO:     10.245.205.138:0 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-07-09 15:14:49.612  [2026-07-09 22:14:49 DP2] Decode batch, #running-req: 1, #token: 4890, token usage: 0.01, cuda graph: True, gen throughput (token/s): 182.99, #queue-req: 0
+2026-07-09 15:14:49.600  [2026-07-09 22:14:49 DP0] Prefill batch, #new-seq: 1, #new-token: 2678, #cached-token: 88, token usage: 0.02, #running-req: 1, #queue-req: 0, cuda graph: True, input throughput (token/s): 7117.83
+2026-07-09 15:14:49.579  2026-07-09 22:14:49,578 INFO ModelRouter: 10.252.171.137 - "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-07-09 15:14:49.578  [2026-07-09 22:14:49] INFO:     10.245.123.152:0 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-07-09 15:14:49.577  [2026-07-09 22:14:49 DP3] Decode batch, #running-req: 1, #token: 9202, token usage: 0.01, cuda graph: True, gen throughput (token/s): 23.60, #queue-req: 0
+2026-07-09 15:14:49.572  [2026-07-09 22:14:49 DP6] Decode batch, #running-req: 1, #token: 2239, token usage: 0.00, cuda graph: True, gen throughput (token/s): 343.06, #queue-req: 0
+2026-07-09 15:14:49.568  2026-07-09 22:14:49,568 INFO ModelRouter: 10.252.171.137 - "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-07-09 15:14:49.568  [2026-07-09 22:14:49] INFO:     10.245.123.152:0 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-07-09 15:14:49.547  2026-07-09 22:14:49,547 INFO ModelRouter: 10.252.171.137 - "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-07-09 15:14:49.547  [2026-07-09 22:14:49] INFO:     10.244.69.99:0 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-07-09 15:14:49.525  [2026-07-09 22:14:49 DP7] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 229, token usage: 0.00, #running-req: 0, #queue-req: 0, cuda graph: True, input throughput (token/s): 3842.93
+2026-07-09 15:14:49.505  2026-07-09 22:14:49,504 INFO ModelRouter: 10.252.174.137 - "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-07-09 15:14:49.504  [2026-07-09 22:14:49] INFO:     10.245.123.152:0 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-07-09 15:14:49.497  [2026-07-09 22:14:49 DP4] Decode batch, #running-req: 1, #token: 2073, token usage: 0.00, cuda graph: True, gen throughput (token/s): 187.20, #queue-req: 0
+2026-07-09 15:14:49.485  [2026-07-09 22:14:49 DP0] Decode batch, #running-req: 2, #token: 11487, token usage: 0.01, cuda graph: True, gen throughput (token/s): 338.67, #queue-req: 0
+2026-07-09 15:14:49.457  [2026-07-09 22:14:49 DP5] Decode batch, #running-req: 2, #token: 4523, token usage: 0.01, cuda graph: True, gen throughput (token/s): 262.05, #queue-req: 0
+2026-07-09 15:14:49.399  [2026-07-09 22:14:49 DP1] Decode batch, #running-req: 1, #token: 3021, token usage: 0.00, cuda graph: True, gen throughput (token/s): 186.25, #queue-req: 0
+2026-07-09 15:14:49.398  2026-07-09 22:14:49,398 INFO ModelRouter: 10.252.171.137 - "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-07-09 15:14:49.398  [2026-07-09 22:14:49] INFO:     10.245.123.152:0 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-07-09 15:14:49.396  [2026-07-09 22:14:49 DP3] Prefill batch, #new-seq: 1, #new-token: 888, #cached-token: 0, token usage: 0.01, #running-req: 0, #queue-req: 0, cuda graph: True, input throughput (token/s): 238088.37
+2026-07-09 15:14:49.393  [2026-07-09 22:14:49 DP2] Decode batch, #running-req: 1, #token: 4850, token usage: 0.01, cuda graph: True, gen throughput (token/s): 133.72, #queue-req: 0
+2026-07-09 15:14:49.361  [2026-07-09 22:14:49 DP3] Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 89, token usage: 0.01, #running-req: 0, #queue-req: 0, cuda graph: True, input throughput (token/s): 0.67
+2026-07-09 15:14:49.351  [2026-07-09 22:14:49 DP6] Decode batch, #running-req: 2, #token: 3388, token usage: 0.00, cuda graph: True, gen throughput (token/s): 389.92, #queue-req: 0
+2026-07-09 15:14:49.326  [2026-07-09 22:14:49 DP7] Decode batch, #running-req: 1, #token: 3150, token usage: 0.00, cuda graph: True, gen throughput (token/s): 185.40, #queue-req: 0
+2026-07-09 15:14:49.308  2026-07-09 22:14:49,308 INFO ModelRouter: 10.252.174.137 - "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-07-09 15:14:49.308  [2026-07-09 22:14:49] INFO:     10.245.123.152:0 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-07-09 15:14:49.287  [2026-07-09 22:14:49 DP5] Prefill batch, #new-seq: 1, #new-token: 1887, #cached-token: 539, token usage: 0.01, #running-req: 1, #queue-req: 0, cuda graph: True, input throughput (token/s): 1019.11
+2026-07-09 15:14:49.283  [2026-07-09 22:14:49 DP4] Decode batch, #running-req: 1, #token: 2033, token usage: 0.00, cuda graph: True, gen throughput (token/s): 90.45, #queue-req: 0
+2026-07-09 15:14:49.262  [2026-07-09 22:14:49 DP6] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 229, token usage: 0.00, #running-req: 2, #queue-req: 0, cuda graph: True, input throughput (token/s): 3386.30
+2026-07-09 15:14:49.249  [2026-07-09 22:14:49 DP0] Decode batch, #running-req: 2, #token: 11407, token usage: 0.01, cuda graph: True, gen throughput (token/s): 85.92, #queue-req: 0
+2026-07-09 15:14:49.235  2026-07-09 22:14:49,235 INFO ModelRouter: 10.252.171.137 - "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-07-09 15:14:49.235  [2026-07-09 22:14:49] INFO:     10.245.123.152:0 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-07-09 15:14:49.226  [2026-07-09 22:14:49 DP0] Prefill batch, #new-seq: 1, #new-token: 2661, #cached-token: 0, token usage: 0.01, #running-req: 1, #queue-req: 0, cuda graph: True, input throughput (token/s): 87022.62
+2026-07-09 15:14:49.205  [2026-07-09 22:14:49 DP2] Prefill batch, #new-seq: 1, #new-token: 4728, #cached-token: 87, token usage: 0.01, #running-req: 1, #queue-req: 0, cuda graph: True, input throughput (token/s): 1546.95
+2026-07-09 15:14:49.193  [2026-07-09 22:14:49 DP4] Prefill batch, #new-seq: 1, #new-token: 1374, #cached-token: 641, token usage: 0.00, #running-req: 0, #queue-req: 0, cuda graph: True, input throughput (token/s): 5800.77
+2026-07-09 15:14:49.189  [2026-07-09 22:14:49 DP5] Decode batch, #running-req: 1, #token: 2111, token usage: 0.00, cuda graph: True, gen throughput (token/s): 187.23, #queue-req: 0
+2026-07-09 15:14:49.185  [2026-07-09 22:14:49 DP1] Decode batch, #running-req: 1, #token: 2981, token usage: 0.00, cuda graph: True, gen throughput (token/s): 37.83, #queue-req: 0
+2026-07-09 15:14:49.132  [2026-07-09 22:14:49 DP0] Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 89, token usage: 0.01, #running-req: 1, #queue-req: 0, cuda graph: True, input throughput (token/s): 0.53
+2026-07-09 15:14:49.123  [2026-07-09 22:14:49 DP6] Decode batch, #running-req: 2, #token: 3308, token usage: 0.00, cuda graph: True, gen throughput (token/s): 359.72, #queue-req: 0
+2026-07-09 15:14:49.110  [2026-07-09 22:14:49 DP7] Decode batch, #running-req: 1, #token: 3110, token usage: 0.00, cuda graph: True, gen throughput (token/s): 184.82, #queue-req: 0
+2026-07-09 15:14:49.049  [2026-07-09 22:14:49 DP2] Decode batch, #running-req: 1, #token: 583, token usage: 0.00, cuda graph: True, gen throughput (token/s): 189.76, #queue-req: 0
+2026-07-09 15:14:49.018  [2026-07-09 22:14:49 DP1] Prefill batch, #new-seq: 1, #new-token: 2402, #cached-token: 547, token usage: 0.00, #running-req: 0, #queue-req: 0, cuda graph: True, input throughput (token/s): 1868.81
+2026-07-09 15:14:48.976  [2026-07-09 22:14:48 DP5] Decode batch, #running-req: 1, #token: 2071, token usage: 0.00, cuda graph: True, gen throughput (token/s): 187.29, #queue-req: 0
+2026-07-09 15:14:48.965  2026-07-09 22:14:48,965 INFO ModelRouter: 10.252.171.137 - "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-07-09 15:14:48.964  [2026-07-09 22:14:48] INFO:     10.245.205.138:0 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-07-09 15:14:48.900  [2026-07-09 22:14:48 DP6] Decode batch, #running-req: 2, #token: 3228, token usage: 0.00, cuda graph: True, gen throughput (token/s): 221.00, #queue-req: 0
+2026-07-09 15:14:48.894  [2026-07-09 22:14:48 DP7] Decode batch, #running-req: 1, #token: 3070, token usage: 0.00, cuda graph: True, gen throughput (token/s): 104.39, #queue-req: 0
+2026-07-09 15:14:48.873  [2026-07-09 22:14:48 DP7] Prefill batch, #new-seq: 1, #new-token: 2505, #cached-token: 560, token usage: 0.00, #running-req: 0, #queue-req: 0, cuda graph: True, input throughput (token/s): 1375.49
+2026-07-09 15:14:48.841  [2026-07-09 22:14:48 DP4] Decode batch, #running-req: 1, #token: 6564, token usage: 0.01, cuda graph: True, gen throughput (token/s): 181.27, #queue-req: 0
+2026-07-09 15:14:48.839  [2026-07-09 22:14:48 DP2] Decode batch, #running-req: 1, #token: 543, token usage: 0.00, cuda graph: True, gen throughput (token/s): 289.34, #queue-req: 0
+2026-07-09 15:14:48.805  [2026-07-09 22:14:48 DP6] Prefill batch, #new-seq: 1, #new-token: 1548, #cached-token: 553, token usage: 0.00, #running-req: 1, #queue-req: 0, cuda graph: True, input throughput (token/s): 1152.46
+2026-07-09 15:14:48.762  [2026-07-09 22:14:48 DP5] Decode batch, #running-req: 1, #token: 2031, token usage: 0.00, cuda graph: True, gen throughput (token/s): 187.46, #queue-req: 0
+2026-07-09 15:14:48.745  2026-07-09 22:14:48,745 INFO ModelRouter: 10.252.171.137 - "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-07-09 15:14:48.745  [2026-07-09 22:14:48] INFO:     10.245.123.152:0 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-07-09 15:14:48.736  [2026-07-09 22:14:48 DP0] Decode batch, #running-req: 1, #token: 507, token usage: 0.00, cuda graph: True, gen throughput (token/s): 189.98, #queue-req: 0
+2026-07-09 15:14:48.706  2026-07-09 22:14:48,705 INFO ModelRouter: 10.252.171.137 - "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-07-09 15:14:48.705  [2026-07-09 22:14:48] INFO:     10.245.205.138:0 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-07-09 15:14:48.642  [2026-07-09 22:14:48 DP6] Decode batch, #running-req: 1, #token: 1154, token usage: 0.00, cuda graph: True, gen throughput (token/s): 188.99, #queue-req: 0
+2026-07-09 15:14:48.621  [2026-07-09 22:14:48 DP2] Decode batch, #running-req: 2, #token: 3273, token usage: 0.00, cuda graph: True, gen throughput (token/s): 359.13, #queue-req: 0
+2026-07-09 15:14:48.620  [2026-07-09 22:14:48 DP4] Decode batch, #running-req: 1, #token: 6524, token usage: 0.01, cuda graph: True, gen throughput (token/s): 181.12, #queue-req: 0
+2026-07-09 15:14:48.549  [2026-07-09 22:14:48 DP5] Decode batch, #running-req: 1, #token: 1991, token usage: 0.00, cuda graph: True, gen throughput (token/s): 187.46, #queue-req: 0
+2026-07-09 15:14:48.526  [2026-07-09 22:14:48 DP0] Decode batch, #running-req: 1, #token: 467, token usage: 0.00, cuda graph: True, gen throughput (token/s): 190.07, #queue-req: 0
+2026-07-09 15:14:48.511  [2026-07-09 22:14:48 DP7] Decode batch, #running-req: 1, #token: 6042, token usage: 0.01, cuda graph: True, gen throughput (token/s): 181.84, #queue-req: 0
+2026-07-09 15:14:48.430  [2026-07-09 22:14:48 DP6] Decode batch, #running-req: 1, #token: 1114, token usage: 0.00, cuda graph: True, gen throughput (token/s): 189.02, #queue-req: 0
