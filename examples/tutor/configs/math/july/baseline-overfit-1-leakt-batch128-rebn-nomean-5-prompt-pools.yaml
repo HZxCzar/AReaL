@@ -22,8 +22,8 @@ prompt_pool:
 student_generalize:
   enabled: true
   path: examples/tutor/generalization/version2/math_overfit_8_independent_hard_generalization.json
-  level1_reward: 1.0
-  level2_reward: 1.0
+  level1_reward: 0.0
+  level2_reward: 0.0
 
 teacher_pre:
   enabled: true
@@ -34,7 +34,7 @@ teacher_pre:
 auxiliary_model:
   mode: api
   enable_thinking: false
-  base_url: https://8aghgobam9gpcqjqmaac9jaooeqj5p89.openapi-qb-ai.sii.edu.cn/v1
+  base_url: https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1
   model: qwen3-8b
   api_key: ${oc.env:INF_API_KEY}
   timeout: 120
