@@ -1,6 +1,9 @@
 import pytest
 
-from examples.tutor.configs import TutorConfig, TutorEvaluatorConfig
+from examples.tutor.configs import (
+    TutorConfig,
+    TutorEvaluatorConfig,
+)
 from examples.tutor.train import (
     _apply_eval_average_rollouts,
     _build_eval_workflow_kwargs,

@@ -5,13 +5,19 @@ import types
 
 import pytest
 
+from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig, TokenLogprob
 from examples.tutor import workflow as tutor_workflow
 from examples.tutor.configs import (
     TutorConfig,
     TutorRewardConfig,
+    TutorStudentGeneralizeConfidenceConfig,
     TutorStudentGeneralizeConfig,
 )
-from examples.tutor.core.callers import TextCallResult
+from examples.tutor.core.callers import (
+    ApiAuxiliaryCaller,
+    TextCallResult,
+)
+from examples.tutor.core.confidence import compute_answer_token_confidence
 from examples.tutor.core.math import score_math_answer
 from examples.tutor.core.pairwise import PairwiseTutorEvaluator
 from examples.tutor.core.parsers import parse_staged_leak_check_result
@@ -29,6 +35,18 @@ from examples.tutor.core.types import (
     TutorPrivateFeedback,
     TutorTurnState,
 )
+
+
+def _char_logprobs(text: str, logprobs: list[float]) -> tuple[TokenLogprob, ...]:
+    assert len(text) == len(logprobs)
+    return tuple(
+        TokenLogprob(
+            token=char,
+            logprob=logprob,
+            bytes=tuple(char.encode("utf-8")),
+        )
+        for char, logprob in zip(text, logprobs, strict=True)
+    )
 
 
 def _judge(correct: bool) -> JudgeResult:
@@ -119,6 +137,154 @@ def test_student_generalize_config_defaults_to_only_success():
 def test_student_generalize_config_rejects_invalid_mode():
     with pytest.raises(ValueError, match="student_generalize.mode"):
         TutorStudentGeneralizeConfig(mode="sometimes")
+
+
+def test_student_generalize_confidence_defaults_to_disabled():
+    confidence = TutorStudentGeneralizeConfidenceConfig()
+
+    assert confidence.enabled is False
+    assert confidence.reward_scale == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize("reward_scale", [0.0, 1.0, -0.1, 1.1])
+def test_student_generalize_confidence_rejects_ungated_scale(reward_scale):
+    with pytest.raises(ValueError, match="reward_scale"):
+        TutorStudentGeneralizeConfidenceConfig(
+            enabled=True,
+            reward_scale=reward_scale,
+        )
+
+
+def test_student_generalize_confidence_requires_generalization():
+    with pytest.raises(ValueError, match="requires"):
+        TutorStudentGeneralizeConfig(
+            confidence=TutorStudentGeneralizeConfidenceConfig(enabled=True)
+        )
+
+
+def test_answer_token_confidence_uses_boxed_content_only():
+    text = r"Reasoning. \boxed{\frac{1}{2}}"
+    answer = r"\frac{1}{2}"
+    logprobs = [
+        -0.5 if char_idx >= text.index(answer) else -10.0
+        for char_idx in range(len(text))
+    ]
+
+    result = compute_answer_token_confidence(_char_logprobs(text, logprobs))
+
+    assert result.available is True
+    assert result.token_count == len(answer)
+    assert result.mean_logprob == pytest.approx(-0.5)
+    assert result.confidence == pytest.approx(0.6065306597)
+
+
+def test_answer_token_confidence_missing_box_is_zero():
+    text = "The answer is 42."
+
+    result = compute_answer_token_confidence(_char_logprobs(text, [-0.1] * len(text)))
+
+    assert result.available is False
+    assert result.reason == "missing_boxed_answer"
+    assert result.confidence == pytest.approx(0.0)
+
+
+def test_answer_token_confidence_rejects_non_finite_logprob():
+    text = r"\boxed{42}"
+    logprobs = [-0.1] * len(text)
+    logprobs[text.index("4")] = float("nan")
+
+    with pytest.raises(ValueError, match="non-finite"):
+        compute_answer_token_confidence(_char_logprobs(text, logprobs))
+
+
+def test_api_auxiliary_caller_requests_and_preserves_logprobs():
+    """Test the API override requests logprobs and retains every returned token."""
+    captured = {}
+    text = r"\boxed{42}"
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content=text),
+                        logprobs=types.SimpleNamespace(
+                            content=[
+                                types.SimpleNamespace(
+                                    token=char,
+                                    logprob=-0.2,
+                                    bytes=list(char.encode("utf-8")),
+                                )
+                                for char in text
+                            ]
+                        ),
+                    )
+                ]
+            )
+
+    llm_caller = AsyncLLMCaller(
+        AuxModelConfig(
+            base_url="http://student.invalid/v1",
+            model="qwen3-8b",
+            max_tokens=128,
+            temperature=0.0,
+        )
+    )
+    llm_caller._client = types.SimpleNamespace(
+        chat=types.SimpleNamespace(completions=FakeCompletions())
+    )
+    caller = ApiAuxiliaryCaller(
+        llm_caller,
+        request_overrides={"logprobs": True},
+    )
+
+    result = asyncio.run(caller.call_text([{"role": "user", "content": "task"}]))
+
+    assert captured["logprobs"] is True
+    assert result.raw_text == text
+    assert "".join(item.token for item in result.token_logprobs) == text
+    assert [item.logprob for item in result.token_logprobs] == pytest.approx(
+        [-0.2] * len(text)
+    )
+
+
+def test_student_generalization_confidence_uses_api_logprob_caller():
+    """Test confidence generalization selects the dedicated API logprob caller."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_generalize_confidence_enabled = True
+    workflow.confidence_aux_caller = object()
+
+    result = workflow._make_student_generalization_caller(aux_caller=object())
+
+    assert result is workflow.confidence_aux_caller
+
+
+def test_workflow_confidence_enables_api_logprobs_without_rollout_engine():
+    """Test confidence shares the student API client and only overrides logprobs."""
+    workflow = tutor_workflow.TutorAgentWorkflow(
+        student_generalize_enabled=True,
+        student_generalize_confidence_enabled=True,
+        aux_mode="api",
+    )
+
+    assert workflow.aux_caller is not None
+    assert workflow.confidence_aux_caller is not None
+    assert workflow.confidence_aux_caller.caller is workflow.aux_caller.caller
+    assert workflow.aux_caller.request_config.get("logprobs") is None
+    assert workflow.confidence_aux_caller.request_config["logprobs"] is True
+
+
+def test_workflow_confidence_rejects_non_api_student():
+    """Test confidence cannot silently fall back to the rollout base model."""
+    with pytest.raises(ValueError, match="auxiliary_model.mode='api'"):
+        tutor_workflow.TutorAgentWorkflow(
+            student_generalize_enabled=True,
+            student_generalize_confidence_enabled=True,
+            aux_mode="self",
+        )
 
 
 def _outcome_computer(**overrides) -> EpisodeRewardComputer:
@@ -1543,6 +1709,86 @@ def test_workflow_student_generalize_runs_after_success_from_same_context(monkey
     ] == pytest.approx(0.2)
     assert "student_generalize_level2" not in workflow.last_traces[0].reward_components
     assert workflow.last_total_reward == pytest.approx(1.2)
+
+
+def test_student_generalize_confidence_is_dense_and_correctness_gated():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_generalize_enabled = True
+    workflow.student_generalize_mode = "only_success"
+    workflow.student_generalize_confidence_enabled = True
+    workflow.student_generalize_confidence_reward_scale = 0.25
+    workflow.student_generalize_level_rewards = {"level1": 0.2, "level2": 0.5}
+    workflow.student_generalize_bank = {}
+    workflow.student_system_prompt = "student"
+
+    turn = _turn(1, correct=True, tutor_output="hint")
+    turn.public_history_after = "learned context"
+    episode = _episode([turn], termination_reason="success")
+
+    outputs = []
+    for answer, answer_logprob in (("1", 0.0), ("2", -2.0)):
+        text = rf"\boxed{{{answer}}}"
+        logprobs = [-10.0] * len(text)
+        logprobs[text.index(answer)] = answer_logprob
+        outputs.append(
+            TextCallResult(
+                text=text,
+                raw_text=text,
+                token_logprobs=_char_logprobs(text, logprobs),
+            )
+        )
+
+    async def call_auxiliary_prompt(**_kwargs):
+        return outputs.pop(0)
+
+    judge_results = [_judge(False), _judge(True)]
+
+    async def score_answer(*_args, **_kwargs):
+        return judge_results.pop(0)
+
+    workflow._call_auxiliary_prompt = call_auxiliary_prompt
+    workflow._score_answer_async = score_answer
+
+    results = asyncio.run(
+        workflow._run_student_generalization(
+            {
+                "metadata": {
+                    "student_generalize": {
+                        "level1": {"task": "level1", "ground_truth": "1"},
+                        "level2": {"task": "level2", "ground_truth": "2"},
+                    }
+                }
+            },
+            episode,
+            aux_caller=object(),
+            answer_judge_caller=None,
+        )
+    )
+
+    assert results[0].correctness_reward == pytest.approx(0.0)
+    assert results[0].confidence == pytest.approx(1.0)
+    assert results[0].confidence_reward == pytest.approx(0.05)
+    assert results[0].reward < 0.2
+    assert results[1].correctness_reward == pytest.approx(0.5)
+    assert results[1].confidence_reward == pytest.approx(0.5 * 0.25 * 0.1353352832)
+    assert results[1].reward > 0.5
+
+    assignment = types.SimpleNamespace(reward=0.0, reward_components={})
+    workflow._apply_student_generalization_rewards([turn], [assignment], results)
+
+    assert assignment.reward_components["student_generalize_level1_confidence"] == (
+        pytest.approx(0.05)
+    )
+    assert assignment.reward_components["student_generalize_level2"] == pytest.approx(
+        0.5
+    )
+    assert "student_generalize_level1" not in assignment.reward_components
+    payload = workflow._student_generalization_result_to_json(results[0])
+    assert payload["confidence"] == pytest.approx(1.0)
+    assert payload["confidence_token_count"] == 1
+    assert payload["confidence_backend"] == "auxiliary_api"
 
 
 def test_student_generalize_only_success_skips_failed_rollout(monkeypatch):

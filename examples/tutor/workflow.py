@@ -129,6 +129,7 @@ from examples.tutor.core.callers import (
     ExternalActorCaller,
     TextCallResult,
 )
+from examples.tutor.core.confidence import compute_answer_token_confidence
 from examples.tutor.core.generation_budget import (
     CONTEXT_BUDGET_TERMINATION_REASON,
     ContextBudgetLimitExceeded,
@@ -254,6 +255,14 @@ class StudentGeneralizationResult:
     student_output: str = ""
     student_error: str | None = None
     judge_result: JudgeResult | None = None
+    correctness_reward: float = 0.0
+    confidence: float = 0.0
+    confidence_mean_logprob: float | None = None
+    confidence_token_count: int = 0
+    confidence_available: bool = False
+    confidence_reason: str = ""
+    confidence_backend: str = ""
+    confidence_reward: float = 0.0
     reward: float = 0.0
     public_history: str = ""
     reward_turn_idx: int | None = None
@@ -333,6 +342,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_generalize_path: str = "",
         student_generalize_level1_reward: float = 0.2,
         student_generalize_level2_reward: float = 0.5,
+        student_generalize_confidence_enabled: bool = False,
+        student_generalize_confidence_reward_scale: float = 0.25,
         pairwise_reward_enabled: bool = False,
         pairwise_reference_lag_steps: int = 5,
         pairwise_reward_scale: float = 0.05,
@@ -486,6 +497,35 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "level1": float(student_generalize_level1_reward),
             "level2": float(student_generalize_level2_reward),
         }
+        self.student_generalize_confidence_enabled = bool(
+            student_generalize_confidence_enabled
+        )
+        self.student_generalize_confidence_reward_scale = float(
+            student_generalize_confidence_reward_scale
+        )
+        if self.student_generalize_confidence_enabled:
+            if not self.student_generalize_enabled:
+                raise ValueError(
+                    "student generalization confidence requires generalization to "
+                    "be enabled."
+                )
+            if not 0.0 < self.student_generalize_confidence_reward_scale < 1.0:
+                raise ValueError(
+                    "student generalization confidence reward scale must be in (0, 1)."
+                )
+            if any(
+                reward <= 0.0
+                for reward in self.student_generalize_level_rewards.values()
+            ):
+                raise ValueError(
+                    "student generalization level rewards must be positive when "
+                    "confidence reward is enabled."
+                )
+            if self.aux_mode != "api":
+                raise ValueError(
+                    "student generalization confidence requires "
+                    "auxiliary_model.mode='api'."
+                )
         self.student_generalize_bank = (
             self._load_student_generalize_bank(self.student_generalize_path)
             if self.student_generalize_enabled and self.student_generalize_path
@@ -523,11 +563,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
             context_length=model_context_length,
             context_window_margin=context_window_margin,
         )
-        self.aux_caller = (
-            ApiAuxiliaryCaller(AsyncLLMCaller(aux_config))
-            if self.aux_mode == "api"
-            else None
-        )
+        self.aux_caller = None
+        self.confidence_aux_caller = None
+        if self.aux_mode == "api":
+            api_caller = AsyncLLMCaller(aux_config)
+            self.aux_caller = ApiAuxiliaryCaller(api_caller)
+            if self.student_generalize_confidence_enabled:
+                self.confidence_aux_caller = ApiAuxiliaryCaller(
+                    api_caller,
+                    request_overrides={"logprobs": True},
+                )
         self.tokenizer_path = tokenizer_path
         self.model_context_length = model_context_length
 
@@ -649,6 +694,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             external_client=external_client,
         )
         aux_caller = self._make_auxiliary_caller(chat_caller=aux_chat_caller)
+        student_generalize_caller = self._make_student_generalization_caller(
+            aux_caller=aux_caller,
+        )
         answer_judge_caller = self._make_answer_judge_caller(
             chat_caller=aux_chat_caller
         )
@@ -924,7 +972,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_generalization_results = await self._run_student_generalization(
             data,
             episode_artifact,
-            aux_caller=aux_caller,
+            aux_caller=student_generalize_caller,
             answer_judge_caller=answer_judge_caller,
         )
         reward_computer = EpisodeRewardComputer(
@@ -1093,6 +1141,21 @@ class TutorAgentWorkflow(RolloutWorkflow):
             context_window_margin=self.context_window_margin,
             semaphore=self._self_aux_semaphore,
         )
+
+    def _make_student_generalization_caller(
+        self,
+        *,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller,
+    ) -> ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller:
+        if not getattr(self, "student_generalize_confidence_enabled", False):
+            return aux_caller
+        confidence_caller = getattr(self, "confidence_aux_caller", None)
+        if confidence_caller is None:
+            raise RuntimeError(
+                "student generalization confidence requires an auxiliary API "
+                "caller with token logprobs."
+            )
+        return confidence_caller
 
     def _make_answer_judge_caller(
         self,
@@ -1899,7 +1962,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_error = None
             student_output = _strip_reasoning_for_context(student_output_raw)
             judge_result = None
-            reward = 0.0
+            correctness_reward = 0.0
+            confidence = 0.0
+            confidence_mean_logprob = None
+            confidence_token_count = 0
+            confidence_available = False
+            confidence_reason = ""
+            confidence_backend = (
+                "auxiliary_api"
+                if getattr(self, "student_generalize_confidence_enabled", False)
+                else ""
+            )
+            confidence_reward = 0.0
             if student_error is None:
                 judge_result = await self._score_answer_async(
                     case.task,
@@ -1908,7 +1982,27 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     answer_judge_caller=answer_judge_caller,
                 )
                 if judge_result.correct:
-                    reward = case.reward
+                    correctness_reward = case.reward
+                if getattr(self, "student_generalize_confidence_enabled", False):
+                    if not student_result.token_logprobs:
+                        raise RuntimeError(
+                            "student generalization API response did not include "
+                            "token logprobs."
+                        )
+                    confidence_result = compute_answer_token_confidence(
+                        student_result.token_logprobs,
+                    )
+                    confidence = confidence_result.confidence
+                    confidence_mean_logprob = confidence_result.mean_logprob
+                    confidence_token_count = confidence_result.token_count
+                    confidence_available = confidence_result.available
+                    confidence_reason = confidence_result.reason
+                    confidence_reward = (
+                        case.reward
+                        * self.student_generalize_confidence_reward_scale
+                        * confidence
+                    )
+            reward = correctness_reward + confidence_reward
             results.append(
                 StudentGeneralizationResult(
                     level=level,
@@ -1918,6 +2012,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     student_output=student_output,
                     student_error=student_error,
                     judge_result=judge_result,
+                    correctness_reward=correctness_reward,
+                    confidence=confidence,
+                    confidence_mean_logprob=confidence_mean_logprob,
+                    confidence_token_count=confidence_token_count,
+                    confidence_available=confidence_available,
+                    confidence_reason=confidence_reason,
+                    confidence_backend=confidence_backend,
+                    confidence_reward=confidence_reward,
                     reward=reward,
                     public_history=anchor.public_history.summary,
                     reward_turn_idx=anchor.reward_turn_idx,
@@ -1957,11 +2059,21 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 assignment = assignments[success_idx]
             if assignment is None:
                 continue
-            key = f"student_generalize_{result.level}"
-            assignment.reward_components[key] = assignment.reward_components.get(
-                key, 0.0
-            ) + float(result.reward)
-            assignment.reward += float(result.reward)
+            correctness_reward = float(result.correctness_reward)
+            confidence_reward = float(result.confidence_reward)
+            if not correctness_reward and not confidence_reward and result.reward:
+                correctness_reward = float(result.reward)
+            if correctness_reward:
+                key = f"student_generalize_{result.level}"
+                assignment.reward_components[key] = (
+                    assignment.reward_components.get(key, 0.0) + correctness_reward
+                )
+            if confidence_reward:
+                key = f"student_generalize_{result.level}_confidence"
+                assignment.reward_components[key] = (
+                    assignment.reward_components.get(key, 0.0) + confidence_reward
+                )
+            assignment.reward += correctness_reward + confidence_reward
 
     def _log_generalize_stats(
         self,
@@ -1997,6 +2109,26 @@ class TutorAgentWorkflow(RolloutWorkflow):
             metrics[f"student_{level}_success"] = float(correct)
             if attempted:
                 metrics[f"student_{level}_correct_given_attempted"] = float(correct)
+                if (
+                    getattr(self, "student_generalize_confidence_enabled", False)
+                    and level_result is not None
+                ):
+                    metrics[f"student_{level}_confidence"] = float(
+                        level_result.confidence
+                    )
+                    metrics[f"student_{level}_confidence_available"] = float(
+                        level_result.confidence_available
+                    )
+                    metrics[f"student_{level}_confidence_token_count"] = float(
+                        level_result.confidence_token_count
+                    )
+                    metrics[f"student_{level}_confidence_reward"] = float(
+                        level_result.confidence_reward
+                    )
+                    if level_result.confidence_mean_logprob is not None:
+                        metrics[f"student_{level}_answer_mean_logprob"] = float(
+                            level_result.confidence_mean_logprob
+                        )
             elif level_result is not None and level_result.skipped:
                 metrics[f"student_{level}_skipped"] = 1.0
 
@@ -2019,6 +2151,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "student_error": result.student_error,
             "judge_correct": bool(judge.correct) if judge is not None else False,
             "judge_feedback": judge.feedback if judge is not None else "",
+            "correctness_reward": float(result.correctness_reward),
+            "confidence": float(result.confidence),
+            "confidence_mean_logprob": result.confidence_mean_logprob,
+            "confidence_token_count": int(result.confidence_token_count),
+            "confidence_available": bool(result.confidence_available),
+            "confidence_reason": result.confidence_reason,
+            "confidence_backend": result.confidence_backend,
+            "confidence_reward": float(result.confidence_reward),
             "reward": float(result.reward),
             "reward_turn_idx": result.reward_turn_idx,
             "public_history": result.public_history,
@@ -2250,6 +2390,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             for level in _STUDENT_GENERALIZE_LEVELS:
                 if rewards.get(level, 0.0):
                     keys.append(f"student_generalize_{level}")
+                    if getattr(self, "student_generalize_confidence_enabled", False):
+                        keys.append(f"student_generalize_{level}_confidence")
         return keys
 
     def _reward_component_metrics(self, traces: list[TurnTrace]) -> dict[str, float]:

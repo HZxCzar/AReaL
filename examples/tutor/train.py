@@ -228,6 +228,10 @@ def main(args):
         student_generalize_path=student_generalize.path,
         student_generalize_level1_reward=student_generalize.level1_reward,
         student_generalize_level2_reward=student_generalize.level2_reward,
+        student_generalize_confidence_enabled=student_generalize.confidence.enabled,
+        student_generalize_confidence_reward_scale=(
+            student_generalize.confidence.reward_scale
+        ),
         pairwise_reward_enabled=pairwise.enabled,
         pairwise_reference_lag_steps=pairwise.reference_lag_steps,
         pairwise_reward_scale=pairwise.scale,

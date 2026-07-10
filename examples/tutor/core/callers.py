@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from examples.common.chat_budget import ChatContextBudget
-from examples.common.openai_utils import AsyncLLMCaller
+from examples.common.openai_utils import AsyncLLMCaller, TokenLogprob
 from examples.tutor.core.generation_budget import (
     ContextBudgetLimitExceeded,
     ensure_response_within_train_sample_budget,
@@ -24,6 +24,7 @@ class TextCallResult:
     text: str
     raw_text: str = ""
     error: str | None = None
+    token_logprobs: tuple[TokenLogprob, ...] = ()
 
 
 @dataclass(slots=True)
@@ -93,12 +94,18 @@ def encode_text(tokenizer: Any | None, text: str) -> list[int]:
 
 
 class ApiAuxiliaryCaller:
-    def __init__(self, caller: AsyncLLMCaller):
+    def __init__(
+        self,
+        caller: AsyncLLMCaller,
+        *,
+        request_overrides: dict[str, Any] | None = None,
+    ):
         self.caller = caller
+        self.request_overrides = dict(request_overrides or {})
 
     @property
     def request_config(self) -> dict[str, Any]:
-        return self.caller.request_config
+        return {**self.caller.request_config, **self.request_overrides}
 
     async def call_text(
         self,
@@ -108,13 +115,17 @@ class ApiAuxiliaryCaller:
     ) -> TextCallResult:
         del rid_prefix
         try:
-            raw_text = await self.caller.call_text(messages)
+            result = await self.caller.call(
+                messages,
+                request_overrides=self.request_overrides,
+            )
         except Exception as exc:
             return TextCallResult(text="", raw_text="", error=str(exc))
         return TextCallResult(
-            text=strip_reasoning_for_context(raw_text),
-            raw_text=raw_text,
+            text=strip_reasoning_for_context(result.text),
+            raw_text=result.text,
             error=None,
+            token_logprobs=result.token_logprobs,
         )
 
 

@@ -29,6 +29,19 @@ class AuxModelConfig:
     context_window_margin: int = 256
 
 
+@dataclass(frozen=True, slots=True)
+class TokenLogprob:
+    token: str
+    logprob: float
+    bytes: tuple[int, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LLMCallResult:
+    text: str
+    token_logprobs: tuple[TokenLogprob, ...] = ()
+
+
 def resolve_request_config(config: AuxModelConfig) -> dict[str, Any]:
     resolved = dict(config.request_params)
     extra_body = resolved.get("extra_body")
@@ -62,12 +75,21 @@ class AsyncLLMCaller:
                 max_retries=0,
             )
 
-    async def call_text(self, messages: list[dict[str, str]]) -> str:
+    async def call(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> LLMCallResult:
         if self._client is None:
             raise RuntimeError("openai package is required for auxiliary model calls")
+        resolved_request_config = {
+            **self.request_config,
+            **(request_overrides or {}),
+        }
         request_kwargs = {
             key: value
-            for key, value in self.request_config.items()
+            for key, value in resolved_request_config.items()
             if key != "extra_body" and value is not None
         }
         if "max_tokens" in request_kwargs:
@@ -94,11 +116,29 @@ class AsyncLLMCaller:
             response = await self._client.chat.completions.create(
                 model=self.config.model,
                 messages=messages,
-                extra_body=self.request_config.get("extra_body") or None,
+                extra_body=resolved_request_config.get("extra_body") or None,
                 **request_kwargs,
             )
-        content = response.choices[0].message.content
-        return (content or "").strip()
+        choice = response.choices[0]
+        content = (choice.message.content or "").strip()
+        choice_logprobs = getattr(choice, "logprobs", None)
+        logprob_content = getattr(choice_logprobs, "content", None) or []
+        token_logprobs = tuple(
+            TokenLogprob(
+                token=str(item.token),
+                logprob=float(item.logprob),
+                bytes=(
+                    tuple(int(value) for value in item.bytes)
+                    if getattr(item, "bytes", None) is not None
+                    else None
+                ),
+            )
+            for item in logprob_content
+        )
+        return LLMCallResult(text=content, token_logprobs=token_logprobs)
+
+    async def call_text(self, messages: list[dict[str, str]]) -> str:
+        return (await self.call(messages)).text
 
 
 def make_teacher_client(extra_kwargs: dict[str, Any]) -> AsyncOpenAI:

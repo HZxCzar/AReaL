@@ -94,6 +94,35 @@ class TutorPairwiseRewardConfig:
 
 
 @dataclass
+class TutorStudentGeneralizeConfidenceConfig:
+    enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Use answer-token confidence as an additional dense "
+                "generalization reward. The auxiliary API must return token "
+                "logprobs for the generated student answer."
+            )
+        },
+    )
+    reward_scale: float = field(
+        default=0.25,
+        metadata={
+            "help": (
+                "Confidence reward as a fraction of the corresponding level "
+                "correctness reward. Must be in (0, 1)."
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        if self.enabled and not 0.0 < float(self.reward_scale) < 1.0:
+            raise ValueError(
+                "student_generalize.confidence.reward_scale must be in (0, 1)."
+            )
+
+
+@dataclass
 class TutorStudentGeneralizeConfig:
     enabled: bool = field(
         default=False,
@@ -127,11 +156,26 @@ class TutorStudentGeneralizeConfig:
     )
     level1_reward: float = field(default=0.2)
     level2_reward: float = field(default=0.5)
+    confidence: TutorStudentGeneralizeConfidenceConfig = field(
+        default_factory=TutorStudentGeneralizeConfidenceConfig
+    )
 
     def __post_init__(self) -> None:
         if self.mode not in _STUDENT_GENERALIZE_MODES:
             raise ValueError(
                 "student_generalize.mode must be one of: 'only_success', 'always'."
+            )
+        if self.confidence.enabled and not self.enabled:
+            raise ValueError(
+                "student_generalize.confidence.enabled=true requires "
+                "student_generalize.enabled=true."
+            )
+        if self.confidence.enabled and (
+            float(self.level1_reward) <= 0.0 or float(self.level2_reward) <= 0.0
+        ):
+            raise ValueError(
+                "student_generalize level rewards must be positive when confidence "
+                "reward is enabled."
             )
 
 
