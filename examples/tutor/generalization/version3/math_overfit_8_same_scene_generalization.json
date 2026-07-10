@@ -1,0 +1,317 @@
+{
+  "train-927": {
+    "eligibility_status": "excluded_version3_presolved",
+    "eligibility_note": "Under the Version 3 same-scene numeric-only rule, one of two exact pre-solve calls solved Level 1 and one of two solved Level 2. Making the numbers larger would test arithmetic rather than the original lattice-counting principle, so this ID is not qualified for strict Version 3 evaluation.",
+    "shared_principle": "Count the unit edges and vertices of a complete triangular lattice without inferring an incorrect linear row pattern.",
+    "original_failure_reason": "The Student did not recover the triangular-lattice edge and vertex formulas; one response used an incorrect linear connector count and another never obtained a consistent model.",
+    "original_compute_graph": "For side length n = 8, count rods as 3(1+2+...+n), count connectors as 1+2+...+(n+1), and add the two counts: 108+45=153.",
+    "level1_compute_graph": "Keep the original graph and change only n from 8 to 11: rods = 3(1+2+...+11)=198, connectors = 1+2+...+12=78, total = 276.",
+    "level2_compute_graph": "Use the same lattice counts at n = 12, then add one new node for two locking washers at each interior connector. Rods = 234, connectors = 91, interior connectors = (11)(10)/2=55, so total pieces = 234+91+2(55)=435.",
+    "level1": {
+      "task": "A complete triangular frame has 11 unit rods along each outer side. Every unit segment parallel to an outer side is present, including all interior unit segments, and a connector is placed at every lattice vertex. How many rods and connectors are used altogether?",
+      "ground_truth": "276"
+    },
+    "level2": {
+      "task": "A complete triangular frame has 12 unit rods along each outer side. Every unit segment parallel to an outer side is present, including all interior unit segments, and a connector is placed at every lattice vertex. In addition, each connector strictly inside the outer boundary receives two locking washers; boundary connectors receive none. Counting rods, connectors, and washers, how many pieces are used altogether?",
+      "ground_truth": "435"
+    }
+  },
+  "train-1801": {
+    "eligibility_status": "excluded_version3_failure_not_principle",
+    "eligibility_note": "In the Version 3 pre-solve, the Student explicitly recognized that unequal denominations in different left-to-right orders are distinct and proposed the correct multiset-permutation method. Its remaining failure was unsupported enumeration or truncation, not the original order-versus-partition principle gap.",
+    "shared_principle": "Count ordered denomination strings with bounded multiplicities; exchanging identical stamps is irrelevant, but changing the left-to-right order of unequal denominations creates a new arrangement.",
+    "original_failure_reason": "The Student repeatedly collapsed rows of stamps to unordered integer partitions instead of counting distinct left-to-right arrangements.",
+    "original_compute_graph": "Enumerate ordered strings of denominations summing to 10 subject to at most d copies of denomination d; a remaining-sum and used-multiplicity DP gives 88.",
+    "level1_compute_graph": "Keep the same bounded ordered-string DP and change only the target postage from 10 to 13, with denominations available through 12; the count is 399.",
+    "level2_compute_graph": "Add one parity state to the same DP. Count bounded ordered denomination strings summing to 14 and retain only strings with an even number of stamps; the count is 297.",
+    "level1": {
+      "task": "Diane has one 1-cent stamp, two identical 2-cent stamps, three identical 3-cent stamps, and so on, up to twelve identical 12-cent stamps. In how many different arrangements can Diane paste exactly 13 cents worth of postage in a left-to-right row across the top of an envelope? Rotating or inverting an individual stamp, or exchanging two stamps of the same denomination, does not create a new arrangement.",
+      "ground_truth": "399"
+    },
+    "level2": {
+      "task": "Diane has one 1-cent stamp, two identical 2-cent stamps, three identical 3-cent stamps, and so on, up to thirteen identical 13-cent stamps. In how many different arrangements can Diane paste exactly 14 cents worth of postage in a left-to-right row across the top of an envelope using an even number of stamps? Rotating or inverting an individual stamp, or exchanging two stamps of the same denomination, does not create a new arrangement.",
+      "ground_truth": "297"
+    }
+  },
+  "train-2131": {
+    "eligibility_status": "eligible",
+    "shared_principle": "Count permutations of distinct cube sizes under a directed adjacent-pair constraint while tracking which cubes have already been used.",
+    "original_failure_reason": "The Student proposed recurrences that did not track the used subset, so they counted repeated cubes and did not represent permutations of all cubes.",
+    "student_presolve_validation": {
+      "status": "passed",
+      "runs_per_level": 3,
+      "level1_correct_runs": 0,
+      "level2_correct_runs": 0,
+      "failure_cause": "Both levels used a length-and-last-cube recurrence without a used-subset state, matching the original missing principle."
+    },
+    "original_compute_graph": "Count permutations of 1,...,8 satisfying next <= previous+2. The valid count is 2*3^6=1458, then reduce modulo 1000 to obtain 458.",
+    "level1_compute_graph": "Keep the original graph and change only the number of cubes from 8 to 9. The count is 2*3^7=4374, and 4374 mod 1000 = 374.",
+    "level2_compute_graph": "Keep the level-1 valid-tower count and add one choice node for selecting one of the eight contacts between adjacent cubes for a sensor. The count is 8(2*3^7)=34992, and the requested remainder is 992.",
+    "level1": {
+      "task": "A collection of nine cubes contains one cube of each integer edge length from 1 through 9. A tower uses all nine cubes. Any cube may be the bottom cube, and a cube placed immediately on top of a cube of edge length k must have edge length at most k+2. Let T be the number of legal towers. What is the remainder when T is divided by 1000?",
+      "ground_truth": "374"
+    },
+    "level2": {
+      "task": "A collection of nine cubes contains one cube of each integer edge length from 1 through 9. A tower uses all nine cubes. Any cube may be the bottom cube, and a cube placed immediately on top of a cube of edge length k must have edge length at most k+2. After a legal tower is built, exactly one of the eight contacts between adjacent cubes is selected for a pressure sensor. Counting both the tower and the selected contact, what is the remainder when the number of possibilities is divided by 1000?",
+      "ground_truth": "992"
+    }
+  },
+  "train-1705": {
+    "eligibility_status": "excluded_original_failure_not_principle",
+    "eligibility_note": "The original pre-solve used the correct compound-present-value formula and missed only the numerical evaluation of 1.05^10. These variants are complete and correct for ID coverage, but they must not be used as evidence of same-principle transfer.",
+    "shared_principle": "Move cash flows to a common time using compound accumulation or discount factors.",
+    "original_compute_graph": "Solve P(1.05)^10=500000 and round P to cents.",
+    "level1_compute_graph": "Keep the original graph and change only the target, rate, and duration: solve P(1.04)^8=500000 and round to cents, giving 365345.10.",
+    "level2_compute_graph": "Add three future deposits to the accumulation equation: P(1.04)^12+18000((1.04)^8+(1.04)^4+1.04)=700000, then solve for P and round to cents.",
+    "level1": {
+      "task": "How much money should be invested today at an annually compounded interest rate of 4% so that the account contains $500,000 in eight years? Express the answer as a dollar value rounded to the nearest cent.",
+      "ground_truth": "\\$365,\\!345.10"
+    },
+    "level2": {
+      "task": "An account must contain $700,000 after twelve annual compounding periods at 4%. One deposit is made today. Additional deposits of $18,000 are made at the ends of years 4, 8, and 11. How large must today's deposit be? Round to the nearest cent.",
+      "ground_truth": "\\$396,\\!986.58"
+    }
+  },
+  "train-1912": {
+    "eligibility_status": "eligible",
+    "shared_principle": "Treat Pascal's triangle as a set of distinct coefficient values and recognize that the linear entries C(n,1)=n contain every positive integer.",
+    "original_failure_reason": "The Student searched only familiar interior binomial coefficients and did not use the linear diagonal, which immediately controls the smallest distinct values.",
+    "student_presolve_validation": {
+      "status": "passed",
+      "runs_per_level": 3,
+      "level1_correct_runs": 0,
+      "level2_correct_runs": 0,
+      "failure_cause": "Both levels searched interior coefficients and failed to use the linear C(n,1)=n diagonal, matching the original missing principle."
+    },
+    "original_compute_graph": "Use C(n,1)=n to see that every positive integer occurs; therefore the first two four-digit distinct entries are 1000 and 1001, and the answer is 1001.",
+    "level1_compute_graph": "Keep the original graph and change only four digits to five digits. The first two five-digit distinct entries are C(10000,1)=10000 and C(10001,1)=10001.",
+    "level2_compute_graph": "Add a row-index filter n divisible by 12. The linear entries now supply every positive multiple of 12, so the first two six-digit candidates are 100008 and 100020; all eligible internal coefficients below the relevant range are excluded, giving 100020.",
+    "level1": {
+      "task": "What is the second smallest distinct five-digit number that appears anywhere in Pascal's triangle? Repeated occurrences of the same numerical value are counted only once.",
+      "ground_truth": "10001"
+    },
+    "level2": {
+      "task": "Retain only rows of Pascal's triangle whose row number n is divisible by 12, where row n contains the entries C(n,0),C(n,1),...,C(n,n). Among all retained entries, what is the second smallest distinct six-digit value? Repeated occurrences of the same numerical value are counted only once.",
+      "ground_truth": "100020"
+    }
+  },
+  "train-2138": {
+    "eligibility_status": "eligible",
+    "shared_principle": "Count binary strings with parity restrictions on every maximal run by retaining enough run state in a recurrence or automaton.",
+    "original_failure_reason": "The Student used recurrences that represented only a final run of minimum length and discarded longer legal odd or even runs.",
+    "student_presolve_validation": {
+      "status": "passed",
+      "runs_per_level": 3,
+      "level1_correct_runs": 0,
+      "level2_correct_runs": 0,
+      "failure_cause": "Both levels used insufficient run states and discarded valid longer runs, matching the original missing principle."
+    },
+    "original_compute_graph": "Run a finite-state DP for length 14 that tracks the current symbol and run parity; sum all accepting states to obtain 172.",
+    "level1_compute_graph": "Keep the same run-state DP and change only the length from 14 to 16; summing accepting states gives 377.",
+    "level2_compute_graph": "Add the first symbol to the same DP state and, at length 18, retain only accepting states whose final symbol equals the first; the count is 429.",
+    "level1": {
+      "task": "Consider sequences of length 16 consisting entirely of A's and B's. Every maximal run of consecutive A's must have even length, and every maximal run of consecutive B's must have odd length. How many such sequences are there?",
+      "ground_truth": "377"
+    },
+    "level2": {
+      "task": "Consider sequences of length 18 consisting entirely of A's and B's. Every maximal run of consecutive A's must have even length, and every maximal run of consecutive B's must have odd length. How many such sequences have the same symbol in their first and last positions?",
+      "ground_truth": "429"
+    }
+  },
+  "train-2346": {
+    "eligibility_status": "excluded_original_failure_not_principle",
+    "eligibility_note": "The original failure was dominated by reconstruction of the Asymptote figure rather than a stable mathematical-principle gap. These variants are complete and correct for ID coverage, but they must not be used as evidence of same-principle transfer.",
+    "shared_principle": "Destroy every triangular cycle in a complete triangular toothpick lattice by removing all unit segments in one of its three directions.",
+    "original_compute_graph": "Recognize the pictured side-4 complete triangular lattice and remove one direction class containing 1+2+3+4=10 toothpicks.",
+    "level1_compute_graph": "Keep the original graph and change only the side length to 1234567. One direction class contains n(n+1)/2=762078456028 toothpicks.",
+    "level2_compute_graph": "Add an inverse-count node: from (n-1)(n-2)/2-3n=11619 recover n=157, then remove one direction class containing n(n+1)/2=12403 toothpicks.",
+    "level1": {
+      "task": "A complete triangular toothpick lattice has 1,234,567 unit toothpicks along each outer side, with every interior unit segment parallel to an outer side present. What is the fewest toothpicks that must be removed so that no triangular cycle of any size remains?",
+      "ground_truth": "762078456028"
+    },
+    "level2": {
+      "task": "A complete triangular toothpick lattice has the same number n of unit toothpicks along each outer side, with every interior unit segment parallel to an outer side present. The number of lattice vertices strictly inside the outer boundary is 11,619 greater than the number of vertices on the boundary. What is the fewest toothpicks that must be removed so that no triangular cycle of any size remains?",
+      "ground_truth": "12403"
+    }
+  },
+  "train-456": {
+    "eligibility_status": "excluded_original_failure_not_principle",
+    "eligibility_note": "The original failure came from reading the stated multiple-of-7 branch as 7x instead of 3x. These variants are complete and correct for ID coverage, but they must not be used as evidence of same-principle transfer.",
+    "shared_principle": "Iterate a piecewise divisibility map, apply the intersection branch first, and use the resulting cycle to solve an iterate-index condition.",
+    "original_compute_graph": "Iterate from 2 to obtain 2->5->8->11->14->42->2; f^a(2)=f(2) first recurs at a=7.",
+    "level1_compute_graph": "Keep the iteration graph with changed divisors and coefficients. Starting at 1 gives 1->2->3->4->12->1->2, so f^a(1)=f(1) first recurs at a=6.",
+    "level2_compute_graph": "Add a perfect-square filter to the same period-5 return condition a=1 mod 5. For 1<a<=2026, square exponents arise from k=1 or 4 mod 5 with 1<=k<=45; excluding a=1 leaves 17.",
+    "level1": {
+      "task": "Define f on positive integers as follows. If x is divisible by both 4 and 6, set f(x)=x/12. If x is divisible by 6 but not by 4, set f(x)=2x. If x is divisible by 4 but not by 6, set f(x)=3x. Otherwise set f(x)=x+1. If f^a denotes a-fold iteration, what is the smallest integer a>1 such that f^a(1)=f(1)?",
+      "ground_truth": "6"
+    },
+    "level2": {
+      "task": "Define f on positive integers as follows. If x is divisible by both 4 and 6, set f(x)=x/12. If x is divisible by 6 but not by 4, set f(x)=2x. If x is divisible by 4 but not by 6, set f(x)=3x. Otherwise set f(x)=x+1. If f^a denotes a-fold iteration, how many perfect-square integers a satisfy 1<a<=2026 and f^a(1)=f(1)?",
+      "ground_truth": "17"
+    }
+  },
+  "test-1527": {
+    "eligibility_status": "excluded_version3_failure_not_principle",
+    "eligibility_note": "In one of two Version 3 Level 1 pre-solves, the Student obtained the correct forbidden-pair count and wrote the exact correct expression (16!-84*14!)/8, failing only to evaluate it to the numeric key. This is not a missing-principle failure, so the ID is not qualified for strict Version 3 evaluation.",
+    "shared_principle": "Count forbidden neighboring cell pairs correctly, subtract ordered placements of two distinguished beads, permute the remaining distinct beads, and quotient by the free dihedral action.",
+    "original_failure_reason": "The Student used incorrect adjacency-pair counts for the 3 by 3 grid while otherwise attempting the correct complement-and-symmetry method.",
+    "original_compute_graph": "On a 3 by 3 grid, count 20 king-adjacent unordered cell pairs. Valid labeled placements are (9*8-2*20)7!, and dividing by 8 dihedral symmetries gives 20160.",
+    "level1_compute_graph": "Keep the same graph and change only the grid from 3 by 3 to 4 by 4. There are 42 king-adjacent unordered pairs, so the count is (16*15-2*42)14!/8=1699976678400.",
+    "level2_compute_graph": "Add the condition that both distinguished beads avoid the four corners. The 12 non-corner cells induce 42-4(3)=30 forbidden pairs, so the count is (12*11-2*30)14!/8=784604620800.",
+    "level1": {
+      "task": "How many ways are there to put 16 differently colored beads on a 4 by 4 grid if the purple bead and the green bead cannot occupy horizontally, vertically, or diagonally adjacent cells, and rotations and reflections of the grid are considered the same?",
+      "ground_truth": "1699976678400"
+    },
+    "level2": {
+      "task": "How many ways are there to put 16 differently colored beads on a 4 by 4 grid if the purple bead and the green bead cannot occupy horizontally, vertically, or diagonally adjacent cells, neither the purple bead nor the green bead may occupy a corner cell, and rotations and reflections of the grid are considered the same?",
+      "ground_truth": "784604620800"
+    }
+  },
+  "test-1593": {
+    "eligibility_status": "eligible",
+    "shared_principle": "Recognize the forced decomposition of a 3 by 2m rectangle tiled by L-trominoes into independent 3 by 2 slabs, each with two orientations.",
+    "original_failure_reason": "The Student did not establish the forced 3 by 2 slab decomposition and instead guessed a nonmultiplicative tiling pattern.",
+    "student_presolve_validation": {
+      "status": "passed",
+      "runs_per_level": 3,
+      "level1_correct_runs": 0,
+      "level2_correct_runs": 0,
+      "failure_cause": "Both levels guessed tiling counts without proving the forced independent-slab decomposition, matching the original missing principle."
+    },
+    "original_compute_graph": "Decompose the fixed 3 by 6 board into three forced 3 by 2 slabs, choose either of two tilings in each slab, and obtain 2^3=8.",
+    "level1_compute_graph": "Keep the same graph and change only the board length from 6 to 8. Four independent slabs give 2^4=16 tilings.",
+    "level2_compute_graph": "Use five independent slabs for a 3 by 10 board and add a state-count node: each slab has one left-hooked and one non-left-hooked orientation, so exactly two left-hooked slabs can be selected in C(5,2)=10 ways.",
+    "level1": {
+      "task": "In how many patterns can eight identical L-shaped pieces, each consisting of three unit squares, be placed to perfectly cover a fixed 3 by 8 board? Rotating or reflecting an individual piece is allowed, but the board itself remains fixed.",
+      "ground_truth": "16"
+    },
+    "level2": {
+      "task": "Ten identical L-shaped pieces, each consisting of three unit squares, perfectly cover a fixed 3 by 10 board. Partition the board into the five consecutive 3 by 2 slabs formed by column pairs (1,2), (3,4), (5,6), (7,8), and (9,10). Call a slab left-hooked when the piece covering its upper-left cell also covers its middle-left cell. How many tilings have exactly two left-hooked slabs?",
+      "ground_truth": "10"
+    }
+  },
+  "test-2072": {
+    "eligibility_status": "excluded_original_failure_not_principle",
+    "eligibility_note": "One original response found all three possible fourth vertices but was cut off by the 1024-token limit, while another omitted one configuration. These variants are complete and correct for ID coverage, but they must not be used as evidence of a stable same-principle transfer failure.",
+    "shared_principle": "Enumerate the three choices of which supplied point is opposite the missing parallelogram vertex, then evaluate the requested function of the three perimeters.",
+    "original_compute_graph": "The three choices give adjacent side pairs (5,5), (5,8), and (5,8), hence perimeters 20,26,26 and difference 6.",
+    "level1_compute_graph": "Keep the same graph and change only the coordinates. The side pairs become (10,10), (10,12), and (10,12), hence perimeters 40,44,44 and difference 4.",
+    "level2_compute_graph": "Keep the same three perimeter nodes 40,44,44 but change the final aggregation from max-minus-min to the sum of squares: 40^2+44^2+44^2=5472.",
+    "level1": {
+      "task": "A parallelogram has three of its vertices at (0,0), (8,6), and (8,-6), but it is not known which supplied vertex is opposite the missing vertex. What is the positive difference between the greatest possible perimeter and the least possible perimeter of the parallelogram?",
+      "ground_truth": "4"
+    },
+    "level2": {
+      "task": "A parallelogram has three of its vertices at (0,0), (8,6), and (8,-6), but it is not known which supplied vertex is opposite the missing vertex. For each of the three possible parallelograms, compute its perimeter. What is the sum of the squares of those three perimeters?",
+      "ground_truth": "5472"
+    }
+  },
+  "test-2397": {
+    "eligibility_status": "eligible",
+    "shared_principle": "Classify two-element root multisets that are closed under a quadratic map by considering fixed points, fixed-point preimages, and two-cycles.",
+    "original_failure_reason": "The Student did not classify all invariant two-root multisets under c -> c^2-2 and therefore could not turn root closure into a finite count of equations.",
+    "student_presolve_validation": {
+      "status": "passed",
+      "runs_per_level": 3,
+      "level1_correct_runs": 0,
+      "level2_correct_runs": 0,
+      "failure_cause": "Both levels omitted invariant root-multiset types, especially fixed-point/other-preimage pairs, matching the original missing principle."
+    },
+    "original_compute_graph": "Classify size-2 multisets closed under T(c)=c^2-2: two repeated fixed points, the pair of fixed points, two fixed-point/other-preimage pairs, and one two-cycle, for 6 equations.",
+    "level1_compute_graph": "Keep the same invariant-multiset classification and change only the map constant from 2 to 3. The same generic six classes occur for T(c)=c^2-3, giving 6 equations.",
+    "level2_compute_graph": "Add the condition that the roots are distinct. Remove the two repeated-fixed-point multisets from the six level-1 cases, leaving 4 equations.",
+    "level1": {
+      "task": "Find the number of quadratic equations of the form x^2+ax+b=0 such that, whenever c is a root of the equation, c^2-3 is also a root. Roots are counted with multiplicity, and a and b may be complex.",
+      "ground_truth": "6"
+    },
+    "level2": {
+      "task": "Find the number of quadratic equations of the form x^2+ax+b=0 that have two distinct roots and satisfy the following closure condition: whenever c is a root, c^2-3 is also a root. The coefficients a and b may be complex.",
+      "ground_truth": "4"
+    }
+  },
+  "test-2454": {
+    "eligibility_status": "eligible",
+    "shared_principle": "Express a Fibonacci-rule target term as a linear form in the first two terms, then solve and minimize a constrained collision of that linear form over integer starting pairs.",
+    "original_failure_reason": "The Student derived the correct linear form but did not parameterize equal-value integer pairs and instead searched target values without proving or reaching the minimum.",
+    "student_presolve_validation": {
+      "status": "passed",
+      "runs_per_level": 3,
+      "level1_correct_runs": 0,
+      "level2_correct_runs": 0,
+      "failure_cause": "Both levels derived the linear form but brute-forced small starts instead of parameterizing its integer collisions, matching the original missing principle."
+    },
+    "original_compute_graph": "Write the seventh term as 5a+8b. Equal values with different a force starting-pair differences (8k,-5k); under 0<=a<=b the first collision is (0,13) and (8,8), giving N=104.",
+    "level1_compute_graph": "Keep the same collision-minimization graph and change only the target from the seventh to the ninth term. The ninth term is 13a+21b; the first collision is (0,34) and (21,21), giving N=714.",
+    "level2_compute_graph": "Add the strict-increase condition a<b to the level-1 graph. The first admissible collision shifts to (0,35) and (21,22), giving N=735.",
+    "level1": {
+      "task": "Two non-decreasing sequences of nonnegative integers have different first terms. In each sequence, every term beginning with the third is the sum of the previous two terms, and the ninth term is N. What is the smallest possible value of N?",
+      "ground_truth": "714"
+    },
+    "level2": {
+      "task": "Two sequences of nonnegative integers have different first terms. In each sequence, the second term is strictly greater than the first, every term beginning with the third is the sum of the previous two terms, and the ninth term is N. What is the smallest possible value of N?",
+      "ground_truth": "735"
+    }
+  },
+  "test-2504": {
+    "eligibility_status": "eligible",
+    "shared_principle": "Scale the variables to a chained product and use a sharp simultaneous AM-GM bound, including its equality conditions.",
+    "original_failure_reason": "The Student applied separate unbalanced AM-GM inequalities whose exponents did not cancel the numerator, rather than finding the chained scaling and simultaneous equality point.",
+    "student_presolve_validation": {
+      "status": "passed",
+      "runs_per_level": 3,
+      "level1_correct_runs": 0,
+      "level2_correct_runs": 0,
+      "failure_cause": "Both levels used non-sharp independent AM-GM bounds or invalid equality conditions, matching the original missing principle."
+    },
+    "original_compute_graph": "Scale to (1/20)abc/((1+a)(a+b)(b+c)(c+81)); the sharp denominator bound is 256abc, so the maximum is 1/5120.",
+    "level1_compute_graph": "Keep the same scaling-and-bound graph with a=2x, b=5y, c=16z. The expression becomes (1/10)abc/((1+a)(a+b)(b+c)(c+16)); the sharp bound is 81abc, giving 1/810.",
+    "level2_compute_graph": "Add an equality-point output node to the level-1 graph. Equality occurs at (a,b,c)=(2,4,8), hence (x,y,z)=(1,4/5,1/2), and 1/x+1/y+1/z=17/4.",
+    "level1": {
+      "task": "Let x, y, and z be positive real numbers. Find the maximum value of xyz/((1+2x)(2x+5y)(5y+16z)(z+1)).",
+      "ground_truth": "\\frac{1}{810}"
+    },
+    "level2": {
+      "task": "For positive real numbers x, y, and z, the expression xyz/((1+2x)(2x+5y)(5y+16z)(z+1)) has a unique maximizing point. At that point, what is 1/x+1/y+1/z?",
+      "ground_truth": "\\frac{17}{4}"
+    }
+  },
+  "test-2645": {
+    "eligibility_status": "eligible",
+    "shared_principle": "Recognize the structured degree-six factorization into one quadratic factor containing both real roots and a positive quartic factor, then use quadratic root identities.",
+    "original_failure_reason": "The Student treated the polynomial as a numerical root-finding problem and did not discover the structured factorization that isolates the two real roots.",
+    "student_presolve_validation": {
+      "status": "passed",
+      "runs_per_level": 3,
+      "level1_correct_runs": 0,
+      "level2_correct_runs": 0,
+      "failure_cause": "Both levels failed to find the structured quadratic-times-positive-quartic factorization, matching the original missing principle."
+    },
+    "original_compute_graph": "Factor as (20x^2+x-2)(100x^4+10x^2+1). The quartic is positive, and the quadratic-root squared difference is its discriminant divided by 20^2, namely 161/400.",
+    "level1_compute_graph": "Keep the same factorization graph and change only its parameters to c=3 and d=7: 1029x^6+49x^5+7x^3+x-3=(21x^2+x-3)(49x^4+7x^2+1). The squared difference is 253/441.",
+    "level2_compute_graph": "Use the same quadratic factor 21x^2+x-3, but change the final root statistic. With r+s=-1/21 and rs=-1/7, r^2+s^2=(r+s)^2-2rs=127/441.",
+    "level1": {
+      "task": "The equation 1029x^6+49x^5+7x^3+x-3=0 has exactly two real roots. Compute the square of the difference between them.",
+      "ground_truth": "\\frac{253}{441}"
+    },
+    "level2": {
+      "task": "Let r and s be the two real roots of 1029x^6+49x^5+7x^3+x-3=0. Compute r^2+s^2.",
+      "ground_truth": "\\frac{127}{441}"
+    }
+  },
+  "test-3695": {
+    "eligibility_status": "excluded_original_failure_not_principle",
+    "eligibility_note": "One exact original pre-solve returned the correct answer and another chose the wrong ray orientation. These variants are complete and correct for ID coverage, but they must not be used as evidence of a stable same-principle transfer failure.",
+    "shared_principle": "Compare the directions of nonshared sides of regular polygons at an endpoint of a common side using their exterior angles and the side-of-line orientation.",
+    "original_compute_graph": "For a regular pentagon and hexagon on the same side of their shared side, subtract exterior angles: 360/5-360/6=12 degrees.",
+    "level1_compute_graph": "Keep the same direction-subtraction graph and change only the side counts to 8 and 10: 360/8-360/10=9 degrees.",
+    "level2_compute_graph": "Change the polygons from the same side to opposite sides of their shared side, so the endpoint deviations add instead of subtract: 360/8+360/10=81 degrees.",
+    "level1": {
+      "task": "A regular octagon and a regular decagon are coplanar, share exactly one side AD, and have their interiors on the same side of line AD. At A, each polygon has one side other than AD. What is the smaller angle, in degrees, between those two nonshared sides?",
+      "ground_truth": "9"
+    },
+    "level2": {
+      "task": "A regular octagon and a regular decagon are coplanar, share exactly one side AD, and have their interiors on opposite sides of line AD. At A, each polygon has one side other than AD. What is the smaller angle, in degrees, between those two nonshared sides?",
+      "ground_truth": "81"
+    }
+  }
+}

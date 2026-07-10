@@ -14,15 +14,15 @@
   },
   "train-1801": {
     "original_compute_graph": "Count ordered stamp denomination strings summing to 10, with at most d copies of denomination d and copies of the same denomination indistinguishable.",
-    "level1_compute_graph": "Count ordered tile-label strings summing to 12, with at most d copies of label d available for each label d from 1 through 11, and copies of the same label indistinguishable.",
-    "level2_compute_graph": "Use the same valid ordered rows summing to 12 with labels 1 through 11. If a row has length m, insert two distinct zero-credit seals into two different gaps, contributing (m + 1) * m variants.",
+    "level1_compute_graph": "Keep the original bounded ordered-multiset graph, but count tile-label strings summing to 13 with at most d copies of label d for d = 1,...,12. A DP over remaining sum and used multiplicities gives 399 rows.",
+    "level2_compute_graph": "Add a length-parity state to the same bounded ordered-multiset graph. Count tile-label strings summing to 14 with at most d copies of label d for d = 1,...,13, retaining only strings of even length; the DP gives 297 rows.",
     "level1": {
-      "task": "A lab builds coded sample bracelets from numbered tiles. It has one tile labeled 1, two identical tiles labeled 2, three identical tiles labeled 3, and so on through eleven identical tiles labeled 11. The bracelet record is only the left-to-right label sequence. How many different records have label sum exactly 12?",
-      "ground_truth": "257"
+      "task": "A code strip is assembled as a left-to-right row. There is one tile labeled 1, two indistinguishable tiles labeled 2, three indistinguishable tiles labeled 3, and so on through twelve indistinguishable tiles labeled 12. The labels in the row must sum to exactly 13. Rotating or flipping an individual tile does not create a new row, and exchanging two tiles bearing the same label does not create a new row. How many different rows are possible?",
+      "ground_truth": "399"
     },
     "level2": {
-      "task": "Diane has one 1-cent stamp, two identical 2-cent stamps, three identical 3-cent stamps, and so on through eleven identical 11-cent stamps. First she chooses a left-to-right stamp sequence with total postage exactly 12 cents. Then she inserts a red 0-cent seal and a blue 0-cent seal into two different gaps of the sequence; a gap may be before the first stamp, after the last stamp, or between neighboring stamps. How many final strips are possible?",
-      "ground_truth": "5370"
+      "task": "A code strip is assembled as a left-to-right row. There is one tile labeled 1, two indistinguishable tiles labeled 2, three indistinguishable tiles labeled 3, and so on through thirteen indistinguishable tiles labeled 13. The labels must sum to exactly 14, and the row must contain an even number of tiles. Rotating or flipping an individual tile does not create a new row, and exchanging two tiles bearing the same label does not create a new row. How many different rows are possible?",
+      "ground_truth": "297"
     }
   },
   "train-2131": {
@@ -39,12 +39,13 @@
     }
   },
   "train-1705": {
+    "eligibility_note": "Skipped for same-principle generalization: the Student used the correct compound-present-value formula on the original task and failed only in evaluating (1.05)^10.",
     "original_compute_graph": "Solve the present-value equation P * (1.05)^10 = 500000 and round P to cents.",
-    "level1_compute_graph": "In each pass, added = ending/5, so ending = starting + ending/5 and hence ending = (5/4) * starting. Solve P * (5/4)^6 = 1000000, giving P = 262144.",
+    "level1_compute_graph": "Keep the original repeated present-value graph, but use an effective discount rate d rather than an interest rate: the one-period discount is d times the ending value, so V_start = (1 - d)V_end. Apply the factor 1 - 0.20 six times: P = 15625 * (0.8)^6 = 4096.",
     "level2_compute_graph": "Present value P plus scheduled gifts at the ends of years 4, 8, and 11 satisfies P * (1.04)^12 + 18000 * ((1.04)^8 + (1.04)^4 + 1.04) = 700000.",
     "level1": {
-      "task": "A damaged archive is rebuilt through six identical restoration passes. During each pass, the number of files added in that pass is exactly one fifth of the number of files present at the end of that pass. No files are added in any other way. The archive contains 1,000,000 files after the sixth pass. How many files did it contain before the first pass?",
-      "ground_truth": "262144"
+      "task": "A six-year zero-coupon claim pays $15,625 at maturity. Its annual effective discount rate is 20%: for each one-year step, the discount for that step is 20% of the value at the end of that step. The same discount convention is applied successively in all six years. What is the claim's value six years before maturity?",
+      "ground_truth": "\\$4,\\!096"
     },
     "level2": {
       "task": "A grant office wants an account balance of $700,000 after twelve annual 4% compounding periods. It will make one deposit today. Separate donors will add $18,000 at the end of year 4, $18,000 at the end of year 8, and $18,000 at the end of year 11. What deposit is required today? Round to the nearest cent.",
@@ -54,30 +55,31 @@
   "train-1912": {
     "original_compute_graph": "View Pascal's triangle by distinct values. The linear diagonal contains every positive integer, so the two smallest distinct four-digit values are 1000 and 1001.",
     "level1_compute_graph": "View all binomial coefficients from expansions of (x+y)^n by distinct coefficient values. The linear coefficients contain every positive integer, so the two smallest distinct five-digit values are 10000 and 10001.",
-    "level2_compute_graph": "Ignore the outer 1 diagonals and the adjacent linear diagonals. The smallest distinct five-digit values then include 10011, 10153, and 10296.",
+    "level2_compute_graph": "Add a row filter to the original distinct-value graph: retain all C(n,k) only when 12 divides n. The linear coefficients C(n,1)=n therefore supply every positive multiple of 12. The first two six-digit retained values are 100008 and 100020; all six-digit internal coefficients with 2 <= k <= n - 2 are at least C(456,2)=103740.",
     "level1": {
       "task": "Look across the coefficients appearing in all polynomial expansions of (x+y)^n for nonnegative integers n. Treat repeated coefficient values as one value. What is the second smallest distinct coefficient that has exactly five digits?",
       "ground_truth": "10001"
     },
     "level2": {
-      "task": "In Pascal's triangle, delete the two outer diagonals of 1s and also delete the adjacent diagonals whose entries are 1, 2, 3, 4, and so on. Among the remaining entries, viewed as distinct numerical values, what is the third smallest value that has exactly five digits?",
-      "ground_truth": "10296"
+      "task": "For every positive integer n divisible by 12, retain all coefficients C(n,k), for k=0,1,...,n, from the expansion of (x+y)^n. Ignore every expansion whose exponent n is not divisible by 12. Treat repeated numerical coefficient values as one value. What is the second smallest distinct retained coefficient that has exactly six digits?",
+      "ground_truth": "100020"
     }
   },
   "train-2138": {
     "original_compute_graph": "Dynamic program over length-14 binary strings ending in A or B, enforcing even A-runs and odd B-runs; compute total valid strings a_14 + b_14.",
     "level1_compute_graph": "Dynamic program over length-16 signal strips ending in H or L, enforcing even H-runs and odd L-runs; compute total valid strips h_16 + l_16.",
-    "level2_compute_graph": "Use the same run constraints, but count length-20 strings with exactly five maximal runs and the middle run length fixed at 4.",
+    "level2_compute_graph": "Use the same run-validity recurrence at length 18, add the first symbol to the DP state, and retain only terminal states whose last symbol equals the first. The two matching endpoint totals sum to 429.",
     "level1": {
       "task": "A signal strip is written with the symbols H and L. Every maximal uninterrupted stretch of H symbols must have even length, while every maximal uninterrupted stretch of L symbols must have odd length. How many length-16 signal strips are possible?",
       "ground_truth": "377"
     },
     "level2": {
-      "task": "A binary status log is written with the letters A and B. Every maximal uninterrupted stretch of A's must have even length, and every maximal uninterrupted stretch of B's must have odd length. The log has length 20, consists of exactly five maximal stretches, and its third maximal stretch has length exactly 4. How many logs are possible?",
-      "ground_truth": "56"
+      "task": "A binary status log is written with the symbols A and B. Every maximal uninterrupted run of A symbols must have even length, while every maximal uninterrupted run of B symbols must have odd length. How many length-18 logs have the same symbol in their first and last positions?",
+      "ground_truth": "429"
     }
   },
   "train-2346": {
+    "eligibility_note": "Skipped for same-principle generalization: the Student's original-task failure was dominated by inability to recover the triangular lattice from the Asymptote figure, not by a stable mathematical-principle gap.",
     "original_compute_graph": "The 30-toothpick figure is a side-4 complete triangular toothpick lattice. Removing one whole direction destroys every triangular cycle, and each direction class has 4*5/2 toothpicks.",
     "level1_compute_graph": "In a side-1234567 complete triangular beam lattice, removing one whole direction destroys every triangular closed beam loop, and each direction class has 1234567*1234568/2 beams.",
     "level2_compute_graph": "A side-n triangular toothpick lattice has (n - 1)(n - 2)/2 interior junctions and 3n boundary junctions. From their difference 11619, recover n = 157, then remove one full direction, n(n+1)/2 toothpicks, to destroy all triangular cycles.",
@@ -91,6 +93,7 @@
     }
   },
   "train-456": {
+    "eligibility_note": "Skipped for same-principle generalization: on the original task the Student read the 'multiple of 7 only' branch as 7x instead of the stated 3x, so the failure was a branch-reading error.",
     "original_compute_graph": "Iterate the piecewise divisibility map from 2; the orbit is 2 -> 5 -> 8 -> 11 -> 14 -> 42 -> 2, so f^a(2) = f(2) first recurs at a = 7.",
     "level1_compute_graph": "Iterate the piecewise divisibility map using divisors 4 and 6, recognizing that 'divisible by both' means divisible by lcm(4,6) = 12. From 1 the orbit is 1 -> 2 -> 3 -> 4 -> 12 -> 1 -> 2, so f^a(1) = f(1) first recurs at a = 6.",
     "level2_compute_graph": "Use the same period-5 orbit from 1, so f^a(1) = f(1) exactly when a = 1 mod 5. Restrict a to perfect squares at most 2026: a = k^2 has residue 1 mod 5 exactly when k = 1 or 4 mod 5. For 1 <= k <= 45 there are 18 such k; exclude a = 1, leaving 17 exponents.",
@@ -105,31 +108,32 @@
   },
   "test-1527": {
     "original_compute_graph": "Count placements of 9 distinct beads on a 3 by 3 grid. Exclude purple-green king-adjacent placements using the 20 adjacent unordered cell pairs, then divide by 8 dihedral symmetries.",
-    "level1_compute_graph": "On a 4 by 4 toroidal grid, every cell has 8 king-neighbors, so there are 16 * 8 / 2 = 64 forbidden unordered cell pairs. Count 16 * 15 - 2 * 64 = 112 ordered nonadjacent placements for the two distinguished teams, permute the other 14 teams, and divide by 8 free dihedral symmetries: 112 * 14! / 8 = 1220496076800.",
-    "level2_compute_graph": "On a 5 by 5 toroidal grid there are 25 * 8 / 2 = 100 king-adjacent unordered pairs. Fix a third badge at the marked origin; deleting that cell and its 8 incident pairs leaves 92 forbidden pairs among the other 24 cells. Thus there are 2 * (C(24,2) - 92) = 368 ordered nonadjacent purple/green placements. Permute the other 22 badges and divide by the 8 origin-fixing dihedral symmetries: 368 * 22! / 8 = 51704033477769953280000.",
+    "level1_compute_graph": "Keep the original graph: count forbidden unordered site pairs E, subtract the 2E ordered placements of two distinguished objects from N(N-1), permute all remaining objects, and divide by the 8 free dihedral symmetries. Here N = 49 and the row/column radius is 2. The axial pairs contribute 2 * 7 * (6 + 5) = 154, and pairs with both coordinate gaps positive contribute 2 * (6 + 5)^2 = 242, so E = 396. The result is (49 * 48 - 2 * 396) * 47! / 8 = 195 * 47! = 50431532094677795225378049254954336093993538315878400000000000.",
+    "level2_compute_graph": "Slightly change the graph by restricting both distinguished objects to the 45 non-corner sites before applying the same forbidden-pair subtraction. The full radius-2 graph has 396 unordered forbidden pairs. Each of the four corners has 8 incident forbidden pairs and no forbidden pair joins two corners, leaving 396 - 4 * 8 = 364 forbidden pairs in the non-corner induced graph. Thus there are 45 * 44 - 2 * 364 = 1252 ordered valid placements, followed by 47! permutations and division by 8: 1252 * 47! / 8 = 40474537296497820270623921581540274865179429468897280000000000.",
     "level1": {
-      "task": "Sixteen distinct processes are assigned one per node of a 4 by 4 cyclic processor array. Rows and columns are indexed modulo 4: the left and right edges wrap together, and the top and bottom edges wrap together. Two different nodes are neighbors when their cyclic row distance and cyclic column distance are both at most 1. The Violet and Green processes may not occupy neighboring nodes. Assignments related by a rotation or reflection of the square array are identified. How many assignments are possible?",
-      "ground_truth": "1220496076800"
+      "task": "Forty-nine distinct processes are assigned one per site of an ordinary, non-cyclic 7 by 7 square array. Among the processes, one is named Red and another is named Cyan. The Red and Cyan processes may not be placed at two sites for which both the absolute row-number difference and the absolute column-number difference are at most 2. This restriction applies only to the Red-Cyan pair. Assignments related by a rotation or reflection of the square are identified. How many assignments are possible?",
+      "ground_truth": "50431532094677795225378049254954336093993538315878400000000000"
     },
     "level2": {
-      "task": "Twenty-five distinct routing tokens are placed one per node of a 5 by 5 cyclic square array whose row and column indices are taken modulo 5. Two different nodes are neighbors when their cyclic row distance and cyclic column distance are both at most 1. A blue token is fixed at the marked node (0,0). The purple and green tokens may not occupy neighboring nodes. Arrangements related by a rotation or reflection about the marked node are identified. How many arrangements are possible?",
-      "ground_truth": "51704033477769953280000"
+      "task": "Forty-nine distinct access badges are assigned one per site of an ordinary, non-cyclic 7 by 7 square array. Among the badges, one is Silver and another is Amber. The Silver and Amber badges may not be placed at two sites for which both the absolute row-number difference and the absolute column-number difference are at most 2. In addition, Silver and Amber themselves must each avoid the four corner sites; the other 47 badges have no corner restriction. Assignments related by a rotation or reflection of the square are identified. How many assignments are possible?",
+      "ground_truth": "40474537296497820270623921581540274865179429468897280000000000"
     }
   },
   "test-1593": {
     "original_compute_graph": "Tile a fixed 3 by 6 rectangle with L-trominoes. The board decomposes into three independent 3 by 2 stages, each with 2 tilings, giving 2^3.",
     "level1_compute_graph": "Fill a fixed 3 by 8 circuit region with L-shaped tri-cell modules. The region decomposes into four independent 3 by 2 stages, each with 2 fillings, giving 2^4.",
-    "level2_compute_graph": "Extend the same forced 3 by 2 stage recurrence to a fixed 3 by 12 rectangle, giving 2^6.",
+    "level2_compute_graph": "Keep the forced decomposition into six independent 3 by 2 stages, but add a state-count node: each stage has exactly one left-hooked and one non-left-hooked tiling, so choosing exactly two left-hooked stages gives C(6,2) = 15.",
     "level1": {
       "task": "A fixed 3 by 8 circuit region is to be exactly filled by eight identical L-shaped modules, each made from three unit cells. Rotating or flipping a module is allowed, but the circuit region itself is fixed in place. How many fillings are possible?",
       "ground_truth": "16"
     },
     "level2": {
-      "task": "A fixed 3 by 12 storage tray is to be exactly covered by twelve identical L-tromino tiles, each made from three unit squares. Rotating or flipping a tile is allowed, but the tray itself is fixed in place. How many tilings are possible?",
-      "ground_truth": "64"
+      "task": "A fixed 3 by 12 tray is tiled by twelve identical L-trominoes. Number rows from top to bottom and partition the columns into the six consecutive two-column slabs (1,2), (3,4), (5,6), (7,8), (9,10), and (11,12). Call a slab left-hooked when the tromino covering its upper-left cell also covers its middle-left cell. How many tilings have exactly two left-hooked slabs?",
+      "ground_truth": "15"
     }
   },
   "test-2072": {
+    "eligibility_note": "Skipped for same-principle generalization: one exact-rollout original-task response found all three possible fourth vertices and was cut off by the 1024-token limit before evaluating the perimeters, while another response omitted one configuration. The original failure is therefore not a stable missing-principle signal.",
     "original_compute_graph": "For the three given points, the possible parallelograms have adjacent side pairs (5,5), (5,8), and (5,8), so perimeters are 20, 26, and 26; return max - min.",
     "level1_compute_graph": "For the three graphics points, the possible parallelograms have adjacent side pairs (10,10), (10,12), and (10,12), so perimeters are 40, 44, and 44; return max - min.",
     "level2_compute_graph": "Use the same three possible perimeters 40, 44, and 44, then sum their squares.",
@@ -144,28 +148,28 @@
   },
   "test-2397": {
     "original_compute_graph": "Count size-2 multisets of roots closed under T(c) = c^2 - 2; each closed multiset gives one monic quadratic equation.",
-    "level1_compute_graph": "Count size-2 multisets of roots closed under T(c) = c^2; each closed multiset gives one monic quadratic equation.",
-    "level2_compute_graph": "Add the two monic linear equations whose single root is fixed by c -> c^2 to the five quadratic equations.",
+    "level1_compute_graph": "Count size-2 complex root multisets closed under T(c) = c^2 - 1. There are two repeated fixed-point multisets, one multiset containing both fixed points, two multisets pairing a fixed point r with its other preimage -r, and the 2-cycle {0,-1}, for 6 monic quadratics.",
+    "level2_compute_graph": "Filter the six closed quadratic root multisets for T(c) = c^2 - 1 to those with two distinct roots. Exclude the two repeated fixed-point multisets and retain the fixed-point pair, the two fixed-point/other-preimage pairs, and the 2-cycle {0,-1}, giving 4 equations.",
     "level1": {
-      "task": "A two-slot algebraic device stores the two roots of a monic quadratic state equation. The device is stable if applying T(c) = c^2 to any stored value produces a value already stored in the same two-slot multiset. How many monic quadratic state equations are stable?",
-      "ground_truth": "5"
+      "task": "A monic quadratic equation has two complex roots counted with multiplicity. Call it closed if, whenever r is one of its roots, r^2-1 is also one of its roots. How many closed monic quadratic equations are there?",
+      "ground_truth": "6"
     },
     "level2": {
-      "task": "Let T(c) = c^2. Count all monic equations of degree 1 or degree 2 whose multiset of roots is closed under T, meaning that applying T to any root gives another root of that equation.",
-      "ground_truth": "7"
+      "task": "A monic quadratic equation has two distinct complex roots. Call it closed if, for each root r, the value r^2-1 is also one of its two roots. How many closed monic quadratic equations with distinct roots are there?",
+      "ground_truth": "4"
     }
   },
   "test-2454": {
     "original_compute_graph": "For a Fibonacci-rule sequence with first terms a_1, a_2, the seventh term is 5a_1 + 8a_2. Minimize a common value N attainable by two nondecreasing nonnegative pairs with different first terms.",
-    "level1_compute_graph": "For a Fibonacci-rule production counter with first readings a_1, a_2, the eighth reading is 8a_1 + 13a_2. Minimize a common eighth reading N attainable by two nondecreasing nonnegative starts with different first readings.",
-    "level2_compute_graph": "Move the target to the tenth term, 21a_1 + 34a_2, and repeat the same minimization.",
+    "level1_compute_graph": "With zero-based terms x_0 = a and x_1 = b, the ninth listed value x_8 is 13a + 21b. Two nondecreasing starts with different a-values collide first at starts (0,34) and (21,21), giving N = 21 * (13 + 21) = 714.",
+    "level2_compute_graph": "For zero-based Fibonacci histories, x_10 = 34a + 55b. Equal values from different starts force differences (Delta a, Delta b) = (55k, -34k). The changed constraint b >= 2a requires, for k = 1, a lower-a start with b >= 2a + 144. The minimum is attained by (0,144) and (55,110), giving N = 55 * 144 = 7920.",
     "level1": {
-      "task": "Two production counters start with nonnegative integer readings and then update by replacing each later reading with the sum of the two preceding readings. In each counter's history, the readings never decrease. The two counters have different first readings but the same eighth reading N. What is the smallest possible N?",
-      "ground_truth": "273"
+      "task": "A history is indexed x_0,x_1,x_2,..., where x_0 and x_1 are nonnegative integers, x_0<=x_1, and x_n=x_{n-1}+x_{n-2} for n>=2. Two such histories have different x_0 values but the same value of x_8. What is the smallest possible common value of x_8?",
+      "ground_truth": "714"
     },
     "level2": {
-      "task": "Two nondecreasing sequences of nonnegative integers follow the Fibonacci rule after their first two terms: each later term is the sum of the two preceding terms. The two sequences have different first terms but a common tenth term N. What is the smallest possible N?",
-      "ground_truth": "1870"
+      "task": "A history starts with nonnegative integers x_0 and x_1 satisfying x_1>=2x_0, and follows x_n=x_{n-1}+x_{n-2} for n>=2. Two histories have different x_0 values but the same x_10=N; their x_1 values are allowed to be different. What is the smallest possible N?",
+      "ground_truth": "7920"
     }
   },
   "test-2504": {
@@ -195,12 +199,13 @@
     }
   },
   "test-3695": {
+    "eligibility_note": "Skipped for same-principle generalization: one exact-rollout original-task pre-solve returned the correct 12 degrees, while another failed from choosing the wrong ray orientation. The original therefore has no stable missing-principle failure to transfer.",
     "original_compute_graph": "For a regular pentagon and hexagon sharing a side on the same side, subtract the relevant endpoint directions; angle = 360 * (6 - 5) / (5 * 6) = 12 degrees.",
-    "level1_compute_graph": "Translate modular labels into physical pointer motion. On the 8-mark clockwise dial, 0 -> 1 is 360/8 degrees clockwise. On the 18-mark counterclockwise-labeled dial, 0 -> 17 is 360/18 degrees clockwise. Subtract the two same-direction rotations: 360/8 - 360/18 = 25 degrees.",
+    "level1_compute_graph": "Keep the original endpoint-direction subtraction graph with directed regular star-path skips. A 12-point path advancing 7 counterclockwise labels turns by 7 * 360/12 = 210 degrees, while a 20-point path advancing 7 labels turns by 7 * 360/20 = 126 degrees. The smaller difference between the outgoing rays is 84 degrees; replacing the directed 7/12 step by the undirected complement 5/12 would be incorrect.",
     "level2_compute_graph": "Recover side counts from diagonal counts: 27 gives n = 9 and 170 gives n = 20. For polygons on opposite sides of their shared side, add endpoint deviations: 360/9 + 360/20 = 58 degrees.",
     "level1": {
-      "task": "Two circular instrument dials are superimposed with their mark-0 rays aligned. Dial A has 8 equally spaced marks labeled 0,1,...,7 in clockwise order, and its pointer moves from mark 0 to mark 1. Dial B has 18 equally spaced marks labeled 0,1,...,17 in counterclockwise order, and its pointer moves from mark 0 to mark 17. What is the smaller angle, in degrees, between the two final pointer rays?",
-      "ground_truth": "25"
+      "task": "Two robots begin with the same directed chord AD. For Robot P, the vertices of a regular 12-point circle are labeled counterclockwise and each path segment advances by 7 labels; thus D is 7 labels after A and the next endpoint is 7 labels after D. Robot Q follows the analogous rule on 20 counterclockwise-labeled vertices, also advancing by 7 labels per segment. At D, what is the smaller angle, in degrees, between the two outgoing path segments?",
+      "ground_truth": "84"
     },
     "level2": {
       "task": "Two regular convex polygons share exactly the side AD, with their interiors on opposite sides of line AD. One polygon has 27 diagonals in total, and the other has 170 diagonals in total. At A, each polygon has one side other than AD. What is the degree measure of the smaller angle between those two nonshared sides?",
