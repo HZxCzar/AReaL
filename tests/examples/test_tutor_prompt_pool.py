@@ -791,7 +791,7 @@ def test_teacher_pool_example_enables_fifty_step_warmup(monkeypatch):
     monkeypatch.setenv("INF_API_KEY", "test-key")
     path = Path(
         "examples/tutor/configs/math/july/"
-        "baseline-overfit-1-leakt-batch128-rebn-nomean-5-teacher-pools.yaml"
+        "baseline-overfit-1-leakt-batch128-rebn-nomean-5-teacher-pools-wp.yaml"
     )
 
     config = OmegaConf.to_object(
@@ -804,3 +804,24 @@ def test_teacher_pool_example_enables_fifty_step_warmup(monkeypatch):
     assert config.prompt_pool.teacher_warmup.prompt_path.endswith(
         "teacher_warmup_20260704.txt"
     )
+
+
+@pytest.mark.parametrize(
+    "config_name",
+    [
+        "baseline-overfit-1-leakt-batch128-rebn-nomean-5-prompt-pools.yaml",
+        "baseline-overfit-1-leakt-batch128-rebn-nomean-5-teacher-pools.yaml",
+        "baseline-overfit-1-leakt-batch128-rebn-nomean-5-teacher-pools-wp.yaml",
+    ],
+)
+def test_pool_examples_penalize_max_turn_failure(monkeypatch, config_name):
+    """Test all pool experiments make max-turn failure as costly as leakage."""
+    monkeypatch.setenv("INF_API_KEY", "test-key")
+    path = Path("examples/tutor/configs/math/july") / config_name
+
+    config = OmegaConf.to_object(
+        OmegaConf.merge(OmegaConf.structured(TutorConfig), OmegaConf.load(path))
+    )
+
+    assert isinstance(config, TutorConfig)
+    assert config.reward.max_turn_penalty == pytest.approx(-1.0)

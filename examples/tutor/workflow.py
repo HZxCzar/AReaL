@@ -386,6 +386,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         outcome_prior_turn_weight: float = 0.1,
         outcome_credit_gamma: float = 0.9,
         early_success_bonus: float = 0.3,
+        max_turn_penalty: float = 0.0,
         enable_turn_penalty: bool = False,
         turn_penalty: float = -0.01,
         length_penalty_threshold_chars: int = 1200,
@@ -523,6 +524,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.outcome_prior_turn_weight = float(outcome_prior_turn_weight)
         self.outcome_credit_gamma = float(outcome_credit_gamma)
         self.early_success_bonus = float(early_success_bonus)
+        self.max_turn_penalty = float(max_turn_penalty)
         self.enable_turn_penalty = bool(enable_turn_penalty)
         self.turn_penalty = float(turn_penalty)
         self.length_penalty_threshold_chars = int(length_penalty_threshold_chars)
@@ -1397,6 +1399,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             outcome_prior_turn_weight=self.outcome_prior_turn_weight,
             outcome_credit_gamma=self.outcome_credit_gamma,
             early_success_bonus=self.early_success_bonus,
+            max_turn_penalty=getattr(self, "max_turn_penalty", 0.0),
             enable_turn_penalty=self.enable_turn_penalty,
             turn_penalty=self.turn_penalty,
             length_penalty_threshold_chars=self.length_penalty_threshold_chars,

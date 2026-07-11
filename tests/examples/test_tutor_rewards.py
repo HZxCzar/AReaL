@@ -885,6 +885,39 @@ def test_failed_episode_has_no_positive_success_credit_or_turn_penalty_by_defaul
     assert [item.reward for item in assignments] == pytest.approx([0.0, 0.0])
 
 
+def test_max_turn_penalty_applies_once_to_terminal_turn():
+    """Test max-turn failure adds one terminal component for ReBN propagation."""
+    turns = [_turn(1), _turn(2), _turn(3)]
+
+    assignments = asyncio.run(
+        _outcome_computer(max_turn_penalty=-1.0).compute(
+            _episode(turns, termination_reason="max_turns")
+        )
+    )
+
+    assert [item.reward_components for item in assignments] == [
+        {},
+        {},
+        {"max_turn_penalty": -1.0},
+    ]
+    assert [item.reward for item in assignments] == pytest.approx([0.0, 0.0, -1.0])
+
+
+@pytest.mark.parametrize(
+    "termination_reason",
+    ["success", "leak", tutor_workflow.CONTEXT_BUDGET_TERMINATION_REASON],
+)
+def test_max_turn_penalty_ignores_other_termination_reasons(termination_reason):
+    """Test only an actual max-turn terminal receives the configured penalty."""
+    assignments = asyncio.run(
+        _outcome_computer(max_turn_penalty=-1.0).compute(
+            _episode([_turn(1)], termination_reason=termination_reason)
+        )
+    )
+
+    assert "max_turn_penalty" not in assignments[0].reward_components
+
+
 def test_turn_penalty_applies_only_when_enabled():
     turns = [_turn(1), _turn(2)]
     assignments = asyncio.run(

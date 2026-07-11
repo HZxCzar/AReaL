@@ -505,6 +505,15 @@ class TutorRewardConfig:
     outcome_prior_turn_weight: float = field(default=0.1)
     outcome_credit_gamma: float = field(default=0.9)
     early_success_bonus: float = field(default=0.3)
+    max_turn_penalty: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Terminal reward applied once to the final teacher turn when an "
+                "episode ends at max_turns without success."
+            )
+        },
+    )
     enable_turn_penalty: bool = field(default=False)
     turn_penalty: float = field(default=-0.01)
     length_penalty_threshold_chars: int = field(default=1200)
