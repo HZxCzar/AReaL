@@ -251,6 +251,20 @@ def load_prompt_pool(path: str, *, role: str) -> tuple[str, ...]:
     return tuple(prompts)
 
 
+def load_prompt_text(path: str, *, role: str) -> str:
+    normalized_path = str(path or "").strip()
+    if not normalized_path:
+        return ""
+    file_path = Path(normalized_path)
+    try:
+        prompt = file_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError as exc:
+        raise ValueError(f"{role} prompt file not found: {file_path}") from exc
+    if not prompt:
+        raise ValueError(f"{role} prompt file must be non-empty: {file_path}")
+    return prompt
+
+
 def _safe_scalar(**metrics: Any) -> None:
     try:
         stats_tracker.get(workflow_context.stat_scope()).scalar(**metrics)
@@ -379,6 +393,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         length_penalty_min: float = -0.1,
         teacher_system_prompt: str = "",
         teacher_prompt_pool_path: str = "",
+        teacher_warmup_enabled: bool = False,
+        teacher_warmup_prompt_path: str = "",
+        teacher_warmup_steps: int = 0,
         teacher_user_prompt_template: str | None = None,
         teacher_show_ground_truth: bool = False,
         teacher_pre_enabled: bool = False,
@@ -517,6 +534,28 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.teacher_prompt_pool = load_prompt_pool(
             teacher_prompt_pool_path, role="teacher"
         )
+        self.teacher_warmup_enabled = bool(teacher_warmup_enabled)
+        self.teacher_warmup_prompt_path = str(teacher_warmup_prompt_path or "").strip()
+        self.teacher_warmup_steps = int(teacher_warmup_steps)
+        if self.teacher_warmup_enabled and not self.teacher_warmup_prompt_path:
+            raise ValueError(
+                "teacher_warmup_prompt_path is required when teacher warm-up is "
+                "enabled."
+            )
+        if self.teacher_warmup_enabled and self.teacher_warmup_steps <= 0:
+            raise ValueError(
+                "teacher_warmup_steps must be positive when teacher warm-up is enabled."
+            )
+        raw_teacher_warmup_prompt = (
+            load_prompt_text(self.teacher_warmup_prompt_path, role="teacher warm-up")
+            if self.teacher_warmup_enabled
+            else ""
+        )
+        self.teacher_warmup_prompt = (
+            self._resolve_teacher_system_prompt(raw_teacher_warmup_prompt)
+            if raw_teacher_warmup_prompt
+            else ""
+        )
         self.teacher_user_prompt_template = (
             teacher_user_prompt_template or TEACHER_STATE_USER_TEMPLATE
         ).strip()
@@ -536,6 +575,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.prompt_pool_seed = int(prompt_pool_seed)
         self._teacher_prompt_pool_fallback_rng = random.Random(
             f"{self.prompt_pool_seed}:teacher:fallback"
+        )
+        self._teacher_warmup_fallback_rng = random.Random(
+            f"{self.prompt_pool_seed}:teacher-warmup-gate:fallback"
         )
         self._student_prompt_pool_fallback_rng = random.Random(
             f"{self.prompt_pool_seed}:student:fallback"
@@ -833,6 +875,88 @@ class TutorAgentWorkflow(RolloutWorkflow):
         index = rng.randrange(len(pool))
         return PromptPoolSelection(index=index, suffix=pool[index])
 
+    def _teacher_warmup_probability(self, rollout_version: int | None) -> float:
+        if not getattr(self, "teacher_warmup_enabled", False):
+            return 0.0
+        version = max(0, int(rollout_version or 0))
+        return max(0.0, 1.0 - version / self.teacher_warmup_steps)
+
+    def _sample_teacher_pool_with_base(
+        self,
+        pool: tuple[str, ...],
+        *,
+        rollout_version: int | None,
+        warmup_probability: float,
+        task_id: int | None,
+    ) -> PromptPoolSelection:
+        if task_id is not None:
+            rng = random.Random(f"{self.prompt_pool_seed}:teacher:{int(task_id)}")
+        else:
+            rng = self._teacher_prompt_pool_fallback_rng
+        # The final virtual item is the clean base prompt, with the same weight as
+        # every suffix loaded from JSON.
+        index = rng.randrange(len(pool) + 1)
+        if index == len(pool):
+            return PromptPoolSelection(
+                index=-1,
+                suffix="",
+                source="pool_base",
+                rollout_version=(
+                    int(rollout_version) if rollout_version is not None else None
+                ),
+                warmup_probability=warmup_probability,
+            )
+        return PromptPoolSelection(
+            index=index,
+            suffix=pool[index],
+            source="pool",
+            rollout_version=(
+                int(rollout_version) if rollout_version is not None else None
+            ),
+            warmup_probability=warmup_probability,
+        )
+
+    def _select_teacher_prompt(
+        self,
+        pool: tuple[str, ...],
+        *,
+        rollout_version: int | None,
+    ) -> PromptPoolSelection | None:
+        try:
+            ctx = workflow_context.get()
+            if bool(getattr(ctx, "is_eval", False)):
+                return None
+            task_id = getattr(ctx, "task_id", None)
+        except Exception:
+            task_id = None
+
+        warmup_probability = self._teacher_warmup_probability(rollout_version)
+        if warmup_probability > 0.0:
+            if task_id is not None:
+                gate_rng = random.Random(
+                    f"{self.prompt_pool_seed}:teacher-warmup-gate:{int(task_id)}"
+                )
+            else:
+                gate_rng = self._teacher_warmup_fallback_rng
+            if gate_rng.random() < warmup_probability:
+                return PromptPoolSelection(
+                    index=-1,
+                    suffix="",
+                    source="warmup_full",
+                    rollout_version=int(rollout_version or 0),
+                    warmup_probability=warmup_probability,
+                    prompt_path=self.teacher_warmup_prompt_path,
+                )
+
+        if pool or getattr(self, "teacher_warmup_enabled", False):
+            return self._sample_teacher_pool_with_base(
+                pool,
+                rollout_version=rollout_version,
+                warmup_probability=warmup_probability,
+                task_id=task_id,
+            )
+        return None
+
     @staticmethod
     def _append_prompt_pool_suffix(
         base_prompt: str, selection: PromptPoolSelection | None
@@ -845,6 +969,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self, selection: PromptPoolSelection | None
     ) -> str:
         return self._append_prompt_pool_suffix(self.student_system_prompt, selection)
+
+    def _teacher_system_prompt_for_selection(
+        self, selection: PromptPoolSelection | None
+    ) -> str:
+        if selection is not None and selection.source == "warmup_full":
+            return self.teacher_warmup_prompt
+        return self._append_prompt_pool_suffix(self.teacher_system_prompt, selection)
 
     def _extract_tutor_visible_output(self, raw_output: str) -> str:
         if getattr(self, "enable_thinking", False):
@@ -899,12 +1030,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         task = str(data["task"])
         ground_truth = str(data["ground_truth"])
         trajectory_id = uuid.uuid4().int & ((1 << 63) - 1)
-        teacher_prompt_selection = self._sample_prompt_pool(
-            getattr(self, "teacher_prompt_pool", ()), role="teacher"
-        )
-        student_prompt_selection = self._sample_prompt_pool(
-            getattr(self, "student_prompt_pool", ()), role="student"
-        )
         self.last_student_generalization_results = []
         turn_artifacts: list[TurnArtifact] = []
         leak_count = 0
@@ -921,6 +1046,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 episode_lora_version = int(context_lora_version)
             elif hasattr(engine, "get_version"):
                 episode_lora_version = int(engine.get_version())
+        teacher_prompt_selection = self._select_teacher_prompt(
+            getattr(self, "teacher_prompt_pool", ()),
+            rollout_version=episode_lora_version,
+        )
+        student_prompt_selection = self._sample_prompt_pool(
+            getattr(self, "student_prompt_pool", ()), role="student"
+        )
         actor_chat_caller = (
             self._make_engine_chat_caller(
                 engine,
@@ -975,6 +1107,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     leak_count=0,
                     teacher_pre_solve_result=teacher_pre_solve_result,
                     student_name=selected_student.name,
+                    teacher_prompt_selection=teacher_prompt_selection,
                 )
                 self._maybe_dump_debug_trace(
                     task=task,
@@ -1045,6 +1178,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
                 student_name=selected_student.name,
                 student_call_failed=bool(initial_student_error),
+                teacher_prompt_selection=teacher_prompt_selection,
             )
             self._maybe_dump_debug_trace(
                 task=episode_artifact.task,
@@ -1302,19 +1436,25 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
             for artifact, trace in zip(turn_artifacts, traces, strict=True)
         ]
+        clean_teacher_inputs = [
+            (
+                self._clean_tutor_input_tokens(artifact)
+                if artifact.tutor_state.teacher_prompt_selection is not None
+                else None
+            )
+            for artifact in turn_artifacts
+        ]
         results = [
             response_to_tensordict(
                 artifact.tutor_response,
                 reward=assignment.reward,
                 trajectory_id=trajectory_id,
                 turn_idx=artifact.turn_idx,
-                input_tokens_override=(
-                    self._clean_tutor_input_tokens(artifact)
-                    if artifact.tutor_state.teacher_prompt_selection is not None
-                    else None
-                ),
+                input_tokens_override=clean_input,
             )
-            for artifact, assignment in zip(turn_artifacts, assignments, strict=True)
+            for artifact, assignment, clean_input in zip(
+                turn_artifacts, assignments, clean_teacher_inputs, strict=True
+            )
         ]
         total_reward = float(sum(assignment.reward for assignment in assignments))
         self.last_history = history
@@ -1333,6 +1473,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
             student_call_failed=bool(
                 initial_student_error
                 or any(artifact.student_error for artifact in turn_artifacts)
+            ),
+            teacher_prompt_selection=teacher_prompt_selection,
+            inference_prompt_tokens=sum(
+                artifact.tutor_response.input_len for artifact in turn_artifacts
+            ),
+            training_prompt_tokens=sum(
+                len(clean_input)
+                if clean_input is not None
+                else artifact.tutor_response.input_len
+                for artifact, clean_input in zip(
+                    turn_artifacts, clean_teacher_inputs, strict=True
+                )
             ),
         )
         self._maybe_dump_debug_trace(
@@ -1589,12 +1741,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
         rid_prefix: str = "tutor",
     ) -> tuple[ModelResponse, str]:
         messages = self._build_tutor_messages(tutor_state)
+        input_token_reserve = self._clean_teacher_input_token_reserve(
+            messages, tutor_state.teacher_prompt_selection
+        )
         if actor_caller is None:
             actor_caller = self._make_actor_caller(engine, external_client)
         result = await actor_caller.generate(
             messages,
             lora_version=lora_version,
             rid_prefix=f"{rid_prefix}-{tutor_state.turn_idx}",
+            input_token_reserve=input_token_reserve,
         )
         return result.response, result.raw_text
 
@@ -2589,9 +2745,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return [
             {
                 "role": "system",
-                "content": self._append_prompt_pool_suffix(
-                    self.teacher_system_prompt,
-                    tutor_state.teacher_prompt_selection,
+                "content": self._teacher_system_prompt_for_selection(
+                    tutor_state.teacher_prompt_selection
                 ),
             },
             {"role": "user", "content": self._build_tutor_prompt(tutor_state)},
@@ -2609,6 +2764,32 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ],
             enable_thinking=self.enable_thinking,
         )
+
+    def _clean_teacher_input_token_reserve(
+        self,
+        rollout_messages: list[dict[str, str]],
+        selection: PromptPoolSelection | None,
+    ) -> int:
+        if selection is None or getattr(self, "max_train_sample_tokens", None) is None:
+            return 0
+        rollout_input_len = len(
+            apply_chat_template(
+                self.tokenizer,
+                rollout_messages,
+                enable_thinking=self.enable_thinking,
+            )
+        )
+        clean_input_len = len(
+            apply_chat_template(
+                self.tokenizer,
+                [
+                    {"role": "system", "content": self.teacher_system_prompt},
+                    {"role": "user", "content": rollout_messages[1]["content"]},
+                ],
+                enable_thinking=self.enable_thinking,
+            )
+        )
+        return max(0, clean_input_len - rollout_input_len)
 
     def _generation_config(self):
         if self.gconfig is not None and hasattr(self.gconfig, "new"):
@@ -2632,6 +2813,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_pre_solve_result: TeacherPreSolveResult | None = None,
         student_name: str = "",
         student_call_failed: bool = False,
+        teacher_prompt_selection: PromptPoolSelection | None = None,
+        inference_prompt_tokens: int = 0,
+        training_prompt_tokens: int = 0,
     ) -> None:
         success_round = next(
             (
@@ -2667,6 +2851,47 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         if success_round > 0:
             metrics["solve_turn"] = int(success_round)
+
+        if teacher_prompt_selection is not None:
+            selected_source = teacher_prompt_selection.source
+            metrics["prompt_schedule/warmup_probability"] = float(
+                teacher_prompt_selection.warmup_probability
+            )
+            metrics["prompt_schedule/rollout_version"] = float(
+                teacher_prompt_selection.rollout_version or 0
+            )
+            metrics["prompt_schedule/warmup_selected"] = float(
+                selected_source == "warmup_full"
+            )
+            metrics["prompt_schedule/inference_prompt_tokens"] = float(
+                inference_prompt_tokens
+            )
+            metrics["prompt_schedule/training_prompt_tokens"] = float(
+                training_prompt_tokens
+            )
+            metrics["prompt_schedule/prompt_token_delta"] = float(
+                inference_prompt_tokens - training_prompt_tokens
+            )
+            teacher_output_chars = sum(
+                len(trace.tutor_visible_output) for trace in traces
+            )
+            for source in ("warmup_full", "pool", "pool_base"):
+                source_selected = source == selected_source
+                prefix = f"prompt_source/{source}"
+                metrics[f"{prefix}/selected"] = float(source_selected)
+                metrics[f"{prefix}/solved"] = float(
+                    source_selected and success_round > 0
+                )
+                metrics[f"{prefix}/reward"] = (
+                    float(total_reward) if source_selected else 0.0
+                )
+                metrics[f"{prefix}/leaked"] = float(source_selected and leak_count > 0)
+                metrics[f"{prefix}/solve_turn"] = (
+                    float(success_round) if source_selected else 0.0
+                )
+                metrics[f"{prefix}/teacher_output_chars"] = (
+                    float(teacher_output_chars) if source_selected else 0.0
+                )
 
         configured_student_names = list(
             getattr(self, "student_model_runtimes", {}).keys()

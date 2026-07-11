@@ -6,12 +6,21 @@ from typing import Any, Literal
 FeedbackKind = Literal["none", "student_judged", "leak"]
 LeakHandlingMode = Literal["disabled", "reward_only", "terminate", "feedback"]
 StudentGeneralizeMode = Literal["only_success", "always"]
+PromptSelectionSource = Literal[
+    "pool",
+    "pool_base",
+    "warmup_full",
+]
 
 
 @dataclass(frozen=True, slots=True)
 class PromptPoolSelection:
     index: int
     suffix: str
+    source: PromptSelectionSource = "pool"
+    rollout_version: int | None = None
+    warmup_probability: float = 0.0
+    prompt_path: str = ""
 
 
 @dataclass(slots=True)

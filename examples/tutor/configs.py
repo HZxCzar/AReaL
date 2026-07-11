@@ -77,6 +77,44 @@ class TutorAuxiliaryModelConfig:
 
 
 @dataclass
+class TutorTeacherWarmupPromptConfig:
+    enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to condition teacher rollouts on a full warm-up system "
+                "prompt with linearly annealed probability."
+            )
+        },
+    )
+    prompt_path: str = field(
+        default="",
+        metadata={"help": "Path to the full teacher warm-up system prompt."},
+    )
+    steps: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Policy-version step at which the warm-up prompt probability "
+                "reaches zero."
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        self.prompt_path = str(self.prompt_path or "").strip()
+        self.steps = int(self.steps)
+        if self.enabled and not self.prompt_path:
+            raise ValueError(
+                "prompt_pool.teacher_warmup.prompt_path is required when enabled."
+            )
+        if self.enabled and self.steps <= 0:
+            raise ValueError(
+                "prompt_pool.teacher_warmup.steps must be positive when enabled."
+            )
+
+
+@dataclass
 class TutorPromptPoolConfig:
     teacher_path: str = field(
         default="",
@@ -95,6 +133,9 @@ class TutorPromptPoolConfig:
                 "once per training episode."
             )
         },
+    )
+    teacher_warmup: TutorTeacherWarmupPromptConfig = field(
+        default_factory=TutorTeacherWarmupPromptConfig
     )
 
 

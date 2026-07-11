@@ -140,6 +140,9 @@ def _build_eval_workflow_kwargs(
     eval_workflow_kwargs["pairwise_reward_enabled"] = False
     eval_workflow_kwargs["teacher_prompt_pool_path"] = ""
     eval_workflow_kwargs["student_prompt_pool_path"] = ""
+    eval_workflow_kwargs["teacher_warmup_enabled"] = False
+    eval_workflow_kwargs["teacher_warmup_prompt_path"] = ""
+    eval_workflow_kwargs["teacher_warmup_steps"] = 0
     return eval_workflow_kwargs
 
 
@@ -236,6 +239,9 @@ def main(args):
         length_penalty_min=reward.length_penalty_min,
         teacher_system_prompt=config.teacher_system_prompt,
         teacher_prompt_pool_path=config.prompt_pool.teacher_path,
+        teacher_warmup_enabled=config.prompt_pool.teacher_warmup.enabled,
+        teacher_warmup_prompt_path=config.prompt_pool.teacher_warmup.prompt_path,
+        teacher_warmup_steps=config.prompt_pool.teacher_warmup.steps,
         teacher_user_prompt_template=config.teacher_user_prompt_template,
         teacher_show_ground_truth=config.teacher_show_ground_truth,
         teacher_pre_enabled=teacher_pre.enabled,

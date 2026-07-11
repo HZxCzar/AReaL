@@ -272,6 +272,7 @@ class AReaLEngineActorCaller:
         lora_version: int | None,
         rid_prefix: str,
         max_completion_tokens: int | None = None,
+        input_token_reserve: int = 0,
     ) -> ActorCallResult:
         metadata: dict[str, Any] = {}
         if lora_version is not None:
@@ -281,11 +282,14 @@ class AReaLEngineActorCaller:
             if max_completion_tokens is None
             else max(1, int(max_completion_tokens))
         )
+        train_sample_budget = self.max_train_sample_tokens
+        if train_sample_budget is not None:
+            train_sample_budget -= max(0, int(input_token_reserve))
         result = await self.chat_caller.generate(
             messages,
             gconfig=self.gconfig,
             max_completion_tokens=completion_budget,
-            max_train_sample_tokens=self.max_train_sample_tokens,
+            max_train_sample_tokens=train_sample_budget,
             metadata=metadata,
             rid_prefix=rid_prefix,
         )
@@ -325,6 +329,7 @@ class ExternalActorCaller:
         lora_version: int | None,
         rid_prefix: str,
         max_completion_tokens: int | None = None,
+        input_token_reserve: int = 0,
     ) -> ActorCallResult:
         del lora_version, rid_prefix
         completion_budget = (
@@ -332,6 +337,9 @@ class ExternalActorCaller:
             if max_completion_tokens is None
             else max(1, int(max_completion_tokens))
         )
+        train_sample_budget = self.max_train_sample_tokens
+        if train_sample_budget is not None:
+            train_sample_budget -= max(0, int(input_token_reserve))
         input_ids = apply_chat_template(
             self.tokenizer,
             messages,
@@ -341,7 +349,7 @@ class ExternalActorCaller:
             input_ids=input_ids,
             gconfig=None,
             max_completion_tokens=completion_budget,
-            max_train_sample_tokens=self.max_train_sample_tokens,
+            max_train_sample_tokens=train_sample_budget,
         )
         raise_if_over_budget(budget)
         safe_max_completion_tokens, _ = self.context_budget.clamp_max_completion_tokens(
@@ -364,7 +372,7 @@ class ExternalActorCaller:
         ensure_response_within_train_sample_budget(
             input_len=len(input_ids),
             output_len=len(output_tokens),
-            max_train_sample_tokens=self.max_train_sample_tokens,
+            max_train_sample_tokens=train_sample_budget,
         )
         response = ModelResponse(
             input_tokens=list(input_ids),

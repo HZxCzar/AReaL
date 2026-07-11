@@ -10,7 +10,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from examples.tutor import workflow as tutor_workflow
-from examples.tutor.configs import TutorConfig
+from examples.tutor.configs import TutorConfig, TutorTeacherWarmupPromptConfig
 from examples.tutor.core.pairwise import PairwiseTutorEvaluator
 from examples.tutor.core.tensors import response_to_tensordict
 from examples.tutor.core.types import (
@@ -94,6 +94,54 @@ def test_load_prompt_pool_reports_missing_and_malformed_files(tmp_path):
         tutor_workflow.load_prompt_pool(str(malformed_path), role="student")
 
 
+def test_teacher_warmup_config_requires_prompt_and_positive_steps():
+    """Test enabled warm-up configs reject incomplete schedules."""
+    with pytest.raises(ValueError, match="prompt_path"):
+        TutorTeacherWarmupPromptConfig(enabled=True, steps=50)
+    with pytest.raises(ValueError, match="steps"):
+        TutorTeacherWarmupPromptConfig(enabled=True, prompt_path="prompt.txt")
+
+    config = TutorTeacherWarmupPromptConfig(
+        enabled=True,
+        prompt_path=" prompt.txt ",
+        steps=50,
+    )
+
+    assert config.prompt_path == "prompt.txt"
+    assert config.steps == 50
+
+
+def test_load_prompt_text_reports_missing_and_empty_files(tmp_path):
+    """Test full prompt assets must exist and contain visible instructions."""
+    with pytest.raises(ValueError, match="prompt file not found"):
+        tutor_workflow.load_prompt_text(
+            str(tmp_path / "missing.txt"), role="teacher warm-up"
+        )
+
+    empty_path = tmp_path / "empty.txt"
+    empty_path.write_text("\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="must be non-empty"):
+        tutor_workflow.load_prompt_text(str(empty_path), role="teacher warm-up")
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [(0, 1.0), (25, 0.5), (49, 0.02), (50, 0.0), (51, 0.0)],
+)
+def test_teacher_warmup_probability_linearly_reaches_zero(version, expected):
+    """Test warm-up probability follows the pinned policy version."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.teacher_warmup_enabled = True
+    workflow.teacher_warmup_steps = 50
+
+    assert workflow._teacher_warmup_probability(version) == pytest.approx(expected)
+
+    workflow.teacher_warmup_enabled = False
+    assert workflow._teacher_warmup_probability(version) == pytest.approx(0.0)
+
+
 def test_prompt_pool_sampling_is_task_deterministic_and_eval_disabled(monkeypatch):
     """Test training task IDs deterministically select an episode-local suffix."""
     workflow = tutor_workflow.TutorAgentWorkflow.__new__(
@@ -126,6 +174,197 @@ def test_prompt_pool_sampling_is_task_deterministic_and_eval_disabled(monkeypatc
     )
     assert workflow._sample_prompt_pool(pool, role="teacher") is None
     assert workflow._sample_prompt_pool(pool, role="student") is None
+
+
+def test_teacher_warmup_selection_overrides_then_hands_off_to_pool(monkeypatch):
+    """Test version zero uses the full prompt and the cutoff uses the pool."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.prompt_pool_seed = 42
+    workflow.teacher_warmup_enabled = True
+    workflow.teacher_warmup_steps = 50
+    workflow.teacher_warmup_prompt_path = "warmup.txt"
+    workflow._teacher_warmup_fallback_rng = random.Random(1)
+    workflow._teacher_prompt_pool_fallback_rng = random.Random(2)
+    monkeypatch.setattr(
+        tutor_workflow.workflow_context,
+        "get",
+        lambda: types.SimpleNamespace(is_eval=False, task_id=7),
+    )
+    pool = ("pool A", "pool B")
+
+    warmup = workflow._select_teacher_prompt(pool, rollout_version=0)
+    after_cutoff = workflow._select_teacher_prompt(pool, rollout_version=50)
+    expected_index = random.Random("42:teacher:7").randrange(len(pool) + 1)
+
+    assert warmup is not None
+    assert warmup.source == "warmup_full"
+    assert warmup.rollout_version == 0
+    assert warmup.warmup_probability == pytest.approx(1.0)
+    assert warmup.prompt_path == "warmup.txt"
+    assert after_cutoff is not None
+    if expected_index == len(pool):
+        assert after_cutoff.source == "pool_base"
+        assert after_cutoff.index == -1
+        assert after_cutoff.suffix == ""
+    else:
+        assert after_cutoff.source == "pool"
+        assert after_cutoff.index == expected_index
+        assert after_cutoff.suffix == pool[expected_index]
+    assert after_cutoff.warmup_probability == pytest.approx(0.0)
+
+
+def test_teacher_pool_includes_clean_base_as_equal_implicit_item(monkeypatch):
+    """Test the clean teacher prompt is a virtual item beside JSON suffixes."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.prompt_pool_seed = 42
+    workflow.teacher_warmup_enabled = False
+    workflow.teacher_system_prompt = "clean base teacher"
+    workflow._teacher_prompt_pool_fallback_rng = random.Random(2)
+    pool = ("pool A", "pool B")
+    base_task_id = next(
+        task_id
+        for task_id in range(100)
+        if random.Random(f"42:teacher:{task_id}").randrange(len(pool) + 1) == len(pool)
+    )
+    monkeypatch.setattr(
+        tutor_workflow.workflow_context,
+        "get",
+        lambda: types.SimpleNamespace(is_eval=False, task_id=base_task_id),
+    )
+
+    selection = workflow._select_teacher_prompt(pool, rollout_version=50)
+
+    assert selection is not None
+    assert selection.source == "pool_base"
+    assert selection.index == -1
+    assert selection.suffix == ""
+    assert workflow._teacher_system_prompt_for_selection(selection) == (
+        workflow.teacher_system_prompt
+    )
+
+
+def test_teacher_warmup_selection_is_disabled_during_eval(monkeypatch):
+    """Test evaluation always uses the clean base prompt."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.teacher_warmup_enabled = True
+    workflow.teacher_warmup_steps = 50
+    workflow.prompt_pool_seed = 42
+    monkeypatch.setattr(
+        tutor_workflow.workflow_context,
+        "get",
+        lambda: types.SimpleNamespace(is_eval=True, task_id=7),
+    )
+
+    assert workflow._select_teacher_prompt(("pool",), rollout_version=0) is None
+
+
+def test_warmup_full_prompt_replaces_instead_of_appending_clean_base():
+    """Test the historical full prompt is the sole rollout system message."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.teacher_system_prompt = "clean base"
+    workflow.teacher_warmup_prompt = "historical full prompt"
+    selection = PromptPoolSelection(
+        index=-1,
+        suffix="",
+        source="warmup_full",
+        rollout_version=0,
+        warmup_probability=1.0,
+    )
+
+    assert (
+        workflow._teacher_system_prompt_for_selection(selection)
+        == "historical full prompt"
+    )
+    assert "clean base" not in workflow._teacher_system_prompt_for_selection(selection)
+
+
+def test_short_warmup_prompt_reserves_clean_training_input_budget():
+    """Test a shorter rollout prompt still budgets for the clean train prompt."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.tokenizer = _RecordingTokenizer()
+    workflow.enable_thinking = True
+    workflow.max_train_sample_tokens = 256
+    workflow.teacher_system_prompt = "a substantially longer clean teacher prompt"
+    workflow.teacher_warmup_prompt = "short"
+    workflow._build_tutor_prompt = lambda _state: "teacher user prompt"
+    captured = {}
+
+    class ActorCaller:
+        async def generate(self, _messages, **kwargs):
+            captured.update(kwargs)
+            return types.SimpleNamespace(response=object(), raw_text="hint")
+
+    state = TutorTurnState(
+        task="task",
+        ground_truth="42",
+        public_history=PublicHistoryState(),
+        previous_tutor_visible_output="",
+        previous_feedback=TutorPrivateFeedback(),
+        turn_idx=1,
+        max_turns=1,
+        teacher_prompt_selection=PromptPoolSelection(
+            index=-1,
+            suffix="",
+            source="warmup_full",
+        ),
+    )
+
+    asyncio.run(workflow._generate_tutor_response(state, actor_caller=ActorCaller()))
+
+    assert captured["input_token_reserve"] > 0
+
+
+def test_rollout_stats_report_warmup_source_and_prompt_token_delta(monkeypatch):
+    """Test warm-up observability exposes schedule and selected-source outcomes."""
+    captured = {}
+    monkeypatch.setattr(
+        tutor_workflow,
+        "_safe_scalar",
+        lambda **metrics: captured.update(metrics),
+    )
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_model_runtimes = {}
+    selection = PromptPoolSelection(
+        index=-1,
+        suffix="",
+        source="warmup_full",
+        rollout_version=25,
+        warmup_probability=0.5,
+        prompt_path="warmup.txt",
+    )
+
+    workflow._log_rollout_stats(
+        total_reward=-1.0,
+        traces=[],
+        termination_reason="leak",
+        pre_success=False,
+        leak_count=1,
+        teacher_prompt_selection=selection,
+        inference_prompt_tokens=1200,
+        training_prompt_tokens=200,
+    )
+
+    assert captured["prompt_schedule/warmup_probability"] == pytest.approx(0.5)
+    assert captured["prompt_schedule/rollout_version"] == pytest.approx(25.0)
+    assert captured["prompt_schedule/warmup_selected"] == pytest.approx(1.0)
+    assert captured["prompt_schedule/prompt_token_delta"] == pytest.approx(1000.0)
+    assert captured["prompt_source/warmup_full/selected"] == pytest.approx(1.0)
+    assert captured["prompt_source/warmup_full/leaked"] == pytest.approx(1.0)
+    assert captured["prompt_source/warmup_full/reward"] == pytest.approx(-1.0)
+    assert captured["prompt_source/pool/selected"] == pytest.approx(0.0)
+    assert captured["prompt_source/pool_base/selected"] == pytest.approx(0.0)
 
 
 def test_teacher_rollout_uses_suffix_but_training_tensor_uses_clean_prompt():
@@ -194,6 +433,28 @@ def test_teacher_rollout_uses_suffix_but_training_tensor_uses_clean_prompt():
     assert tensor_dict["loss_mask"].tolist()[0] == [0] * len(clean_input) + [1, 1]
     assert tensor_dict["logprobs"].tolist()[0][-2:] == pytest.approx([-0.1, -0.2])
     assert tensor_dict["versions"].tolist()[0][-2:] == [4, 4]
+
+    workflow.teacher_warmup_prompt = "historical full prompt"
+    state.teacher_prompt_selection = PromptPoolSelection(
+        index=-1,
+        suffix="",
+        source="warmup_full",
+        rollout_version=0,
+        warmup_probability=1.0,
+    )
+    warmup_messages = workflow._build_tutor_messages(state)
+    response.input_tokens = tokenizer.apply_chat_template(
+        warmup_messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        enable_thinking=True,
+    )
+    response.input_len = len(response.input_tokens)
+
+    warmup_clean_input = workflow._clean_tutor_input_tokens(artifact)
+
+    assert warmup_messages[0]["content"] == "historical full prompt"
+    assert warmup_clean_input == clean_input
 
 
 def test_student_calls_use_selected_behavior_suffix():
@@ -506,4 +767,40 @@ def test_prompt_pool_example_yaml_loads_typed_config(monkeypatch):
     )
     assert tutor_workflow.load_prompt_pool(
         config.prompt_pool.student_path, role="student"
+    )
+
+
+def test_teacher_warmup_asset_exactly_matches_20260704_prompt():
+    """Test the historical warm-up prompt is copied without rewriting lessons."""
+    source_path = Path(
+        "examples/tutor/configs/math/0708/"
+        "baseline-overfit-8-hard-leakt-prompt-2-pre-batch128-rebn-nomean.yaml"
+    )
+    asset_path = Path("examples/tutor/prompt_pools/teacher_warmup_20260704.txt")
+
+    source_prompt = str(OmegaConf.load(source_path).teacher_system_prompt).strip()
+    asset_prompt = tutor_workflow.load_prompt_text(
+        str(asset_path), role="teacher warm-up"
+    )
+
+    assert asset_prompt == source_prompt
+
+
+def test_teacher_pool_example_enables_fifty_step_warmup(monkeypatch):
+    """Test the active teacher-pool experiment enables the historical curriculum."""
+    monkeypatch.setenv("INF_API_KEY", "test-key")
+    path = Path(
+        "examples/tutor/configs/math/july/"
+        "baseline-overfit-1-leakt-batch128-rebn-nomean-5-teacher-pools.yaml"
+    )
+
+    config = OmegaConf.to_object(
+        OmegaConf.merge(OmegaConf.structured(TutorConfig), OmegaConf.load(path))
+    )
+
+    assert isinstance(config, TutorConfig)
+    assert config.prompt_pool.teacher_warmup.enabled is True
+    assert config.prompt_pool.teacher_warmup.steps == 50
+    assert config.prompt_pool.teacher_warmup.prompt_path.endswith(
+        "teacher_warmup_20260704.txt"
     )

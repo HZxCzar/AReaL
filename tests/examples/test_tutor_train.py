@@ -51,6 +51,9 @@ def test_build_eval_workflow_kwargs_keeps_single_episode_generation():
         "pairwise_reward_enabled": True,
         "teacher_prompt_pool_path": "teacher.json",
         "student_prompt_pool_path": "student.json",
+        "teacher_warmup_enabled": True,
+        "teacher_warmup_prompt_path": "warmup.txt",
+        "teacher_warmup_steps": 50,
     }
 
     eval_workflow_kwargs = _build_eval_workflow_kwargs(workflow_kwargs, config)
@@ -60,6 +63,12 @@ def test_build_eval_workflow_kwargs_keeps_single_episode_generation():
     assert eval_workflow_kwargs["pairwise_reward_enabled"] is False
     assert eval_workflow_kwargs["teacher_prompt_pool_path"] == ""
     assert eval_workflow_kwargs["student_prompt_pool_path"] == ""
+    assert eval_workflow_kwargs["teacher_warmup_enabled"] is False
+    assert eval_workflow_kwargs["teacher_warmup_prompt_path"] == ""
+    assert eval_workflow_kwargs["teacher_warmup_steps"] == 0
     assert workflow_kwargs["pairwise_reward_enabled"] is True
     assert workflow_kwargs["teacher_prompt_pool_path"] == "teacher.json"
     assert workflow_kwargs["student_prompt_pool_path"] == "student.json"
+    assert workflow_kwargs["teacher_warmup_enabled"] is True
+    assert workflow_kwargs["teacher_warmup_prompt_path"] == "warmup.txt"
+    assert workflow_kwargs["teacher_warmup_steps"] == 50
