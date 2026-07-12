@@ -294,8 +294,23 @@ def test_zero_argument_cli_uses_aligned_filter_defaults(monkeypatch):
     assert args.student_top_p == args.teacher_top_p == 0.8
     assert args.student_concurrency == args.teacher_concurrency == 4
     assert args.student_attempts == args.teacher_attempts == 1
+    assert args.student_only is False
     assert args.splits == ["train", "test"]
     assert args.overwrite is True
+
+
+def test_student_only_cli_can_be_enabled(monkeypatch):
+    """Student-only filtering should be explicit and support repeated attempts."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["filter_task.py", "--student-only", "--student-attempts", "3"],
+    )
+
+    args = parse_args()
+
+    assert args.student_only is True
+    assert args.student_attempts == 3
 
 
 def test_endpoint_resolution_supports_cloud_student_and_teacher(monkeypatch):

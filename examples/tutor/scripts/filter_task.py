@@ -250,6 +250,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--student-attempts", type=int, default=1)
     parser.add_argument("--teacher-attempts", type=int, default=1)
     parser.add_argument(
+        "--student-only",
+        action="store_true",
+        help=(
+            "Only remove rows solved by the student. Keep every row that remains "
+            "unsolved after --student-attempts and do not call the teacher solver."
+        ),
+    )
+    parser.add_argument(
         "--concurrency",
         type=int,
         default=0,
@@ -1246,7 +1254,9 @@ def summarize_pipeline(
     final_original_indices: list[int],
     save_outputs: bool,
     preview_chars: int,
+    student_only: bool = False,
 ) -> dict[str, Any]:
+    kept_results = pre_results if student_only else teacher_results
     return {
         "input_rows": input_rows,
         "evaluated": len(pre_results),
@@ -1266,7 +1276,7 @@ def summarize_pipeline(
         ),
         "teacher_errors": sum(result.status == "error" for result in teacher_results),
         "kept_original_indices": final_original_indices,
-        "kept_ids": [result.item_id for result in teacher_results if result.kept],
+        "kept_ids": [result.item_id for result in kept_results if result.kept],
         "pre_solve_rows": rows_to_report(
             pre_results,
             save_outputs=save_outputs,
@@ -1380,6 +1390,7 @@ async def main_async(args: argparse.Namespace) -> None:
         "deprecated_shared_concurrency": _positive_int(args.concurrency),
         "student_attempts": student_attempts,
         "teacher_attempts": teacher_attempts,
+        "student_only": bool(args.student_only),
         "keep_on_error": bool(args.keep_on_error),
         "save_outputs": bool(args.save_outputs),
         "preview_chars": int(args.preview_chars),
@@ -1421,21 +1432,27 @@ async def main_async(args: argparse.Namespace) -> None:
             limit=max(0, int(args.limit)),
         )
         pre_keep_indices = [result.index for result in pre_results if result.kept]
-        candidate_dataset = split_dataset.select(pre_keep_indices)
-        teacher_results = await classify_split_teacher_solved(
-            client=teacher_client,
-            workflow=workflow,
-            answer_judge_caller=answer_judge_caller,
-            system_prompt=system_prompt,
-            user_template=user_template,
-            dataset=candidate_dataset,
-            split_name=split_name,
-            attempts=teacher_attempts,
-            keep_on_error=bool(args.keep_on_error),
-        )
-        final_original_indices = [
-            pre_keep_indices[result.index] for result in teacher_results if result.kept
-        ]
+        if args.student_only:
+            teacher_results = []
+            final_original_indices = pre_keep_indices
+        else:
+            candidate_dataset = split_dataset.select(pre_keep_indices)
+            teacher_results = await classify_split_teacher_solved(
+                client=teacher_client,
+                workflow=workflow,
+                answer_judge_caller=answer_judge_caller,
+                system_prompt=system_prompt,
+                user_template=user_template,
+                dataset=candidate_dataset,
+                split_name=split_name,
+                attempts=teacher_attempts,
+                keep_on_error=bool(args.keep_on_error),
+            )
+            final_original_indices = [
+                pre_keep_indices[result.index]
+                for result in teacher_results
+                if result.kept
+            ]
         filtered_splits[split_name] = split_dataset.select(final_original_indices)
         split_summary = summarize_pipeline(
             input_rows=len(split_dataset),
@@ -1444,6 +1461,7 @@ async def main_async(args: argparse.Namespace) -> None:
             final_original_indices=final_original_indices,
             save_outputs=bool(args.save_outputs),
             preview_chars=int(args.preview_chars),
+            student_only=bool(args.student_only),
         )
         if args.limit and args.limit > 0:
             split_summary["debug_limit"] = int(args.limit)
