@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-qwen1.7b-math-baseline
+trial_name: qwen8b-qwen1.7b-math-pre
 
 seed: 42
 enable_offload: false
