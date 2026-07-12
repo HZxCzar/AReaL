@@ -25,17 +25,17 @@ auxiliary_model:
   mode: api
   enable_thinking: false
   base_url: https://chj8bobdbm9acbj8kkcqgemj8pj8e9gp.openapi-qb-ai.sii.edu.cn/v1
-  model: qwen3-1.7b
+  model: qwen3-8b
   api_key: ${oc.env:INF_API_KEY}
   timeout: 120
-  max_tokens: 2048
-  temperature: 0.7
-  top_p: 0.8
+  max_tokens: 1024
+  temperature: 0.0
+  top_p: 1.0
   max_concurrent_calls: 4
   request_params:
     seed: 42
     extra_headers:
-      x-inspire-inference-key: tutor-train-qwen17b-student
+      x-inspire-inference-key: tutor-train-qwen8b-auxiliary
     extra_body:
       top_k: 20
       min_p: 0
@@ -43,6 +43,27 @@ auxiliary_model:
         enable_thinking: false
   answer_judge_enabled: true
   answer_judge_max_tokens: 256
+
+student_models:
+  - name: qwen3-1.7b
+    weight: 1.0
+    base_url: ${auxiliary_model.base_url}
+    model: qwen3-1.7b
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    max_concurrent_calls: 4
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-qwen17b-student
+      extra_body:
+        top_k: 20
+        min_p: 0
+        chat_template_kwargs:
+          enable_thinking: false
 
 reward:
   success: 1.0
