@@ -194,6 +194,7 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         leak_penalty_compute=reward.leak_penalty_compute,
         leak_penalty_formula=reward.leak_penalty_formula,
         leak_penalty_aggregation=reward.leak_penalty_aggregation,
+        format_error_penalty=reward.format_error_penalty,
         leaked_success_reward_scale=reward.leaked_success_reward_scale,
         assign_success_reward=reward.assign_success_reward,
         outcome_prior_turn_weight=reward.outcome_prior_turn_weight,

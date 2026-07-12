@@ -20,6 +20,7 @@ class EpisodeRewardComputer:
         leak_penalty_compute: float | None = None,
         leak_penalty_formula: float | None = None,
         leak_penalty_aggregation: str = "turn",
+        format_error_penalty: float = 0.0,
         leaked_success_reward_scale: float = 1.0,
         assign_success_reward: bool = False,
         outcome_prior_turn_weight: float = 0.1,
@@ -42,6 +43,8 @@ class EpisodeRewardComputer:
             )
         if leak_penalty_aggregation not in {"turn", "episode"}:
             raise ValueError("leak_penalty_aggregation must be 'turn' or 'episode'.")
+        if format_error_penalty > 0.0:
+            raise ValueError("format_error_penalty must be <= 0.")
         if leaked_success_reward_scale < 0.0:
             raise ValueError("leaked_success_reward_scale must be >= 0.")
         staged_penalties = {
@@ -68,6 +71,7 @@ class EpisodeRewardComputer:
         }
         self.assign_success_reward = assign_success_reward
         self.leak_penalty_aggregation = leak_penalty_aggregation
+        self.format_error_penalty = float(format_error_penalty)
         self.leaked_success_reward_scale = float(leaked_success_reward_scale)
         self.outcome_prior_turn_weight = outcome_prior_turn_weight
         self.outcome_credit_gamma = outcome_credit_gamma
@@ -116,6 +120,8 @@ class EpisodeRewardComputer:
             if leak_component is not None:
                 name, value = leak_component
                 components[name] = value
+            if artifact.tutor_format_error and self.format_error_penalty:
+                components["format_error"] = self.format_error_penalty
             success_credit = success_credits.get(artifact.turn_idx, 0.0)
             if success_credit:
                 components["success_credit"] = success_credit
@@ -279,4 +285,5 @@ def artifact_to_trace(
         public_history_after=artifact.public_history_after,
         leak_level=artifact.leak_result.leak_level,
         invalid_due_to_leak=artifact.invalid_due_to_leak,
+        tutor_format_error=artifact.tutor_format_error,
     )

@@ -83,6 +83,7 @@ def _turn(
     leak_level: int | None = None,
     correct: bool = False,
     tutor_output: str = "hint",
+    tutor_format_error: str | None = None,
 ) -> TurnArtifact:
     tutor_state = TutorTurnState(
         task="task",
@@ -103,6 +104,7 @@ def _turn(
         leak_result=_leak(leaked, leak_level),
         public_history_before="",
         public_history_after="",
+        tutor_format_error=tutor_format_error,
         student_state=StudentTurnState(
             task="task",
             public_history=PublicHistoryState(),
@@ -361,6 +363,10 @@ def test_tutor_reward_config_validates_leak_penalty_modes():
     assert config.leak_penalty == pytest.approx(-1.0)
     assert config.leaked_success_reward_scale == pytest.approx(1.0)
     assert config.leak_penalty_aggregation == "turn"
+    assert config.format_error_penalty == pytest.approx(0.0)
+
+    with pytest.raises(ValueError, match="format_error_penalty"):
+        TutorRewardConfig(format_error_penalty=0.1)
 
     with pytest.raises(ValueError, match="leak_penalty"):
         TutorRewardConfig(leak_penalty=None)
@@ -534,6 +540,32 @@ def test_non_thinking_tutor_visible_output_rejects_malformed_tags():
     )
 
     assert visible == ""
+
+
+def test_non_thinking_tutor_parse_reports_malformed_tags():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.enable_thinking = False
+
+    visible, format_error = workflow._parse_tutor_visible_output(
+        "<reasoning>private</reasoning><output>visible hint"
+    )
+
+    assert visible == ""
+    assert format_error == "teacher response must contain exactly one </output> tag"
+
+
+def test_thinking_tutor_parse_ignores_tagged_format():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.enable_thinking = True
+
+    visible, format_error = workflow._parse_tutor_visible_output("plain guidance")
+
+    assert visible == "plain guidance"
+    assert format_error is None
 
 
 def test_non_thinking_tutor_visible_output_does_not_fall_back_to_json():
@@ -901,6 +933,40 @@ def test_rawbase_leak_penalty_uses_binary_component():
     assert [assignment.reward for assignment in assignments] == pytest.approx(
         [-0.05, 0.0]
     )
+
+
+def test_format_error_penalty_applies_to_each_malformed_turn():
+    turns = [
+        _turn(1, tutor_format_error="missing </output>"),
+        _turn(2),
+        _turn(3, tutor_format_error="duplicate <output>"),
+    ]
+
+    assignments = asyncio.run(
+        _outcome_computer(format_error_penalty=-0.5).compute(
+            _episode(turns, termination_reason="max_turns")
+        )
+    )
+
+    assert [item.reward_components for item in assignments] == [
+        {"format_error": -0.5},
+        {},
+        {"format_error": -0.5},
+    ]
+    assert [item.reward for item in assignments] == pytest.approx([-0.5, 0.0, -0.5])
+
+
+def test_zero_format_error_penalty_disables_component():
+    assignments = asyncio.run(
+        _outcome_computer(format_error_penalty=0.0).compute(
+            _episode(
+                [_turn(1, tutor_format_error="missing </output>")],
+                termination_reason="max_turns",
+            )
+        )
+    )
+
+    assert assignments[0].reward_components == {}
 
 
 def test_failed_episode_has_no_positive_success_credit_or_turn_penalty_by_default():

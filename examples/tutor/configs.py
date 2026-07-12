@@ -501,6 +501,15 @@ class TutorRewardConfig:
             "choices": ["turn", "episode"],
         },
     )
+    format_error_penalty: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Per-turn penalty for malformed tagged teacher output in "
+                "non-thinking mode. Ignored when teacher thinking is enabled."
+            )
+        },
+    )
     assign_success_reward: bool = field(default=False)
     outcome_prior_turn_weight: float = field(default=0.1)
     outcome_credit_gamma: float = field(default=0.9)
@@ -524,6 +533,8 @@ class TutorRewardConfig:
     )
 
     def __post_init__(self) -> None:
+        if self.format_error_penalty > 0.0:
+            raise ValueError("reward.format_error_penalty must be <= 0.")
         if self.leak_penalty_mode not in {"binary", "staged", "rawbase"}:
             raise ValueError(
                 "reward.leak_penalty_mode must be one of: "

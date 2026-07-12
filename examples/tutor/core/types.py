@@ -110,6 +110,7 @@ class TurnArtifact:
     leak_result: LeakCheckResult
     public_history_before: str
     public_history_after: str
+    tutor_format_error: str | None = None
     student_state: StudentTurnState | None = None
     student_prompt: str = ""
     student_output: str = ""
@@ -159,3 +160,4 @@ class TurnTrace:
     public_history_after: str
     leak_level: int | None = None
     invalid_due_to_leak: bool = False
+    tutor_format_error: str | None = None

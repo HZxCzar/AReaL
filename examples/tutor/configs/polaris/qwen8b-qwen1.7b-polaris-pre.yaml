@@ -1,5 +1,5 @@
-experiment_name: tutor-math-baseline
-trial_name: qwen8b-qwen1.7b-math-pre
+experiment_name: tutor-polaris-baseline
+trial_name: qwen8b-qwen1.7b-polaris-pre
 
 seed: 42
 enable_offload: false
@@ -8,12 +8,27 @@ tokenizer_path: ${actor.path}
 
 workflow: examples.tutor.workflow.TutorAgentWorkflow
 eval_workflow: ${workflow}
-dataset_type: math
-answer_scorer: math
+dataset_type: polaris
+answer_scorer: polaris
 max_turns: 10
 enable_thinking: false
-leak_handling_mode: terminate
+leak_handling_mode: disabled
 teacher_show_ground_truth: false
+
+student_generalize:
+  enabled: true
+  mode: only_success
+  path: ""
+  level1_reward: 1.0
+  level2_reward: 2.0
+
+polaris_processing:
+  enabled: true
+  output_path: examples/tutor/data/polaris_dataset_generalize_seed42_train0p98_gen0p5
+  train_ratio: 0.98
+  generalize_ratio: 0.5
+  reuse_generalize_tasks: true
+  overwrite: false
 
 teacher_pre:
   enabled: true
@@ -41,7 +56,7 @@ auxiliary_model:
       min_p: 0
       chat_template_kwargs:
         enable_thinking: false
-  answer_judge_enabled: true
+  answer_judge_enabled: false
   answer_judge_max_tokens: 256
 
 student_models:
@@ -67,11 +82,9 @@ student_models:
 
 reward:
   format_error_penalty: -0.5
-  success: 1.0
-  leak_penalty_mode: rawbase
+  success: 0.0
   assign_success_reward: false
-  leak_penalty: -1.0
-  leak_penalty_aggregation: episode
+  leak_penalty: 0.0
   outcome_prior_turn_weight: 0.5
   outcome_credit_gamma: 0.9
   early_success_bonus: 0.0
@@ -230,7 +243,7 @@ train_dataset:
   shuffle: false
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_qwen1.7b_student_qwen8b_teacher_filter_task
+  path: examples/tutor/data/polaris_dataset
   type: rl
   max_length: 16384
 
@@ -238,7 +251,7 @@ valid_dataset:
   batch_size: ${train_dataset.batch_size}
   pin_memory: false
   num_workers: 0
-  path: examples/tutor/data/math_dataset_qwen1.7b_student_qwen8b_teacher_filter_task
+  path: examples/tutor/data/polaris_dataset
   type: rl
 
 saver:
@@ -277,4 +290,4 @@ stats_logger:
     entity: hz-czar-stanford
     project: TAgent
     name: ${trial_name}
-    group: 8&17-leakt
+    group: 8&17-polaris

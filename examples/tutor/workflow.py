@@ -382,6 +382,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         leak_penalty_compute: float | None = None,
         leak_penalty_formula: float | None = None,
         leak_penalty_aggregation: str = "turn",
+        format_error_penalty: float = 0.0,
         leaked_success_reward_scale: float = 1.0,
         assign_success_reward: bool = False,
         outcome_prior_turn_weight: float = 0.1,
@@ -502,6 +503,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
         if leak_penalty_aggregation not in {"turn", "episode"}:
             raise ValueError("leak_penalty_aggregation must be 'turn' or 'episode'.")
+        if format_error_penalty > 0.0:
+            raise ValueError("format_error_penalty must be <= 0.")
         if leaked_success_reward_scale < 0.0:
             raise ValueError("leaked_success_reward_scale must be >= 0.")
 
@@ -520,6 +523,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             float(leak_penalty_formula) if leak_penalty_formula is not None else 0.0
         )
         self.leak_penalty_aggregation = leak_penalty_aggregation
+        self.format_error_penalty = float(format_error_penalty)
         self.leaked_success_reward_scale = float(leaked_success_reward_scale)
         self.assign_success_reward = bool(assign_success_reward)
         self.outcome_prior_turn_weight = float(outcome_prior_turn_weight)
@@ -980,13 +984,17 @@ class TutorAgentWorkflow(RolloutWorkflow):
             return self.teacher_warmup_prompt
         return self._append_prompt_pool_suffix(self.teacher_system_prompt, selection)
 
-    def _extract_tutor_visible_output(self, raw_output: str) -> str:
+    def _parse_tutor_visible_output(self, raw_output: str) -> tuple[str, str | None]:
         if getattr(self, "enable_thinking", False):
-            return _strip_reasoning_for_context(raw_output)
-        output, _ = parse_tagged_teacher_output(raw_output)
+            return _strip_reasoning_for_context(raw_output), None
+        output, parse_error = parse_tagged_teacher_output(raw_output)
         if output is None:
-            return ""
-        return _strip_reasoning_for_context(output)
+            return "", parse_error or "failed to parse tagged teacher output"
+        return _strip_reasoning_for_context(output), None
+
+    def _extract_tutor_visible_output(self, raw_output: str) -> str:
+        output, _ = self._parse_tutor_visible_output(raw_output)
+        return output
 
     def get_lora_versions_for_episode(
         self,
@@ -1239,7 +1247,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
                 termination_reason = CONTEXT_BUDGET_TERMINATION_REASON
                 break
-            tutor_visible_output = self._extract_tutor_visible_output(tutor_raw_output)
+            tutor_visible_output, tutor_format_error = self._parse_tutor_visible_output(
+                tutor_raw_output
+            )
             public_before = public_history.summary
             leak_result = self._pending_leak_check_result()
             if self.leak_handling_mode in {"terminate", "feedback"}:
@@ -1262,6 +1272,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                             leak_result=leak_result,
                             public_history_before=public_before,
                             public_history_after=public_before,
+                            tutor_format_error=tutor_format_error,
                         )
                     )
                     break
@@ -1319,6 +1330,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     leak_result=leak_result,
                     public_history_before=public_before,
                     public_history_after=next_public_history.summary,
+                    tutor_format_error=tutor_format_error,
                     student_state=student_state,
                     student_prompt=student_prompt,
                     student_output=student_answer,
@@ -1392,6 +1404,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             leak_penalty_compute=getattr(self, "leak_penalty_compute", None),
             leak_penalty_formula=getattr(self, "leak_penalty_formula", None),
             leak_penalty_aggregation=getattr(self, "leak_penalty_aggregation", "turn"),
+            format_error_penalty=getattr(self, "format_error_penalty", 0.0),
             leaked_success_reward_scale=getattr(
                 self, "leaked_success_reward_scale", 1.0
             ),
@@ -2837,6 +2850,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "reward": float(total_reward),
             "turns": len(traces),
             "leaks": int(leak_count),
+            "format_errors": sum(
+                int(bool(getattr(trace, "tutor_format_error", None)))
+                for trace in traces
+            ),
             "invalid_success_due_to_leak": int(invalid_success_due_to_leak),
             "pre_solved": float(pre_success),
             "solved": float(success_round > 0),
@@ -2941,6 +2958,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     keys.append(key)
         elif getattr(self, "leak_penalty", 0.0):
             keys.append("leak")
+        if not getattr(self, "enable_thinking", False) and getattr(
+            self, "format_error_penalty", 0.0
+        ):
+            keys.append("format_error")
         if getattr(self, "enable_turn_penalty", False) and getattr(
             self, "turn_penalty", 0.0
         ):
