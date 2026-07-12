@@ -121,7 +121,7 @@ python3 examples/tutor/train.py \
   scheduler.type=local
 ```
 
-`auxiliary_model` is the fixed leak/answer/pairwise judge. To train against a mix of API
+`auxiliary_model` is the fixed leak/answer judge. To train against a mix of API
 students, configure any number of entries under `student_models`:
 
 ```yaml
@@ -159,8 +159,8 @@ student_models:
 ```
 
 Training samples one student per episode according to `weight` and keeps that student
-for the initial answer, all tutor turns, generalization probes, and pairwise reference
-replay. Evaluation ignores the weights and runs the complete validation set for every
+for the initial answer, all tutor turns, and generalization probes. Evaluation ignores
+the weights and runs the complete validation set for every
 configured student; `evaluator.average_rollouts` is applied independently to each
 student. An empty `student_models` list preserves the legacy behavior where
 `auxiliary_model` is also the student.

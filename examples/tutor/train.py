@@ -137,7 +137,6 @@ def _build_eval_workflow_kwargs(
         raise ValueError("eval_gconfig must be set before building eval workflow.")
     eval_workflow_kwargs = workflow_kwargs.copy()
     eval_workflow_kwargs["gconfig"] = config.eval_gconfig.new(n_samples=1)
-    eval_workflow_kwargs["pairwise_reward_enabled"] = False
     eval_workflow_kwargs["teacher_prompt_pool_path"] = ""
     eval_workflow_kwargs["student_prompt_pool_path"] = ""
     eval_workflow_kwargs["teacher_warmup_enabled"] = False
@@ -164,7 +163,6 @@ def main(args):
     student_generalize = config.student_generalize
     teacher_pre = config.teacher_pre
     reward = config.reward
-    pairwise = reward.pairwise
     _prepare_polaris_generalization_data(config)
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
     _validate_student_generalize_datasets(config, tokenizer)
@@ -239,6 +237,7 @@ def main(args):
         length_penalty_threshold_chars=reward.length_penalty_threshold_chars,
         length_penalty_per_100_chars=reward.length_penalty_per_100_chars,
         length_penalty_min=reward.length_penalty_min,
+        zero_reward_on_length_stop=reward.zero_reward_on_length_stop,
         teacher_system_prompt=config.teacher_system_prompt,
         teacher_prompt_pool_path=config.prompt_pool.teacher_path,
         teacher_warmup_enabled=config.prompt_pool.teacher_warmup.enabled,
@@ -271,11 +270,6 @@ def main(args):
         student_generalize_confidence_reward_scale=(
             student_generalize.confidence.reward_scale
         ),
-        pairwise_reward_enabled=pairwise.enabled,
-        pairwise_reference_lag_steps=pairwise.reference_lag_steps,
-        pairwise_reward_scale=pairwise.scale,
-        pairwise_compare_all_turns=pairwise.compare_all_turns,
-        pairwise_judge_both_incorrect=pairwise.judge_both_incorrect,
     )
 
     eval_workflow_kwargs = _build_eval_workflow_kwargs(workflow_kwargs, config)

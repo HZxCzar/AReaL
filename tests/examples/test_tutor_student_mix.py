@@ -1,4 +1,3 @@
-import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -260,57 +259,6 @@ def test_select_student_without_pool_preserves_legacy_auxiliary_caller(monkeypat
     # Assert
     assert selected.name == "legacy-student"
     assert selected.caller is workflow.aux_caller
-
-
-def test_pairwise_evaluation_separates_student_and_judge_callers(monkeypatch):
-    """Test pairwise replay uses the selected student but keeps the fixed judge."""
-    # Arrange
-    captured = {}
-
-    class FakePairwiseEvaluator:
-        def __init__(self, **kwargs):
-            captured["reward_caller"] = kwargs["reward_caller"]
-            self.run_student = kwargs["run_student"]
-
-        async def evaluate(self, _episode, *, reference_version):
-            captured["reference_version"] = reference_version
-            await self.run_student(SimpleNamespace())
-            return []
-
-    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
-        tutor_workflow.TutorAgentWorkflow
-    )
-    workflow.pairwise_reference_lag_steps = 1
-    workflow.pairwise_reward_scale = 0.05
-    workflow.pairwise_compare_all_turns = True
-    workflow.pairwise_judge_both_incorrect = True
-    fixed_judge = object()
-    selected_student = object()
-
-    async def run_student(_state, *, aux_caller):
-        captured["student_caller"] = aux_caller
-        return "answer", None
-
-    monkeypatch.setattr(workflow, "_run_student", run_student)
-    monkeypatch.setattr(tutor_workflow, "PairwiseTutorEvaluator", FakePairwiseEvaluator)
-
-    # Act
-    results = asyncio.run(
-        workflow._run_pairwise_evaluation(
-            SimpleNamespace(),
-            episode_lora_version=5,
-            chat_caller=object(),
-            aux_caller=fixed_judge,
-            student_caller=selected_student,
-            answer_judge_caller=None,
-        )
-    )
-
-    # Assert
-    assert results == []
-    assert captured["reward_caller"] is fixed_judge
-    assert captured["student_caller"] is selected_student
-    assert captured["reference_version"] == 4
 
 
 def test_rollout_metrics_include_overall_and_dynamic_per_student_values(monkeypatch):

@@ -188,6 +188,8 @@ class AsyncTaskRunner(Generic[T]):
         # Thread control
         self.exiting = threading.Event()
         self.paused = threading.Event()
+        self._pause_acknowledged = threading.Event()
+        self._pause_lock = threading.Lock()
 
         # Queues for task management
         self.input_queue: queue.Queue[_TaskInput[T]] = queue.Queue(
@@ -232,6 +234,7 @@ class AsyncTaskRunner(Generic[T]):
         self.exiting.clear()
         # Always start in resumed state; previous pause() should not leak
         self.paused.clear()
+        self._pause_acknowledged.clear()
 
         # Reset the readiness event before spinning up the new worker thread
         self._loop_ready.clear()
@@ -325,6 +328,7 @@ class AsyncTaskRunner(Generic[T]):
         try:
             while not self.exiting.is_set():
                 if self.paused.is_set():
+                    self._pause_acknowledged.set()
                     await asyncio.sleep(self.poll_sleep_time)
                     continue
 
@@ -630,9 +634,26 @@ class AsyncTaskRunner(Generic[T]):
 
         After calling pause(), no new tasks will be started from the
         input queue, but existing running tasks will continue to
-        completion.
+        completion. This method returns after the background event loop has
+        observed the pause, so tasks already created by that loop have had a
+        chance to start before the caller proceeds.
         """
-        self.paused.set()
+        with self._pause_lock:
+            self._check_thread_health()
+            self._pause_acknowledged.clear()
+            self.paused.set()
+
+            loop = self._loop
+            if loop is None or threading.current_thread() is self.thread:
+                return
+
+            self._signal_new_input()
+            while not self._pause_acknowledged.wait(timeout=self.poll_sleep_time):
+                self._check_thread_health()
+                if self.exiting.is_set():
+                    raise RuntimeError(
+                        "AsyncTaskRunner exited before acknowledging pause."
+                    )
 
     def resume(self):
         """Resume submission of new tasks.
@@ -640,8 +661,10 @@ class AsyncTaskRunner(Generic[T]):
         Allows new tasks to be pulled from the input queue and
         started.
         """
-        self.paused.clear()
-        self._signal_new_input()
+        with self._pause_lock:
+            self.paused.clear()
+            self._pause_acknowledged.clear()
+            self._signal_new_input()
 
     def get_queue_sizes(self) -> tuple[int, int]:
         """Get current sizes of input and output queues.

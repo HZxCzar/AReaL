@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import gc
+import json
 import math
 import os
 import time
@@ -19,6 +21,7 @@ import torch.distributed.checkpoint as dcp
 import torch.distributed.nn.functional as dist_F
 from peft import (
     LoraConfig,
+    PeftConfig,
     PeftModel,
     TaskType,
     get_peft_model,
@@ -133,6 +136,36 @@ from areal.utils.save_load import get_state_dict_from_repo_id_or_path
 if TYPE_CHECKING:
     from areal.api import Scheduler
     from areal.api.cli_args import PPOActorConfig, PPOCriticConfig
+
+
+_LORA_DCP_METADATA_FILE = "areal_lora_config.json"
+_LORA_DCP_METADATA_SCHEMA_VERSION = 1
+_LORA_BEHAVIOR_CONFIG_FIELDS = (
+    "peft_type",
+    "task_type",
+    "r",
+    "lora_alpha",
+    "lora_dropout",
+    "fan_in_fan_out",
+    "bias",
+    "use_rslora",
+    "use_dora",
+    "rank_pattern",
+    "alpha_pattern",
+    "modules_to_save",
+    "target_parameters",
+    "exclude_modules",
+    "trainable_token_indices",
+    "layer_replication",
+    "lora_bias",
+    "layers_to_transform",
+    "layers_pattern",
+    "alora_invocation_tokens",
+    "use_qalora",
+    "qalora_group_size",
+    "arrow_config",
+    "ensure_weight_tying",
+)
 
 
 @dataclasses.dataclass
@@ -934,20 +967,125 @@ class FSDPEngine(TrainEngine):
         )
         self.model = model
 
+    @staticmethod
+    def _normalize_lora_config_value(value: Any) -> Any:
+        value = getattr(value, "value", value)
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            value = dataclasses.asdict(value)
+        if isinstance(value, dict):
+            return {
+                key: FSDPEngine._normalize_lora_config_value(value[key])
+                for key in sorted(value)
+            }
+        if isinstance(value, set):
+            return sorted(
+                FSDPEngine._normalize_lora_config_value(item) for item in value
+            )
+        if isinstance(value, (list, tuple)):
+            return [FSDPEngine._normalize_lora_config_value(item) for item in value]
+        return value
+
+    @classmethod
+    def _lora_config_values(cls, peft_config: PeftConfig) -> dict[str, Any]:
+        return {
+            field_name: cls._normalize_lora_config_value(
+                getattr(peft_config, field_name, None)
+            )
+            for field_name in _LORA_BEHAVIOR_CONFIG_FIELDS
+        }
+
+    def _build_lora_config_signature(self, peft_config: PeftConfig) -> dict[str, Any]:
+        return {
+            "config": self._lora_config_values(peft_config),
+            # Compare the actual base-model modules selected by PEFT. This treats
+            # "all-linear" and an equivalent expanded module list as identical.
+            "resolved_target_modules": sorted(
+                self._matched_lora_target_modules(peft_config)
+            ),
+        }
+
+    def _matched_lora_target_modules(self, peft_config: PeftConfig) -> set[str]:
+        from peft.tuners.tuners_utils import (
+            _maybe_include_all_linear_layers,
+            check_target_module_exists,
+        )
+
+        expanded_config = _maybe_include_all_linear_layers(
+            copy.deepcopy(peft_config), self.model
+        )
+        return {
+            name
+            for name, _module in self.model.named_modules()
+            if name and check_target_module_exists(expanded_config, name)
+        }
+
+    def _validate_init_lora_config(self, adapter_config: PeftConfig) -> None:
+        config = self.config
+        target_modules: str | list[str]
+        if not config.target_modules or config.target_modules == ["all-linear"]:
+            target_modules = "all-linear"
+        else:
+            target_modules = config.target_modules
+        expected_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=config.lora_rank,
+            lora_alpha=config.lora_alpha,
+            target_modules=target_modules,
+            bias="none",
+        )
+
+        mismatches: list[str] = []
+        for field_name in _LORA_BEHAVIOR_CONFIG_FIELDS:
+            checkpoint_value = self._normalize_lora_config_value(
+                getattr(adapter_config, field_name, None)
+            )
+            expected_value = self._normalize_lora_config_value(
+                getattr(expected_config, field_name, None)
+            )
+            if checkpoint_value != expected_value:
+                mismatches.append(
+                    f"{field_name}: checkpoint={checkpoint_value!r}, "
+                    f"actor={expected_value!r}"
+                )
+
+        checkpoint_targets = self._matched_lora_target_modules(adapter_config)
+        expected_targets = self._matched_lora_target_modules(expected_config)
+        if checkpoint_targets != expected_targets:
+            mismatches.append(
+                "target_modules: "
+                f"checkpoint={sorted(checkpoint_targets)!r}, "
+                f"actor={sorted(expected_targets)!r}"
+            )
+
+        if mismatches:
+            details = "\n- ".join(mismatches)
+            raise ValueError(
+                "LoRA adapter config mismatch for "
+                f"init_lora_path={config.init_lora_path!r}:\n- {details}\n"
+                "Update the actor LoRA settings to match the adapter checkpoint."
+            )
+
     def _apply_peft_wrapper(self):
         config = self.config
         if self.config.peft_type != "lora":
             raise NotImplementedError()
 
-        self.model.enable_input_require_grads()
         if config.init_lora_path:
+            adapter_config = PeftConfig.from_pretrained(config.init_lora_path)
+            self._validate_init_lora_config(adapter_config)
+            self._lora_config_signature = self._build_lora_config_signature(
+                adapter_config
+            )
+            self.model.enable_input_require_grads()
             self.model = PeftModel.from_pretrained(
                 self.model,
                 config.init_lora_path,
+                config=adapter_config,
                 is_trainable=True,
                 autocast_adapter_dtype=False,
             )
         else:
+            self.model.enable_input_require_grads()
             if not config.target_modules or config.target_modules == ["all-linear"]:
                 target_modules = "all-linear"
             else:
@@ -959,6 +1097,7 @@ class FSDPEngine(TrainEngine):
                 target_modules=target_modules,
                 bias="none",
             )
+            self._lora_config_signature = self._build_lora_config_signature(peft_config)
             self.model = get_peft_model(
                 self.model,
                 peft_config,
@@ -1427,11 +1566,17 @@ class FSDPEngine(TrainEngine):
         dcp_state = DCPState(self.model, self.optimizer if with_optim else None)
         state_dict = {"dcp": dcp_state}
         dcp.save(state_dict, checkpoint_id=path)
+        if self.config.use_lora:
+            self._write_lora_dcp_metadata_distributed(path)
 
     def _load_from_dcp(self, path: str, with_optim: bool):
         """Load model from Distributed Checkpoint (DCP) format."""
         if self.model is None:
             raise RuntimeError("Model not initialized")
+
+        if self.config.use_lora:
+            metadata = self._read_lora_dcp_metadata_distributed(path)
+            self._validate_lora_dcp_metadata(metadata, path)
 
         dcp_state = DCPState(self.model, self.optimizer if with_optim else None)
         state_dict = {"dcp": dcp_state}
@@ -1439,6 +1584,91 @@ class FSDPEngine(TrainEngine):
             state_dict=state_dict,
             checkpoint_id=path,
         )
+
+    def _current_lora_dcp_metadata(self) -> dict[str, Any]:
+        signature = getattr(self, "_lora_config_signature", None)
+        if signature is None:
+            raise RuntimeError(
+                "LoRA config signature is unavailable; PEFT setup must complete "
+                "before saving a checkpoint."
+            )
+        return {
+            "schema_version": _LORA_DCP_METADATA_SCHEMA_VERSION,
+            "lora_signature": signature,
+        }
+
+    @staticmethod
+    def _write_lora_dcp_metadata(path: str, metadata: dict[str, Any]) -> None:
+        metadata_path = os.path.join(path, _LORA_DCP_METADATA_FILE)
+        temporary_path = f"{metadata_path}.tmp.{os.getpid()}"
+        try:
+            with open(temporary_path, "w", encoding="utf-8") as file:
+                json.dump(metadata, file, ensure_ascii=False, indent=2, sort_keys=True)
+                file.write("\n")
+            os.replace(temporary_path, metadata_path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
+
+    @staticmethod
+    def _read_lora_dcp_metadata(path: str) -> dict[str, Any]:
+        metadata_path = os.path.join(path, _LORA_DCP_METADATA_FILE)
+        try:
+            with open(metadata_path, encoding="utf-8") as file:
+                metadata = json.load(file)
+        except FileNotFoundError as exc:
+            raise ValueError(
+                "LoRA checkpoint is missing areal_lora_config.json and cannot be "
+                "resumed safely."
+            ) from exc
+        if not isinstance(metadata, dict):
+            raise ValueError("LoRA checkpoint metadata must be a JSON object.")
+        return metadata
+
+    def _write_lora_dcp_metadata_distributed(self, path: str) -> None:
+        error: str | None = None
+        if dist.get_rank(group=self.cpu_group) == 0:
+            try:
+                self._write_lora_dcp_metadata(path, self._current_lora_dcp_metadata())
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+        payload = [error]
+        dist.broadcast_object_list(payload, src=0, group=self.cpu_group)
+        if payload[0] is not None:
+            raise RuntimeError(f"Failed to save LoRA checkpoint metadata: {payload[0]}")
+
+    def _read_lora_dcp_metadata_distributed(self, path: str) -> dict[str, Any]:
+        metadata: dict[str, Any] | None = None
+        error: str | None = None
+        if dist.get_rank(group=self.cpu_group) == 0:
+            try:
+                metadata = self._read_lora_dcp_metadata(path)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+        payload: list[Any] = [metadata, error]
+        dist.broadcast_object_list(payload, src=0, group=self.cpu_group)
+        if payload[1] is not None:
+            raise ValueError(f"Failed to read LoRA checkpoint metadata: {payload[1]}")
+        if not isinstance(payload[0], dict):
+            raise ValueError("LoRA checkpoint metadata must be a JSON object.")
+        return payload[0]
+
+    def _validate_lora_dcp_metadata(self, metadata: dict[str, Any], path: str) -> None:
+        if metadata.get("schema_version") != _LORA_DCP_METADATA_SCHEMA_VERSION:
+            raise ValueError(
+                "Unsupported LoRA checkpoint metadata schema: "
+                f"checkpoint={metadata.get('schema_version')!r}, "
+                f"supported={_LORA_DCP_METADATA_SCHEMA_VERSION}."
+            )
+        checkpoint_signature = metadata.get("lora_signature")
+        current_signature = self._current_lora_dcp_metadata()["lora_signature"]
+        if checkpoint_signature != current_signature:
+            raise ValueError(
+                "LoRA config mismatch while resuming checkpoint "
+                f"{path!r}. The checkpoint and current config must be identical. "
+                f"checkpoint={checkpoint_signature!r}, "
+                f"current={current_signature!r}."
+            )
 
     def _save_optimizer_state(self, path: str):
         assert self.optimizer is not None

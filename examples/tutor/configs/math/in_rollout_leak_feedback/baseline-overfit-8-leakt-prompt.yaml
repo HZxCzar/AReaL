@@ -87,11 +87,6 @@ reward:
   length_penalty_threshold_chars: 0
   length_penalty_per_100_chars: 0.0
   length_penalty_min: 0.0
-  pairwise:
-    enabled: false
-    reference_lag_steps: 5
-    scale: 0.05
-    compare_all_turns: true
 
 student_generalize:
   enabled: false

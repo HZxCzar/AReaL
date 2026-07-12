@@ -106,7 +106,7 @@ class DifficultyTutorWorkflow:
             latest_student_answer=latest_student_answer,
         )
 
-    def _maybe_dump_debug_trace(
+    async def _maybe_dump_debug_trace(
         self,
         *,
         task: str,
@@ -136,7 +136,7 @@ class DifficultyTutorWorkflow:
                 for result in (student_generalization_results or [])
             ],
         }
-        super()._maybe_dump_debug_trace(  # type: ignore[misc]
+        await super()._maybe_dump_debug_trace(  # type: ignore[misc]
             task=task,
             ground_truth=ground_truth,
             initial_student_answer=initial_student_answer,
@@ -535,7 +535,6 @@ def build_workflow(
 
     auxiliary_model = config.auxiliary_model
     reward = config.reward
-    pairwise = reward.pairwise
     teacher_pre = config.teacher_pre
     aux_thinking = resolve_thinking(
         args.thinking, bool(auxiliary_model.enable_thinking)
@@ -595,11 +594,6 @@ def build_workflow(
         max_train_sample_tokens=config.gconfig.max_tokens,
         tokenizer_path=config.tokenizer_path,
         model_context_length=config.sglang.context_length,
-        pairwise_reward_enabled=pairwise.enabled,
-        pairwise_reference_lag_steps=pairwise.reference_lag_steps,
-        pairwise_reward_scale=pairwise.scale,
-        pairwise_compare_all_turns=pairwise.compare_all_turns,
-        pairwise_judge_both_incorrect=pairwise.judge_both_incorrect,
     )
 
 

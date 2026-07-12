@@ -48,7 +48,6 @@ def test_build_eval_workflow_kwargs_keeps_single_episode_generation():
     _apply_eval_average_rollouts(config)
     workflow_kwargs = {
         "gconfig": config.gconfig,
-        "pairwise_reward_enabled": True,
         "teacher_prompt_pool_path": "teacher.json",
         "student_prompt_pool_path": "student.json",
         "teacher_warmup_enabled": True,
@@ -60,13 +59,11 @@ def test_build_eval_workflow_kwargs_keeps_single_episode_generation():
 
     assert config.eval_gconfig.n_samples == 5
     assert eval_workflow_kwargs["gconfig"].n_samples == 1
-    assert eval_workflow_kwargs["pairwise_reward_enabled"] is False
     assert eval_workflow_kwargs["teacher_prompt_pool_path"] == ""
     assert eval_workflow_kwargs["student_prompt_pool_path"] == ""
     assert eval_workflow_kwargs["teacher_warmup_enabled"] is False
     assert eval_workflow_kwargs["teacher_warmup_prompt_path"] == ""
     assert eval_workflow_kwargs["teacher_warmup_steps"] == 0
-    assert workflow_kwargs["pairwise_reward_enabled"] is True
     assert workflow_kwargs["teacher_prompt_pool_path"] == "teacher.json"
     assert workflow_kwargs["student_prompt_pool_path"] == "student.json"
     assert workflow_kwargs["teacher_warmup_enabled"] is True

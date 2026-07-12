@@ -231,3 +231,61 @@ def test_tutor_response_tensordict_includes_trajectory_metadata():
 
     assert tensor_dict["trajectory_id"].tolist() == [123]
     assert tensor_dict["turn_idx"].tolist() == [2]
+    assert "no_eos" not in tensor_dict
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "enabled", "expected_reward"),
+    [
+        ("length", False, 1.0),
+        ("length", True, 0.0),
+        ("stop", True, 1.0),
+    ],
+)
+def test_tutor_response_tensordict_optionally_zeroes_length_stop_reward(
+    stop_reason, enabled, expected_reward
+):
+    response = types.SimpleNamespace(
+        input_tokens=[1],
+        output_tokens=[2],
+        output_logprobs=[-0.1],
+        output_versions=[5],
+        stop_reason=stop_reason,
+    )
+
+    tensor_dict = response_to_tensordict(
+        response,
+        reward=1.0,
+        zero_reward_on_length_stop=enabled,
+    )
+
+    assert tensor_dict["rewards"].tolist() == pytest.approx([expected_reward])
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("output_logprobs", [-0.1]),
+        ("output_logprobs", [-0.1, -0.2, -0.3]),
+        ("output_versions", [5]),
+        ("output_versions", [5, 5, 5]),
+    ],
+)
+def test_tutor_response_tensordict_rejects_output_metadata_length_mismatch(
+    field_name, field_value
+):
+    """Every generated token must have one behavior logprob and version."""
+    response = types.SimpleNamespace(
+        input_tokens=[1, 2],
+        output_tokens=[3, 4],
+        output_logprobs=[-0.1, -0.2],
+        output_versions=[5, 5],
+        stop_reason="length",
+    )
+    setattr(response, field_name, field_value)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"{field_name} length mismatch.*output_tokens=2.*{field_name}=",
+    ):
+        response_to_tensordict(response, reward=1.0)

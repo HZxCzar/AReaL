@@ -5,6 +5,8 @@ import dataclasses
 import json
 import os
 import pickle
+import shutil
+import time
 from typing import TYPE_CHECKING, Any
 
 import torch.distributed as dist
@@ -149,6 +151,10 @@ class RecoverInfo:
 
 
 class RecoverHandler:
+    _RECOVER_DIR = "recover"
+    _GENERATIONS_DIR = "generations"
+    _CURRENT_FILE = "current.json"
+
     def __init__(self, config: RecoverConfig, ft_spec: FinetuneSpec):
         self.config = config
         self.ft_spec = ft_spec
@@ -174,6 +180,153 @@ class RecoverHandler:
             Saver.get_save_root(experiment_name, trial_name, fileroot),
             "recover_info",
         )
+
+    @classmethod
+    def _recover_root(cls, experiment_name: str, trial_name: str, fileroot: str) -> str:
+        return os.path.join(
+            Saver.get_save_root(experiment_name, trial_name, fileroot),
+            cls._RECOVER_DIR,
+        )
+
+    @classmethod
+    def _generation_path(
+        cls,
+        experiment_name: str,
+        trial_name: str,
+        fileroot: str,
+        generation: str,
+    ) -> str:
+        cls._validate_path_component(generation, label="recovery generation")
+        return os.path.join(
+            cls._recover_root(experiment_name, trial_name, fileroot),
+            cls._GENERATIONS_DIR,
+            generation,
+        )
+
+    @classmethod
+    def _read_current_generation(
+        cls, experiment_name: str, trial_name: str, fileroot: str
+    ) -> str:
+        pointer_path = os.path.join(
+            cls._recover_root(experiment_name, trial_name, fileroot),
+            cls._CURRENT_FILE,
+        )
+        with open(pointer_path) as f:
+            generation = json.load(f)["generation"]
+        cls._validate_path_component(generation, label="recovery generation")
+        return generation
+
+    @staticmethod
+    def _validate_path_component(value: Any, *, label: str) -> None:
+        if (
+            not isinstance(value, str)
+            or not value
+            or value in {".", ".."}
+            or os.path.basename(value) != value
+        ):
+            raise InValidRecoverInfo(f"Invalid {label}: {value!r}")
+
+    @classmethod
+    def _commit_generation(
+        cls,
+        experiment_name: str,
+        trial_name: str,
+        fileroot: str,
+        generation: str,
+    ) -> bool:
+        cls._validate_path_component(generation, label="recovery generation")
+        recover_root = cls._recover_root(experiment_name, trial_name, fileroot)
+        os.makedirs(recover_root, exist_ok=True)
+        pointer_path = os.path.join(recover_root, cls._CURRENT_FILE)
+        temporary_path = f"{pointer_path}.tmp-{os.getpid()}"
+        try:
+            with open(temporary_path, "w") as f:
+                json.dump({"generation": generation}, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary_path, pointer_path)
+            try:
+                directory_fd = os.open(recover_root, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError as exc:
+                logger.warning(
+                    "Recovery pointer was replaced, but its directory could not "
+                    "be synced; keeping the previous generation: %s",
+                    exc,
+                )
+                return False
+            return True
+        finally:
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
+
+    @staticmethod
+    def _sync_stage_error(stage: str, error: Exception | None) -> None:
+        if not dist.is_initialized():
+            if error is not None:
+                raise error
+            return
+
+        local_error = (
+            None
+            if error is None
+            else f"rank {dist.get_rank()}: {type(error).__name__}: {error}"
+        )
+        errors: list[str | None] = [None] * dist.get_world_size()
+        dist.all_gather_object(errors, local_error)
+        failures = [item for item in errors if item is not None]
+        if failures:
+            raise RuntimeError(f"Recovery {stage} failed: {'; '.join(failures)}")
+
+    @staticmethod
+    def _new_generation_name(step_info: StepInfo) -> str:
+        timestamp = (
+            time.time_ns()
+            if not dist.is_initialized() or dist.get_rank() == 0
+            else None
+        )
+        if dist.is_initialized():
+            values = [timestamp]
+            dist.broadcast_object_list(values, src=0)
+            timestamp = values[0]
+        return (
+            f"epoch{step_info.epoch}-epochstep{step_info.epoch_step}-"
+            f"globalstep{step_info.global_step}-{timestamp}"
+        )
+
+    @staticmethod
+    def _cleanup_failed_generation(path: str) -> None:
+        if not dist.is_initialized() or dist.get_rank() == 0:
+            shutil.rmtree(path, ignore_errors=True)
+
+    @classmethod
+    def _cleanup_other_generations(
+        cls,
+        experiment_name: str,
+        trial_name: str,
+        fileroot: str,
+        current_generation: str,
+    ) -> None:
+        if dist.is_initialized() and dist.get_rank() != 0:
+            return
+        try:
+            generations_root = os.path.join(
+                cls._recover_root(experiment_name, trial_name, fileroot),
+                cls._GENERATIONS_DIR,
+            )
+            if not os.path.isdir(generations_root):
+                return
+            for name in os.listdir(generations_root):
+                if name == current_generation:
+                    continue
+                path = os.path.join(generations_root, name)
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+        except Exception as exc:
+            logger.warning("Failed to clean old recovery generations: %s", exc)
 
     @staticmethod
     def _is_gateway_train_controller(
@@ -243,31 +396,96 @@ class RecoverHandler:
         normalized_engine: dict[str, TrainEngine | TrainController] = (
             self._normalize_recover_engines(engine)
         )
-        for name, engine_ in normalized_engine.items():
-            self._save_checkpoint(
-                engine_,
-                name=name,
-                tokenizer=tokenizer,
-                processor=processor,
-                base_model_path=base_model_path,
-            )
-
-        self.last_step_info = step_info
-        recover_info = RecoverInfo(
-            last_step_info=self.last_step_info,
-            saver_info=saver.state_dict(),
-            evaluator_info=evaluator.state_dict(),
-            stats_logger_info=stats_logger.state_dict(),
-            dataloader_info=dataloader.state_dict(),
-            checkpoint_info=self.freq_ctl.state_dict(),
-        )
-
-        recover_info_path = self.recover_info_path(
+        engine_name_error = None
+        try:
+            for name in normalized_engine:
+                self._validate_path_component(name, label="recovery engine name")
+        except InValidRecoverInfo as exc:
+            engine_name_error = exc
+        self._sync_stage_error("engine name validation", engine_name_error)
+        generation = self._new_generation_name(step_info)
+        generation_path = self._generation_path(
             self.config.experiment_name,
             self.config.trial_name,
             self.config.fileroot,
+            generation,
         )
-        recover_info.dump(recover_info_path)
+        checkpoint_root = os.path.join(generation_path, "checkpoints")
+        for name, engine_ in normalized_engine.items():
+            checkpoint_error = None
+            try:
+                self._save_checkpoint(
+                    engine_,
+                    path=os.path.join(checkpoint_root, name),
+                    tokenizer=tokenizer,
+                    processor=processor,
+                    base_model_path=base_model_path,
+                )
+            except Exception as exc:
+                checkpoint_error = exc
+            try:
+                self._sync_stage_error(f"checkpoint save for {name}", checkpoint_error)
+            except Exception:
+                self._cleanup_failed_generation(generation_path)
+                raise
+
+        recover_info = None
+        state_collection_error = None
+        try:
+            recover_info = RecoverInfo(
+                last_step_info=step_info,
+                saver_info=saver.state_dict(),
+                evaluator_info=evaluator.state_dict(),
+                stats_logger_info=stats_logger.state_dict(),
+                dataloader_info=dataloader.state_dict(),
+                checkpoint_info=self.freq_ctl.state_dict(),
+            )
+        except Exception as exc:
+            state_collection_error = exc
+        try:
+            self._sync_stage_error("state collection", state_collection_error)
+        except Exception:
+            self._cleanup_failed_generation(generation_path)
+            raise
+        assert recover_info is not None
+
+        recover_info_path = os.path.join(generation_path, "recover_info")
+        info_error = None
+        try:
+            recover_info.dump(recover_info_path)
+        except Exception as exc:
+            info_error = exc
+        try:
+            self._sync_stage_error("state save", info_error)
+        except Exception:
+            self._cleanup_failed_generation(generation_path)
+            raise
+
+        commit_error = None
+        commit_is_durable = False
+        if not dist.is_initialized() or dist.get_rank() == 0:
+            try:
+                commit_is_durable = self._commit_generation(
+                    self.config.experiment_name,
+                    self.config.trial_name,
+                    self.config.fileroot,
+                    generation,
+                )
+            except Exception as exc:
+                commit_error = exc
+        try:
+            self._sync_stage_error("commit", commit_error)
+        except Exception:
+            self._cleanup_failed_generation(generation_path)
+            raise
+        self.last_step_info = step_info
+        if commit_is_durable:
+            self._cleanup_other_generations(
+                self.config.experiment_name,
+                self.config.trial_name,
+                self.config.fileroot,
+                generation,
+            )
 
     def load(
         self,
@@ -294,57 +512,110 @@ class RecoverHandler:
             self._normalize_recover_engines(engine)
         )
 
-        recover_info_path = self.recover_info_path(
-            self.config.experiment_name,
-            self.config.trial_name,
-            self.config.fileroot,
-        )
-        logger.info(f"Loading recover info from {recover_info_path}")
+        generation_path = None
+        recover_info = None
+        read_error = None
         try:
-            recover_info: RecoverInfo = RecoverInfo.load(recover_info_path)
-            logger.info(f"Recovering from {recover_info.last_step_info.next()}.")
+            generation = self._read_current_generation(
+                self.config.experiment_name,
+                self.config.trial_name,
+                self.config.fileroot,
+            )
+            generation_path = self._generation_path(
+                self.config.experiment_name,
+                self.config.trial_name,
+                self.config.fileroot,
+                generation,
+            )
+            recover_info_path = os.path.join(generation_path, "recover_info")
+            logger.info(f"Loading recover info from {recover_info_path}")
+            recover_info = RecoverInfo.load(recover_info_path)
+        except Exception as exc:
+            read_error = exc
+        if read_error is not None and not dist.is_initialized():
+            if isinstance(
+                read_error,
+                (
+                    FileNotFoundError,
+                    KeyError,
+                    TypeError,
+                    json.JSONDecodeError,
+                    InValidRecoverInfo,
+                ),
+            ):
+                logger.warning(
+                    "Complete resume info was not found. "
+                    "This should not be a resumed experiment!"
+                )
+                return None
+            raise read_error
+        self._sync_stage_error("state read", read_error)
+
+        assert generation_path is not None
+        assert recover_info is not None
+        logger.info(f"Recovering from {recover_info.last_step_info.next()}.")
+
+        checkpoint_paths: dict[str, str] = {}
+        path_error = None
+        try:
+            for name in normalized_engine:
+                self._validate_path_component(name, label="recovery engine name")
+                checkpoint_path = os.path.join(generation_path, "checkpoints", name)
+                if not os.path.exists(checkpoint_path):
+                    raise FileNotFoundError(
+                        f"Checkpoint path {checkpoint_path} does not exist."
+                    )
+                checkpoint_paths[name] = checkpoint_path
+        except Exception as exc:
+            path_error = exc
+        if path_error is not None and not dist.is_initialized():
+            logger.warning(
+                "Complete resume info was not found. "
+                "This should not be a resumed experiment!"
+            )
+            return None
+        self._sync_stage_error("checkpoint validation", path_error)
+
+        state_restore_error = None
+        try:
             saver.load_state_dict(recover_info.saver_info)
             self.freq_ctl.load_state_dict(recover_info.checkpoint_info)
             evaluator.load_state_dict(recover_info.evaluator_info)
             stats_logger.load_state_dict(recover_info.stats_logger_info)
             dataloader.load_state_dict(recover_info.dataloader_info)
+        except Exception as exc:
+            state_restore_error = exc
+        self._sync_stage_error("local state restore", state_restore_error)
 
-            for name, engine_ in normalized_engine.items():
-                self._load_checkpoint(engine_, name=name)
-            global_step = recover_info.last_step_info.global_step
+        for name, engine_ in normalized_engine.items():
+            self._load_checkpoint(engine_, path=checkpoint_paths[name])
 
-            if inference_engine is not None:
-                assert weight_update_meta is not None
-                update_engine = normalized_engine[inference_engine_update_from]
-                recovery_version = global_step + 1
-                versioned_meta = weight_update_meta.with_version(recovery_version)
-                update_engine.connect_engine(inference_engine, versioned_meta)
-                inference_engine.pause()
+        global_step = recover_info.last_step_info.global_step
+
+        if inference_engine is not None:
+            assert weight_update_meta is not None
+            update_engine = normalized_engine[inference_engine_update_from]
+            recovery_version = global_step + 1
+            versioned_meta = weight_update_meta.with_version(recovery_version)
+            update_engine.connect_engine(inference_engine, versioned_meta)
+            inference_engine.pause()
+            try:
                 update_engine.update_weights(versioned_meta)
+            finally:
                 inference_engine.resume()
-                update_engine.set_version(recovery_version)
-                inference_engine.set_version(recovery_version)
-            return recover_info
-        except (FileNotFoundError, InValidRecoverInfo):
-            logger.warning(
-                f"Resume info not found at {recover_info_path}. "
-                f"This should not be a resumed experiment!"
-            )
+            update_engine.set_version(recovery_version)
+            inference_engine.set_version(recovery_version)
+        return recover_info
 
     def _save_checkpoint(
         self,
         engine: TrainEngine,
-        name: str = "default",
+        path: str,
         tokenizer: PreTrainedTokenizerFast | None = None,
         processor: AutoProcessor | None = None,
         base_model_path: str | None = None,
     ):
-        path = Saver.get_recover_checkpoint_path(
-            self.config.experiment_name,
-            self.config.trial_name,
-            self.config.fileroot,
-            name=name,
-        )
+        os.makedirs(path, exist_ok=True)
         weight_format = "dcp"
         with_optim = not self.config.no_save_optim
         meta = SaveLoadMeta(
@@ -361,16 +632,10 @@ class RecoverHandler:
     def _load_checkpoint(
         self,
         engine: TrainEngine | TrainController,
-        name: str = "default",
+        path: str,
         tokenizer: PreTrainedTokenizerFast | None = None,
         base_model_path: str | None = None,
     ):
-        path = Saver.get_recover_checkpoint_path(
-            self.config.experiment_name,
-            self.config.trial_name,
-            self.config.fileroot,
-            name=name,
-        )
         if not os.path.exists(path):
             raise FileNotFoundError(f"Checkpoint path {path} does not exist.")
         weight_format = "dcp"
@@ -392,16 +657,16 @@ def check_if_auto_recover(config: RecoverConfig) -> bool:
     experiment_name = config.experiment_name
     trial_name = config.trial_name
     fileroot = config.fileroot
-    recover_info_path = RecoverHandler.recover_info_path(
-        experiment_name, trial_name, fileroot
-    )
-    logger.info(f"Searching for recover info file in {recover_info_path}.")
-    if os.path.exists(str(recover_info_path)):
-        try:
-            info = RecoverInfo.load(recover_info_path)
-        except Exception as e:
-            logger.warning(f"Failed to load recover info from {recover_info_path}: {e}")
-            return False
+    try:
+        generation = RecoverHandler._read_current_generation(
+            experiment_name, trial_name, fileroot
+        )
+        generation_path = RecoverHandler._generation_path(
+            experiment_name, trial_name, fileroot, generation
+        )
+        recover_info_path = os.path.join(generation_path, "recover_info")
+        logger.info(f"Searching for recover info file in {recover_info_path}.")
+        info = RecoverInfo.load(recover_info_path)
         if info.last_step_info.epoch < 0:
             msg = (
                 f"Recover checkpoint is not valid. "
@@ -411,19 +676,14 @@ def check_if_auto_recover(config: RecoverConfig) -> bool:
             logger.warning(msg)
             return False
 
-        save_root = Saver.get_save_root(experiment_name, trial_name, fileroot)
-        for name in os.listdir(save_root):
-            if not os.path.isdir(os.path.join(save_root, name)):
-                continue
-            path = Saver.get_recover_checkpoint_path(
-                experiment_name, trial_name, fileroot, name=name
-            )
-            if not os.path.exists(path):
-                logger.warning(f"Recover checkpoint for model {name} does not exist.")
-                return False
+        checkpoint_root = os.path.join(generation_path, "checkpoints")
+        if not os.path.isdir(checkpoint_root) or not os.listdir(checkpoint_root):
+            logger.warning("Recovery checkpoint directory is missing or empty.")
+            return False
         return True
-    logger.warning(f"Recover info not found at: {recover_info_path}")
-    return False
+    except Exception as e:
+        logger.warning(f"Complete recovery state was not found: {e}")
+        return False
 
 
 def check_if_recover(config: RecoverConfig, _run_id: int) -> bool:

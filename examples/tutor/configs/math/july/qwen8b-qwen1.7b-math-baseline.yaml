@@ -75,11 +75,6 @@ reward:
   length_penalty_threshold_chars: 0
   length_penalty_per_100_chars: 0.0
   length_penalty_min: 0.0
-  pairwise:
-    enabled: false
-    reference_lag_steps: 5
-    scale: 0.05
-    compare_all_turns: true
 
 debug_trace_dir: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/debug_traces/${experiment_name}/${trial_name}
 debug_trace_every_n_rollouts: 10
@@ -121,7 +116,7 @@ rollout:
 gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 16384
+  max_new_tokens: 4096
   max_tokens: 24576
   greedy: false
   temperature: 0.7
@@ -131,7 +126,7 @@ gconfig:
 eval_gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 16384
+  max_new_tokens: 4096
   max_tokens: 24576
   greedy: false
   temperature: 0.7

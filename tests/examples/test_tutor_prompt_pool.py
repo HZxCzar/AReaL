@@ -11,7 +11,6 @@ from omegaconf import OmegaConf
 
 from examples.tutor import workflow as tutor_workflow
 from examples.tutor.configs import TutorConfig, TutorTeacherWarmupPromptConfig
-from examples.tutor.core.pairwise import PairwiseTutorEvaluator
 from examples.tutor.core.tensors import response_to_tensordict
 from examples.tutor.core.types import (
     EpisodeArtifact,
@@ -404,6 +403,7 @@ def test_teacher_rollout_uses_suffix_but_training_tensor_uses_clean_prompt():
         output_tokens=[901, 902],
         output_logprobs=[-0.1, -0.2],
         output_versions=[4, 4],
+        stop_reason="stop",
         input_len=len(rollout_input),
         output_len=2,
         tokenizer=tokenizer,
@@ -532,128 +532,6 @@ def test_concurrent_teacher_calls_keep_episode_local_suffixes():
         "base teacher\n\nstrategy A",
         "base teacher\n\nstrategy B",
     ]
-
-
-def test_pairwise_reference_teacher_reuses_episode_selection():
-    """Test the lagged teacher receives the current episode's strategy suffix."""
-    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
-        tutor_workflow.TutorAgentWorkflow
-    )
-    workflow.teacher_system_prompt = "base teacher"
-    workflow._build_tutor_prompt = lambda _state: "teacher user prompt"
-    workflow.gconfig = None
-    workflow.max_completion_tokens = 32
-    workflow.max_train_sample_tokens = 128
-    captured = {}
-
-    class ChatCaller:
-        async def generate(self, messages, **kwargs):
-            captured["messages"] = messages
-            captured["kwargs"] = kwargs
-            return types.SimpleNamespace(raw_text="reference hint")
-
-    state = TutorTurnState(
-        task="task",
-        ground_truth="42",
-        public_history=PublicHistoryState(),
-        previous_tutor_visible_output="",
-        previous_feedback=TutorPrivateFeedback(),
-        turn_idx=1,
-        max_turns=1,
-        teacher_prompt_selection=PromptPoolSelection(
-            index=4, suffix="use backward reasoning"
-        ),
-    )
-
-    output = asyncio.run(
-        workflow._generate_reference_tutor_response(
-            state,
-            chat_caller=ChatCaller(),
-            reference_version=3,
-        )
-    )
-
-    assert output == "reference hint"
-    assert captured["messages"][0]["content"] == (
-        "base teacher\n\nuse backward reasoning"
-    )
-    assert captured["kwargs"]["metadata"] == {"lora_version": 3}
-
-
-def test_pairwise_reference_student_reuses_episode_selection():
-    """Test pairwise comparisons do not introduce a second student behavior."""
-    selection = PromptPoolSelection(index=2, suffix="work backward")
-    current_state = StudentTurnState(
-        task="task",
-        public_history=PublicHistoryState(),
-        previous_student_output="wrong",
-        latest_tutor_visible_output="current hint",
-        student_prompt_selection=selection,
-    )
-    tutor_state = TutorTurnState(
-        task="task",
-        ground_truth="42",
-        public_history=PublicHistoryState(),
-        previous_tutor_visible_output="",
-        previous_feedback=TutorPrivateFeedback(),
-        turn_idx=1,
-        max_turns=1,
-    )
-    turn = TurnArtifact(
-        turn_idx=1,
-        tutor_state=tutor_state,
-        tutor_prompt="prompt",
-        tutor_response=None,
-        tutor_raw_output="current hint",
-        tutor_visible_output="current hint",
-        leak_result=_leak(),
-        public_history_before="",
-        public_history_after="",
-        student_state=current_state,
-        student_output="current answer",
-        judge_result=_judge(True),
-    )
-    episode = EpisodeArtifact(
-        task="task",
-        ground_truth="42",
-        initial_student_answer="wrong",
-        initial_student_error=None,
-        initial_judge_result=_judge(False),
-        turns=[turn],
-        termination_reason="success",
-        pre_success=False,
-        leak_count=0,
-        latest_student_answer="current answer",
-        student_prompt_selection=selection,
-    )
-    captured_states = []
-
-    async def generate_reference_tutor(_state, _version):
-        return "reference hint"
-
-    async def run_student(state):
-        captured_states.append(state)
-        return "reference answer", None
-
-    async def run_leak_check(_task, _ground_truth, _teacher_action):
-        return _leak()
-
-    async def score_answer(_task, _ground_truth, _student_output):
-        return _judge(False)
-
-    evaluator = PairwiseTutorEvaluator(
-        reward_scale=0.1,
-        reward_caller=object(),
-        generate_reference_tutor=generate_reference_tutor,
-        run_student=run_student,
-        run_leak_check=run_leak_check,
-        score_answer=score_answer,
-    )
-
-    result = asyncio.run(evaluator.evaluate_turn(episode, turn, reference_version=0))
-
-    assert result.outcome == "current"
-    assert captured_states[0].student_prompt_selection == selection
 
 
 def test_student_generalization_reuses_episode_behavior_suffix():

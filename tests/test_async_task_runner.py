@@ -6,10 +6,12 @@ async task executor.
 """
 
 import asyncio
+import threading
 import time
 
 import pytest
 
+from areal.infra import async_task_runner as async_task_runner_module
 from areal.infra.async_task_runner import AsyncTaskRunner
 
 
@@ -137,6 +139,80 @@ class TestAsyncTaskRunnerPauseResume:
         assert len(results) == 5
         assert set(results) == {0, 2, 4, 6, 8}
 
+        runner.destroy()
+
+    def test_pause_waits_for_background_loop_acknowledgement(self):
+        runner = AsyncTaskRunner[int](max_queue_size=10)
+        runner.initialize()
+        callback_started = threading.Event()
+        release_callback = threading.Event()
+
+        def blocking_callback() -> None:
+            callback_started.set()
+            release_callback.wait()
+
+        assert runner._loop is not None
+        runner._loop.call_soon_threadsafe(blocking_callback)
+        assert callback_started.wait(timeout=1)
+
+        pause_returned = threading.Event()
+
+        def pause_runner() -> None:
+            runner.pause()
+            pause_returned.set()
+
+        pause_thread = threading.Thread(target=pause_runner)
+        pause_thread.start()
+        assert not pause_returned.wait(timeout=0.05)
+
+        release_callback.set()
+        pause_thread.join(timeout=1)
+        assert pause_returned.is_set()
+        runner.destroy()
+
+    def test_pause_acknowledges_after_already_created_task_starts(self, monkeypatch):
+        runner = AsyncTaskRunner[int](max_queue_size=10)
+        drain_checked_pause = threading.Event()
+        release_drain = threading.Event()
+        task_started = threading.Event()
+
+        def controlled_drain(running_tasks):
+            try:
+                task_input = runner.input_queue.get_nowait()
+            except async_task_runner_module.queue.Empty:
+                return 0
+            assert not runner.paused.is_set()
+            drain_checked_pause.set()
+            assert release_drain.wait(timeout=1)
+            task = asyncio.create_task(
+                task_input.async_fn(*task_input.args, **task_input.kwargs),
+                name=str(task_input.task_id),
+            )
+            running_tasks[str(task_input.task_id)] = async_task_runner_module._Task(
+                create_time=time.monotonic_ns(),
+                task=task,
+                task_input=task_input,
+            )
+            return 1
+
+        monkeypatch.setattr(runner, "_drain_pending_inputs", controlled_drain)
+        runner.initialize()
+
+        async def task() -> int:
+            task_started.set()
+            await asyncio.sleep(0.01)
+            return 1
+
+        runner.submit(task, task_id=1)
+        assert drain_checked_pause.wait(timeout=1)
+        pause_thread = threading.Thread(target=runner.pause)
+        pause_thread.start()
+        assert runner.paused.wait(timeout=1)
+        release_drain.set()
+        pause_thread.join(timeout=2)
+
+        assert not pause_thread.is_alive()
+        assert task_started.is_set()
         runner.destroy()
 
 

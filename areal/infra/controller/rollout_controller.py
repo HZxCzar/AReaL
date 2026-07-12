@@ -67,6 +67,7 @@ class _RemoteRolloutTaskInput:
 class _RemoteRolloutResult:
     task_id: int
     trajectory: dict[str, Any]
+    rollout_version: int
 
 
 class RolloutController:
@@ -76,6 +77,18 @@ class RolloutController:
         config: InferenceEngineConfig,
         scheduler: Scheduler,
     ):
+        required_worker_methods = ("wait_for_task_with_metadata", "_discard_task")
+        missing_methods = [
+            name
+            for name in required_worker_methods
+            if not callable(getattr(inf_engine, name, None))
+        ]
+        if missing_methods:
+            raise TypeError(
+                "RolloutController supports the built-in SGLang/vLLM engines; "
+                "the selected engine is missing internal worker methods: "
+                f"{missing_methods}."
+            )
         self.inf_engine = inf_engine
         self.config = config
         self.scheduler = scheduler
@@ -93,6 +106,7 @@ class RolloutController:
 
         # State
         self._version_lock = Lock()
+        self._lora_update_lock = Lock()
         self._version = 0
 
         self._task_id_generator = TaskIdGenerator()
@@ -224,6 +238,7 @@ class RolloutController:
             task_factory=self._create_submit_callback,
             staleness_manager=self._staleness_manager,
             enable_tracing=self.config.enable_rollout_tracing,
+            result_transform=self._transform_dequeued_result,
         )
         # Initialize the dispatcher's async task runner
         self._dispatcher.initialize(logger=logger)
@@ -674,7 +689,12 @@ class RolloutController:
         with self._futures_lock:
             future = self._pending_futures.pop(task_id, None)
         if future:
-            future.get_loop().call_soon_threadsafe(future.set_result, None)
+
+            def resolve_if_pending() -> None:
+                if not future.done():
+                    future.set_result(None)
+
+            future.get_loop().call_soon_threadsafe(resolve_if_pending)
 
     def _collective_rpc(self, method: str, *args, **kwargs) -> list[Any]:
         return run_async_task(self._collective_rpc_async, method, *args, **kwargs)
@@ -784,20 +804,44 @@ class RolloutController:
             f"rejected: {stats.rejected}."
         )
 
+    def _transform_dequeued_result(
+        self, result: _RemoteRolloutResult | None
+    ) -> _RemoteRolloutResult | None:
+        """Reject a worker result that became stale in the controller buffer."""
+        if result is None:
+            return None
+        min_allowed_version = max(
+            0, self.get_version() - self.config.max_head_offpolicyness
+        )
+        if result.rollout_version >= min_allowed_version:
+            return result
+
+        self.staleness_manager.on_rollout_invalidated()
+        if self.config.enable_rollout_tracing:
+            logger.info(
+                "Reject controller-buffered stale rollout task %s at version %s. %s",
+                result.task_id,
+                result.rollout_version,
+                self._rollout_stats(),
+            )
+        return None
+
     def _create_submit_callback(self, pending_task: _RemoteRolloutTaskInput):
         async def _submit_then_wait() -> _RemoteRolloutResult | None:
-            # Choose worker via round-robin
-            worker, rank = self._choose_worker()
-            engine_name = self._engine_name(rank)
-
             # NOTE: No need to call `on_rollout_submitted` here.
             # This function will be passed to `BatchTaskDispather` where
             # `on_rollout_submitted` will be called upon dispatching
             task_id = pending_task.task_id
 
             manager = self.staleness_manager
+            engine_task_id = task_id
+            worker = None
+            engine_name = None
+            future = None
 
             try:
+                worker, rank = self._choose_worker()
+                engine_name = self._engine_name(rank)
                 # Set future for this task
                 future = asyncio.get_event_loop().create_future()
                 with self._futures_lock:
@@ -825,12 +869,14 @@ class RolloutController:
                 assert task_id == engine_task_id, (task_id, engine_task_id)
 
                 # Wait for callback to resolve the future
-                await asyncio.wait_for(future, timeout=self.config.request_timeout)
+                await asyncio.wait_for(
+                    asyncio.shield(future), timeout=self.config.request_timeout
+                )
 
                 # Fetch the result
                 result = await self.scheduler.async_call_engine(
                     worker.id,
-                    "wait_for_task",
+                    "wait_for_task_with_metadata",
                     engine_name=engine_name,
                     task_id=engine_task_id,
                     timeout=0.1,  # A short time to prevent blocking other requests
@@ -838,14 +884,17 @@ class RolloutController:
                     http_timeout=self.config.request_timeout,
                 )
 
-                traj = result
-                if traj is not None:
+                if result is not None:
                     manager.on_rollout_accepted()
                     if self.config.enable_rollout_tracing:
                         logger.info(
                             f"Finish and accept rollout. {self._rollout_stats()}"
                         )
-                    return _RemoteRolloutResult(task_id=task_id, trajectory=traj)
+                    return _RemoteRolloutResult(
+                        task_id=task_id,
+                        trajectory=result.trajectory,
+                        rollout_version=result.rollout_version,
+                    )
 
                 manager.on_rollout_rejected()
                 if self.config.enable_rollout_tracing:
@@ -853,21 +902,82 @@ class RolloutController:
                 return None
 
             except TimeoutError:
-                if task_id is not None:
-                    with self._futures_lock:
-                        self._pending_futures.pop(task_id, None)
+                assert worker is not None and engine_name is not None
+                assert future is not None
+                self._schedule_worker_task_discard(
+                    task_id=task_id,
+                    future=future,
+                    worker_id=worker.id,
+                    engine_name=engine_name,
+                    engine_task_id=engine_task_id,
+                )
                 manager.on_rollout_rejected()
                 logger.error(f"Rollout timed out after {self.config.request_timeout}s")
                 return None
             except Exception as exc:
-                if task_id is not None:
-                    with self._futures_lock:
-                        self._pending_futures.pop(task_id, None)
+                if (
+                    worker is not None
+                    and engine_name is not None
+                    and future is not None
+                ):
+                    self._schedule_worker_task_discard(
+                        task_id=task_id,
+                        future=future,
+                        worker_id=worker.id,
+                        engine_name=engine_name,
+                        engine_task_id=engine_task_id,
+                    )
                 manager.on_rollout_rejected()
                 logger.error("Workflow execution failed: %s", exc, exc_info=True)
                 return None
 
         return _submit_then_wait
+
+    def _schedule_worker_task_discard(
+        self,
+        *,
+        task_id: int,
+        future: asyncio.Future,
+        worker_id: str,
+        engine_name: str,
+        engine_task_id: int,
+    ) -> None:
+        with self._futures_lock:
+            self._pending_futures.pop(task_id, None)
+        if not future.done():
+            future.cancel()
+        asyncio.create_task(
+            self._discard_worker_task(
+                worker_id=worker_id,
+                engine_name=engine_name,
+                engine_task_id=engine_task_id,
+            )
+        )
+
+    async def _discard_worker_task(
+        self,
+        *,
+        worker_id: str,
+        engine_name: str,
+        engine_task_id: int,
+    ) -> None:
+        """Tell a worker to drop a task result now or when it completes."""
+        try:
+            await self.scheduler.async_call_engine(
+                worker_id,
+                "_discard_task",
+                engine_name=engine_name,
+                task_id=engine_task_id,
+                tombstone_ttl_seconds=self.config.request_timeout,
+                http_timeout=self.config.request_timeout,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to discard late rollout task %s from worker %s.",
+                engine_task_id,
+                worker_id,
+                exc_info=True,
+            )
 
     def get_capacity(self):
         return self.staleness_manager.get_capacity()
@@ -1040,9 +1150,22 @@ class RolloutController:
         )
 
     async def update_weights_from_disk(self, meta: WeightUpdateMeta):
-        meta.clear_checkpoint_after_load = False
-        await self._collective_rpc_async("update_weights_from_disk", meta=meta)
-        shutil.rmtree(meta.path, ignore_errors=True)
+        if not meta.use_lora:
+            meta.clear_checkpoint_after_load = False
+            await self._collective_rpc_async("update_weights_from_disk", meta=meta)
+            shutil.rmtree(meta.path, ignore_errors=True)
+            return
+        if not self._lora_update_lock.acquire(blocking=False):
+            raise RuntimeError(
+                "A LoRA weight update is already running; concurrent updates are "
+                "not supported."
+            )
+        try:
+            meta.clear_checkpoint_after_load = False
+            await self._collective_rpc_async("update_weights_from_disk", meta=meta)
+            shutil.rmtree(meta.path, ignore_errors=True)
+        finally:
+            self._lora_update_lock.release()
 
     async def pause_generation(self):
         await self._collective_rpc_async("pause_generation")

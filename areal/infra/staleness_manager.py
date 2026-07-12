@@ -123,6 +123,19 @@ class StalenessManager:
             self.rollout_stat.running -= 1
             self.rollout_stat.rejected += 1
 
+    def on_rollout_invalidated(self) -> None:
+        """Move a completed rollout from accepted to rejected.
+
+        This is used when a result was fresh at completion but became stale while
+        waiting in a result buffer. The rollout is no longer running, so this must
+        not change the running counter.
+        """
+        with self.lock:
+            if self.rollout_stat.accepted <= 0:
+                raise RuntimeError("Cannot invalidate a rollout that was not accepted.")
+            self.rollout_stat.accepted -= 1
+            self.rollout_stat.rejected += 1
+
     def get_stats(self) -> RolloutStat:
         """Get a snapshot of current rollout statistics.
 

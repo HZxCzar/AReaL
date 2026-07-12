@@ -853,7 +853,6 @@ def build_workflow(
 
     auxiliary_model = config.auxiliary_model
     reward = config.reward
-    pairwise = reward.pairwise
     teacher_pre = config.teacher_pre
     aux_thinking = resolve_role_thinking(
         args.student_thinking,
@@ -910,11 +909,6 @@ def build_workflow(
         answer_judge_system_prompt=config.answer_judge_system_prompt,
         tokenizer_path=config.tokenizer_path,
         model_context_length=config.sglang.context_length,
-        pairwise_reward_enabled=pairwise.enabled,
-        pairwise_reference_lag_steps=pairwise.reference_lag_steps,
-        pairwise_reward_scale=pairwise.scale,
-        pairwise_compare_all_turns=pairwise.compare_all_turns,
-        pairwise_judge_both_incorrect=pairwise.judge_both_incorrect,
     )
 
 

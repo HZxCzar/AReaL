@@ -1,4 +1,7 @@
 import asyncio
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Any
 
@@ -7,16 +10,24 @@ import torch
 
 from areal.api import ModelRequest, RolloutWorkflow
 from areal.api.cli_args import GenerationHyperparameters, InferenceEngineConfig
-from areal.api.io_struct import HttpGenerationResult, HttpRequest
+from areal.api.io_struct import HttpGenerationResult, HttpRequest, WeightUpdateMeta
 from areal.infra import remote_inf_engine as remote_inf_engine_module
 from areal.infra import workflow_context
 from areal.infra import workflow_executor as workflow_executor_module
+from areal.infra.async_task_runner import TimedResult
+from areal.infra.controller.rollout_controller import (
+    RolloutController,
+    _RemoteRolloutResult,
+    _RemoteRolloutTaskInput,
+)
 from areal.infra.remote_inf_engine import RemoteInfEngine
 from areal.infra.staleness_manager import StalenessManager
 from areal.infra.workflow_context import WorkflowContext
 from areal.infra.workflow_executor import (
+    BatchTaskDispatcher,
     RolloutStaleError,
     WorkflowExecutor,
+    _RolloutResult,
     _RolloutTaskInput,
 )
 
@@ -33,9 +44,10 @@ class FakeInferenceEngine:
         self.version = version
 
     @contextmanager
-    def lora_version_lease(self, version: int, *, workflow: bool = False):
-        self.leased_versions.append((version, workflow))
-        yield
+    def lora_version_lease(self, version: int | None, *, workflow: bool = False):
+        leased_version = self.version if version is None else version
+        self.leased_versions.append((leased_version, workflow))
+        yield leased_version
 
 
 class StaticWorkflow(RolloutWorkflow):
@@ -43,7 +55,9 @@ class StaticWorkflow(RolloutWorkflow):
         self.on_run = on_run
         self.seen_lora_version = None
 
-    async def arun_episode(self, engine, data: dict[str, Any]) -> dict[str, torch.Tensor]:
+    async def arun_episode(
+        self, engine, data: dict[str, Any]
+    ) -> dict[str, torch.Tensor]:
         self.seen_lora_version = workflow_context.get().lora_version
         if self.on_run is not None:
             self.on_run()
@@ -51,15 +65,15 @@ class StaticWorkflow(RolloutWorkflow):
             "input_ids": torch.tensor([[1, 2]], dtype=torch.int32),
             "attention_mask": torch.ones((1, 2), dtype=torch.bool),
             "loss_mask": torch.tensor([[0, 1]], dtype=torch.int32),
-            "versions": torch.tensor(
-                [[-1, self.seen_lora_version]], dtype=torch.int32
-            ),
+            "versions": torch.tensor([[-1, self.seen_lora_version]], dtype=torch.int32),
             "rewards": torch.tensor([1.0], dtype=torch.float32),
         }
 
 
 class FakeBackend:
-    def build_generation_request(self, req: ModelRequest, with_lora: bool, version: int):
+    def build_generation_request(
+        self, req: ModelRequest, with_lora: bool, version: int
+    ):
         return HttpRequest(endpoint="/generate", payload={"version": version})
 
     def parse_generation_response(self, response: dict[str, Any]):
@@ -124,7 +138,7 @@ def make_executor(version: int = 0) -> tuple[WorkflowExecutor, FakeInferenceEngi
 
 
 def test_workflow_task_uses_start_lora_version_in_context():
-    """Task execution should expose the LoRA version captured at task creation."""
+    """A queued task should bind the latest LoRA version when execution starts."""
     executor, engine = make_executor(version=3)
     workflow = StaticWorkflow()
     task_fn = executor._create_workflow_task(
@@ -135,8 +149,10 @@ def test_workflow_task_uses_start_lora_version_in_context():
     result = asyncio.run(task_fn())
 
     assert result is not None
-    assert workflow.seen_lora_version == 3
-    assert result.trajectory["versions"][0, 1].item() == 3
+    assert workflow.seen_lora_version == 5
+    assert result.rollout_version == 5
+    assert result.trajectory["versions"][0, 1].item() == 5
+    assert engine.leased_versions == [(5, True)]
 
 
 def test_workflow_task_rejects_stale_before_running_workflow():
@@ -172,7 +188,9 @@ def test_workflow_task_rejects_stale_before_running_workflow():
 def test_workflow_task_rejects_stale_after_workflow_returns():
     """Tasks that become stale during workflow execution should be rejected."""
     executor, _ = make_executor(version=0)
-    workflow = StaticWorkflow(on_run=lambda: executor.set_min_allowed_rollout_version(1))
+    workflow = StaticWorkflow(
+        on_run=lambda: executor.set_min_allowed_rollout_version(1)
+    )
     should_accept_called = False
 
     def should_accept(_traj):
@@ -219,7 +237,9 @@ def test_workflow_task_logs_stale_zero_for_accepted_and_one_for_stale(monkeypatc
     accepted_task = accepted_executor._create_workflow_task(
         _RolloutTaskInput(task_id=20, data={}, workflow=StaticWorkflow())
     )
-    assert asyncio.run(accepted_task()) is not None
+    accepted_result = asyncio.run(accepted_task())
+    assert accepted_result is not None
+    assert accepted_executor._transform_dequeued_result(accepted_result) is not None
 
     stale_executor, _ = make_executor(version=0)
     stale_task = stale_executor._create_workflow_task(
@@ -232,6 +252,173 @@ def test_workflow_task_logs_stale_zero_for_accepted_and_one_for_stale(monkeypatc
         {"accepted": 1, "stale": 0},
         {"rejected": 1, "stale": 1},
     ]
+
+
+def _buffer_rollout_result(
+    executor: WorkflowExecutor,
+    result: _RolloutResult,
+) -> None:
+    manager = executor.staleness_manager
+    dispatcher = BatchTaskDispatcher(
+        max_queue_size=4,
+        task_factory=lambda _input: None,
+        staleness_manager=manager,
+        result_transform=executor._transform_dequeued_result,
+    )
+    executor._dispatcher = dispatcher
+    manager.on_rollout_enqueued()
+    manager.on_rollout_submitted()
+    manager.on_rollout_accepted()
+    dispatcher._active_task_ids.add(result.task_id)
+    dispatcher._pending_results[result.task_id] = TimedResult(
+        create_time=1,
+        data=result,
+        task_id=result.task_id,
+    )
+
+
+def test_discard_before_worker_submit_prevents_task_from_starting():
+    executor, _ = make_executor(version=0)
+    dispatcher = BatchTaskDispatcher(
+        max_queue_size=4,
+        task_factory=lambda _input: None,
+        staleness_manager=executor.staleness_manager,
+    )
+    task_input = _RolloutTaskInput(task_id=29, data={}, workflow=StaticWorkflow())
+
+    assert dispatcher.discard_task(29) is True
+    dispatcher.submit_task_input(task_input)
+
+    assert list(dispatcher._pending_inputs) == []
+    assert dispatcher._active_task_ids == set()
+    assert dispatcher._discarded_task_ids == set()
+    assert dispatcher._pre_discarded_task_deadlines == {}
+
+
+def test_pre_discard_tombstone_expires():
+    executor, _ = make_executor(version=0)
+    dispatcher = BatchTaskDispatcher(
+        max_queue_size=4,
+        task_factory=lambda _input: None,
+        staleness_manager=executor.staleness_manager,
+    )
+    task_input = _RolloutTaskInput(task_id=27, data={}, workflow=StaticWorkflow())
+
+    assert dispatcher.discard_task(27, tombstone_ttl_seconds=0) is True
+    dispatcher.submit_task_input(task_input)
+
+    assert list(dispatcher._pending_inputs) == [task_input]
+    assert dispatcher._active_task_ids == {27}
+    assert dispatcher._pre_discarded_task_deadlines == {}
+
+
+def test_discarded_pending_result_uses_discard_callback_not_result_transform():
+    executor, _ = make_executor(version=0)
+    discarded = []
+
+    def fail_transform(_result):
+        raise AssertionError("discarded results must not be accepted")
+
+    dispatcher = BatchTaskDispatcher(
+        max_queue_size=4,
+        task_factory=lambda _input: None,
+        staleness_manager=executor.staleness_manager,
+        result_transform=fail_transform,
+        discarded_result_callback=discarded.append,
+    )
+    result = _RolloutResult(
+        task_id=28,
+        trajectory={"input_ids": torch.tensor([[1]])},
+        rollout_version=0,
+    )
+    dispatcher._active_task_ids.add(28)
+    dispatcher._pending_results[28] = TimedResult(
+        create_time=1,
+        data=result,
+        task_id=28,
+    )
+
+    assert dispatcher.discard_task(28) is True
+
+    assert discarded == [result]
+    assert dispatcher._pending_results == {}
+    assert dispatcher._active_task_ids == set()
+
+
+def test_buffered_rollout_is_rejected_if_stale_at_dequeue():
+    """A result that aged in the worker buffer must not reach the trainer."""
+    executor, _ = make_executor(version=0)
+    result = _RolloutResult(
+        task_id=30,
+        trajectory={"input_ids": torch.tensor([[1]])},
+        rollout_version=0,
+    )
+    _buffer_rollout_result(executor, result)
+    executor.set_min_allowed_rollout_version(1)
+
+    assert executor.wait(count=1, timeout=0.1) == [None]
+    stats = executor.staleness_manager.get_stats()
+    assert stats.accepted == 0
+    assert stats.rejected == 1
+    assert stats.running == 0
+
+
+def test_buffered_rollout_at_minimum_version_remains_accepted():
+    """The minimum allowed rollout version is inclusive."""
+    executor, _ = make_executor(version=1)
+    trajectory = {"input_ids": torch.tensor([[1]])}
+    result = _RolloutResult(
+        task_id=31,
+        trajectory=trajectory,
+        rollout_version=1,
+    )
+    _buffer_rollout_result(executor, result)
+    executor.set_min_allowed_rollout_version(1)
+
+    dequeued = executor.wait(count=1, timeout=0.1)
+
+    assert len(dequeued) == 1
+    assert dequeued[0] is trajectory
+    stats = executor.staleness_manager.get_stats()
+    assert stats.accepted == 1
+    assert stats.rejected == 0
+
+
+def test_controller_buffered_rollout_is_rejected_if_stale_at_dequeue():
+    """The controller's second result buffer must also enforce freshness."""
+    config = InferenceEngineConfig(
+        backend="sglang:d1",
+        consumer_batch_size=2,
+        max_concurrent_rollouts=4,
+        max_head_offpolicyness=1,
+    )
+    controller = RolloutController(
+        inf_engine=RemoteInfEngine,
+        config=config,
+        scheduler=object(),
+    )
+    controller._staleness_manager = StalenessManager(
+        version_provider=controller,
+        max_concurrent_rollouts=4,
+        consumer_batch_size=2,
+        max_staleness=1,
+    )
+    controller._version = 2
+    manager = controller.staleness_manager
+    manager.on_rollout_enqueued()
+    manager.on_rollout_submitted()
+    manager.on_rollout_accepted()
+    result = _RemoteRolloutResult(
+        task_id=32,
+        trajectory={"input_ids": torch.tensor([[1]])},
+        rollout_version=0,
+    )
+
+    assert controller._transform_dequeued_result(result) is None
+    stats = manager.get_stats()
+    assert stats.accepted == 0
+    assert stats.rejected == 1
+    assert stats.running == 0
 
 
 def test_remote_agenerate_raises_before_backend_request_when_rollout_stale():
@@ -260,7 +447,222 @@ def test_remote_agenerate_raises_before_backend_request_when_rollout_stale():
     workflow_context.set(WorkflowContext())
 
 
-def make_remote_engine_for_pause_tests() -> tuple[RemoteInfEngine, FakeSubmissionExecutor]:
+def test_current_lora_lease_protects_version_from_unload_selection():
+    config = InferenceEngineConfig(
+        backend="sglang:d1",
+        use_lora=True,
+        request_timeout=1,
+    )
+    engine = RemoteInfEngine(config=config, backend=FakeBackend())
+    engine.addresses = ["127.0.0.1:1"]
+    engine._version = 3
+    engine._loaded_lora_versions_by_addr = {"127.0.0.1:1": {3}}
+    engine._unloading_lora_versions_by_addr = {"127.0.0.1:1": set()}
+    engine._max_loaded_loras_by_addr = {"127.0.0.1:1": 1}
+
+    with engine.lora_version_lease(None, workflow=True) as leased_version:
+        assert leased_version == 3
+        with pytest.raises(TimeoutError, match="inactive LoRA adapter slots"):
+            engine._select_inactive_loras_to_unload(4, time.monotonic())
+
+    assert engine._select_inactive_loras_to_unload(4, time.monotonic()) == {
+        3: ["127.0.0.1:1"]
+    }
+
+
+def test_vllm_server_args_record_loaded_lora_and_capacity():
+    config = InferenceEngineConfig(backend="vllm:d1", use_lora=True)
+    engine = RemoteInfEngine(config=config, backend=FakeBackend())
+    addr = "127.0.0.1:1"
+    engine.addresses = [addr]
+
+    engine.record_lora_server_args(
+        {
+            "lora_modules": ["actor-v0=/tmp/adapter"],
+            "max_loras": 4,
+        }
+    )
+
+    assert engine._loaded_lora_versions_by_addr == {addr: {0}}
+    assert engine._max_loaded_loras_by_addr == {addr: 4}
+    with engine.lora_version_lease(0) as leased_version:
+        assert leased_version == 0
+
+
+def test_concurrent_lora_disk_update_fails_instead_of_waiting(monkeypatch):
+    config = InferenceEngineConfig(backend="sglang:d1", use_lora=True)
+    engine = RemoteInfEngine(config=config, backend=FakeBackend())
+    update_started = threading.Event()
+    release_update = threading.Event()
+
+    def fake_serial_update(*_args):
+        update_started.set()
+        assert release_update.wait(timeout=1)
+
+    monkeypatch.setattr(
+        engine, "_update_lora_weights_from_disk_serial", fake_serial_update
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            engine._update_lora_weights_from_disk,
+            "experiment",
+            "trial",
+            1,
+            None,
+        )
+        assert update_started.wait(timeout=1)
+        second = executor.submit(
+            engine._update_lora_weights_from_disk,
+            "experiment",
+            "trial",
+            2,
+            None,
+        )
+        with pytest.raises(RuntimeError, match="already running"):
+            second.result()
+        release_update.set()
+        first.result()
+
+
+def test_lora_lease_rejects_version_already_selected_for_unload():
+    config = InferenceEngineConfig(backend="sglang:d1", use_lora=True)
+    engine = RemoteInfEngine(config=config, backend=FakeBackend())
+    addr = "127.0.0.1:1"
+    engine.addresses = [addr]
+    engine._loaded_lora_versions_by_addr = {addr: {3}}
+    engine._unloading_lora_versions_by_addr = {addr: {3}}
+
+    with pytest.raises(RuntimeError, match="not available for a new lease"):
+        with engine.lora_version_lease(3):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_controller_rejects_concurrent_lora_update_before_worker_rpc(
+    monkeypatch,
+):
+    config = InferenceEngineConfig(backend="sglang:d1", use_lora=True)
+    controller = RolloutController(
+        inf_engine=RemoteInfEngine,
+        config=config,
+        scheduler=object(),
+    )
+    first_rpc_started = asyncio.Event()
+    release_first_rpc = asyncio.Event()
+    rpc_calls = 0
+
+    async def fake_collective_rpc(*_args, **_kwargs):
+        nonlocal rpc_calls
+        rpc_calls += 1
+        first_rpc_started.set()
+        await release_first_rpc.wait()
+
+    monkeypatch.setattr(controller, "_collective_rpc_async", fake_collective_rpc)
+    meta = WeightUpdateMeta(type="disk", path="/tmp/missing", use_lora=True)
+
+    first_update = asyncio.create_task(controller.update_weights_from_disk(meta))
+    await first_rpc_started.wait()
+    with pytest.raises(RuntimeError, match="already running"):
+        await controller.update_weights_from_disk(meta)
+    release_first_rpc.set()
+    await first_update
+
+    assert rpc_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_controller_discards_worker_result_that_arrives_after_timeout():
+    class Scheduler:
+        def __init__(self):
+            self.calls = []
+
+        async def async_call_engine(self, worker_id, method, **kwargs):
+            self.calls.append((worker_id, method, kwargs))
+            return None
+
+    scheduler = Scheduler()
+    controller = RolloutController(
+        inf_engine=RemoteInfEngine,
+        config=InferenceEngineConfig(backend="sglang:d1"),
+        scheduler=scheduler,
+    )
+    await controller._discard_worker_task(
+        worker_id="worker-0",
+        engine_name="rollout-0",
+        engine_task_id=17,
+    )
+
+    assert len(scheduler.calls) == 1
+    worker_id, method, kwargs = scheduler.calls[0]
+    assert worker_id == "worker-0"
+    assert method == "_discard_task"
+    assert kwargs["task_id"] == 17
+
+
+def test_controller_no_worker_failure_releases_running_capacity():
+    config = InferenceEngineConfig(
+        backend="sglang:d1",
+        consumer_batch_size=2,
+        max_concurrent_rollouts=2,
+    )
+    controller = RolloutController(
+        inf_engine=RemoteInfEngine,
+        config=config,
+        scheduler=object(),
+    )
+    controller._staleness_manager = StalenessManager(
+        version_provider=controller,
+        max_concurrent_rollouts=2,
+        consumer_batch_size=2,
+        max_staleness=1,
+    )
+    manager = controller.staleness_manager
+    manager.on_rollout_enqueued()
+    manager.on_rollout_submitted()
+    task_fn = controller._create_submit_callback(
+        _RemoteRolloutTaskInput(
+            task_id=19,
+            data={},
+            workflow=None,
+            workflow_kwargs={},
+            should_accept_fn=None,
+        )
+    )
+
+    assert asyncio.run(task_fn()) is None
+    stats = manager.get_stats()
+    assert stats.running == 0
+    assert stats.rejected == 1
+
+
+@pytest.mark.asyncio
+async def test_controller_callback_does_not_resolve_cancelled_future():
+    controller = RolloutController(
+        inf_engine=RemoteInfEngine,
+        config=InferenceEngineConfig(backend="sglang:d1"),
+        scheduler=object(),
+    )
+    loop = asyncio.get_running_loop()
+    errors = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: errors.append(context))
+    try:
+        future = loop.create_future()
+        controller._pending_futures[23] = future
+        controller._resolve_task_future(23)
+        future.cancel()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert future.cancelled()
+    assert errors == []
+
+
+def make_remote_engine_for_pause_tests() -> tuple[
+    RemoteInfEngine, FakeSubmissionExecutor
+]:
     config = InferenceEngineConfig(
         backend="sglang:d1",
         max_head_offpolicyness=1,

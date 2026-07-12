@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from examples.tutor import workflow as tutor_workflow
 from examples.tutor.configs import TutorAuxiliaryModelConfig, TutorConfig
 from examples.tutor.core import polaris
 from examples.tutor.core.polaris import (
@@ -75,6 +77,17 @@ def test_polaris_scorer_uses_boxed_mathd_equivalence():
     assert result.raw_result["mathd_correct"]
 
 
+@pytest.mark.asyncio
+async def test_polaris_process_round_trip():
+    score_process = polaris.PolarisScoreProcess()
+    try:
+        result = await score_process.score("Compute 1+1.", "2", "\\boxed{2}")
+    finally:
+        await asyncio.to_thread(score_process.close)
+
+    assert result.correct
+
+
 def test_polaris_sympy_fallback_is_thread_safe():
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(grade_answer_sympy, "1/2", "\\frac{1}{2}")
@@ -110,51 +123,51 @@ def test_polaris_sympy_fallback_uses_bounded_math_verify(monkeypatch):
 @pytest.mark.asyncio
 async def test_polaris_async_scorer_does_not_block_event_loop(monkeypatch):
     expected = score_polaris_answer("Compute one half.", "1/2", "\\boxed{1/2}")
-    executor = ThreadPoolExecutor(max_workers=1)
+    score_process = polaris.PolarisScoreProcess()
 
-    def slow_score(task, ground_truth, student_answer):
-        del task, ground_truth, student_answer
+    def slow_score(task, ground_truth, student_answer, cancel_event):
+        del task, ground_truth, student_answer, cancel_event
         time.sleep(0.1)
         return expected
 
-    monkeypatch.setattr(polaris, "_get_score_executor", lambda: executor)
-    monkeypatch.setattr(polaris, "score_polaris_answer", slow_score)
+    monkeypatch.setattr(score_process, "_score_blocking", slow_score)
     try:
         score_task = asyncio.create_task(
-            score_polaris_answer_async("task", "answer", "student")
+            score_polaris_answer_async(
+                "task", "answer", "student", score_process=score_process
+            )
         )
         await asyncio.sleep(0.01)
 
         assert not score_task.done()
         assert await score_task == expected
     finally:
-        executor.shutdown(wait=True)
+        score_process.close()
 
 
 @pytest.mark.asyncio
-async def test_polaris_async_scorer_timeout_uses_fast_exact_fallback(monkeypatch):
-    executor = ThreadPoolExecutor(max_workers=1)
+async def test_polaris_async_scorer_timeout_counts_answer_as_incorrect(monkeypatch):
+    score_process = polaris.PolarisScoreProcess(timeout_seconds=0.01)
 
-    def stuck_score(task, ground_truth, student_answer):
-        del task, ground_truth, student_answer
+    def stuck_score(task, ground_truth, student_answer, cancel_event):
+        del task, ground_truth, student_answer, cancel_event
         time.sleep(0.1)
         raise AssertionError("late scorer result should be ignored")
 
-    monkeypatch.setattr(polaris, "_get_score_executor", lambda: executor)
-    monkeypatch.setattr(polaris, "score_polaris_answer", stuck_score)
-    monkeypatch.setattr(polaris, "_POLARIS_SCORE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(score_process, "_score_blocking", stuck_score)
     try:
         result = await score_polaris_answer_async(
             "Compute one half.",
             "\\frac{1}{2}",
             "The final answer is \\boxed{1/2}.",
+            score_process=score_process,
         )
 
-        assert result.correct
-        assert result.raw_result["mathd_correct"]
+        assert not result.correct
+        assert not result.raw_result["mathd_correct"]
         assert "timed out" in result.raw_result["scoring_error"]
     finally:
-        executor.shutdown(wait=True)
+        score_process.close()
 
 
 @pytest.mark.asyncio
@@ -163,9 +176,12 @@ async def test_workflow_uses_async_polaris_scorer(monkeypatch):
     workflow.dataset_type = "polaris"
     workflow.answer_judge_enabled = False
     expected = score_polaris_answer("task", "7", "\\boxed{7}")
+    received_process = None
 
-    async def fake_async_score(task, ground_truth, student_answer):
+    async def fake_async_score(task, ground_truth, student_answer, *, score_process):
+        nonlocal received_process
         assert (task, ground_truth, student_answer) == ("task", "7", "\\boxed{7}")
+        received_process = score_process
         return expected
 
     monkeypatch.setattr(polaris, "score_polaris_answer_async", fake_async_score)
@@ -178,6 +194,108 @@ async def test_workflow_uses_async_polaris_scorer(monkeypatch):
     )
 
     assert result == expected
+    assert received_process is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_episodes_use_separate_polaris_processes(monkeypatch):
+    created = []
+
+    class FakeScoreProcess:
+        def __init__(self):
+            self.closed = False
+            created.append(self)
+
+        def close(self):
+            time.sleep(0.05)
+            self.closed = True
+
+    monkeypatch.setattr(polaris, "PolarisScoreProcess", FakeScoreProcess)
+    workflow = TutorAgentWorkflow.__new__(TutorAgentWorkflow)
+    workflow.dataset_type = "polaris"
+    observed = []
+    both_started = asyncio.Event()
+
+    async def fake_run_episode(data, **_kwargs):
+        observed.append((data["id"], tutor_workflow._POLARIS_SCORE_PROCESS.get()))
+        if len(observed) == 2:
+            both_started.set()
+        await both_started.wait()
+        return None
+
+    workflow._run_episode = fake_run_episode
+    heartbeat_ran = False
+
+    async def heartbeat():
+        nonlocal heartbeat_ran
+        await asyncio.sleep(0.01)
+        heartbeat_ran = True
+
+    await asyncio.gather(
+        workflow.arun_episode(object(), {"id": 1}),
+        workflow.arun_episode(object(), {"id": 2}),
+        heartbeat(),
+    )
+
+    assert observed[0][1] is not observed[1][1]
+    assert len(created) == 2
+    assert all(process.closed for process in created)
+    assert heartbeat_ran
+
+
+def test_polaris_timeout_terminates_only_its_process():
+    class Connection:
+        closed = False
+
+        @staticmethod
+        def send(_request):
+            return None
+
+        @staticmethod
+        def poll(_timeout):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    class Process:
+        alive = True
+        terminated = False
+        pid = 1
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.terminated = True
+            self.alive = False
+
+        def join(self, timeout):
+            del timeout
+
+        def kill(self):
+            self.alive = False
+
+    score_process = polaris.PolarisScoreProcess(timeout_seconds=0.01)
+    connection = Connection()
+    process = Process()
+    score_process._connection = connection
+    score_process._process = process
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        score_process._score_blocking("task", "answer", "student", threading.Event())
+
+    assert connection.closed
+    assert process.terminated
+    assert score_process._connection is None
+    assert score_process._process is None
+
+    score_process.timeout_seconds = polaris._POLARIS_SCORE_TIMEOUT_SECONDS
+    restarted_result = asyncio.run(
+        score_process.score("Compute 1+1.", "2", "\\boxed{2}")
+    )
+    score_process.close()
+    assert restarted_result.correct
 
 
 def test_polaris_scorer_strips_thinking_before_extracting_answer():

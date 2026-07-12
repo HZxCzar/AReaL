@@ -222,35 +222,14 @@ class TutorStudentModelConfig:
 
 
 @dataclass
-class TutorPairwiseRewardConfig:
-    enabled: bool = field(
-        default=False,
-        metadata={"help": "Enable post-hoc pairwise tutor reward against lagged LoRA."},
-    )
-    reference_lag_steps: int = field(default=5)
-    scale: float = field(default=0.05)
-    compare_all_turns: bool = field(default=True)
-    judge_both_incorrect: bool = field(
-        default=True,
-        metadata={
-            "help": (
-                "Use the pairwise judge when both current and reference student "
-                "answers are exact-incorrect. If false, assign zero pairwise "
-                "reward for those turns."
-            )
-        },
-    )
-
-
-@dataclass
 class TutorStudentGeneralizeConfidenceConfig:
     enabled: bool = field(
         default=False,
         metadata={
             "help": (
-                "Use answer-token confidence as an additional dense "
-                "generalization reward. The auxiliary API must return token "
-                "logprobs for the generated student answer."
+                "Give a confidence bonus to a correct generalized answer. "
+                "The auxiliary API must return token logprobs for the generated "
+                "student answer."
             )
         },
     )
@@ -528,8 +507,14 @@ class TutorRewardConfig:
     length_penalty_threshold_chars: int = field(default=1200)
     length_penalty_per_100_chars: float = field(default=-0.005)
     length_penalty_min: float = field(default=-0.1)
-    pairwise: TutorPairwiseRewardConfig = field(
-        default_factory=TutorPairwiseRewardConfig
+    zero_reward_on_length_stop: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Set a tutor turn's training reward to zero when inference "
+                "stops because it reached the generation length limit."
+            )
+        },
     )
 
     def __post_init__(self) -> None:
@@ -658,6 +643,12 @@ class TutorConfig(GRPOConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.actor.mask_no_eos_with_zero:
+            raise ValueError(
+                "Tutor does not support actor.mask_no_eos_with_zero because its "
+                "turn-level tensors are dynamically padded. Use "
+                "reward.zero_reward_on_length_stop instead."
+            )
         student_names = [student.name for student in self.student_models]
         if len(student_names) != len(set(student_names)):
             raise ValueError("student_models names must be unique.")

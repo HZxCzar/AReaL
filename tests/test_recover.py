@@ -1,5 +1,8 @@
 """Tests for the recovery configuration and functionality."""
 
+import json
+import os
+import shutil
 import tempfile
 from unittest.mock import Mock
 
@@ -10,7 +13,12 @@ from areal.api.io_struct import FinetuneSpec, StepInfo
 from areal.experimental.training_service.controller.controller import (
     GatewayTrainController,
 )
-from areal.utils.recover import RecoverHandler, check_if_auto_recover, check_if_recover
+from areal.utils.recover import (
+    InValidRecoverInfo,
+    RecoverHandler,
+    check_if_auto_recover,
+    check_if_recover,
+)
 
 
 class TestRecoverConfig:
@@ -182,6 +190,7 @@ class TestRecoverHandler:
             trial_name="test_trial",
             fileroot=tmpdir,
             mode=mode,
+            freq_steps=1,
         )
         ft_spec = FinetuneSpec(
             total_train_epochs=1,
@@ -234,3 +243,343 @@ class TestRecoverHandler:
 
             assert "GatewayTrainController" in str(exc_info.value)
             assert "recover.mode" in str(exc_info.value)
+
+    def test_failed_save_does_not_replace_last_complete_recovery(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler = self._make_handler(tmpdir, "on")
+
+            class Stateful:
+                @staticmethod
+                def state_dict():
+                    return {}
+
+            class Engine:
+                fail = False
+
+                def save(self, meta):
+                    if self.fail:
+                        raise RuntimeError("save failed")
+                    with open(os.path.join(meta.path, "complete"), "w") as f:
+                        f.write("ok")
+
+            engine = Engine()
+            stateful = Stateful()
+            first_step = StepInfo(
+                epoch=0,
+                epoch_step=0,
+                global_step=0,
+                steps_per_epoch=handler.ft_spec.steps_per_epoch,
+            )
+            handler.dump(
+                engine,
+                first_step,
+                stateful,
+                stateful,
+                stateful,
+                stateful,
+            )
+            pointer_path = os.path.join(
+                handler._recover_root("test_exp", "test_trial", tmpdir),
+                handler._CURRENT_FILE,
+            )
+            with open(pointer_path) as f:
+                first_generation = json.load(f)["generation"]
+
+            engine.fail = True
+            second_step = StepInfo(
+                epoch=0,
+                epoch_step=1,
+                global_step=1,
+                steps_per_epoch=handler.ft_spec.steps_per_epoch,
+            )
+            with pytest.raises(RuntimeError, match="save failed"):
+                handler.dump(
+                    engine,
+                    second_step,
+                    stateful,
+                    stateful,
+                    stateful,
+                    stateful,
+                )
+
+            with open(pointer_path) as f:
+                assert json.load(f)["generation"] == first_generation
+            assert check_if_auto_recover(handler.config) is True
+
+    def test_failed_state_collection_removes_uncommitted_generation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler = self._make_handler(tmpdir, "on")
+
+            class Engine:
+                @staticmethod
+                def save(meta):
+                    with open(os.path.join(meta.path, "complete"), "w") as f:
+                        f.write("ok")
+
+            class Stateful:
+                @staticmethod
+                def state_dict():
+                    return {}
+
+            class FailingStateful:
+                @staticmethod
+                def state_dict():
+                    raise RuntimeError("state collection failed")
+
+            step = StepInfo(
+                epoch=0,
+                epoch_step=0,
+                global_step=0,
+                steps_per_epoch=handler.ft_spec.steps_per_epoch,
+            )
+            with pytest.raises(RuntimeError, match="state collection failed"):
+                handler.dump(
+                    Engine(),
+                    step,
+                    Stateful(),
+                    Stateful(),
+                    Stateful(),
+                    FailingStateful(),
+                )
+
+            recover_root = handler._recover_root("test_exp", "test_trial", tmpdir)
+            generations_root = os.path.join(recover_root, handler._GENERATIONS_DIR)
+            assert not os.path.exists(os.path.join(recover_root, handler._CURRENT_FILE))
+            assert not os.path.exists(generations_root) or not os.listdir(
+                generations_root
+            )
+
+    def test_complete_save_replaces_invalid_current_pointer(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler = self._make_handler(tmpdir, "on")
+            recover_root = handler._recover_root("test_exp", "test_trial", tmpdir)
+            os.makedirs(recover_root, exist_ok=True)
+            pointer_path = os.path.join(recover_root, handler._CURRENT_FILE)
+            with open(pointer_path, "w") as f:
+                json.dump({"generation": ".."}, f)
+            orphan_path = os.path.join(recover_root, handler._GENERATIONS_DIR, "orphan")
+            os.makedirs(orphan_path)
+            with open(os.path.join(orphan_path, "partial"), "w") as f:
+                f.write("incomplete")
+
+            class Engine:
+                @staticmethod
+                def save(meta):
+                    with open(os.path.join(meta.path, "complete"), "w") as f:
+                        f.write("ok")
+
+            class Stateful:
+                @staticmethod
+                def state_dict():
+                    return {}
+
+            step = StepInfo(
+                epoch=0,
+                epoch_step=0,
+                global_step=0,
+                steps_per_epoch=handler.ft_spec.steps_per_epoch,
+            )
+            handler.dump(
+                Engine(),
+                step,
+                Stateful(),
+                Stateful(),
+                Stateful(),
+                Stateful(),
+            )
+
+            generation = handler._read_current_generation(
+                "test_exp", "test_trial", tmpdir
+            )
+            assert generation not in {".", ".."}
+            assert os.path.isdir(
+                handler._generation_path("test_exp", "test_trial", tmpdir, generation)
+            )
+            assert not os.path.exists(orphan_path)
+
+    def test_dump_rejects_unsafe_engine_name(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler = self._make_handler(tmpdir, "on")
+            step = StepInfo(
+                epoch=0,
+                epoch_step=0,
+                global_step=0,
+                steps_per_epoch=handler.ft_spec.steps_per_epoch,
+            )
+
+            with pytest.raises(InValidRecoverInfo, match="recovery engine name"):
+                handler.dump(
+                    {"..": Mock()},
+                    step,
+                    Mock(),
+                    Mock(),
+                    Mock(),
+                    Mock(),
+                )
+
+    def test_load_restores_local_state_before_entering_checkpoint_load(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler = self._make_handler(tmpdir, "on")
+
+            class Engine:
+                load_called = False
+
+                @staticmethod
+                def save(meta):
+                    with open(os.path.join(meta.path, "complete"), "w") as f:
+                        f.write("ok")
+
+                def load(self, _meta):
+                    self.load_called = True
+
+            class Stateful:
+                @staticmethod
+                def state_dict():
+                    return {}
+
+                @staticmethod
+                def load_state_dict(_state):
+                    return None
+
+            class FailingDataloader(Stateful):
+                @staticmethod
+                def load_state_dict(_state):
+                    raise RuntimeError("local restore failed")
+
+            engine = Engine()
+            stateful = Stateful()
+            step = StepInfo(
+                epoch=0,
+                epoch_step=0,
+                global_step=0,
+                steps_per_epoch=handler.ft_spec.steps_per_epoch,
+            )
+            handler.dump(
+                engine,
+                step,
+                stateful,
+                stateful,
+                stateful,
+                stateful,
+            )
+
+            with pytest.raises(RuntimeError, match="local restore failed"):
+                handler.load(
+                    engine,
+                    stateful,
+                    stateful,
+                    stateful,
+                    FailingDataloader(),
+                )
+
+            assert engine.load_called is False
+
+    def test_missing_checkpoint_does_not_mutate_local_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler = self._make_handler(tmpdir, "on")
+
+            class Engine:
+                @staticmethod
+                def save(meta):
+                    with open(os.path.join(meta.path, "complete"), "w") as f:
+                        f.write("ok")
+
+            class Stateful:
+                load_calls = 0
+
+                @staticmethod
+                def state_dict():
+                    return {}
+
+                def load_state_dict(self, _state):
+                    self.load_calls += 1
+
+            engine = Engine()
+            stateful = Stateful()
+            step = StepInfo(
+                epoch=0,
+                epoch_step=0,
+                global_step=0,
+                steps_per_epoch=handler.ft_spec.steps_per_epoch,
+            )
+            handler.dump(
+                engine,
+                step,
+                stateful,
+                stateful,
+                stateful,
+                stateful,
+            )
+            generation = handler._read_current_generation(
+                "test_exp", "test_trial", tmpdir
+            )
+            checkpoint_path = os.path.join(
+                handler._generation_path("test_exp", "test_trial", tmpdir, generation),
+                "checkpoints",
+                "default",
+            )
+            shutil.rmtree(checkpoint_path)
+
+            assert handler.load(engine, stateful, stateful, stateful, stateful) is None
+            assert stateful.load_calls == 0
+
+    def test_directory_sync_failure_keeps_previous_generation(self, monkeypatch):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler = self._make_handler(tmpdir, "on")
+
+            class Engine:
+                @staticmethod
+                def save(meta):
+                    with open(os.path.join(meta.path, "complete"), "w") as f:
+                        f.write("ok")
+
+            class Stateful:
+                @staticmethod
+                def state_dict():
+                    return {}
+
+            stateful = Stateful()
+            first_step = StepInfo(
+                epoch=0,
+                epoch_step=0,
+                global_step=0,
+                steps_per_epoch=handler.ft_spec.steps_per_epoch,
+            )
+            handler.dump(
+                Engine(),
+                first_step,
+                stateful,
+                stateful,
+                stateful,
+                stateful,
+            )
+
+            from areal.utils import recover as recover_module
+
+            original_os_open = recover_module.os.open
+
+            def fail_directory_open(*_args, **_kwargs):
+                raise OSError("directory fsync unsupported")
+
+            monkeypatch.setattr(recover_module.os, "open", fail_directory_open)
+            second_step = StepInfo(
+                epoch=0,
+                epoch_step=1,
+                global_step=1,
+                steps_per_epoch=handler.ft_spec.steps_per_epoch,
+            )
+            handler.dump(
+                Engine(),
+                second_step,
+                stateful,
+                stateful,
+                stateful,
+                stateful,
+            )
+            monkeypatch.setattr(recover_module.os, "open", original_os_open)
+
+            generations_root = os.path.join(
+                handler._recover_root("test_exp", "test_trial", tmpdir),
+                handler._GENERATIONS_DIR,
+            )
+            assert len(os.listdir(generations_root)) == 2

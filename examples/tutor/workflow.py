@@ -8,10 +8,13 @@ import random
 import re
 import time
 import uuid
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+import aiofiles
+import aiofiles.os
 import torch
 
 try:
@@ -144,7 +147,6 @@ from examples.tutor.core.history import (
     trace_to_history_record,
     trace_to_json,
 )
-from examples.tutor.core.pairwise import PairwiseTutorEvaluator
 from examples.tutor.core.parsers import (
     parse_leak_check_result,
     parse_staged_leak_check_result,
@@ -209,6 +211,10 @@ from examples.tutor.prompts import (
 )
 
 logger = logging.getLogger("TutorWorkflow")
+
+_POLARIS_SCORE_PROCESS: ContextVar[Any | None] = ContextVar(
+    "tutor_polaris_score_process", default=None
+)
 
 _REWARD_COMPONENT_ALIASES = {
     "success_credit": "success",
@@ -394,6 +400,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         length_penalty_threshold_chars: int = 1200,
         length_penalty_per_100_chars: float = -0.005,
         length_penalty_min: float = -0.1,
+        zero_reward_on_length_stop: bool = False,
         teacher_system_prompt: str = "",
         teacher_prompt_pool_path: str = "",
         teacher_warmup_enabled: bool = False,
@@ -425,11 +432,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_generalize_level2_reward: float = 0.5,
         student_generalize_confidence_enabled: bool = False,
         student_generalize_confidence_reward_scale: float = 0.25,
-        pairwise_reward_enabled: bool = False,
-        pairwise_reference_lag_steps: int = 5,
-        pairwise_reward_scale: float = 0.05,
-        pairwise_compare_all_turns: bool = True,
-        pairwise_judge_both_incorrect: bool = True,
     ):
         self.max_turns = max_turns
         self.dataset_type = (dataset_type or "").strip().lower()
@@ -535,6 +537,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.length_penalty_threshold_chars = int(length_penalty_threshold_chars)
         self.length_penalty_per_100_chars = float(length_penalty_per_100_chars)
         self.length_penalty_min = float(length_penalty_min)
+        self.zero_reward_on_length_stop = bool(zero_reward_on_length_stop)
         self.teacher_system_prompt = self._resolve_teacher_system_prompt(
             teacher_system_prompt
         )
@@ -657,11 +660,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if self.student_generalize_enabled and self.student_generalize_path
             else {}
         )
-        self.pairwise_reward_enabled = bool(pairwise_reward_enabled)
-        self.pairwise_reference_lag_steps = max(0, int(pairwise_reference_lag_steps))
-        self.pairwise_reward_scale = float(pairwise_reward_scale)
-        self.pairwise_compare_all_turns = bool(pairwise_compare_all_turns)
-        self.pairwise_judge_both_incorrect = bool(pairwise_judge_both_incorrect)
         self.last_history: list[dict[str, Any]] = []
         self.last_traces: list[TurnTrace] = []
         self.last_student_generalization_results: list[StudentGeneralizationResult] = []
@@ -996,34 +994,39 @@ class TutorAgentWorkflow(RolloutWorkflow):
         output, _ = self._parse_tutor_visible_output(raw_output)
         return output
 
-    def get_lora_versions_for_episode(
-        self,
-        engine: Any,
-        data: dict[str, Any],
-        current_lora_version: int | None,
-    ) -> set[int]:
-        del engine, data
-        if current_lora_version is None:
-            return set()
-
-        actor_version = int(current_lora_version)
-        versions = {actor_version}
-        try:
-            is_eval = bool(getattr(workflow_context.get(), "is_eval", False))
-        except Exception:
-            is_eval = False
-
-        if self.pairwise_reward_enabled and not is_eval:
-            versions.add(max(0, actor_version - int(self.pairwise_reference_lag_steps)))
-        return versions
-
     async def arun_episode(self, engine, data: dict[str, Any]):
-        return await self._run_episode(data, engine=engine)
+        return await self._run_episode_with_polaris_process(data, engine=engine)
 
     async def run(self, data: dict[str, Any], **extra_kwargs):
         teacher_client = make_teacher_client(extra_kwargs)
-        await self._run_episode(data, external_client=teacher_client)
+        await self._run_episode_with_polaris_process(
+            data, external_client=teacher_client
+        )
         return self.last_total_reward
+
+    async def _run_episode_with_polaris_process(
+        self,
+        data: dict[str, Any],
+        *,
+        engine: Any | None = None,
+        external_client: Any | None = None,
+    ) -> dict[str, torch.Tensor] | None:
+        if getattr(self, "dataset_type", "aime") != "polaris":
+            return await self._run_episode(
+                data, engine=engine, external_client=external_client
+            )
+
+        from examples.tutor.core.polaris import PolarisScoreProcess
+
+        score_process = PolarisScoreProcess()
+        token = _POLARIS_SCORE_PROCESS.set(score_process)
+        try:
+            return await self._run_episode(
+                data, engine=engine, external_client=external_client
+            )
+        finally:
+            _POLARIS_SCORE_PROCESS.reset(token)
+            await asyncio.to_thread(score_process.close)
 
     async def _run_episode(
         self,
@@ -1119,7 +1122,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     student_name=selected_student.name,
                     teacher_prompt_selection=teacher_prompt_selection,
                 )
-                self._maybe_dump_debug_trace(
+                await self._maybe_dump_debug_trace(
                     task=task,
                     ground_truth=ground_truth,
                     initial_student_answer="",
@@ -1190,7 +1193,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_call_failed=bool(initial_student_error),
                 teacher_prompt_selection=teacher_prompt_selection,
             )
-            self._maybe_dump_debug_trace(
+            await self._maybe_dump_debug_trace(
                 task=episode_artifact.task,
                 ground_truth=episode_artifact.ground_truth,
                 initial_student_answer=episode_artifact.initial_student_answer,
@@ -1419,24 +1422,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             length_penalty_per_100_chars=self.length_penalty_per_100_chars,
             length_penalty_min=self.length_penalty_min,
         )
-        pairwise_rewards: dict[int, float] = {}
-        if self._should_run_pairwise_reward(engine, turn_artifacts):
-            pairwise_results = await self._run_pairwise_evaluation(
-                episode_artifact,
-                episode_lora_version=episode_lora_version,
-                chat_caller=actor_chat_caller,
-                aux_caller=aux_caller,
-                student_caller=student_caller,
-                answer_judge_caller=answer_judge_caller,
-            )
-            pairwise_rewards = {
-                result.turn_idx: result.reward
-                for result in pairwise_results
-                if result.reward
-            }
-        assignments = await reward_computer.compute(
-            episode_artifact, pairwise_rewards=pairwise_rewards
-        )
+        assignments = await reward_computer.compute(episode_artifact)
         self._apply_student_generalization_rewards(
             turn_artifacts, assignments, student_generalization_results
         )
@@ -1467,6 +1453,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 trajectory_id=trajectory_id,
                 turn_idx=artifact.turn_idx,
                 input_tokens_override=clean_input,
+                zero_reward_on_length_stop=getattr(
+                    self, "zero_reward_on_length_stop", False
+                ),
             )
             for artifact, assignment, clean_input in zip(
                 turn_artifacts, assignments, clean_teacher_inputs, strict=True
@@ -1503,7 +1492,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
             ),
         )
-        self._maybe_dump_debug_trace(
+        await self._maybe_dump_debug_trace(
             task=episode_artifact.task,
             ground_truth=episode_artifact.ground_truth,
             initial_student_answer=episode_artifact.initial_student_answer,
@@ -2162,7 +2151,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
             from examples.tutor.core.polaris import score_polaris_answer_async
 
             exact_result = await score_polaris_answer_async(
-                task, ground_truth, student_answer
+                task,
+                ground_truth,
+                student_answer,
+                score_process=_POLARIS_SCORE_PROCESS.get(),
             )
         else:
             exact_result = self._score_answer(task, ground_truth, student_answer)
@@ -2466,11 +2458,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     confidence_token_count = confidence_result.token_count
                     confidence_available = confidence_result.available
                     confidence_reason = confidence_result.reason
-                    confidence_reward = (
-                        case.reward
-                        * self.student_generalize_confidence_reward_scale
-                        * confidence
-                    )
+                    if judge_result.correct:
+                        confidence_reward = (
+                            case.reward
+                            * self.student_generalize_confidence_reward_scale
+                            * confidence
+                        )
             reward = correctness_reward + confidence_reward
             results.append(
                 StudentGeneralizationResult(
@@ -2669,93 +2662,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 for attempt in result.attempts
             ],
         }
-
-    def _should_run_pairwise_reward(
-        self, engine: Any | None, turn_artifacts: list[TurnArtifact]
-    ) -> bool:
-        if not self.pairwise_reward_enabled:
-            return False
-        if engine is None or not turn_artifacts:
-            return False
-        try:
-            ctx = workflow_context.get()
-        except Exception:
-            return True
-        return not bool(getattr(ctx, "is_eval", False))
-
-    async def _run_pairwise_evaluation(
-        self,
-        episode_artifact: EpisodeArtifact,
-        *,
-        episode_lora_version: int | None,
-        chat_caller: AReaLEngineChatCaller | None,
-        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller,
-        answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
-        student_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
-    ):
-        if episode_lora_version is None or chat_caller is None:
-            return []
-        reference_version = max(
-            0, int(episode_lora_version) - self.pairwise_reference_lag_steps
-        )
-
-        async def generate_reference_tutor(
-            tutor_state: TutorTurnState, reference_version: int
-        ):
-            return await self._generate_reference_tutor_response(
-                tutor_state,
-                chat_caller=chat_caller,
-                reference_version=reference_version,
-            )
-
-        evaluator = PairwiseTutorEvaluator(
-            reward_scale=self.pairwise_reward_scale,
-            reward_caller=aux_caller,
-            generate_reference_tutor=generate_reference_tutor,
-            run_student=lambda state: self._run_student(
-                state, aux_caller=student_caller or aux_caller
-            ),
-            run_leak_check=lambda task,
-            ground_truth,
-            teacher_action: self._run_optional_leak_check(
-                task,
-                ground_truth,
-                teacher_action,
-                aux_caller=aux_caller,
-            ),
-            score_answer=lambda task,
-            ground_truth,
-            student_output: self._score_answer_async(
-                task,
-                ground_truth,
-                student_output,
-                answer_judge_caller=answer_judge_caller,
-            ),
-            visible_output_extractor=self._extract_tutor_visible_output,
-            compare_all_turns=self.pairwise_compare_all_turns,
-            judge_both_incorrect=self.pairwise_judge_both_incorrect,
-        )
-        results = await evaluator.evaluate(
-            episode_artifact, reference_version=reference_version
-        )
-        return results
-
-    async def _generate_reference_tutor_response(
-        self,
-        tutor_state: TutorTurnState,
-        *,
-        chat_caller: AReaLEngineChatCaller,
-        reference_version: int,
-    ) -> str:
-        result = await chat_caller.generate(
-            self._build_tutor_messages(tutor_state),
-            gconfig=self._generation_config(),
-            max_completion_tokens=self.max_completion_tokens,
-            max_train_sample_tokens=self.max_train_sample_tokens,
-            metadata={"lora_version": int(reference_version)},
-            rid_prefix="reference-tutor",
-        )
-        return result.raw_text
 
     def _build_tutor_messages(
         self, tutor_state: TutorTurnState
@@ -2970,10 +2876,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             self, "length_penalty_per_100_chars", 0.0
         ):
             keys.append("length_penalty")
-        if getattr(self, "pairwise_reward_enabled", False) and getattr(
-            self, "pairwise_reward_scale", 0.0
-        ):
-            keys.append("pairwise")
         if getattr(self, "student_generalize_enabled", False):
             rewards = getattr(self, "student_generalize_level_rewards", {}) or {}
             for level in _STUDENT_GENERALIZE_LEVELS:
@@ -3004,7 +2906,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         return metrics
 
-    def _maybe_dump_debug_trace(
+    async def _maybe_dump_debug_trace(
         self,
         *,
         task: str,
@@ -3033,7 +2935,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if task_id % self.debug_trace_every_n_rollouts != 0:
                 return
             out_dir = Path(self.debug_trace_dir) / ("eval" if ctx.is_eval else "train")
-            out_dir.mkdir(parents=True, exist_ok=True)
+            await aiofiles.os.makedirs(out_dir, exist_ok=True)
             file_path = out_dir / f"task_{task_id:08d}_{int(time.time() * 1000)}.json"
             payload = {
                 "task_id": task_id,
@@ -3074,10 +2976,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     for result in (student_generalization_results or [])
                 ],
             }
-            file_path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            async with aiofiles.open(file_path, "w", encoding="utf-8") as trace_file:
+                await trace_file.write(
+                    json.dumps(payload, ensure_ascii=False, indent=2)
+                )
             logger.info("Tutor debug trace dumped to %s", os.fspath(file_path))
         except Exception:
             logger.exception("Failed to dump tutor debug trace.")

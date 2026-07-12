@@ -385,6 +385,9 @@ class RemoteInfEngine(InferenceEngine):
         self._unloading_lora_versions_by_addr: dict[str, set[int]] = {}
         self._max_loaded_loras_by_addr: dict[str, int] = {}
         self._warned_unknown_lora_capacity = False
+        # Weight updates may be submitted from different controller threads. Only
+        # one LoRA version may change server adapter state at a time.
+        self._lora_update_lock = Lock()
 
         self._workflow_executor: WorkflowExecutor | None = None
         self._initialized = False
@@ -425,12 +428,16 @@ class RemoteInfEngine(InferenceEngine):
     def _record_lora_server_args(
         self, server_args: dict[str, Any], addr: str | None = None
     ) -> None:
-        max_loaded_loras = server_args.get("max_loaded_loras")
+        max_loaded_loras = server_args.get(
+            "max_loaded_loras", server_args.get("max_loras")
+        )
         max_loaded_loras = (
             int(max_loaded_loras) if max_loaded_loras is not None else None
         )
 
-        lora_paths = server_args.get("lora_paths") or []
+        lora_paths = (
+            server_args.get("lora_paths") or server_args.get("lora_modules") or []
+        )
         loaded_versions: set[int] = set()
         for lora_spec in lora_paths:
             lora_name = str(lora_spec).split("=", 1)[0]
@@ -472,27 +479,57 @@ class RemoteInfEngine(InferenceEngine):
         )
 
     @contextmanager
-    def lora_version_lease(self, version: int, *, workflow: bool = False):
+    def lora_version_lease(self, version: int | None, *, workflow: bool = False):
         """Keep a LoRA version loaded while a request or workflow may use it.
+
+        Passing ``None`` atomically leases the current version. This prevents an
+        updater from choosing that version for unload between a separate
+        ``get_version()`` call and lease registration.
 
         ``workflow`` documents the caller scope. Unload safety is per LoRA
         version, not global across all active workflows.
         """
         if not self.config.use_lora:
-            yield
+            yield self.get_version() if version is None else int(version)
             return
 
         with self._lora_cond:
-            self._active_lora_versions[int(version)] += 1
+            if version is None:
+                with self.lock:
+                    leased_version = self._version
+            else:
+                leased_version = int(version)
+
+            unloading_addrs = [
+                addr
+                for addr, versions in self._unloading_lora_versions_by_addr.items()
+                if leased_version in versions
+            ]
+            known_addrs = [
+                addr
+                for addr in self.addresses
+                if addr in self._loaded_lora_versions_by_addr
+            ]
+            missing_addrs = [
+                addr
+                for addr in known_addrs
+                if leased_version
+                not in self._loaded_lora_versions_by_addr.get(addr, set())
+            ]
+            if unloading_addrs or missing_addrs:
+                raise RuntimeError(
+                    f"LoRA version {leased_version} is not available for a new lease. "
+                    f"unloading_addrs={unloading_addrs}, missing_addrs={missing_addrs}."
+                )
+            self._active_lora_versions[leased_version] += 1
             self._lora_cond.notify_all()
         try:
-            yield
+            yield leased_version
         finally:
             with self._lora_cond:
-                version = int(version)
-                self._active_lora_versions[version] -= 1
-                if self._active_lora_versions[version] <= 0:
-                    del self._active_lora_versions[version]
+                self._active_lora_versions[leased_version] -= 1
+                if self._active_lora_versions[leased_version] <= 0:
+                    del self._active_lora_versions[leased_version]
                 self._lora_cond.notify_all()
 
     def _set_generation_paused(self, paused: bool) -> None:
@@ -943,27 +980,19 @@ class RemoteInfEngine(InferenceEngine):
                 await asyncio.sleep(0.5)
 
             self._raise_if_rollout_stale()
-            generation_version = (
-                request_lora_version
-                if request_lora_version is not None
-                else self.get_version()
-            )
             with_lora = self.config.use_lora and not request_disable_lora
-
-            # Build request using backend
-            http_req = self.backend.build_generation_request(
-                req,
-                with_lora=with_lora,
-                version=generation_version,
-            )
-
-            # Loop until the generation is complete
             lora_lease = (
-                self.lora_version_lease(generation_version)
+                self.lora_version_lease(request_lora_version)
                 if with_lora
                 else nullcontext()
             )
-            with lora_lease:
+            with lora_lease as leased_version:
+                generation_version = leased_version if with_lora else self.get_version()
+                http_req = self.backend.build_generation_request(
+                    req,
+                    with_lora=with_lora,
+                    version=generation_version,
+                )
                 result = await arequest_with_retry(
                     session=session,
                     addr=server_addr,
@@ -1343,9 +1372,7 @@ class RemoteInfEngine(InferenceEngine):
         try:
             for version, addrs in unload_plan.items():
                 unload_req = self.backend.build_lora_unload_request(meta, version)
-                successes, failures = self._run_requests_on_servers(
-                    [unload_req], addrs
-                )
+                successes, failures = self._run_requests_on_servers([unload_req], addrs)
 
                 with self._lora_cond:
                     for addr in successes:
@@ -1399,6 +1426,28 @@ class RemoteInfEngine(InferenceEngine):
             )
 
     def _update_lora_weights_from_disk(
+        self,
+        experiment_name: str,
+        trial_name: str,
+        model_version: int,
+        meta: WeightUpdateMeta,
+    ):
+        if not self._lora_update_lock.acquire(blocking=False):
+            raise RuntimeError(
+                "A LoRA weight update is already running; concurrent updates are "
+                "not supported."
+            )
+        try:
+            return self._update_lora_weights_from_disk_serial(
+                experiment_name,
+                trial_name,
+                model_version,
+                meta,
+            )
+        finally:
+            self._lora_update_lock.release()
+
+    def _update_lora_weights_from_disk_serial(
         self,
         experiment_name: str,
         trial_name: str,
@@ -1521,6 +1570,18 @@ class RemoteInfEngine(InferenceEngine):
     ) -> dict[str, Any] | None:
         """Wait for a specific submitted task to complete."""
         return self.workflow_executor.wait_for_task(task_id, timeout, raise_timeout)
+
+    def wait_for_task_with_metadata(
+        self, task_id: int, timeout: float | None = None, raise_timeout: bool = True
+    ):
+        """Wait for a task while preserving its authoritative rollout version."""
+        return self.workflow_executor.wait_for_task_with_metadata(
+            task_id, timeout, raise_timeout
+        )
+
+    def _discard_task(self, task_id: int, tombstone_ttl_seconds: float = 60.0) -> bool:
+        """Internal controller hook to discard a timed-out task result."""
+        return self.workflow_executor._discard_task(task_id, tombstone_ttl_seconds)
 
     def rollout_batch(
         self,

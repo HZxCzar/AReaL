@@ -397,6 +397,16 @@ class RemotevLLMEngine(InferenceEngine):
         """Wait for a specific task to complete by task_id."""
         return self._engine.wait_for_task(task_id, timeout, raise_timeout)
 
+    def wait_for_task_with_metadata(
+        self, task_id: int, timeout: float | None = None, raise_timeout: bool = True
+    ):
+        """Wait for a task and retain the rollout version for its controller."""
+        return self._engine.wait_for_task_with_metadata(task_id, timeout, raise_timeout)
+
+    def _discard_task(self, task_id: int, tombstone_ttl_seconds: float = 60.0) -> bool:
+        """Internal controller hook to discard a timed-out task result."""
+        return self._engine._discard_task(task_id, tombstone_ttl_seconds)
+
     def rollout_batch(
         self,
         data: list[dict[str, Any]],

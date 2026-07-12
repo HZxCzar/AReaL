@@ -1200,6 +1200,11 @@ class TrainEngineConfig:
             )
         if self.init_lora_path and not self.use_lora:
             raise ValueError("init_lora_path requires use_lora=True.")
+        if self.init_lora_path and self.backend.startswith("megatron:"):
+            raise ValueError(
+                "init_lora_path is not supported by the Megatron backend; "
+                "use an FSDP backend or leave init_lora_path empty."
+            )
 
 
 @dataclass

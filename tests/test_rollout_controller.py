@@ -20,7 +20,10 @@ from areal.api.cli_args import (
     SGLangConfig,
 )
 from areal.infra import RolloutController
+from areal.infra.controller.rollout_controller import _RemoteRolloutResult
 from areal.infra.scheduler.local import LocalScheduler
+from areal.infra.staleness_manager import StalenessManager
+from areal.infra.workflow_executor import _RolloutResult
 from areal.utils.hf_utils import load_hf_tokenizer
 
 
@@ -100,14 +103,20 @@ class MockScheduler:
             resp = requests.post(callback_addr, json=dict(task_id=task_id))
             resp.raise_for_status()
             return task_id
-        # Handle wait_for_task method
-        elif method == "wait_for_task":
+        # Handle wait_for_task methods
+        elif method in {"wait_for_task", "wait_for_task_with_metadata"}:
             task_id = kwargs.get("task_id")
             if (
                 worker_id in self._pending_results
                 and task_id in self._pending_results[worker_id]
             ):
                 result = self._pending_results[worker_id].pop(task_id)
+                if method == "wait_for_task_with_metadata":
+                    return _RolloutResult(
+                        task_id=task_id,
+                        trajectory=result,
+                        rollout_version=0,
+                    )
                 return result
             return None
         elif method == "wait":
@@ -168,6 +177,12 @@ class MockScheduler:
 
 
 class MockInferenceEngine:
+    def wait_for_task_with_metadata(self):
+        return None
+
+    def _discard_task(self):
+        return None
+
     @classmethod
     def __module__(cls):
         return "tests.test_rollout_controller"
@@ -178,6 +193,17 @@ class MockInferenceEngine:
 
 
 class TestRolloutControllerInitialization:
+    def test_constructor_rejects_engine_without_internal_worker_protocol(self):
+        class UnsupportedEngine:
+            pass
+
+        with pytest.raises(TypeError, match="built-in SGLang/vLLM"):
+            RolloutController(
+                inf_engine=UnsupportedEngine,
+                config=create_test_config(consumer_batch_size=16),
+                scheduler=MockScheduler(),
+            )
+
     def test_constructor(self):
         config = create_test_config(consumer_batch_size=16)
         scheduler = MockScheduler()
@@ -368,6 +394,41 @@ class TestRolloutControllerCapacity:
         assert capacity_v5 == capacity_v0 == 1000
 
         controller.destroy()
+
+    def test_controller_rejects_result_that_became_stale_in_outer_buffer(self):
+        """Controller buffering must not bypass the configured version window."""
+        config = create_test_config(
+            consumer_batch_size=8,
+            max_concurrent_rollouts=8,
+            max_head_offpolicyness=1,
+        )
+        controller = RolloutController(
+            inf_engine=MockInferenceEngine,
+            config=config,
+            scheduler=MockScheduler(),
+        )
+        controller._staleness_manager = StalenessManager(
+            version_provider=controller,
+            max_concurrent_rollouts=8,
+            consumer_batch_size=8,
+            max_staleness=1,
+        )
+        controller._version = 2
+        manager = controller.staleness_manager
+        manager.on_rollout_enqueued()
+        manager.on_rollout_submitted()
+        manager.on_rollout_accepted()
+        result = _RemoteRolloutResult(
+            task_id=9,
+            trajectory={"input_ids": torch.tensor([[1]])},
+            rollout_version=0,
+        )
+
+        assert controller._transform_dequeued_result(result) is None
+        stats = manager.get_stats()
+        assert stats.accepted == 0
+        assert stats.rejected == 1
+        assert stats.running == 0
 
 
 class TestRolloutControllerWorkerSelection:

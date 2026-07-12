@@ -239,6 +239,7 @@ class _RolloutTaskInput:
 class _RolloutResult:
     task_id: int
     trajectory: dict[str, Any]
+    rollout_version: int
 
 
 def _coerce_lora_version(version: Any, *, source: str) -> int:
@@ -279,9 +280,7 @@ def _get_episode_lora_versions(
     raw_versions = hook(engine, data, current_lora_version)
     if raw_versions is None:
         raise ValueError("get_lora_versions_for_episode must return an iterable.")
-    if isinstance(raw_versions, (str, bytes)) or not isinstance(
-        raw_versions, Iterable
-    ):
+    if isinstance(raw_versions, (str, bytes)) or not isinstance(raw_versions, Iterable):
         raise ValueError("get_lora_versions_for_episode must return an iterable.")
 
     for idx, version in enumerate(raw_versions):
@@ -333,6 +332,8 @@ class BatchTaskDispatcher(Generic[TInput, TResult]):
         task_factory: Callable[[TInput], Callable[[], Awaitable[TResult | None]]],
         staleness_manager: StalenessManager,
         enable_tracing: bool = False,
+        result_transform: Callable[[TResult | None], TResult | None] | None = None,
+        discarded_result_callback: Callable[[TResult | None], None] | None = None,
     ):
         self.runner = AsyncTaskRunner(
             max_queue_size=max_queue_size,
@@ -341,12 +342,16 @@ class BatchTaskDispatcher(Generic[TInput, TResult]):
         self.task_factory = task_factory
         self.staleness_manager = staleness_manager
         self.enable_tracing = enable_tracing
+        self.result_transform = result_transform
+        self.discarded_result_callback = discarded_result_callback
         self.logger: Logger
 
         # Unbounded deques for producer/consumer pattern
         self._pending_inputs: deque[TInput] = deque()
         self._pending_results: dict[int, TimedResult[TResult]] = {}
         self._active_task_ids: set[int] = set()
+        self._discarded_task_ids: set[int] = set()
+        self._pre_discarded_task_deadlines: dict[int, float] = {}
 
         # Condition variables for coordination
         self._input_lock = threading.Lock()
@@ -466,14 +471,25 @@ class BatchTaskDispatcher(Generic[TInput, TResult]):
                 except TimeoutError:
                     continue
 
+                discarded_results: list[TimedResult[TResult]] = []
                 with self._result_cv:
                     for result in results:
+                        if result.task_id in self._discarded_task_ids:
+                            self._discarded_task_ids.remove(result.task_id)
+                            self._active_task_ids.discard(result.task_id)
+                            self._task_callbacks.pop(result.task_id, None)
+                            discarded_results.append(result)
+                            continue
                         self._pending_results[result.task_id] = result
                         # Trigger callback if registered
                         cb_addr = self._task_callbacks.pop(result.task_id, None)
                         if cb_addr:
                             self._send_callback(cb_addr, result.task_id, result.data)
                     self._result_cv.notify_all()
+
+                if self.discarded_result_callback is not None:
+                    for result in discarded_results:
+                        self.discarded_result_callback(result.data)
 
                 # Newly available capacity after result processing should wake producers
                 with self._input_cv:
@@ -538,6 +554,8 @@ class BatchTaskDispatcher(Generic[TInput, TResult]):
 
         # Clear pending callbacks to prevent memory leak
         self._task_callbacks.clear()
+        self._discarded_task_ids.clear()
+        self._pre_discarded_task_deadlines.clear()
 
         # Shutdown the async task runner
         self.runner.destroy()
@@ -598,14 +616,19 @@ class BatchTaskDispatcher(Generic[TInput, TResult]):
             Task input to be processed.
         """
         self._check_thread_exception()
+        with self._result_cv:
+            self._purge_expired_pre_discards()
+            if task_input.task_id in self._pre_discarded_task_deadlines:
+                del self._pre_discarded_task_deadlines[task_input.task_id]
+                self._task_callbacks.pop(task_input.task_id, None)
+                return
+            self._active_task_ids.add(task_input.task_id)
         with self._input_cv:
             self._pending_inputs.append(task_input)
             self.staleness_manager.on_rollout_enqueued()
             if self.enable_tracing:
                 self.logger.info(f"Enqueue rollout. {self._rollout_stats()}")
             self._input_cv.notify()
-        with self._result_cv:
-            self._active_task_ids.add(task_input.task_id)
 
     def wait_results(
         self, count: int, timeout: float | None = None, raise_timeout: bool = True
@@ -664,7 +687,10 @@ class BatchTaskDispatcher(Generic[TInput, TResult]):
 
         random.shuffle(selected)
 
-        return [r.data for r in selected]
+        results = [r.data for r in selected]
+        if self.result_transform is not None:
+            results = [self.result_transform(result) for result in results]
+        return results
 
     def wait_for_task(
         self, task_id: int, timeout: float | None = None, raise_timeout: bool = True
@@ -693,7 +719,46 @@ class BatchTaskDispatcher(Generic[TInput, TResult]):
             found_result = self._pending_results.pop(task_id)
             self._active_task_ids.remove(task_id)
             self._result_cv.notify_all()
-            return found_result.data
+            result = found_result.data
+            if self.result_transform is not None:
+                result = self.result_transform(result)
+            return result
+
+    def _purge_expired_pre_discards(self) -> None:
+        now = time.monotonic()
+        expired = [
+            task_id
+            for task_id, deadline in self._pre_discarded_task_deadlines.items()
+            if deadline <= now
+        ]
+        for task_id in expired:
+            del self._pre_discarded_task_deadlines[task_id]
+
+    def discard_task(self, task_id: int, tombstone_ttl_seconds: float = 60.0) -> bool:
+        """Drop a task result now or as soon as the running task completes."""
+        discarded_result: TResult | None = None
+        with self._result_cv:
+            self._purge_expired_pre_discards()
+            pending = self._pending_results.pop(task_id, None)
+            if pending is not None:
+                self._active_task_ids.discard(task_id)
+                self._task_callbacks.pop(task_id, None)
+                discarded_result = pending.data
+                self._result_cv.notify_all()
+            elif task_id in self._active_task_ids:
+                self._discarded_task_ids.add(task_id)
+                self._task_callbacks.pop(task_id, None)
+                return True
+            else:
+                self._pre_discarded_task_deadlines[task_id] = time.monotonic() + max(
+                    0.0, float(tombstone_ttl_seconds)
+                )
+                self._task_callbacks.pop(task_id, None)
+                return True
+
+        if self.discarded_result_callback is not None:
+            self.discarded_result_callback(discarded_result)
+        return True
 
     def active_submit_and_wait(
         self,
@@ -1039,6 +1104,8 @@ class WorkflowExecutor:
             task_factory=self._create_workflow_task,
             staleness_manager=self._staleness_manager,
             enable_tracing=self.config.enable_rollout_tracing,
+            result_transform=self._transform_dequeued_result,
+            discarded_result_callback=self._finalize_discarded_result,
         )
 
         # Initialize the dispatcher's async task runner
@@ -1070,6 +1137,51 @@ class WorkflowExecutor:
             return False
         with self._stale_lock:
             return int(version) < self._min_allowed_rollout_version
+
+    def _transform_dequeued_result(
+        self, result: _RolloutResult | None
+    ) -> _RolloutResult | None:
+        """Reject a completed result that became stale while buffered."""
+        if result is None:
+            return None
+        if not self.is_rollout_version_stale(result.rollout_version):
+            stats_tracker.get("rollout").scalar(accepted=1, stale=0)
+            trace_session_event(
+                "mark_finalized",
+                task_id=result.task_id,
+                status="accepted",
+            )
+            return result
+
+        self.staleness_manager.on_rollout_invalidated()
+        stats_tracker.get("rollout").scalar(rejected=1, stale=1, cached_stale=1)
+        trace_session_event(
+            "mark_finalized",
+            task_id=result.task_id,
+            status="rejected",
+            reason="buffered_stale",
+        )
+        if self.config.enable_rollout_tracing:
+            self.logger.info(
+                "Reject buffered stale rollout task %s at version %s. %s",
+                result.task_id,
+                result.rollout_version,
+                self._rollout_stats(),
+            )
+        return None
+
+    def _finalize_discarded_result(self, result: _RolloutResult | None) -> None:
+        """Record a controller-timed-out result as rejected without returning it."""
+        if result is None:
+            return
+        self.staleness_manager.on_rollout_invalidated()
+        stats_tracker.get("rollout").scalar(rejected=1, stale=0)
+        trace_session_event(
+            "mark_finalized",
+            task_id=result.task_id,
+            status="rejected",
+            reason="controller_timeout",
+        )
 
     def get_capacity(self):
         """Get current available capacity for new rollouts.
@@ -1110,25 +1222,12 @@ class WorkflowExecutor:
             filtering/validation.
         """
 
-        task_version = self.inference_engine.get_version()
-
         async def _execute_workflow() -> _RolloutResult | None:
             """Execute workflow.arun_episode and apply AReaL-specific logic."""
             task_id = pending_task.task_id
 
             # Set task_id in ContextVar before entering arun_episode
             perf_tracer.set_task_id(task_id)
-
-            workflow_lora_version = task_version if self.config.use_lora else None
-
-            # Set workflow execution context
-            workflow_context.set(
-                WorkflowContext(
-                    is_eval=pending_task.is_eval,
-                    task_id=task_id,
-                    lora_version=workflow_lora_version,
-                )
-            )
 
             manager = self.staleness_manager
             traj: dict[str, Any] | None = None
@@ -1137,23 +1236,47 @@ class WorkflowExecutor:
             reason: str | None = None
 
             try:
-                if self.is_rollout_version_stale(task_version):
-                    raise RolloutStaleError(
-                        f"Rollout task {task_id} version {task_version} is stale."
+                with ExitStack() as lora_stack:
+                    # A task can wait after submission. Bind it to the latest LoRA
+                    # only when execution starts, and lease it in the same locked
+                    # operation so an updater cannot unload it in between.
+                    if self.config.use_lora:
+                        task_version = lora_stack.enter_context(
+                            self.inference_engine.lora_version_lease(
+                                None, workflow=True
+                            )
+                        )
+                        workflow_lora_version = task_version
+                    else:
+                        task_version = self.inference_engine.get_version()
+                        workflow_lora_version = None
+
+                    workflow_context.set(
+                        WorkflowContext(
+                            is_eval=pending_task.is_eval,
+                            task_id=task_id,
+                            lora_version=workflow_lora_version,
+                        )
                     )
 
-                episode_lora_versions = (
-                    _get_episode_lora_versions(
-                        pending_task.workflow,
-                        self.inference_engine,
-                        pending_task.data,
-                        workflow_lora_version,
+                    if self.is_rollout_version_stale(task_version):
+                        raise RolloutStaleError(
+                            f"Rollout task {task_id} version {task_version} is stale."
+                        )
+
+                    episode_lora_versions = (
+                        _get_episode_lora_versions(
+                            pending_task.workflow,
+                            self.inference_engine,
+                            pending_task.data,
+                            workflow_lora_version,
+                        )
+                        if self.config.use_lora
+                        else ()
                     )
-                    if self.config.use_lora
-                    else ()
-                )
-                with ExitStack() as lora_stack:
                     for lora_version in episode_lora_versions:
+                        if lora_version == workflow_lora_version:
+                            continue
                         lora_stack.enter_context(
                             self.inference_engine.lora_version_lease(
                                 lora_version, workflow=True
@@ -1163,10 +1286,10 @@ class WorkflowExecutor:
                         self.inference_engine, pending_task.data
                     )
 
-                if self.is_rollout_version_stale(task_version):
-                    raise RolloutStaleError(
-                        f"Rollout task {task_id} version {task_version} is stale."
-                    )
+                    if self.is_rollout_version_stale(task_version):
+                        raise RolloutStaleError(
+                            f"Rollout task {task_id} version {task_version} is stale."
+                        )
 
                 # Trajectory format checking
                 if self.config.check_trajectory_format and traj is not None:
@@ -1218,18 +1341,16 @@ class WorkflowExecutor:
 
                 if should_accept_traj:
                     manager.on_rollout_accepted()
-                    stats_tracker.get("rollout").scalar(accepted=1, stale=0)
-                    trace_session_event(
-                        "mark_finalized",
-                        task_id=task_id,
-                        status="accepted",
-                    )
                     if self.config.enable_rollout_tracing:
                         self.logger.info(
                             f"Finish and accept rollout. {self._rollout_stats()}",
                         )
                     assert traj is not None
-                    return _RolloutResult(task_id=task_id, trajectory=traj)
+                    return _RolloutResult(
+                        task_id=task_id,
+                        trajectory=traj,
+                        rollout_version=task_version,
+                    )
 
                 manager.on_rollout_rejected()
                 stats_tracker.get("rollout").scalar(rejected=1, stale=0)
@@ -1353,11 +1474,21 @@ class WorkflowExecutor:
         --------
         :meth:`~areal.api.engine_api.InferenceEngine.wait_for_task`
         """
-        result = self.dispatcher.wait_for_task(task_id, timeout, raise_timeout)
+        result = self.wait_for_task_with_metadata(task_id, timeout, raise_timeout)
 
         if result is not None and self.config.enable_rollout_tracing:
             self.logger.info(f"Task {task_id} completed successfully")
         return result.trajectory if result is not None else None
+
+    def wait_for_task_with_metadata(
+        self, task_id: int, timeout: float | None = None, raise_timeout: bool = True
+    ) -> _RolloutResult | None:
+        """Wait for a task and retain its rollout version for controller checks."""
+        return self.dispatcher.wait_for_task(task_id, timeout, raise_timeout)
+
+    def _discard_task(self, task_id: int, tombstone_ttl_seconds: float = 60.0) -> bool:
+        """Internal controller hook to discard a timed-out task result."""
+        return self.dispatcher.discard_task(task_id, tombstone_ttl_seconds)
 
     @trace_perf("workflow_executor.rollout_batch", category="scheduler")
     def rollout_batch(

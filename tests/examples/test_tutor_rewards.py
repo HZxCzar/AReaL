@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import types
 
 import pytest
@@ -19,7 +20,6 @@ from examples.tutor.core.callers import (
 )
 from examples.tutor.core.confidence import compute_answer_token_confidence
 from examples.tutor.core.math import score_math_answer
-from examples.tutor.core.pairwise import PairwiseTutorEvaluator
 from examples.tutor.core.parsers import parse_staged_leak_check_result
 from examples.tutor.core.rewards import EpisodeRewardComputer
 from examples.tutor.core.types import (
@@ -36,6 +36,8 @@ from examples.tutor.core.types import (
     TutorTurnState,
 )
 
+from areal.api.cli_args import PPOActorConfig
+
 
 def _char_logprobs(text: str, logprobs: list[float]) -> tuple[TokenLogprob, ...]:
     assert len(text) == len(logprobs)
@@ -47,6 +49,10 @@ def _char_logprobs(text: str, logprobs: list[float]) -> tuple[TokenLogprob, ...]
         )
         for char, logprob in zip(text, logprobs, strict=True)
     )
+
+
+async def _noop_debug_trace(**_kwargs):
+    return None
 
 
 def _judge(correct: bool) -> JudgeResult:
@@ -364,6 +370,7 @@ def test_tutor_reward_config_validates_leak_penalty_modes():
     assert config.leaked_success_reward_scale == pytest.approx(1.0)
     assert config.leak_penalty_aggregation == "turn"
     assert config.format_error_penalty == pytest.approx(0.0)
+    assert config.zero_reward_on_length_stop is False
 
     with pytest.raises(ValueError, match="format_error_penalty"):
         TutorRewardConfig(format_error_penalty=0.1)
@@ -398,6 +405,13 @@ def test_tutor_reward_config_validates_leak_penalty_modes():
 
     with pytest.raises(ValueError, match="leak_penalty"):
         TutorRewardConfig(leak_penalty_mode="rawbase", leak_penalty=None)
+
+
+def test_tutor_config_rejects_official_no_eos_mask():
+    actor = PPOActorConfig(mask_no_eos_with_zero=True)
+
+    with pytest.raises(ValueError, match="reward.zero_reward_on_length_stop"):
+        TutorConfig(dataset_type="math", actor=actor)
 
 
 @pytest.mark.parametrize(
@@ -1063,55 +1077,38 @@ def test_optional_leak_check_disabled_returns_clean_result_without_checker(monke
     assert result.raw_result == {"disabled": True}
 
 
-def test_pairwise_leak_check_disabled_uses_clean_reference_result(monkeypatch):
-    captured = {}
-
-    class FakePairwiseEvaluator:
-        def __init__(self, **kwargs):
-            self.run_leak_check = kwargs["run_leak_check"]
-
-        async def evaluate(self, episode_artifact, *, reference_version):
-            captured["reference_version"] = reference_version
-            captured["leak_result"] = await self.run_leak_check(
-                episode_artifact.task,
-                episode_artifact.ground_truth,
-                "reference answer is 42",
-            )
-            return []
-
+def test_debug_trace_dump_writes_json_asynchronously(tmp_path, monkeypatch):
+    """Tutor debug traces should use the async workflow I/O path."""
     workflow = tutor_workflow.TutorAgentWorkflow.__new__(
         tutor_workflow.TutorAgentWorkflow
     )
-    workflow.leak_handling_mode = "disabled"
-    workflow.pairwise_reference_lag_steps = 2
-    workflow.pairwise_reward_scale = 0.05
-    workflow.pairwise_compare_all_turns = True
-    workflow.pairwise_judge_both_incorrect = True
+    workflow.debug_trace_dir = str(tmp_path)
+    workflow.debug_trace_every_n_rollouts = 1
+    monkeypatch.setattr(
+        tutor_workflow.workflow_context,
+        "get",
+        lambda: types.SimpleNamespace(task_id=7, is_eval=False),
+    )
 
-    async def fail_leak_check(*args, **kwargs):
-        raise AssertionError("leak checker should not be called")
-
-    async def unused_student(*args, **kwargs):
-        raise AssertionError("student should not be called")
-
-    monkeypatch.setattr(workflow, "_run_leak_check", fail_leak_check)
-    monkeypatch.setattr(workflow, "_run_student", unused_student)
-    monkeypatch.setattr(tutor_workflow, "PairwiseTutorEvaluator", FakePairwiseEvaluator)
-
-    results = asyncio.run(
-        workflow._run_pairwise_evaluation(
-            _episode([_turn(1)], termination_reason="max_turns"),
-            episode_lora_version=5,
-            chat_caller=object(),
-            aux_caller=object(),
-            answer_judge_caller=None,
+    asyncio.run(
+        workflow._maybe_dump_debug_trace(
+            task="task",
+            ground_truth="42",
+            initial_student_answer="0",
+            latest_student_answer="42",
+            total_reward=1.0,
+            traces=[],
+            termination_reason="success",
+            pre_success=False,
+            leak_count=0,
         )
     )
 
-    assert results == []
-    assert captured["reference_version"] == 3
-    assert captured["leak_result"].leaked is False
-    assert captured["leak_result"].raw_result == {"disabled": True}
+    trace_files = list((tmp_path / "train").glob("task_00000007_*.json"))
+    assert len(trace_files) == 1
+    payload = json.loads(trace_files[0].read_text(encoding="utf-8"))
+    assert payload["task_id"] == 7
+    assert payload["termination_reason"] == "success"
 
 
 class FakeAnswerJudgeCaller:
@@ -1256,7 +1253,6 @@ def _minimal_episode_workflow(**overrides):
         "length_penalty_threshold_chars": 0,
         "length_penalty_per_100_chars": 0.0,
         "length_penalty_min": 0.0,
-        "pairwise_reward_enabled": False,
         "leak_handling_mode": "reward_only",
     }
     params.update(overrides)
@@ -1292,7 +1288,7 @@ def test_workflow_teacher_pre_solve_failure_skips_sample(monkeypatch):
     workflow._make_auxiliary_caller = lambda **_kwargs: object()
     workflow._make_answer_judge_caller = lambda **_kwargs: None
     workflow._log_rollout_stats = lambda **kwargs: stats.update(kwargs)
-    workflow._maybe_dump_debug_trace = lambda **_kwargs: None
+    workflow._maybe_dump_debug_trace = _noop_debug_trace
 
     async def run_teacher_pre_solve(*_args, **_kwargs):
         return pre_result
@@ -1335,7 +1331,7 @@ def test_workflow_pre_solved_sample_skips_always_generalization(monkeypatch):
     workflow._make_auxiliary_caller = lambda **_kwargs: object()
     workflow._make_answer_judge_caller = lambda **_kwargs: None
     workflow._log_rollout_stats = lambda **kwargs: stats.update(kwargs)
-    workflow._maybe_dump_debug_trace = lambda **_kwargs: None
+    workflow._maybe_dump_debug_trace = _noop_debug_trace
 
     async def run_student(state, **_kwargs):
         student_calls.append(state)
@@ -1387,7 +1383,7 @@ def test_workflow_reward_only_leak_does_not_skip_student_or_success(monkeypatch)
     workflow._build_tutor_prompt = lambda state: f"tutor prompt {state.turn_idx}"
     workflow._build_student_prompt_from_state = lambda state: "student prompt"
     workflow._log_rollout_stats = lambda **_kwargs: None
-    workflow._maybe_dump_debug_trace = lambda **_kwargs: None
+    workflow._maybe_dump_debug_trace = _noop_debug_trace
 
     async def generate_tutor_response(*_args, **_kwargs):
         return response, "the answer is 42"
@@ -1458,7 +1454,7 @@ def test_workflow_leak_termination_skips_student_and_assigns_penalty(monkeypatch
     workflow._build_tutor_prompt = lambda state: f"tutor prompt {state.turn_idx}"
     workflow._build_student_prompt_from_state = lambda state: "student prompt"
     workflow._log_rollout_stats = lambda **kwargs: stats.update(kwargs)
-    workflow._maybe_dump_debug_trace = lambda **_kwargs: None
+    workflow._maybe_dump_debug_trace = _noop_debug_trace
 
     async def generate_tutor_response(*_args, **_kwargs):
         return response, "the answer is 42"
@@ -1538,7 +1534,7 @@ def test_workflow_leak_termination_reuses_immediate_clean_checks(monkeypatch):
     workflow._build_tutor_prompt = lambda state: f"tutor prompt {state.turn_idx}"
     workflow._build_student_prompt_from_state = lambda state: "student prompt"
     workflow._log_rollout_stats = lambda **_kwargs: None
-    workflow._maybe_dump_debug_trace = lambda **_kwargs: None
+    workflow._maybe_dump_debug_trace = _noop_debug_trace
 
     async def generate_tutor_response(*_args, **_kwargs):
         return response, tutor_outputs.pop(0)
@@ -1618,7 +1614,7 @@ def test_workflow_feedback_mode_invalidates_leaked_student_success_and_persists_
     workflow._build_tutor_prompt = lambda state: f"tutor prompt {state.turn_idx}"
     workflow._build_student_prompt_from_state = lambda state: "student prompt"
     workflow._log_rollout_stats = lambda **kwargs: stats.update(kwargs)
-    workflow._maybe_dump_debug_trace = lambda **_kwargs: None
+    workflow._maybe_dump_debug_trace = _noop_debug_trace
 
     async def generate_tutor_response(tutor_state, **_kwargs):
         tutor_states.append(tutor_state)
@@ -1723,7 +1719,6 @@ def test_workflow_student_generalize_runs_after_success_from_same_context(monkey
     workflow.length_penalty_threshold_chars = 0
     workflow.length_penalty_per_100_chars = 0.0
     workflow.length_penalty_min = 0.0
-    workflow.pairwise_reward_enabled = False
     workflow.student_generalize_enabled = True
     workflow.student_generalize_level_rewards = {"level1": 0.2, "level2": 0.5}
     workflow.student_generalize_bank = {}
@@ -1749,7 +1744,7 @@ def test_workflow_student_generalize_runs_after_success_from_same_context(monkey
     workflow._build_tutor_prompt = lambda state: f"tutor prompt {state.turn_idx}"
     workflow._build_student_prompt_from_state = lambda state: "student prompt"
     workflow._log_rollout_stats = lambda **_kwargs: None
-    workflow._maybe_dump_debug_trace = lambda **_kwargs: None
+    workflow._maybe_dump_debug_trace = _noop_debug_trace
 
     async def generate_tutor_response(*_args, **_kwargs):
         return response, "last tutor hint"
@@ -1898,8 +1893,8 @@ def test_student_generalize_confidence_is_dense_and_correctness_gated():
 
     assert results[0].correctness_reward == pytest.approx(0.0)
     assert results[0].confidence == pytest.approx(1.0)
-    assert results[0].confidence_reward == pytest.approx(0.05)
-    assert results[0].reward < 0.2
+    assert results[0].confidence_reward == pytest.approx(0.0)
+    assert results[0].reward == pytest.approx(0.0)
     assert results[1].correctness_reward == pytest.approx(0.5)
     assert results[1].confidence_reward == pytest.approx(0.5 * 0.25 * 0.1353352832)
     assert results[1].reward > 0.5
@@ -1907,9 +1902,7 @@ def test_student_generalize_confidence_is_dense_and_correctness_gated():
     assignment = types.SimpleNamespace(reward=0.0, reward_components={})
     workflow._apply_student_generalization_rewards([turn], [assignment], results)
 
-    assert assignment.reward_components["student_generalize_level1_confidence"] == (
-        pytest.approx(0.05)
-    )
+    assert "student_generalize_level1_confidence" not in assignment.reward_components
     assert assignment.reward_components["student_generalize_level2"] == pytest.approx(
         0.5
     )
@@ -2098,198 +2091,6 @@ def test_student_generalize_missing_variants_skips_without_student_call(monkeypa
     assert all(result.skip_reason == "missing_variant" for result in results)
 
 
-def test_pairwise_can_skip_judge_when_both_answers_are_incorrect():
-    class RewardCaller:
-        calls = 0
-
-        async def call_text(self, *args, **kwargs):
-            self.calls += 1
-            raise AssertionError("pairwise judge should not be called")
-
-    async def generate_reference_tutor(tutor_state, reference_version):
-        del tutor_state, reference_version
-        return "reference hint"
-
-    async def run_student(state):
-        del state
-        return "reference student answer", None
-
-    async def run_leak_check(task, ground_truth, teacher_action):
-        del task, ground_truth, teacher_action
-        return _leak(False)
-
-    async def score_answer(task, ground_truth, student_output):
-        del task, ground_truth, student_output
-        return _judge(False)
-
-    reward_caller = RewardCaller()
-    evaluator = PairwiseTutorEvaluator(
-        reward_scale=0.05,
-        reward_caller=reward_caller,
-        generate_reference_tutor=generate_reference_tutor,
-        run_student=run_student,
-        run_leak_check=run_leak_check,
-        score_answer=score_answer,
-        judge_both_incorrect=False,
-    )
-    turn = _turn(1, correct=False)
-    result = asyncio.run(
-        evaluator.evaluate_turn(
-            _episode([turn], termination_reason="max_turns"),
-            turn,
-            reference_version=0,
-        )
-    )
-
-    assert result.outcome == "tie"
-    assert result.reason == "both_incorrect"
-    assert result.reward == pytest.approx(0.0)
-    assert reward_caller.calls == 0
-
-
-def test_pairwise_current_leak_still_compares_reference():
-    calls = {"reference": 0, "student": 0, "leak": 0, "score": 0}
-
-    class RewardCaller:
-        async def call_text(self, *args, **kwargs):
-            raise AssertionError("pairwise judge should not be needed")
-
-    async def generate_reference_tutor(tutor_state, reference_version):
-        del tutor_state, reference_version
-        calls["reference"] += 1
-        return "reference hint"
-
-    async def run_student(state):
-        del state
-        calls["student"] += 1
-        return "reference student answer", None
-
-    async def run_leak_check(task, ground_truth, teacher_action):
-        del task, ground_truth, teacher_action
-        calls["leak"] += 1
-        return _leak(False)
-
-    async def score_answer(task, ground_truth, student_output):
-        del task, ground_truth, student_output
-        calls["score"] += 1
-        return _judge(False)
-
-    evaluator = PairwiseTutorEvaluator(
-        reward_scale=0.05,
-        reward_caller=RewardCaller(),
-        generate_reference_tutor=generate_reference_tutor,
-        run_student=run_student,
-        run_leak_check=run_leak_check,
-        score_answer=score_answer,
-    )
-    turn = _turn(1, leaked=True, correct=True)
-
-    result = asyncio.run(
-        evaluator.evaluate_turn(
-            _episode([turn], termination_reason="success"),
-            turn,
-            reference_version=0,
-        )
-    )
-
-    assert result.outcome == "current"
-    assert result.reason == "exact_correctness"
-    assert result.reward == pytest.approx(0.05)
-    assert calls == {"reference": 1, "student": 1, "leak": 1, "score": 1}
-
-
-def test_pairwise_invalid_current_leak_is_skipped():
-    async def fail_reference(*args, **kwargs):
-        raise AssertionError("invalid current leak should skip reference generation")
-
-    async def fail_student(*args, **kwargs):
-        raise AssertionError("student should not be called")
-
-    async def fail_leak_check(*args, **kwargs):
-        raise AssertionError("leak checker should not be called")
-
-    async def fail_score(*args, **kwargs):
-        raise AssertionError("answer scorer should not be called")
-
-    class RewardCaller:
-        async def call_text(self, *args, **kwargs):
-            raise AssertionError("pairwise judge should not be called")
-
-    evaluator = PairwiseTutorEvaluator(
-        reward_scale=0.05,
-        reward_caller=RewardCaller(),
-        generate_reference_tutor=fail_reference,
-        run_student=fail_student,
-        run_leak_check=fail_leak_check,
-        score_answer=fail_score,
-    )
-    turn = _turn(1, leaked=True, correct=True)
-    turn.invalid_due_to_leak = True
-
-    result = asyncio.run(
-        evaluator.evaluate_turn(
-            _episode([turn], termination_reason="max_turns"),
-            turn,
-            reference_version=0,
-        )
-    )
-
-    assert result.outcome == "skipped"
-    assert result.reason == "current_turn_invalid_due_to_leak"
-    assert result.reward == pytest.approx(0.0)
-
-
-def test_pairwise_reference_leak_still_runs_student():
-    calls = {"student": 0, "score": 0}
-
-    class RewardCaller:
-        async def call_text(self, *args, **kwargs):
-            raise AssertionError("pairwise judge should not be needed")
-
-    async def generate_reference_tutor(tutor_state, reference_version):
-        del tutor_state, reference_version
-        return "reference leaks 42"
-
-    async def run_student(state):
-        del state
-        calls["student"] += 1
-        return "reference student answer", None
-
-    async def run_leak_check(task, ground_truth, teacher_action):
-        del task, ground_truth, teacher_action
-        return _leak(True)
-
-    async def score_answer(task, ground_truth, student_output):
-        del task, ground_truth, student_output
-        calls["score"] += 1
-        return _judge(True)
-
-    evaluator = PairwiseTutorEvaluator(
-        reward_scale=0.05,
-        reward_caller=RewardCaller(),
-        generate_reference_tutor=generate_reference_tutor,
-        run_student=run_student,
-        run_leak_check=run_leak_check,
-        score_answer=score_answer,
-    )
-    turn = _turn(1, correct=False)
-
-    result = asyncio.run(
-        evaluator.evaluate_turn(
-            _episode([turn], termination_reason="max_turns"),
-            turn,
-            reference_version=0,
-        )
-    )
-
-    assert result.outcome == "reference"
-    assert result.reason == "exact_correctness"
-    assert result.reference is not None
-    assert result.reference.leak_result.leaked is True
-    assert result.reward == pytest.approx(-0.05)
-    assert calls == {"student": 1, "score": 1}
-
-
 def _trace(
     turn_idx: int,
     reward_components: dict[str, float],
@@ -2328,8 +2129,6 @@ def _metric_workflow(**overrides):
         "turn_penalty": -0.01,
         "length_penalty_threshold_chars": 10,
         "length_penalty_per_100_chars": -0.5,
-        "pairwise_reward_enabled": True,
-        "pairwise_reward_scale": 0.05,
     }
     params.update(overrides)
     for name, value in params.items():
@@ -2352,7 +2151,6 @@ def test_rollout_stats_uses_clean_metric_names_and_reward_breakdown(monkeypatch)
             {
                 "success_credit": 1.0,
                 "length_penalty": -0.1,
-                "pairwise": 0.05,
             },
             correct=True,
         ),
@@ -2366,7 +2164,7 @@ def test_rollout_stats_uses_clean_metric_names_and_reward_breakdown(monkeypatch)
         leak_count=1,
     )
 
-    assert captured["reward"] == pytest.approx(0.89)
+    assert captured["reward"] == pytest.approx(0.84)
     assert captured["turns"] == 2
     assert captured["leaks"] == 1
     assert captured["pre_solved"] == 0.0
@@ -2395,7 +2193,6 @@ def test_rollout_stats_uses_clean_metric_names_and_reward_breakdown(monkeypatch)
         "leak": -0.05,
         "turn_penalty": -0.01,
         "length_penalty": -0.1,
-        "pairwise": 0.05,
     }
     total_abs = sum(abs(value) for value in expected_components.values())
     for name, value in expected_components.items():
@@ -2559,7 +2356,6 @@ def test_reward_component_metrics_include_staged_leak_components():
         leak_penalty_formula=-0.1,
         enable_turn_penalty=False,
         length_penalty_threshold_chars=0,
-        pairwise_reward_enabled=False,
     )
 
     metrics = workflow._reward_component_metrics(
@@ -2578,7 +2374,6 @@ def test_reward_component_share_is_zero_when_enabled_components_are_absent():
     workflow = _metric_workflow(
         enable_turn_penalty=False,
         length_penalty_threshold_chars=0,
-        pairwise_reward_enabled=False,
     )
 
     metrics = workflow._reward_component_metrics([])
