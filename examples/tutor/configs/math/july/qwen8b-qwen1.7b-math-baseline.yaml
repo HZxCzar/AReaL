@@ -103,8 +103,7 @@ gconfig:
   max_tokens: 24576
   greedy: false
   temperature: 0.7
-  top_p: 0.8
-  top_k: 20
+  top_p: 1.0
   lora_name: default_lora
 
 eval_gconfig:
@@ -114,8 +113,7 @@ eval_gconfig:
   max_tokens: 24576
   greedy: false
   temperature: 0.7
-  top_p: 0.8
-  top_k: 20
+  top_p: 1.0
   lora_name: default_lora
 
 actor:
