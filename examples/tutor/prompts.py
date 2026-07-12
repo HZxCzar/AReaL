@@ -11,13 +11,15 @@ DEFAULT_TEACHER_SYSTEM_PROMPT = (
 )
 
 NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT = """\
-For each reply, write a JSON object with two fields:
-{
-  "reasoning": "your private thinking about what the student needs next",
-  "output": "your message shown to the student"
-}
-Use "reasoning" to think through your tutoring strategy. The student will not see
-that field. Put the student-facing guidance in "output"."""
+For each reply, use exactly these two tagged sections:
+<reasoning>
+your private thinking about what the student needs next
+</reasoning>
+<output>
+your message shown to the student
+</output>
+The student will see only the text inside <output>...</output>. Put all private
+thinking inside <reasoning>...</reasoning>. Do not use JSON or Markdown code fences."""
 
 DEFAULT_STUDENT_SYSTEM_PROMPT = (
     "You are a real student solving the task. Use the visible tutoring history "

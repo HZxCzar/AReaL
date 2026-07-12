@@ -148,6 +148,7 @@ from examples.tutor.core.pairwise import PairwiseTutorEvaluator
 from examples.tutor.core.parsers import (
     parse_leak_check_result,
     parse_staged_leak_check_result,
+    parse_tagged_teacher_output,
 )
 from examples.tutor.core.rewards import EpisodeRewardComputer, artifact_to_trace
 from examples.tutor.core.scoring import AnswerScorer, get_answer_scorer
@@ -982,11 +983,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
     def _extract_tutor_visible_output(self, raw_output: str) -> str:
         if getattr(self, "enable_thinking", False):
             return _strip_reasoning_for_context(raw_output)
-        parsed, _ = parse_json_dict(raw_output)
-        output = parsed.get("output") if isinstance(parsed, dict) else None
-        if isinstance(output, str):
-            return _strip_reasoning_for_context(output)
-        return _strip_reasoning_for_context(raw_output)
+        output, _ = parse_tagged_teacher_output(raw_output)
+        if output is None:
+            return ""
+        return _strip_reasoning_for_context(output)
 
     def get_lora_versions_for_episode(
         self,
@@ -1890,7 +1890,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
     ) -> LeakCheckResult:
         del task
-        teacher_message = self._extract_tutor_visible_output(teacher_action)
+        # The rollout passes an already-extracted student-visible action here.
+        # Parsing it again would discard valid plain text in non-thinking mode.
+        teacher_message = _strip_reasoning_for_context(teacher_action)
         prompt = render_prompt(
             RAWBASE_LEAK_CHECK_USER_TEMPLATE,
             ground_truth=ground_truth,

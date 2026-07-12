@@ -5,6 +5,32 @@ from examples.common.parsing import join_errors, parse_json_dict
 from .text import strip_reasoning_for_context
 from .types import LeakCheckResult
 
+_TEACHER_RESPONSE_TAGS = (
+    "<reasoning>",
+    "</reasoning>",
+    "<output>",
+    "</output>",
+)
+
+
+def parse_tagged_teacher_output(raw_output: str) -> tuple[str | None, str | None]:
+    """Extract the student-visible section from a tagged teacher response."""
+    text = raw_output or ""
+    for tag in _TEACHER_RESPONSE_TAGS:
+        count = text.count(tag)
+        if count != 1:
+            return None, f"teacher response must contain exactly one {tag} tag"
+
+    reasoning_open = text.index("<reasoning>")
+    reasoning_close = text.index("</reasoning>")
+    output_open = text.index("<output>")
+    output_close = text.index("</output>")
+    if not reasoning_open < reasoning_close < output_open < output_close:
+        return None, "teacher response tags are not in the required order"
+
+    output_start = output_open + len("<output>")
+    return text[output_start:output_close].strip(), None
+
 
 def parse_public_summary(raw_output: str) -> str:
     text = strip_reasoning_for_context(raw_output)
@@ -48,7 +74,8 @@ def parse_leak_check_result(raw_output: str) -> LeakCheckResult:
     return LeakCheckResult(
         raw_output=raw_output,
         leaked=leaked,
-        feedback=feedback or (
+        feedback=feedback
+        or (
             "The teacher revealed the answer directly. The student did not see this turn."
             if leaked
             else "No answer leakage detected."

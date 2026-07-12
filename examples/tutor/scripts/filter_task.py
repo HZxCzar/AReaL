@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from dotenv import load_dotenv
+
 try:
     from openai import AsyncOpenAI
 except ImportError:  # pragma: no cover - handled at runtime
@@ -33,6 +35,8 @@ sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_TUTOR_DIR))
 
 from examples.tutor.core.types import PublicHistoryState, StudentTurnState  # noqa: E402
+from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig  # noqa: E402
+from examples.tutor.core.callers import ApiAuxiliaryCaller  # noqa: E402
 from examples.tutor.prompts import (  # noqa: E402
     FILTER_SOLVER_SYSTEM_PROMPT,
     FILTER_SOLVER_USER_TEMPLATE,
@@ -41,18 +45,47 @@ from examples.tutor.prompts import (  # noqa: E402
 
 
 DEFAULT_CONFIG_PATH = (
-    "examples/tutor/configs/math/staged_leak/"
-    "qwen8b-nonthinking-qwen4b-remote-overfit-8-generalize-staged-leak.yaml"
+    "examples/tutor/configs/math/qwen4&8/"
+    "qwen8b-qwen4b-remote-overfit-8-generalize-staged-leak.yaml"
 )
+DEFAULT_STUDENT_BASE_URL_ENV = "QWEN3_1_7B_BASE_URL"
 DEFAULT_STUDENT_BASE_URL = (
-    "https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1"
+    "https://chj8bobdbm9acbj8kkcqgemj8pj8e9gp.openapi-qb-ai.sii.edu.cn/v1"
 )
 DEFAULT_TEACHER_BASE_URL = (
-    "https://choab9kmmqm8cbcbmqjbeg5jdej8ahaj.openapi-qb-ai.sii.edu.cn/v1"
+    "https://chj8bobdbm9acbj8kkcqgemj8pj8e9gp.openapi-qb-ai.sii.edu.cn/v1"
 )
-DEFAULT_STUDENT_MODEL = "qwen3-4b"
+DEFAULT_STUDENT_MODEL = "qwen3-1.7b"
 DEFAULT_TEACHER_MODEL = "qwen3-8b"
 DEFAULT_MODEL = DEFAULT_TEACHER_MODEL
+DEFAULT_INPUT_PATH = "examples/tutor/data/math_dataset"
+DEFAULT_OUTPUT_PATH = (
+    "examples/tutor/data/math_dataset_qwen1.7b_student_qwen8b_teacher_filter_task"
+)
+DEFAULT_STUDENT_REQUEST_PARAMS = json.dumps(
+    {
+        "seed": 42,
+        "extra_headers": {"x-inspire-inference-key": "tutor-filter-qwen1.7b-student"},
+        "extra_body": {"top_k": 20, "min_p": 0},
+    },
+    separators=(",", ":"),
+)
+DEFAULT_TEACHER_REQUEST_PARAMS = json.dumps(
+    {
+        "seed": 42,
+        "extra_headers": {"x-inspire-inference-key": "tutor-filter-qwen8b-teacher"},
+        "extra_body": {"top_k": 20, "min_p": 0},
+    },
+    separators=(",", ":"),
+)
+PROXY_ENV_VARS = (
+    "ALL_PROXY",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+)
 DEDICATED_REQUEST_PARAM_KEYS = {
     "max_completion_tokens",
     "max_tokens",
@@ -144,13 +177,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     parser.add_argument(
         "--input",
-        default="",
-        help="Input HuggingFace dataset path. Defaults to config.train_dataset.path.",
+        default=DEFAULT_INPUT_PATH,
+        help=f"Input HuggingFace dataset path. Defaults to {DEFAULT_INPUT_PATH}.",
     )
     parser.add_argument(
         "--output",
-        default="",
-        help="Output HuggingFace dataset path. Required unless --dry-run is set.",
+        default=DEFAULT_OUTPUT_PATH,
+        help=f"Output HuggingFace dataset path. Defaults to {DEFAULT_OUTPUT_PATH}.",
     )
     parser.add_argument(
         "--report",
@@ -173,15 +206,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--student-base-url",
-        default="",
+        default=DEFAULT_STUDENT_BASE_URL,
         help=(
-            "OpenAI-compatible student/judge base URL. Defaults to "
-            f"{DEFAULT_STUDENT_BASE_URL}, or config.auxiliary_model.base_url when set."
+            "OpenAI-compatible Qwen3-1.7B student base URL. Defaults to the "
+            f"{DEFAULT_STUDENT_BASE_URL_ENV} environment variable."
         ),
     )
     parser.add_argument(
         "--teacher-base-url",
-        default="",
+        default=DEFAULT_TEACHER_BASE_URL,
         help=(
             "OpenAI-compatible teacher solver base URL. Defaults to "
             f"{DEFAULT_TEACHER_BASE_URL}."
@@ -192,8 +225,10 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Shared API key fallback. Defaults to OPENAI_API_KEY, then EMPTY.",
     )
-    parser.add_argument("--student-api-key", default="", help="Student/judge API key.")
-    parser.add_argument("--teacher-api-key", default="", help="Teacher API key.")
+    parser.add_argument("--student-api-key", default="", help="Student API key.")
+    parser.add_argument(
+        "--teacher-api-key", default="", help="Teacher and answer-judge API key."
+    )
     parser.add_argument(
         "--model",
         default="",
@@ -202,8 +237,8 @@ def parse_args() -> argparse.Namespace:
             "--teacher-model for heterogeneous models."
         ),
     )
-    parser.add_argument("--student-model", default="")
-    parser.add_argument("--teacher-model", default="")
+    parser.add_argument("--student-model", default=DEFAULT_STUDENT_MODEL)
+    parser.add_argument("--teacher-model", default=DEFAULT_TEACHER_MODEL)
     parser.add_argument(
         "--timeout",
         type=float,
@@ -218,16 +253,56 @@ def parse_args() -> argparse.Namespace:
         "--concurrency",
         type=int,
         default=0,
-        help="Maximum concurrent calls. Defaults to config.auxiliary_model.max_concurrent_calls.",
+        help=(
+            "Deprecated shared maximum concurrent calls. Prefer "
+            "--student-concurrency and --teacher-concurrency."
+        ),
+    )
+    parser.add_argument(
+        "--student-concurrency",
+        type=int,
+        default=4,
+        help=(
+            "Maximum concurrent student/judge calls. Defaults to --concurrency, "
+            "then config.auxiliary_model.max_concurrent_calls."
+        ),
+    )
+    parser.add_argument(
+        "--teacher-concurrency",
+        type=int,
+        default=4,
+        help=(
+            "Maximum concurrent teacher solver calls. Defaults to --concurrency, "
+            "then config.auxiliary_model.max_concurrent_calls."
+        ),
     )
     parser.add_argument(
         "--thinking",
         choices=["config", "on", "off", "unset"],
         default="config",
         help=(
-            "Whether to send extra_body.chat_template_kwargs.enable_thinking. "
+            "Deprecated shared thinking-mode fallback. Prefer --student-thinking "
+            "and --teacher-thinking. "
             "'config' uses config.enable_thinking for teacher and "
             "auxiliary_model.enable_thinking for student/judge."
+        ),
+    )
+    parser.add_argument(
+        "--student-thinking",
+        choices=["config", "on", "off", "unset"],
+        default="off",
+        help=(
+            "Student/judge thinking mode. Defaults to --thinking; 'config' uses "
+            "config.auxiliary_model.enable_thinking."
+        ),
+    )
+    parser.add_argument(
+        "--teacher-thinking",
+        choices=["config", "on", "off", "unset"],
+        default="off",
+        help=(
+            "Teacher solver thinking mode. Defaults to --thinking; 'config' uses "
+            "config.enable_thinking."
         ),
     )
     parser.add_argument(
@@ -248,7 +323,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--student-request-params",
-        default="",
+        default=DEFAULT_STUDENT_REQUEST_PARAMS,
         help="Student/judge-specific chat.completions.create kwargs as JSON.",
     )
     parser.add_argument(
@@ -259,7 +334,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--teacher-request-params",
-        default="",
+        default=DEFAULT_TEACHER_REQUEST_PARAMS,
         help="Teacher-specific chat.completions.create kwargs as JSON.",
     )
     parser.add_argument(
@@ -280,13 +355,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--student-max-tokens",
         type=int,
-        default=0,
+        default=2048,
         help="Student/judge max completion tokens. Defaults to auxiliary_model.max_tokens.",
     )
     parser.add_argument(
         "--teacher-max-tokens",
         type=int,
-        default=0,
+        default=2048,
         help="Teacher max completion tokens. Defaults to gconfig.max_new_tokens.",
     )
     parser.add_argument(
@@ -301,13 +376,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--student-temperature",
         type=float,
-        default=None,
+        default=0.7,
         help="Student sampling temperature. Defaults to auxiliary_model.temperature.",
     )
     parser.add_argument(
         "--teacher-temperature",
         type=float,
-        default=None,
+        default=0.7,
         help="Teacher sampling temperature. Defaults to gconfig.temperature.",
     )
     parser.add_argument(
@@ -322,13 +397,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--student-top-p",
         type=float,
-        default=None,
+        default=0.8,
         help="Student top_p. Defaults to auxiliary_model.top_p.",
     )
     parser.add_argument(
         "--teacher-top-p",
         type=float,
-        default=None,
+        default=0.8,
         help="Teacher top_p. Defaults to gconfig.top_p.",
     )
     parser.add_argument("--system-prompt-file", type=Path, default=None)
@@ -337,7 +412,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-outputs", action="store_true")
     parser.add_argument("--preview-chars", type=int, default=500)
     parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--overwrite",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
+        "--keep-env-proxy",
+        action="store_true",
+        help="Keep proxy environment variables instead of clearing them.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("overrides", nargs="*")
     return parser.parse_args()
@@ -411,6 +495,14 @@ def resolve_thinking(choice: str, default: bool) -> bool | None:
     return bool(default)
 
 
+def resolve_role_thinking(
+    role_choice: str | None,
+    shared_choice: str,
+    default: bool,
+) -> bool | None:
+    return resolve_thinking(role_choice or shared_choice, default)
+
+
 def with_thinking_param(
     params: dict[str, Any], enable_thinking: bool | None
 ) -> dict[str, Any]:
@@ -441,6 +533,22 @@ def _positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def resolve_student_concurrency(args: argparse.Namespace, config: Any) -> int:
+    return (
+        _positive_int(args.student_concurrency)
+        or _positive_int(args.concurrency)
+        or max(1, int(config.auxiliary_model.max_concurrent_calls))
+    )
+
+
+def resolve_teacher_concurrency(args: argparse.Namespace, config: Any) -> int:
+    return (
+        _positive_int(args.teacher_concurrency)
+        or _positive_int(args.concurrency)
+        or max(1, int(config.auxiliary_model.max_concurrent_calls))
+    )
 
 
 def _request_top_k_from_gconfig(config: Any) -> int | None:
@@ -559,8 +667,10 @@ def build_aux_request_params(args: argparse.Namespace, config: Any) -> dict[str,
             dict(auxiliary_model.request_params), build_shared_request_params(args)
         ),
         role_params=load_student_request_params(args),
-        enable_thinking=resolve_thinking(
-            args.thinking, bool(auxiliary_model.enable_thinking)
+        enable_thinking=resolve_role_thinking(
+            args.student_thinking,
+            args.thinking,
+            bool(auxiliary_model.enable_thinking),
         ),
     )
 
@@ -572,7 +682,11 @@ def build_teacher_request_params(
         generation_params=teacher_generation_params(args, config),
         shared_params=build_shared_request_params(args),
         role_params=load_teacher_request_params(args),
-        enable_thinking=resolve_thinking(args.thinking, bool(config.enable_thinking)),
+        enable_thinking=resolve_role_thinking(
+            args.teacher_thinking,
+            args.thinking,
+            bool(config.enable_thinking),
+        ),
     )
 
 
@@ -604,10 +718,11 @@ def request_top_p(params: dict[str, Any]) -> float | None:
 
 
 def resolve_student_base_url(args: argparse.Namespace, config: Any) -> str:
+    del config
     return (
         args.student_base_url
         or args.base_url
-        or getattr(config.auxiliary_model, "base_url", "")
+        or os.getenv(DEFAULT_STUDENT_BASE_URL_ENV, "")
         or DEFAULT_STUDENT_BASE_URL
     )
 
@@ -634,6 +749,7 @@ def resolve_student_api_key(args: argparse.Namespace, config: Any) -> str:
         args.student_api_key
         or args.api_key
         or getattr(config.auxiliary_model, "api_key", "")
+        or os.getenv("INF_API_KEY")
         or os.getenv("OPENAI_API_KEY")
         or "EMPTY"
     )
@@ -641,7 +757,11 @@ def resolve_student_api_key(args: argparse.Namespace, config: Any) -> str:
 
 def resolve_teacher_api_key(args: argparse.Namespace) -> str:
     return (
-        args.teacher_api_key or args.api_key or os.getenv("OPENAI_API_KEY") or "EMPTY"
+        args.teacher_api_key
+        or args.api_key
+        or os.getenv("INF_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or "EMPTY"
     )
 
 
@@ -727,8 +847,10 @@ def build_workflow(
     reward = config.reward
     pairwise = reward.pairwise
     teacher_pre = config.teacher_pre
-    aux_thinking = resolve_thinking(
-        args.thinking, bool(auxiliary_model.enable_thinking)
+    aux_thinking = resolve_role_thinking(
+        args.student_thinking,
+        args.thinking,
+        bool(auxiliary_model.enable_thinking),
     )
     return TutorAgentWorkflow(
         dataset_type=config.dataset_type,
@@ -785,6 +907,32 @@ def build_workflow(
         pairwise_compare_all_turns=pairwise.compare_all_turns,
         pairwise_judge_both_incorrect=pairwise.judge_both_incorrect,
     )
+
+
+def build_answer_judge_caller(
+    config: TutorConfig,
+    args: argparse.Namespace,
+    *,
+    teacher_request_params: dict[str, Any],
+    max_concurrency: int,
+) -> ApiAuxiliaryCaller | None:
+    """Use the stronger remote 8B teacher endpoint for answer judging."""
+    if not config.auxiliary_model.answer_judge_enabled:
+        return None
+    caller_config = AuxModelConfig(
+        base_url=resolve_teacher_base_url(args),
+        model=resolve_teacher_model(args),
+        api_key=resolve_teacher_api_key(args),
+        timeout=int(resolve_teacher_timeout(args)),
+        max_tokens=int(config.auxiliary_model.answer_judge_max_tokens),
+        temperature=0.0,
+        top_p=request_top_p(teacher_request_params),
+        max_concurrency=max_concurrency,
+        request_params=strip_dedicated_request_params(teacher_request_params),
+        tokenizer_path=config.tokenizer_path,
+        context_length=config.sglang.context_length,
+    )
+    return ApiAuxiliaryCaller(AsyncLLMCaller(caller_config))
 
 
 async def classify_pre_solved_row(
@@ -1157,30 +1305,37 @@ async def main_async(args: argparse.Namespace) -> None:
         if args.report
         else default_report_path(output_path if output_path is not None else input_path)
     )
-    max_concurrency = max(
-        1,
-        int(args.concurrency)
-        if args.concurrency and args.concurrency > 0
-        else int(config.auxiliary_model.max_concurrent_calls),
-    )
+    student_concurrency = resolve_student_concurrency(args, config)
+    teacher_concurrency = resolve_teacher_concurrency(args, config)
     student_attempts = max(1, int(args.student_attempts))
     teacher_attempts = max(1, int(args.teacher_attempts))
     aux_request_params = build_aux_request_params(args, config)
     teacher_request_params = build_teacher_request_params(args, config)
+    student_base_url = resolve_student_base_url(args, config)
+    if not student_base_url:
+        raise ValueError(
+            "Qwen3-1.7B student endpoint is not configured. Set "
+            f"{DEFAULT_STUDENT_BASE_URL_ENV} or pass --student-base-url."
+        )
     workflow = build_workflow(
         config,
         args,
         aux_request_params=aux_request_params,
-        max_concurrency=max_concurrency,
+        max_concurrency=student_concurrency,
     )
-    answer_judge_caller = workflow._make_answer_judge_caller()
+    answer_judge_caller = build_answer_judge_caller(
+        config,
+        args,
+        teacher_request_params=teacher_request_params,
+        max_concurrency=teacher_concurrency,
+    )
     teacher_client = TeacherSolverClient(
         base_url=resolve_teacher_base_url(args),
         api_key=resolve_teacher_api_key(args),
         model=resolve_teacher_model(args),
         timeout=resolve_teacher_timeout(args),
         request_params=teacher_request_params,
-        concurrency=max_concurrency,
+        concurrency=teacher_concurrency,
     )
     system_prompt = load_prompt(args.system_prompt_file, DEFAULT_SOLVER_SYSTEM_PROMPT)
     default_user_template = (
@@ -1202,10 +1357,15 @@ async def main_async(args: argparse.Namespace) -> None:
         "config": str(Path(args.config).resolve()),
         "answer_scorer": config.answer_scorer,
         "answer_judge_enabled": bool(config.auxiliary_model.answer_judge_enabled),
-        "student_and_judge": {
-            "base_url": resolve_student_base_url(args, config),
+        "student": {
+            "base_url": student_base_url,
             "model": resolve_student_model(args, config),
             "timeout": resolve_student_timeout(args, config),
+        },
+        "answer_judge": {
+            "base_url": resolve_teacher_base_url(args),
+            "model": resolve_teacher_model(args),
+            "timeout": resolve_teacher_timeout(args),
         },
         "teacher": {
             "base_url": resolve_teacher_base_url(args),
@@ -1214,7 +1374,9 @@ async def main_async(args: argparse.Namespace) -> None:
         },
         "deprecated_shared_base_url": args.base_url or None,
         "deprecated_shared_model": args.model or None,
-        "max_concurrency": max_concurrency,
+        "student_concurrency": student_concurrency,
+        "teacher_concurrency": teacher_concurrency,
+        "deprecated_shared_concurrency": _positive_int(args.concurrency),
         "student_attempts": student_attempts,
         "teacher_attempts": teacher_attempts,
         "keep_on_error": bool(args.keep_on_error),
@@ -1319,8 +1481,13 @@ async def main_async(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    load_dotenv(_REPO_ROOT / ".env", override=False)
+    args = parse_args()
+    if not args.keep_env_proxy:
+        for name in PROXY_ENV_VARS:
+            os.environ.pop(name, None)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
-    asyncio.run(main_async(parse_args()))
+    asyncio.run(main_async(args))
 
 
 if __name__ == "__main__":

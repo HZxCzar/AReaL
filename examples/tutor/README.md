@@ -74,17 +74,7 @@ For the full old 8B self-filter and current 4B+8B runbooks, see
 when the two models differ:
 
 ```bash
-python3 examples/tutor/scripts/filter_task.py \
-  --config examples/tutor/configs/math/staged_leak/qwen8b-nonthinking-qwen4b-remote-overfit-8-generalize-staged-leak.yaml \
-  --input examples/tutor/data/math_dataset \
-  --output examples/tutor/data/math_dataset_filter_task \
-  --splits train test \
-  --teacher-base-url http://127.0.0.1:30008/v1 \
-  --teacher-model default \
-  --thinking off \
-  --student-attempts 1 \
-  --teacher-attempts 1 \
-  --overwrite
+uv run python examples/tutor/scripts/filter_task.py
 ```
 
 Student defaults come from `auxiliary_model` in the config. Teacher defaults come from

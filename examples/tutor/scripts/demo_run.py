@@ -21,6 +21,7 @@ from examples.common.trace_utils import (
     load_demo_rows,
     patch_teacher_factory,
 )
+from examples.tutor.core.text import strip_reasoning_for_context
 
 from areal.api.cli_args import load_expr_config
 
@@ -109,7 +110,7 @@ class DemoTutorWorkflow(TutorAgentWorkflow):
         *,
         aux_caller=None,
     ):
-        teacher_message = self._extract_tutor_visible_output(teacher_action)
+        teacher_message = strip_reasoning_for_context(teacher_action)
         prompt = tutor_workflow_module.render_prompt(
             tutor_workflow_module.RAWBASE_LEAK_CHECK_USER_TEMPLATE,
             ground_truth=ground_truth,

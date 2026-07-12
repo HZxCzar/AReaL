@@ -479,7 +479,7 @@ def test_feedback_mode_only_adds_private_feedback_instruction():
     assert "evidence" not in prompt
 
 
-def test_non_thinking_teacher_system_prompt_requires_json_output():
+def test_non_thinking_teacher_system_prompt_requires_tagged_output():
     workflow = tutor_workflow.TutorAgentWorkflow.__new__(
         tutor_workflow.TutorAgentWorkflow
     )
@@ -489,8 +489,11 @@ def test_non_thinking_teacher_system_prompt_requires_json_output():
 
     assert prompt.startswith("base prompt")
     assert tutor_workflow.NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT in prompt
-    assert '"reasoning"' in prompt
-    assert '"output"' in prompt
+    assert "<reasoning>" in prompt
+    assert "</reasoning>" in prompt
+    assert "<output>" in prompt
+    assert "</output>" in prompt
+    assert "Do not use JSON" in prompt
 
 
 def test_thinking_teacher_system_prompt_keeps_existing_format():
@@ -504,30 +507,55 @@ def test_thinking_teacher_system_prompt_keeps_existing_format():
     assert prompt == "base prompt"
 
 
-def test_non_thinking_tutor_visible_output_uses_json_output_only():
+def test_non_thinking_tutor_visible_output_uses_tagged_output_only():
     workflow = tutor_workflow.TutorAgentWorkflow.__new__(
         tutor_workflow.TutorAgentWorkflow
     )
     workflow.enable_thinking = False
 
     visible = workflow._extract_tutor_visible_output(
-        r'{"reasoning": "secret \boxed{42}", "output": "Try isolating x first."}'
+        r"""prefix that is not student-visible
+<reasoning>secret \boxed{42}</reasoning>
+<output>Try \frac{x}{2} first.</output>
+suffix that is not student-visible"""
     )
 
-    assert visible == "Try isolating x first."
+    assert visible == r"Try \frac{x}{2} first."
 
 
-def test_non_thinking_tutor_visible_output_falls_back_for_invalid_json():
+def test_non_thinking_tutor_visible_output_rejects_malformed_tags():
     workflow = tutor_workflow.TutorAgentWorkflow.__new__(
         tutor_workflow.TutorAgentWorkflow
     )
     workflow.enable_thinking = False
 
     visible = workflow._extract_tutor_visible_output(
-        "not json <think>private</think> visible hint"
+        "<reasoning>private answer: 42</reasoning><output>visible hint"
     )
 
-    assert visible == "not json  visible hint"
+    assert visible == ""
+
+
+def test_non_thinking_tutor_visible_output_does_not_fall_back_to_json():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.enable_thinking = False
+
+    visible = workflow._extract_tutor_visible_output(
+        r'{"reasoning": "private answer: 42", "output": "visible hint"}'
+    )
+
+    assert visible == ""
+
+
+def test_tagged_teacher_output_rejects_duplicate_sections():
+    output, error = tutor_workflow.parse_tagged_teacher_output(
+        "<reasoning>private</reasoning><output>first</output><output>second</output>"
+    )
+
+    assert output is None
+    assert error is not None
 
 
 def test_rawbase_leak_check_asks_llm_about_visible_output(monkeypatch):
@@ -565,7 +593,7 @@ def test_rawbase_leak_check_asks_llm_about_visible_output(monkeypatch):
     assert captured["rid_prefix"] == "rawbase-leak-check"
 
 
-def test_rawbase_leak_check_strips_private_reasoning_json_output(monkeypatch):
+def test_rawbase_leak_check_uses_already_visible_teacher_output(monkeypatch):
     workflow = tutor_workflow.TutorAgentWorkflow.__new__(
         tutor_workflow.TutorAgentWorkflow
     )
@@ -584,7 +612,7 @@ def test_rawbase_leak_check_strips_private_reasoning_json_output(monkeypatch):
         workflow._run_rawbase_leak_check(
             "task",
             "42",
-            r'{"reasoning": "the answer is 42", "output": "Try factoring first."}',
+            "Try factoring first.",
         )
     )
 
@@ -1146,6 +1174,7 @@ def _minimal_episode_workflow(**overrides):
     )
     params = {
         "max_turns": 1,
+        "enable_thinking": True,
         "success_reward": 1.0,
         "leak_penalty": -1.0,
         "leak_penalty_mode": "binary",
@@ -1633,6 +1662,7 @@ def test_workflow_student_generalize_runs_after_success_from_same_context(monkey
     workflow.student_generalize_level_rewards = {"level1": 0.2, "level2": 0.5}
     workflow.student_generalize_bank = {}
     workflow.student_system_prompt = ""
+    workflow.enable_thinking = True
 
     response = types.SimpleNamespace(
         input_tokens=[1],
