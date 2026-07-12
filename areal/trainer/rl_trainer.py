@@ -534,6 +534,41 @@ class PPOTrainer:
         elif self._requires_proxy_workflow(workflow):
             self._ensure_proxy_started()
 
+        can_evaluate = (
+            config.evaluator.eval_before_train
+            and start_step == 0
+            and self.eval_rollout is not None
+            and self.valid_dataloader is not None
+            and eval_workflow is not None
+        )
+        if can_evaluate:
+            if self._should_offload_rollout:
+                self._onload_rollout(is_eval=True)
+            with (
+                stats_tracker.record_timing("eval"),
+                perf_tracer.trace_scope(
+                    "train.eval_before_train",
+                    category=Category.COMPUTE,
+                    args={"global_step": -1},
+                ),
+            ):
+                evaluated_before_train = self.evaluator.evaluate_before_train(
+                    functools.partial(
+                        self._evaluate_fn,
+                        eval_workflow=eval_workflow,
+                        eval_workflow_kwargs=eval_workflow_kwargs,
+                    ),
+                    start_step=start_step,
+                )
+            if self._should_offload_rollout:
+                self._offload_rollout(is_eval=True)
+            if evaluated_before_train:
+                self._export_and_commit_stats(
+                    epoch=0,
+                    epoch_step=-1,
+                    global_step=-1,
+                )
+
         for global_step in range(start_step, max_steps):
             if (
                 config.total_train_steps is not None

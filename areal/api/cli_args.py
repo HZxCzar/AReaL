@@ -1999,6 +1999,16 @@ class _Timer:
 class EvaluatorConfig(_Timer):
     """Configuration for model evaluation scheduling and timing."""
 
+    eval_before_train: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Run validation once on model version 0 before the first training "
+                "update. This is skipped when resuming from a checkpoint."
+            )
+        },
+    )
+
 
 @dataclass
 class SaverConfig(_Timer):

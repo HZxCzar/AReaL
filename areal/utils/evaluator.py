@@ -23,6 +23,18 @@ class Evaluator:
     def load_state_dict(self, state_dict):
         self.freq_ctl.load_state_dict(state_dict)
 
+    def evaluate_before_train(
+        self,
+        evaluate_fn: Callable,
+        *,
+        start_step: int,
+    ) -> bool:
+        """Run the version-0 evaluation for a fresh training run."""
+        if not self.config.eval_before_train or start_step != 0:
+            return False
+        evaluate_fn()
+        return True
+
     def evaluate(
         self,
         evaluate_fn: Callable,
