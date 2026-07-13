@@ -15,6 +15,12 @@ enable_thinking: false
 leak_handling_mode: terminate
 teacher_show_ground_truth: false
 
+student_generalize:
+  enabled: true
+  source: train
+  level1_reward: 0.0
+  level2_reward: 0.0
+
 teacher_pre:
   enabled: true
   mode: filter_solver
