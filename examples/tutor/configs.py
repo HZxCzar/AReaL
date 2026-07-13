@@ -20,6 +20,7 @@ _STUDENT_GENERALIZE_SOURCES = {"sidecar", "train"}
 _STUDENT_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 TUTOR_EVAL_STUDENT_FIELD = "__tutor_student_name"
+TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD = "__tutor_student_prompt_index"
 
 
 @dataclass
@@ -131,13 +132,30 @@ class TutorPromptPoolConfig:
         metadata={
             "help": (
                 "Optional JSON string-array of student behavior suffixes sampled "
-                "once per training episode."
+                "once per training episode and optionally covered exhaustively "
+                "during evaluation."
+            )
+        },
+    )
+    eval_all_student_prompts: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether evaluation expands every validation item across all "
+                "configured student prompt suffixes."
             )
         },
     )
     teacher_warmup: TutorTeacherWarmupPromptConfig = field(
         default_factory=TutorTeacherWarmupPromptConfig
     )
+
+    def __post_init__(self) -> None:
+        if self.eval_all_student_prompts and not str(self.student_path or "").strip():
+            raise ValueError(
+                "prompt_pool.student_path is required when "
+                "prompt_pool.eval_all_student_prompts=true."
+            )
 
 
 @dataclass

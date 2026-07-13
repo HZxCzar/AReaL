@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging as py_logging
+import operator
 import os
 import random
 import re
@@ -127,6 +128,7 @@ from examples.common.openai_utils import (
 from examples.common.parsing import parse_json_dict
 from examples.tutor.configs import (
     TUTOR_EVAL_STUDENT_FIELD,
+    TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
     TutorStudentModelConfig,
 )
 from examples.tutor.core.callers import (
@@ -886,6 +888,43 @@ class TutorAgentWorkflow(RolloutWorkflow):
         index = rng.randrange(len(pool))
         return PromptPoolSelection(index=index, suffix=pool[index])
 
+    def _select_student_prompt(
+        self, data: dict[str, Any]
+    ) -> PromptPoolSelection | None:
+        pool = getattr(self, "student_prompt_pool", ())
+        try:
+            is_eval = bool(getattr(workflow_context.get(), "is_eval", False))
+        except Exception:
+            is_eval = False
+        if not is_eval:
+            return self._sample_prompt_pool(pool, role="student")
+
+        raw_index = data.get(TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD)
+        if raw_index is None:
+            return None
+        if isinstance(raw_index, bool):
+            raise ValueError(
+                "Forced evaluation student prompt index must be an integer."
+            )
+        try:
+            index = operator.index(raw_index)
+        except TypeError as exc:
+            raise ValueError(
+                "Forced evaluation student prompt index must be an integer; "
+                f"got {raw_index!r}."
+            ) from exc
+        if not pool:
+            raise ValueError(
+                "A forced evaluation student prompt requires a non-empty student "
+                "prompt pool."
+            )
+        if index < 0 or index >= len(pool):
+            raise ValueError(
+                f"Forced evaluation student prompt index {index} is out of range "
+                f"for {len(pool)} prompts."
+            )
+        return PromptPoolSelection(index=index, suffix=pool[index])
+
     def _teacher_warmup_probability(self, rollout_version: int | None) -> float:
         if not getattr(self, "teacher_warmup_enabled", False):
             return 0.0
@@ -1069,9 +1108,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             getattr(self, "teacher_prompt_pool", ()),
             rollout_version=episode_lora_version,
         )
-        student_prompt_selection = self._sample_prompt_pool(
-            getattr(self, "student_prompt_pool", ()), role="student"
-        )
+        student_prompt_selection = self._select_student_prompt(data)
         actor_chat_caller = (
             self._make_engine_chat_caller(
                 engine,
@@ -1127,6 +1164,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     teacher_pre_solve_result=teacher_pre_solve_result,
                     student_name=selected_student.name,
                     teacher_prompt_selection=teacher_prompt_selection,
+                    student_prompt_selection=student_prompt_selection,
                 )
                 await self._maybe_dump_debug_trace(
                     task=task,
@@ -1198,6 +1236,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_name=selected_student.name,
                 student_call_failed=bool(initial_student_error),
                 teacher_prompt_selection=teacher_prompt_selection,
+                student_prompt_selection=student_prompt_selection,
             )
             await self._maybe_dump_debug_trace(
                 task=episode_artifact.task,
@@ -1486,6 +1525,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 or any(artifact.student_error for artifact in turn_artifacts)
             ),
             teacher_prompt_selection=teacher_prompt_selection,
+            student_prompt_selection=student_prompt_selection,
             inference_prompt_tokens=sum(
                 artifact.tutor_response.input_len for artifact in turn_artifacts
             ),
@@ -2749,6 +2789,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_name: str = "",
         student_call_failed: bool = False,
         teacher_prompt_selection: PromptPoolSelection | None = None,
+        student_prompt_selection: PromptPoolSelection | None = None,
         inference_prompt_tokens: int = 0,
         training_prompt_tokens: int = 0,
     ) -> None:
@@ -2850,6 +2891,25 @@ class TutorAgentWorkflow(RolloutWorkflow):
             metrics[f"{prefix}/reward"] = float(total_reward)
             metrics[f"{prefix}/turns"] = float(len(traces))
             metrics[f"{prefix}/call_failed"] = float(student_call_failed)
+
+        student_prompt_pool = getattr(self, "student_prompt_pool", ())
+        if student_prompt_pool:
+            selected_index = (
+                student_prompt_selection.index
+                if student_prompt_selection is not None
+                else None
+            )
+            for prompt_index in range(len(student_prompt_pool)):
+                metrics[f"student_prompt/{prompt_index}/selected"] = float(
+                    prompt_index == selected_index
+                )
+            if selected_index is not None:
+                prefix = f"student_prompt/{selected_index}"
+                metrics[f"{prefix}/solved"] = float(success_round > 0)
+                metrics[f"{prefix}/pre_solved"] = float(pre_success)
+                metrics[f"{prefix}/reward"] = float(total_reward)
+                metrics[f"{prefix}/turns"] = float(len(traces))
+                metrics[f"{prefix}/call_failed"] = float(student_call_failed)
 
         metrics.update(self._reward_component_metrics(traces))
         self._log_generalize_stats(

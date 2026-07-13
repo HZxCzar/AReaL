@@ -7,7 +7,11 @@ from datetime import datetime
 from typing import Any
 
 sys.path.append(str(pathlib.Path(__file__).parent))
-from configs import TUTOR_EVAL_STUDENT_FIELD, TutorConfig
+from configs import (
+    TUTOR_EVAL_STUDENT_FIELD,
+    TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
+    TutorConfig,
+)
 from core.generalization import (
     load_student_generalize_bank,
     validate_student_generalize_dataset,
@@ -172,6 +176,40 @@ def _expand_eval_dataset_for_students(dataset: Any, student_names: list[str]) ->
     return concatenate_datasets(expanded)
 
 
+def _expand_eval_dataset_for_student_prompts(
+    dataset: Any, student_prompt_count: int
+) -> Any:
+    if student_prompt_count == 0:
+        return dataset
+    if student_prompt_count < 0:
+        raise ValueError("student_prompt_count must be non-negative.")
+    if TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD in dataset.column_names:
+        raise ValueError(
+            "Validation dataset already contains reserved column "
+            f"{TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD!r}."
+        )
+
+    from datasets import concatenate_datasets
+
+    expanded = [
+        dataset.add_column(
+            TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
+            [prompt_index] * len(dataset),
+        )
+        for prompt_index in range(student_prompt_count)
+    ]
+    return concatenate_datasets(expanded)
+
+
+def _load_eval_student_prompts(config: TutorConfig) -> tuple[str, ...]:
+    if not config.prompt_pool.eval_all_student_prompts:
+        return ()
+
+    from examples.tutor.workflow import load_prompt_pool
+
+    return load_prompt_pool(config.prompt_pool.student_path, role="student")
+
+
 def _build_eval_workflow_kwargs(
     workflow_kwargs: dict[str, Any], config: TutorConfig
 ) -> dict[str, Any]:
@@ -180,7 +218,12 @@ def _build_eval_workflow_kwargs(
     eval_workflow_kwargs = workflow_kwargs.copy()
     eval_workflow_kwargs["gconfig"] = config.eval_gconfig.new(n_samples=1)
     eval_workflow_kwargs["teacher_prompt_pool_path"] = ""
-    eval_workflow_kwargs["student_prompt_pool_path"] = ""
+    if config.prompt_pool.eval_all_student_prompts:
+        eval_workflow_kwargs["student_prompt_pool_path"] = (
+            config.prompt_pool.student_path
+        )
+    else:
+        eval_workflow_kwargs["student_prompt_pool_path"] = ""
     eval_workflow_kwargs["teacher_warmup_enabled"] = False
     eval_workflow_kwargs["teacher_warmup_prompt_path"] = ""
     eval_workflow_kwargs["teacher_warmup_steps"] = 0
@@ -202,6 +245,7 @@ def main(args):
     config, _ = load_expr_config(args, TutorConfig)
     _apply_eval_average_rollouts(config)
     auxiliary_model = config.auxiliary_model
+    eval_student_prompts = _load_eval_student_prompts(config)
     student_generalize = config.student_generalize
     teacher_pre = config.teacher_pre
     reward = config.reward
@@ -222,7 +266,7 @@ def main(args):
         if eval_max_samples <= 0:
             eval_max_samples = None
     if (
-        eval_max_samples is not None or config.student_models
+        eval_max_samples is not None or config.student_models or eval_student_prompts
     ) and valid_dataset_config is not None:
         valid_dataset_config = deepcopy(valid_dataset_config)
         valid_dataset_config.scheduling_spec = None
@@ -239,6 +283,10 @@ def main(args):
     valid_dataset = _expand_eval_dataset_for_students(
         valid_dataset,
         [student.name for student in config.student_models],
+    )
+    valid_dataset = _expand_eval_dataset_for_student_prompts(
+        valid_dataset,
+        len(eval_student_prompts),
     )
 
     workflow_kwargs = dict(

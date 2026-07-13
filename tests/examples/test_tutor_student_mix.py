@@ -8,10 +8,14 @@ from omegaconf import OmegaConf
 from examples.tutor import workflow as tutor_workflow
 from examples.tutor.configs import (
     TUTOR_EVAL_STUDENT_FIELD,
+    TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
     TutorConfig,
     TutorStudentModelConfig,
 )
-from examples.tutor.train import _expand_eval_dataset_for_students
+from examples.tutor.train import (
+    _expand_eval_dataset_for_student_prompts,
+    _expand_eval_dataset_for_students,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -166,6 +170,62 @@ def test_expand_eval_dataset_covers_every_row_for_every_student():
         "future-student",
         "future-student",
     ]
+
+
+def test_expand_eval_dataset_covers_every_row_for_every_student_prompt():
+    """Test each validation row is paired with every student prompt index."""
+    dataset = Dataset.from_dict({"id": [1, 2], "task": ["a", "b"]})
+
+    expanded = _expand_eval_dataset_for_student_prompts(dataset, 3)
+
+    assert len(expanded) == 6
+    assert expanded["id"] == [1, 2, 1, 2, 1, 2]
+    assert expanded[TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD] == [0, 0, 1, 1, 2, 2]
+
+
+def test_expand_eval_dataset_covers_student_model_prompt_cross_product():
+    """Test model and prompt dimensions form a complete evaluation product."""
+    dataset = Dataset.from_dict({"id": [1, 2], "task": ["a", "b"]})
+    expanded = _expand_eval_dataset_for_students(dataset, ["student-a", "student-b"])
+
+    expanded = _expand_eval_dataset_for_student_prompts(expanded, 3)
+
+    combinations = set(
+        zip(
+            expanded["id"],
+            expanded[TUTOR_EVAL_STUDENT_FIELD],
+            expanded[TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD],
+            strict=True,
+        )
+    )
+    expected = {
+        (item_id, student_name, prompt_index)
+        for item_id in (1, 2)
+        for student_name in ("student-a", "student-b")
+        for prompt_index in range(3)
+    }
+    assert len(expanded) == 12
+    assert combinations == expected
+
+
+def test_expand_eval_dataset_with_zero_student_prompts_returns_input():
+    """Test disabled all-prompt evaluation leaves the dataset untouched."""
+    dataset = Dataset.from_dict({"id": [1], "task": ["a"]})
+
+    assert _expand_eval_dataset_for_student_prompts(dataset, 0) is dataset
+
+
+def test_expand_eval_dataset_rejects_reserved_student_prompt_column():
+    """Test user data cannot collide with the forced prompt-index column."""
+    dataset = Dataset.from_dict(
+        {
+            "id": [1],
+            TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD: [0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="reserved column"):
+        _expand_eval_dataset_for_student_prompts(dataset, 2)
 
 
 def test_select_student_uses_weighted_training_sample(monkeypatch):

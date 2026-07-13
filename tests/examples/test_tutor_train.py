@@ -3,6 +3,7 @@ import pytest
 from examples.tutor.configs import (
     TutorConfig,
     TutorEvaluatorConfig,
+    TutorPromptPoolConfig,
 )
 from examples.tutor.train import (
     _apply_eval_average_rollouts,
@@ -15,6 +16,19 @@ def test_tutor_evaluator_config_defaults_to_three_average_rollouts():
     config = TutorEvaluatorConfig()
 
     assert config.average_rollouts == 3
+
+
+def test_student_prompt_eval_coverage_defaults_disabled():
+    """Test existing configs keep clean student prompts during evaluation."""
+    config = TutorPromptPoolConfig()
+
+    assert config.eval_all_student_prompts is False
+
+
+def test_student_prompt_eval_coverage_requires_prompt_pool():
+    """Test all-prompt evaluation fails fast without student prompt data."""
+    with pytest.raises(ValueError, match="student_path"):
+        TutorPromptPoolConfig(eval_all_student_prompts=True)
 
 
 @pytest.mark.parametrize("average_rollouts", [0, -1])
@@ -69,3 +83,32 @@ def test_build_eval_workflow_kwargs_keeps_single_episode_generation():
     assert workflow_kwargs["teacher_warmup_enabled"] is True
     assert workflow_kwargs["teacher_warmup_prompt_path"] == "warmup.txt"
     assert workflow_kwargs["teacher_warmup_steps"] == 50
+
+
+def test_build_eval_workflow_kwargs_keeps_enabled_student_prompt_pool():
+    """Test all-prompt evaluation retains only the student prompt pool."""
+    config = TutorConfig(
+        dataset_type="math",
+        prompt_pool=TutorPromptPoolConfig(
+            teacher_path="teacher.json",
+            student_path="student.json",
+            eval_all_student_prompts=True,
+        ),
+    )
+    _apply_eval_average_rollouts(config)
+    workflow_kwargs = {
+        "gconfig": config.gconfig,
+        "teacher_prompt_pool_path": "teacher.json",
+        "student_prompt_pool_path": "student.json",
+        "teacher_warmup_enabled": True,
+        "teacher_warmup_prompt_path": "warmup.txt",
+        "teacher_warmup_steps": 50,
+    }
+
+    eval_workflow_kwargs = _build_eval_workflow_kwargs(workflow_kwargs, config)
+
+    assert eval_workflow_kwargs["teacher_prompt_pool_path"] == ""
+    assert eval_workflow_kwargs["student_prompt_pool_path"] == "student.json"
+    assert eval_workflow_kwargs["teacher_warmup_enabled"] is False
+    assert eval_workflow_kwargs["teacher_warmup_prompt_path"] == ""
+    assert eval_workflow_kwargs["teacher_warmup_steps"] == 0

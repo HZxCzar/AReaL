@@ -10,7 +10,11 @@ import pytest
 from omegaconf import OmegaConf
 
 from examples.tutor import workflow as tutor_workflow
-from examples.tutor.configs import TutorConfig, TutorTeacherWarmupPromptConfig
+from examples.tutor.configs import (
+    TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
+    TutorConfig,
+    TutorTeacherWarmupPromptConfig,
+)
 from examples.tutor.core.tensors import response_to_tensordict
 from examples.tutor.core.types import (
     EpisodeArtifact,
@@ -173,6 +177,84 @@ def test_prompt_pool_sampling_is_task_deterministic_and_eval_disabled(monkeypatc
     )
     assert workflow._sample_prompt_pool(pool, role="teacher") is None
     assert workflow._sample_prompt_pool(pool, role="student") is None
+
+
+def test_eval_student_prompt_selection_honors_forced_index(monkeypatch):
+    """Test evaluation rows pin a persona independently of rollout task IDs."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_prompt_pool = ("persona zero", "persona one", "persona two")
+    context = types.SimpleNamespace(is_eval=True, task_id=17)
+    monkeypatch.setattr(tutor_workflow.workflow_context, "get", lambda: context)
+    data = {TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD: 1}
+
+    assert workflow._select_student_prompt({}) is None
+    first = workflow._select_student_prompt(data)
+    context.task_id = 99
+    second = workflow._select_student_prompt(data)
+
+    assert first == second == PromptPoolSelection(index=1, suffix="persona one")
+
+
+def test_training_student_prompt_selection_ignores_eval_index(monkeypatch):
+    """Test training keeps deterministic task sampling despite reserved input."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_prompt_pool = ("zero", "one", "two")
+    workflow.prompt_pool_seed = 42
+    workflow._student_prompt_pool_fallback_rng = random.Random(2)
+    monkeypatch.setattr(
+        tutor_workflow.workflow_context,
+        "get",
+        lambda: types.SimpleNamespace(is_eval=False, task_id=17),
+    )
+
+    selection = workflow._select_student_prompt(
+        {TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD: 0}
+    )
+    expected_index = random.Random("42:student:17").randrange(3)
+
+    assert selection == PromptPoolSelection(
+        index=expected_index,
+        suffix=workflow.student_prompt_pool[expected_index],
+    )
+
+
+@pytest.mark.parametrize("prompt_index", [True, 1.0, "1", -1, 3])
+def test_eval_student_prompt_selection_rejects_invalid_index(monkeypatch, prompt_index):
+    """Test forced persona indices must be valid integer pool positions."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_prompt_pool = ("zero", "one", "two")
+    monkeypatch.setattr(
+        tutor_workflow.workflow_context,
+        "get",
+        lambda: types.SimpleNamespace(is_eval=True, task_id=17),
+    )
+
+    with pytest.raises(ValueError, match="student prompt index"):
+        workflow._select_student_prompt(
+            {TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD: prompt_index}
+        )
+
+
+def test_eval_student_prompt_selection_requires_loaded_pool(monkeypatch):
+    """Test forced evaluation cannot silently fall back to the base prompt."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_prompt_pool = ()
+    monkeypatch.setattr(
+        tutor_workflow.workflow_context,
+        "get",
+        lambda: types.SimpleNamespace(is_eval=True, task_id=17),
+    )
+
+    with pytest.raises(ValueError, match="non-empty student prompt pool"):
+        workflow._select_student_prompt({TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD: 0})
 
 
 def test_teacher_warmup_selection_overrides_then_hands_off_to_pool(monkeypatch):
@@ -364,6 +446,42 @@ def test_rollout_stats_report_warmup_source_and_prompt_token_delta(monkeypatch):
     assert captured["prompt_source/warmup_full/reward"] == pytest.approx(-1.0)
     assert captured["prompt_source/pool/selected"] == pytest.approx(0.0)
     assert captured["prompt_source/pool_base/selected"] == pytest.approx(0.0)
+
+
+def test_rollout_stats_report_selected_student_prompt(monkeypatch):
+    """Test prompt-index metrics expose per-persona evaluation outcomes."""
+    captured = {}
+    monkeypatch.setattr(
+        tutor_workflow,
+        "_safe_scalar",
+        lambda **metrics: captured.update(metrics),
+    )
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_model_runtimes = {}
+    workflow.student_prompt_pool = ("persona zero", "persona one", "persona two")
+
+    workflow._log_rollout_stats(
+        total_reward=1.5,
+        traces=[],
+        termination_reason="pre_solved",
+        pre_success=True,
+        leak_count=0,
+        student_prompt_selection=PromptPoolSelection(
+            index=1,
+            suffix="persona one",
+        ),
+    )
+
+    assert captured["student_prompt/0/selected"] == pytest.approx(0.0)
+    assert captured["student_prompt/1/selected"] == pytest.approx(1.0)
+    assert captured["student_prompt/2/selected"] == pytest.approx(0.0)
+    assert captured["student_prompt/1/solved"] == pytest.approx(0.0)
+    assert captured["student_prompt/1/pre_solved"] == pytest.approx(1.0)
+    assert captured["student_prompt/1/reward"] == pytest.approx(1.5)
+    assert captured["student_prompt/1/turns"] == pytest.approx(0.0)
+    assert captured["student_prompt/1/call_failed"] == pytest.approx(0.0)
 
 
 def test_teacher_rollout_uses_suffix_but_training_tensor_uses_clean_prompt():
@@ -646,6 +764,55 @@ def test_prompt_pool_example_yaml_loads_typed_config(monkeypatch):
     assert tutor_workflow.load_prompt_pool(
         config.prompt_pool.student_path, role="student"
     )
+
+
+def test_pass2_student_personality_pool_config_loads_five_personas(monkeypatch):
+    """Test the pass@2 pilot changes only the five-way student persona pool."""
+    monkeypatch.setenv("INF_API_KEY", "test-key")
+    path = Path(
+        "examples/tutor/configs/math/july/pass@2/"
+        "qwen8b-qwen1.7b-math-student-personality-pool-5.yaml"
+    )
+    baseline_path = path.with_name("qwen8b-qwen1.7b-math-baseline.yaml")
+
+    config = OmegaConf.to_object(
+        OmegaConf.merge(OmegaConf.structured(TutorConfig), OmegaConf.load(path))
+    )
+    student_prompts = tutor_workflow.load_prompt_pool(
+        config.prompt_pool.student_path, role="student"
+    )
+    pilot_source = OmegaConf.load(path)
+    baseline_source = OmegaConf.load(baseline_path)
+    pilot_source.pop("trial_name")
+    pilot_source.pop("prompt_pool")
+    baseline_source.pop("trial_name")
+
+    assert isinstance(config, TutorConfig)
+    assert config.prompt_pool.teacher_path == ""
+    assert config.prompt_pool.student_path.endswith(
+        "student_personality_suffixes_5.json"
+    )
+    assert config.prompt_pool.eval_all_student_prompts is True
+    assert len(student_prompts) == 5
+    assert all(prompt.startswith("[Persona: ") for prompt in student_prompts)
+    assert tuple(
+        prompt.split("]", 1)[0].removeprefix("[Persona: ") for prompt in student_prompts
+    ) == (
+        "QuickHelpSeeker",
+        "IndependentPerseverer",
+        "ReceptiveFollower",
+        "SkepticalDefender",
+        "AdaptiveExplorer",
+    )
+    assert all(
+        prompt.endswith(
+            "Do not mention the persona label or these behavior instructions."
+        )
+        for prompt in student_prompts
+    )
+    assert OmegaConf.to_container(
+        pilot_source, resolve=False
+    ) == OmegaConf.to_container(baseline_source, resolve=False)
 
 
 def test_teacher_warmup_asset_exactly_matches_20260704_prompt():
