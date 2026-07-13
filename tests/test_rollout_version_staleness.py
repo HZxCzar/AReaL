@@ -8,7 +8,13 @@ from typing import Any
 import pytest
 import torch
 
-from areal.api import ModelRequest, RolloutWorkflow
+from areal.api import (
+    Job,
+    LocalInfServerInfo,
+    ModelRequest,
+    RolloutWorkflow,
+    Worker,
+)
 from areal.api.cli_args import GenerationHyperparameters, InferenceEngineConfig
 from areal.api.io_struct import HttpGenerationResult, HttpRequest, WeightUpdateMeta
 from areal.infra import remote_inf_engine as remote_inf_engine_module
@@ -487,6 +493,54 @@ def test_vllm_server_args_record_loaded_lora_and_capacity():
     assert engine._max_loaded_loras_by_addr == {addr: 4}
     with engine.lora_version_lease(0) as leased_version:
         assert leased_version == 0
+
+
+@pytest.mark.asyncio
+async def test_eval_controller_uses_updated_lora_on_shared_server():
+    """Eval workers should use LoRAs loaded by the owning rollout controller."""
+
+    class FakeScheduler:
+        def __init__(self, config):
+            self.worker = Worker(id="eval-rollout/0", ip="127.0.0.1")
+            self.engine = RemoteInfEngine(config=config, backend=FakeBackend())
+
+        def create_workers(self, job):
+            return [self.worker.id]
+
+        def get_workers(self, role):
+            return [self.worker]
+
+        async def create_engine(self, **_kwargs):
+            return None
+
+        async def async_call_engine(self, *, method, **kwargs):
+            if method == "initialize":
+                self.engine.addresses = [kwargs["addr"]]
+            elif method == "record_lora_server_args":
+                self.engine.record_lora_server_args(kwargs["server_args"])
+            return None
+
+    config = InferenceEngineConfig(backend="sglang:d1", use_lora=True)
+    scheduler = FakeScheduler(config)
+    controller = RolloutController(
+        inf_engine=RemoteInfEngine,
+        config=config,
+        scheduler=scheduler,
+    )
+    controller._worker_role = "eval-rollout"
+
+    await controller._async_initialize(
+        Job(role="eval-rollout"),
+        server_args={
+            "lora_paths": ["default_lora-v0=/tmp/initial_lora"],
+            "max_loaded_loras": 16,
+        },
+        server_infos=[LocalInfServerInfo(host="127.0.0.1", port=30000, process=None)],
+    )
+
+    scheduler.engine.set_version(10)
+    with scheduler.engine.lora_version_lease(None, workflow=True) as version:
+        assert version == 10
 
 
 def test_concurrent_lora_disk_update_fails_instead_of_waiting(monkeypatch):

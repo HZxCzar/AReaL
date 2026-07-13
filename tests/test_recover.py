@@ -220,6 +220,15 @@ class TestRecoverHandler:
             assert "GatewayTrainController" in str(exc_info.value)
             assert '`_version="v2"`' in str(exc_info.value)
 
+    def test_load_missing_pointer_starts_new_distributed_experiment(self, monkeypatch):
+        """A new distributed run must not require an existing recovery pointer."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler = self._make_handler(tmpdir, "auto")
+
+            monkeypatch.setattr("areal.utils.recover.dist.is_initialized", lambda: True)
+
+            assert handler.load(Mock(), Mock(), Mock(), Mock(), Mock()) is None
+
     @pytest.mark.parametrize("mode", ["on", "auto"])
     def test_dump_rejects_gateway_train_controller(self, mode):
         with tempfile.TemporaryDirectory() as tmpdir:

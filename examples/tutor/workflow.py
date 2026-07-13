@@ -427,6 +427,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         context_window_margin: int = 256,
         student_generalize_enabled: bool = False,
         student_generalize_mode: StudentGeneralizeMode | str = "only_success",
+        student_generalize_source: str = "sidecar",
         student_generalize_path: str = "",
         student_generalize_level1_reward: float = 0.2,
         student_generalize_level2_reward: float = 0.5,
@@ -621,6 +622,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError(
                 "student_generalize_mode must be 'only_success' or 'always'."
             )
+        self.student_generalize_source = (
+            student_generalize_source or "sidecar"
+        ).strip()
+        if self.student_generalize_source not in {"sidecar", "train"}:
+            raise ValueError("student_generalize_source must be 'sidecar' or 'train'.")
         self.student_generalize_path = student_generalize_path.strip()
         self.student_generalize_level_rewards = {
             "level1": float(student_generalize_level1_reward),
@@ -647,8 +653,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 for reward in self.student_generalize_level_rewards.values()
             ):
                 raise ValueError(
-                    "student generalization level rewards must be positive when "
-                    "confidence reward is enabled."
+                    "student generalization rewards must be positive when confidence "
+                    "reward is enabled."
                 )
             if self.aux_mode != "api" and not self._student_model_configs:
                 raise ValueError(
@@ -2290,9 +2296,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
             return {}
 
         rewards = getattr(self, "student_generalize_level_rewards", {}) or {}
+        if getattr(self, "student_generalize_source", "sidecar") == "train":
+            raw_samples = payload.get("samples")
+            items = raw_samples if isinstance(raw_samples, list) else []
+        else:
+            items = [payload.get(level) for level in _STUDENT_GENERALIZE_LEVELS]
+
         cases: dict[str, StudentGeneralizationCase] = {}
-        for level in _STUDENT_GENERALIZE_LEVELS:
-            item = payload.get(level)
+        for level, item in zip(_STUDENT_GENERALIZE_LEVELS, items, strict=False):
             if not isinstance(item, dict):
                 continue
             task = item.get("task")

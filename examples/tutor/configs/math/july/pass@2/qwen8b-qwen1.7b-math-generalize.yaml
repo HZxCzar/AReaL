@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-qwen1.7b-math-pass@2-baseline
+trial_name: qwen8b-qwen1.7b-math-pass@2-generalize
 
 seed: 42
 enable_offload: false
@@ -18,8 +18,8 @@ teacher_show_ground_truth: false
 student_generalize:
   enabled: true
   source: train
-  level1_reward: 0.0
-  level2_reward: 0.0
+  level1_reward: 0.5
+  level2_reward: 0.5
 
 auxiliary_model:
   mode: api

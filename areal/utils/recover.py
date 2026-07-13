@@ -532,6 +532,9 @@ class RecoverHandler:
             recover_info = RecoverInfo.load(recover_info_path)
         except Exception as exc:
             read_error = exc
+        if isinstance(read_error, FileNotFoundError):
+            logger.warning("No recovery state was found. Starting a new experiment.")
+            return None
         if read_error is not None and not dist.is_initialized():
             if isinstance(
                 read_error,

@@ -12,6 +12,11 @@ from core.generalization import (
     load_student_generalize_bank,
     validate_student_generalize_dataset,
 )
+from core.math_generalization import (
+    MATH_GENERALIZATION_SAMPLE_COUNT,
+    default_math_generalization_output_path,
+    prepare_math_generalization_sidecar,
+)
 from core.polaris_generalization import (
     default_polaris_generalization_output_path,
     prepare_polaris_generalization_dataset,
@@ -43,6 +48,11 @@ def _validate_student_generalize_datasets(config: TutorConfig, tokenizer: Any) -
         train_dataset,
         split_name="train",
         bank=bank,
+        sample_count=(
+            MATH_GENERALIZATION_SAMPLE_COUNT
+            if student_generalize.source == "train"
+            else None
+        ),
     )
 
     if config.valid_dataset is None:
@@ -56,7 +66,39 @@ def _validate_student_generalize_datasets(config: TutorConfig, tokenizer: Any) -
         valid_dataset,
         split_name="test",
         bank=bank,
+        sample_count=(
+            MATH_GENERALIZATION_SAMPLE_COUNT
+            if student_generalize.source == "train"
+            else None
+        ),
     )
+
+
+def _prepare_math_generalization_data(config: TutorConfig) -> None:
+    generalize = config.student_generalize
+    if (
+        config.dataset_type != "math"
+        or not generalize.enabled
+        or generalize.source != "train"
+    ):
+        return
+
+    output_path = str(
+        default_math_generalization_output_path(
+            config.train_dataset.path,
+            seed=config.seed,
+            sample_count=MATH_GENERALIZATION_SAMPLE_COUNT,
+        )
+    )
+    valid_path = config.valid_dataset.path if config.valid_dataset is not None else None
+    result = prepare_math_generalization_sidecar(
+        train_dataset_path=config.train_dataset.path,
+        valid_dataset_path=valid_path,
+        output_path=output_path,
+        seed=config.seed,
+        sample_count=MATH_GENERALIZATION_SAMPLE_COUNT,
+    )
+    generalize.path = str(result.sidecar_path)
 
 
 def _prepare_polaris_generalization_data(config: TutorConfig) -> None:
@@ -164,6 +206,7 @@ def main(args):
     teacher_pre = config.teacher_pre
     reward = config.reward
     _prepare_polaris_generalization_data(config)
+    _prepare_math_generalization_data(config)
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
     _validate_student_generalize_datasets(config, tokenizer)
 
@@ -263,6 +306,7 @@ def main(args):
         model_context_length=config.sglang.context_length,
         student_generalize_enabled=student_generalize.enabled,
         student_generalize_mode=student_generalize.mode,
+        student_generalize_source=student_generalize.source,
         student_generalize_path=student_generalize.path,
         student_generalize_level1_reward=student_generalize.level1_reward,
         student_generalize_level2_reward=student_generalize.level2_reward,

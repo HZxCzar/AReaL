@@ -147,6 +147,18 @@ def test_student_generalize_config_rejects_invalid_mode():
         TutorStudentGeneralizeConfig(mode="sometimes")
 
 
+def test_student_generalize_train_source_keeps_level_reward_config():
+    """Test train-sampled generalization preserves level reward fields."""
+    config = TutorStudentGeneralizeConfig(
+        source="train",
+        level1_reward=0.4,
+        level2_reward=0.4,
+    )
+
+    assert config.level1_reward == pytest.approx(0.4)
+    assert config.level2_reward == pytest.approx(0.4)
+
+
 def test_student_generalize_confidence_defaults_to_disabled():
     confidence = TutorStudentGeneralizeConfidenceConfig()
 
@@ -2089,6 +2101,54 @@ def test_student_generalize_missing_variants_skips_without_student_call(monkeypa
     assert [result.level for result in results] == ["level1", "level2"]
     assert all(result.skipped for result in results)
     assert all(result.skip_reason == "missing_variant" for result in results)
+
+
+def test_student_generalize_train_pairs_keep_level_reward_components():
+    """Test fixed train pairs retain the existing level reward interface."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_generalize_source = "train"
+    workflow.student_generalize_level_rewards = {"level1": 0.3, "level2": 0.3}
+    workflow.student_generalize_bank = {
+        "original": {
+            "samples": [
+                {"id": "train-1", "task": "first task", "ground_truth": "1"},
+                {"id": "train-2", "task": "second task", "ground_truth": "2"},
+            ]
+        }
+    }
+
+    cases = workflow._student_generalization_cases({"id": "original"})
+
+    assert list(cases) == ["level1", "level2"]
+    assert [case.task for case in cases.values()] == ["first task", "second task"]
+    assert [case.reward for case in cases.values()] == pytest.approx([0.3, 0.3])
+
+    turn = _turn(1, correct=True)
+    assignment = types.SimpleNamespace(reward=0.0, reward_components={})
+    results = [
+        tutor_workflow.StudentGeneralizationResult(
+            level="level1",
+            correctness_reward=0.3,
+            reward=0.3,
+            reward_turn_idx=1,
+        ),
+        tutor_workflow.StudentGeneralizationResult(
+            level="level2",
+            correctness_reward=0.3,
+            reward=0.3,
+            reward_turn_idx=1,
+        ),
+    ]
+
+    workflow._apply_student_generalization_rewards([turn], [assignment], results)
+
+    assert assignment.reward == pytest.approx(0.6)
+    assert assignment.reward_components == {
+        "student_generalize_level1": pytest.approx(0.3),
+        "student_generalize_level2": pytest.approx(0.3),
+    }
 
 
 def _trace(

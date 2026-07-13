@@ -4,6 +4,9 @@ import pytest
 from datasets import Dataset, DatasetDict, load_from_disk
 
 from examples.tutor.core.generalization import validate_student_generalize_dataset
+from examples.tutor.core.math_generalization import (
+    prepare_math_generalization_sidecar,
+)
 from examples.tutor.core.polaris_generalization import (
     prepare_polaris_generalization_dataset,
 )
@@ -47,6 +50,106 @@ def test_validate_student_generalize_dataset_rejects_missing_cases():
 
     with pytest.raises(ValueError, match="train split has 2/2 samples"):
         validate_student_generalize_dataset(dataset, split_name="train", bank={})
+
+
+def test_prepare_math_generalization_sidecar_pairs_fixed_train_samples(tmp_path):
+    """Test seeded preprocessing fixes two other train questions per sample."""
+    train_rows = [
+        {
+            "id": f"train-{index}",
+            "task": f"train task {index}",
+            "ground_truth": str(index),
+            "metadata": {},
+        }
+        for index in range(5)
+    ]
+    test_rows = [
+        {
+            "id": "test-0",
+            "task": "test task",
+            "ground_truth": "5",
+            "metadata": {},
+        }
+    ]
+    source = tmp_path / "source"
+    DatasetDict(
+        {
+            "train": Dataset.from_list(train_rows),
+            "test": Dataset.from_list(test_rows),
+        }
+    ).save_to_disk(str(source))
+
+    first = prepare_math_generalization_sidecar(
+        train_dataset_path=source,
+        valid_dataset_path=source,
+        output_path=tmp_path / "first",
+        seed=42,
+        sample_count=2,
+        show_progress=False,
+    )
+    second = prepare_math_generalization_sidecar(
+        train_dataset_path=source,
+        valid_dataset_path=source,
+        output_path=tmp_path / "second",
+        seed=42,
+        sample_count=2,
+        show_progress=False,
+    )
+
+    first_bank = json.loads(first.sidecar_path.read_text(encoding="utf-8"))
+    second_bank = json.loads(second.sidecar_path.read_text(encoding="utf-8"))
+    assert first_bank == second_bank
+    assert set(first_bank) == {row["id"] for row in [*train_rows, *test_rows]}
+    train_ids = {row["id"] for row in train_rows}
+    for sample_id, payload in first_bank.items():
+        paired_ids = [sample["id"] for sample in payload["samples"]]
+        assert len(paired_ids) == 2
+        assert len(set(paired_ids)) == 2
+        assert set(paired_ids) <= train_ids
+        assert sample_id not in paired_ids
+
+    validate_student_generalize_dataset(
+        Dataset.from_list(train_rows),
+        split_name="train",
+        bank=first_bank,
+        sample_count=2,
+    )
+
+
+def test_prepare_math_generalization_sidecar_reuses_matching_manifest(tmp_path):
+    """Test startup preprocessing reuses fixed pairs with matching settings."""
+    rows = [
+        {
+            "id": f"train-{index}",
+            "task": f"task {index}",
+            "ground_truth": str(index),
+        }
+        for index in range(3)
+    ]
+    source = tmp_path / "source"
+    DatasetDict({"train": Dataset.from_list(rows)}).save_to_disk(str(source))
+    output = tmp_path / "output"
+
+    prepare_math_generalization_sidecar(
+        train_dataset_path=source,
+        valid_dataset_path=None,
+        output_path=output,
+        seed=7,
+        sample_count=2,
+        show_progress=False,
+    )
+    reused = prepare_math_generalization_sidecar(
+        train_dataset_path=source,
+        valid_dataset_path=None,
+        output_path=output,
+        seed=7,
+        sample_count=2,
+        show_progress=False,
+    )
+
+    assert reused.reused is True
+    assert reused.main_size == 3
+    assert reused.train_pool_size == 3
 
 
 def test_prepare_polaris_generalization_dataset_matches_by_difficulty(tmp_path):

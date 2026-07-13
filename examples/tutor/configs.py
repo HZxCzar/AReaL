@@ -16,6 +16,7 @@ _LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate", "feedback"}
 _DATASET_TYPES = {"aime", "math", "polaris"}
 _ANSWER_SCORERS = {"auto", "aime", "math", "polaris"}
 _STUDENT_GENERALIZE_MODES = {"only_success", "always"}
+_STUDENT_GENERALIZE_SOURCES = {"sidecar", "train"}
 _STUDENT_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 TUTOR_EVAL_STUDENT_FIELD = "__tutor_student_name"
@@ -273,6 +274,17 @@ class TutorStudentGeneralizeConfig:
             "choices": ["only_success", "always"],
         },
     )
+    source: str = field(
+        default="sidecar",
+        metadata={
+            "help": (
+                "Where generalization questions come from: 'sidecar' uses the "
+                "configured JSON/metadata level1 and level2 cases; 'train' "
+                "builds fixed seeded pairs from the training split at startup."
+            ),
+            "choices": ["sidecar", "train"],
+        },
+    )
     path: str = field(
         default="",
         metadata={
@@ -293,6 +305,10 @@ class TutorStudentGeneralizeConfig:
             raise ValueError(
                 "student_generalize.mode must be one of: 'only_success', 'always'."
             )
+        if self.source not in _STUDENT_GENERALIZE_SOURCES:
+            raise ValueError(
+                "student_generalize.source must be one of: 'sidecar', 'train'."
+            )
         if self.confidence.enabled and not self.enabled:
             raise ValueError(
                 "student_generalize.confidence.enabled=true requires "
@@ -302,8 +318,8 @@ class TutorStudentGeneralizeConfig:
             float(self.level1_reward) <= 0.0 or float(self.level2_reward) <= 0.0
         ):
             raise ValueError(
-                "student_generalize level rewards must be positive when confidence "
-                "reward is enabled."
+                "student_generalize rewards must be positive when confidence reward "
+                "is enabled."
             )
 
 
@@ -695,4 +711,9 @@ class TutorConfig(GRPOConfig):
         elif self.polaris_processing.enabled:
             raise ValueError(
                 "polaris_processing.enabled=true requires dataset_type='polaris'."
+            )
+        if self.student_generalize.source == "train" and self.dataset_type != "math":
+            raise ValueError(
+                "student_generalize.source='train' currently requires "
+                "dataset_type='math'."
             )

@@ -24,12 +24,17 @@ def validate_student_generalize_dataset(
     *,
     split_name: str,
     bank: Mapping[str, Any],
+    sample_count: int | None = None,
 ) -> None:
     missing: list[str] = []
     total = 0
     for index, sample in enumerate(dataset):
         total += 1
-        sample_missing = _missing_generalize_fields(sample, bank)
+        sample_missing = _missing_generalize_fields(
+            sample,
+            bank,
+            sample_count=sample_count,
+        )
         if sample_missing:
             sample_id = sample.get("id")
             label = str(sample_id) if sample_id is not None else f"index {index}"
@@ -44,8 +49,9 @@ def validate_student_generalize_dataset(
     raise ValueError(
         "student_generalize.enabled=true but "
         f"{split_name} split has {len(missing)}/{total} samples without complete "
-        "student generalization cases. Each sample must provide level1 and level2 "
-        "with task and ground_truth, either in the sidecar keyed by id or in "
+        "student generalization cases. Each sample must provide either level1 and "
+        "level2 or the configured number of samples with task and ground_truth, "
+        "either in the sidecar keyed by id or in "
         f"metadata.student_generalize. Missing: {preview}"
     )
 
@@ -53,6 +59,8 @@ def validate_student_generalize_dataset(
 def _missing_generalize_fields(
     sample: Mapping[str, Any],
     bank: Mapping[str, Any],
+    *,
+    sample_count: int | None = None,
 ) -> list[str]:
     payload: Any | None = None
     sample_id = sample.get("id")
@@ -65,6 +73,21 @@ def _missing_generalize_fields(
 
     if not isinstance(payload, Mapping):
         return ["student_generalize"]
+
+    samples = payload.get("samples")
+    if isinstance(samples, list):
+        expected_count = sample_count if sample_count is not None else len(samples)
+        missing: list[str] = []
+        if len(samples) != expected_count:
+            missing.append(f"samples(count={len(samples)}, expected={expected_count})")
+        for index, item in enumerate(samples):
+            if not isinstance(item, Mapping):
+                missing.append(f"samples[{index}]")
+                continue
+            for field in REQUIRED_STUDENT_GENERALIZE_FIELDS:
+                if item.get(field) in (None, ""):
+                    missing.append(f"samples[{index}].{field}")
+        return missing
 
     missing: list[str] = []
     for level in REQUIRED_STUDENT_GENERALIZE_LEVELS:
