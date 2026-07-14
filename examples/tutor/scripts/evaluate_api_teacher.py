@@ -27,6 +27,7 @@ except ImportError:  # pragma: no cover - handled with a runtime error
 from examples.tutor import train as tutor_train
 from examples.tutor.configs import (
     TUTOR_EVAL_STUDENT_FIELD,
+    TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
     TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
     TutorConfig,
 )
@@ -119,6 +120,7 @@ class EpisodeResult:
     latest_student_answer_preview: str
     trace_path: str | None
     duration_seconds: float
+    student_prompt_pool: str = ""
     student_prompt_index: int | None = None
 
 
@@ -450,11 +452,13 @@ def build_eval_workflow_kwargs(
         "teacher_pre_attempts": presolve_attempts,
         "teacher_pre_max_tokens": presolve_max_tokens,
         "student_system_prompt": config.student_system_prompt,
-        "student_prompt_pool_path": (
-            config.prompt_pool.student_path
-            if config.prompt_pool.eval_all_student_prompts
-            else ""
+        "student_prompt_pool_path": config.prompt_pool.student_eval_paths.get(
+            "seen", ""
         ),
+        "student_heldout_prompt_pool_path": (
+            config.prompt_pool.student_eval_paths.get("heldout", "")
+        ),
+        "student_prompt_include_base": config.prompt_pool.include_base,
         "prompt_pool_seed": config.seed,
         "leak_check_system_prompt": config.leak_check_system_prompt,
         "answer_judge_enabled": auxiliary_model.answer_judge_enabled,
@@ -487,7 +491,7 @@ def prepare_test_dataset(
     *,
     tokenizer: Any,
     limit: int,
-    student_prompts: tuple[str, ...] | None = None,
+    student_prompts: tuple[tutor_train.EvalStudentPrompt, ...] | None = None,
 ) -> Any:
     valid_config = tutor_train._without_remote_dataset_loading(config.valid_dataset)
     dataset = get_custom_dataset(
@@ -512,7 +516,7 @@ def prepare_test_dataset(
         student_prompts = tutor_train._load_eval_student_prompts(config)
     dataset = tutor_train._expand_eval_dataset_for_student_prompts(
         dataset,
-        len(student_prompts),
+        student_prompts,
     )
     return dataset
 
@@ -656,9 +660,12 @@ def result_from_workflow(
         ),
         trace_path=None,
         duration_seconds=float(duration_seconds),
+        student_prompt_pool=str(
+            spec.row.get(TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD) or ""
+        ),
         student_prompt_index=(
             int(spec.row[TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD])
-            if TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD in spec.row
+            if spec.row.get(TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD) is not None
             else None
         ),
     )
@@ -701,9 +708,12 @@ def error_result(
         latest_student_answer_preview="",
         trace_path=None,
         duration_seconds=float(duration_seconds),
+        student_prompt_pool=str(
+            spec.row.get(TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD) or ""
+        ),
         student_prompt_index=(
             int(spec.row[TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD])
-            if TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD in spec.row
+            if spec.row.get(TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD) is not None
             else None
         ),
     )
@@ -1030,51 +1040,62 @@ def aggregate_report(
     dataset_size: int,
     attempts: int,
     generalization_enabled: bool = False,
-    student_prompt_rows: dict[int, int] | None = None,
+    student_prompt_rows: dict[tuple[str, int], int] | None = None,
 ) -> dict[str, Any]:
     results = latest_results(results)
-    expected_per_mode = dataset_size * attempts
+    persona_row_count = sum((student_prompt_rows or {}).values())
+    base_prompt_rows = dataset_size - persona_row_count
+    if base_prompt_rows < 0:
+        raise ValueError(
+            "Student prompt row counts exceed the evaluation dataset size."
+        )
+    expected_per_mode = base_prompt_rows * attempts
     mode_summaries: dict[str, dict[str, Any]] = {}
     for mode in modes:
-        mode_results = [result for result in results if result.mode == mode.name]
+        all_mode_results = [result for result in results if result.mode == mode.name]
+        mode_results = (
+            [
+                result
+                for result in all_mode_results
+                if result.student_prompt_index is None
+            ]
+            if student_prompt_rows
+            else all_mode_results
+        )
         mode_summary = {
             **aggregate_mode(
                 mode_results,
                 expected=expected_per_mode,
                 generalization_enabled=generalization_enabled,
             ),
-            **aggregate_items(mode_results, expected_items=dataset_size),
+            **aggregate_items(mode_results, expected_items=base_prompt_rows),
         }
         if student_prompt_rows:
-            mode_summary["student_prompts"] = {
-                str(prompt_index): {
+            pool_summaries: dict[str, dict[str, Any]] = {}
+            for (pool, prompt_index), row_count in sorted(student_prompt_rows.items()):
+                prompt_results = [
+                    result
+                    for result in all_mode_results
+                    if result.student_prompt_pool == pool
+                    and result.student_prompt_index == prompt_index
+                ]
+                pool_summaries.setdefault(pool, {})[str(prompt_index)] = {
                     "dataset_rows": row_count,
                     **aggregate_mode(
-                        [
-                            result
-                            for result in mode_results
-                            if result.student_prompt_index == prompt_index
-                        ],
+                        prompt_results,
                         expected=row_count * attempts,
                         generalization_enabled=generalization_enabled,
                     ),
-                    **aggregate_items(
-                        [
-                            result
-                            for result in mode_results
-                            if result.student_prompt_index == prompt_index
-                        ],
-                        expected_items=row_count,
-                    ),
+                    **aggregate_items(prompt_results, expected_items=row_count),
                 }
-                for prompt_index, row_count in sorted(student_prompt_rows.items())
-            }
+            mode_summary["student_prompts"] = pool_summaries
         mode_summaries[mode.name] = mode_summary
 
     return {
         "dataset_rows": dataset_size,
+        "base_prompt_rows": base_prompt_rows,
         "attempts_per_row": attempts,
-        "expected_total_attempts": expected_per_mode * len(modes),
+        "expected_total_attempts": dataset_size * attempts * len(modes),
         "recorded_total_attempts": len(results),
         "modes": mode_summaries,
     }
@@ -1105,16 +1126,25 @@ def aggregate_items(
     }
 
 
-def student_prompt_row_counts(dataset: Any) -> dict[int, int]:
+def student_prompt_row_counts(dataset: Any) -> dict[tuple[str, int], int]:
     """Count expanded validation rows for each forced student prompt."""
 
-    if TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD not in dataset.column_names:
+    required = {
+        TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
+        TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
+    }
+    if not required.issubset(dataset.column_names):
         return {}
     return dict(
         sorted(
             Counter(
-                int(prompt_index)
-                for prompt_index in dataset[TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD]
+                (str(pool), int(prompt_index))
+                for pool, prompt_index in zip(
+                    dataset[TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD],
+                    dataset[TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD],
+                    strict=True,
+                )
+                if prompt_index is not None
             ).items()
         )
     )
@@ -1154,7 +1184,7 @@ def build_run_signature(
     attempts: int,
     teacher_base_url: str,
     teacher_request_params: dict[str, Any],
-    student_prompts: tuple[str, ...] = (),
+    student_prompts: tuple[tutor_train.EvalStudentPrompt, ...] = (),
 ) -> dict[str, Any]:
     config_path = Path(args.config).resolve()
     config_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
@@ -1218,12 +1248,12 @@ def build_run_signature(
                 "student_generalize_source": config.student_generalize.source,
                 **(
                     {
-                        "student_prompt_pool": {
-                            "path": config.prompt_pool.student_path,
+                        "student_prompt_pools": {
+                            "paths": config.prompt_pool.student_eval_paths,
                             "count": len(student_prompts),
                             "sha256": hashlib.sha256(
                                 json.dumps(
-                                    student_prompts,
+                                    [asdict(prompt) for prompt in student_prompts],
                                     ensure_ascii=False,
                                     separators=(",", ":"),
                                 ).encode("utf-8")
@@ -1706,15 +1736,13 @@ async def main_async(args: argparse.Namespace) -> None:
         student_prompt_rows=prompt_row_counts,
     )
     if prompt_row_counts:
-        report["student_prompt_pool"] = {
-            "path": config.prompt_pool.student_path,
+        report["student_prompt_pools"] = {
+            "paths": config.prompt_pool.student_eval_paths,
             "row_counts": {
-                str(index): count for index, count in prompt_row_counts.items()
+                f"{pool}/{index}": count
+                for (pool, index), count in prompt_row_counts.items()
             },
-            "prompts": [
-                {"index": index, "suffix": prompt}
-                for index, prompt in enumerate(student_prompts)
-            ],
+            "prompts": [asdict(prompt) for prompt in student_prompts],
         }
     report["output_dir"] = str(output_dir)
     report["finished_at"] = datetime.now(UTC).isoformat()

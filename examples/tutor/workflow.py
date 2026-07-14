@@ -128,6 +128,7 @@ from examples.common.openai_utils import (
 from examples.common.parsing import parse_json_dict
 from examples.tutor.configs import (
     TUTOR_EVAL_STUDENT_FIELD,
+    TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
     TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
     TutorStudentModelConfig,
 )
@@ -416,6 +417,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_pre_max_tokens: int = 0,
         student_system_prompt: str = "",
         student_prompt_pool_path: str = "",
+        student_heldout_prompt_pool_path: str = "",
+        student_prompt_include_base: bool = False,
         prompt_pool_seed: int = 0,
         leak_check_system_prompt: str = "",
         answer_judge_enabled: bool = False,
@@ -585,6 +588,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.student_prompt_pool = load_prompt_pool(
             student_prompt_pool_path, role="student"
         )
+        self.student_heldout_prompt_pool = load_prompt_pool(
+            student_heldout_prompt_pool_path, role="held-out student"
+        )
+        self.student_prompt_include_base = bool(student_prompt_include_base)
         self.prompt_pool_seed = int(prompt_pool_seed)
         self._teacher_prompt_pool_fallback_rng = random.Random(
             f"{self.prompt_pool_seed}:teacher:fallback"
@@ -867,7 +874,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         ).strip()
 
     def _sample_prompt_pool(
-        self, pool: tuple[str, ...], *, role: str
+        self, pool: tuple[str, ...], *, role: str, include_base: bool = False
     ) -> PromptPoolSelection | None:
         if not pool:
             return None
@@ -885,19 +892,29 @@ class TutorAgentWorkflow(RolloutWorkflow):
             rng = self._teacher_prompt_pool_fallback_rng
         else:
             rng = self._student_prompt_pool_fallback_rng
-        index = rng.randrange(len(pool))
-        return PromptPoolSelection(index=index, suffix=pool[index])
+        index = rng.randrange(len(pool) + int(include_base))
+        if index == len(pool):
+            return None
+        return PromptPoolSelection(
+            index=index,
+            suffix=pool[index],
+            pool="seen" if role == "student" else "",
+        )
 
     def _select_student_prompt(
         self, data: dict[str, Any]
     ) -> PromptPoolSelection | None:
-        pool = getattr(self, "student_prompt_pool", ())
+        seen_pool = getattr(self, "student_prompt_pool", ())
         try:
             is_eval = bool(getattr(workflow_context.get(), "is_eval", False))
         except Exception:
             is_eval = False
         if not is_eval:
-            return self._sample_prompt_pool(pool, role="student")
+            return self._sample_prompt_pool(
+                seen_pool,
+                role="student",
+                include_base=getattr(self, "student_prompt_include_base", False),
+            )
 
         raw_index = data.get(TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD)
         if raw_index is None:
@@ -913,17 +930,30 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "Forced evaluation student prompt index must be an integer; "
                 f"got {raw_index!r}."
             ) from exc
+        raw_pool = str(
+            data.get(TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD) or "seen"
+        ).strip()
+        pools = {
+            "seen": seen_pool,
+            "heldout": getattr(self, "student_heldout_prompt_pool", ()),
+        }
+        if raw_pool not in pools:
+            raise ValueError(
+                f"Unknown forced evaluation student prompt pool {raw_pool!r}; "
+                "expected 'seen' or 'heldout'."
+            )
+        pool = pools[raw_pool]
         if not pool:
             raise ValueError(
-                "A forced evaluation student prompt requires a non-empty student "
-                "prompt pool."
+                f"A forced evaluation student prompt requires a non-empty {raw_pool} "
+                "student prompt pool."
             )
         if index < 0 or index >= len(pool):
             raise ValueError(
                 f"Forced evaluation student prompt index {index} is out of range "
                 f"for {len(pool)} prompts."
             )
-        return PromptPoolSelection(index=index, suffix=pool[index])
+        return PromptPoolSelection(index=index, suffix=pool[index], pool=raw_pool)
 
     def _teacher_warmup_probability(self, rollout_version: int | None) -> float:
         if not getattr(self, "teacher_warmup_enabled", False):
@@ -2873,49 +2903,81 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     float(teacher_output_chars) if source_selected else 0.0
                 )
 
-        configured_student_names = list(
-            getattr(self, "student_model_runtimes", {}).keys()
-        )
-        if not configured_student_names and student_name:
-            configured_student_names = [student_name]
-        for configured_name in configured_student_names:
-            metric_name = self._student_metric_name(configured_name)
-            metrics[f"student/{metric_name}/selected"] = float(
-                configured_name == student_name
+        try:
+            is_forced_persona_eval = bool(
+                workflow_context.get().is_eval and student_prompt_selection is not None
             )
-        if student_name:
-            metric_name = self._student_metric_name(student_name)
-            prefix = f"student/{metric_name}"
-            metrics[f"{prefix}/solved"] = float(success_round > 0)
-            metrics[f"{prefix}/pre_solved"] = float(pre_success)
-            metrics[f"{prefix}/reward"] = float(total_reward)
-            metrics[f"{prefix}/turns"] = float(len(traces))
-            metrics[f"{prefix}/call_failed"] = float(student_call_failed)
-
-        student_prompt_pool = getattr(self, "student_prompt_pool", ())
-        if student_prompt_pool:
-            selected_index = (
-                student_prompt_selection.index
-                if student_prompt_selection is not None
-                else None
+        except Exception:
+            is_forced_persona_eval = False
+        if is_forced_persona_eval:
+            metrics.clear()
+        if not is_forced_persona_eval:
+            configured_student_names = list(
+                getattr(self, "student_model_runtimes", {}).keys()
             )
-            for prompt_index in range(len(student_prompt_pool)):
-                metrics[f"student_prompt/{prompt_index}/selected"] = float(
-                    prompt_index == selected_index
+            if not configured_student_names and student_name:
+                configured_student_names = [student_name]
+            for configured_name in configured_student_names:
+                metric_name = self._student_metric_name(configured_name)
+                metrics[f"student/{metric_name}/selected"] = float(
+                    configured_name == student_name
                 )
-            if selected_index is not None:
-                prefix = f"student_prompt/{selected_index}"
+            if student_name:
+                metric_name = self._student_metric_name(student_name)
+                prefix = f"student/{metric_name}"
                 metrics[f"{prefix}/solved"] = float(success_round > 0)
                 metrics[f"{prefix}/pre_solved"] = float(pre_success)
                 metrics[f"{prefix}/reward"] = float(total_reward)
                 metrics[f"{prefix}/turns"] = float(len(traces))
                 metrics[f"{prefix}/call_failed"] = float(student_call_failed)
 
-        metrics.update(self._reward_component_metrics(traces))
-        self._log_generalize_stats(
-            solved=success_round > 0,
-            student_generalization_results=student_generalization_results,
-        )
+        student_prompt_pools = {
+            "seen": getattr(self, "student_prompt_pool", ()),
+            "heldout": getattr(self, "student_heldout_prompt_pool", ()),
+        }
+        if any(student_prompt_pools.values()):
+            selected_index = (
+                student_prompt_selection.index
+                if student_prompt_selection is not None
+                else None
+            )
+            selected_pool = (
+                student_prompt_selection.pool or "seen"
+                if student_prompt_selection is not None
+                else None
+            )
+            for pool_name, prompt_pool in student_prompt_pools.items():
+                if not prompt_pool:
+                    continue
+                pool_selected = pool_name == selected_pool
+                metrics[f"student_prompt/{pool_name}/selected"] = float(pool_selected)
+                for prompt_index in range(len(prompt_pool)):
+                    is_selected = pool_selected and prompt_index == selected_index
+                    metrics[f"student_prompt/{pool_name}/{prompt_index}/selected"] = (
+                        float(is_selected)
+                    )
+                    if pool_name == "seen":
+                        metrics[f"student_prompt/{prompt_index}/selected"] = float(
+                            is_selected
+                        )
+            if selected_index is not None:
+                prefixes = [f"student_prompt/{selected_pool}"]
+                prefixes.append(f"student_prompt/{selected_pool}/{selected_index}")
+                if selected_pool == "seen":
+                    prefixes.append(f"student_prompt/{selected_index}")
+                for prefix in prefixes:
+                    metrics[f"{prefix}/solved"] = float(success_round > 0)
+                    metrics[f"{prefix}/pre_solved"] = float(pre_success)
+                    metrics[f"{prefix}/reward"] = float(total_reward)
+                    metrics[f"{prefix}/turns"] = float(len(traces))
+                    metrics[f"{prefix}/call_failed"] = float(student_call_failed)
+
+        if not is_forced_persona_eval:
+            metrics.update(self._reward_component_metrics(traces))
+            self._log_generalize_stats(
+                solved=success_round > 0,
+                student_generalization_results=student_generalization_results,
+            )
         _safe_scalar(**metrics)
 
     def _enabled_reward_component_keys(self) -> list[str]:

@@ -11,6 +11,7 @@ from omegaconf import OmegaConf
 
 from examples.tutor import workflow as tutor_workflow
 from examples.tutor.configs import (
+    TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
     TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
     TutorConfig,
     TutorTeacherWarmupPromptConfig,
@@ -194,7 +195,36 @@ def test_eval_student_prompt_selection_honors_forced_index(monkeypatch):
     context.task_id = 99
     second = workflow._select_student_prompt(data)
 
-    assert first == second == PromptPoolSelection(index=1, suffix="persona one")
+    assert (
+        first
+        == second
+        == PromptPoolSelection(index=1, suffix="persona one", pool="seen")
+    )
+
+
+def test_eval_student_prompt_selection_uses_heldout_pool(monkeypatch):
+    """Test held-out evaluation never falls back to the seen training pool."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_prompt_pool = ("seen zero",)
+    workflow.student_heldout_prompt_pool = ("heldout zero", "heldout one")
+    monkeypatch.setattr(
+        tutor_workflow.workflow_context,
+        "get",
+        lambda: types.SimpleNamespace(is_eval=True, task_id=17),
+    )
+
+    selection = workflow._select_student_prompt(
+        {
+            TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD: "heldout",
+            TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD: 1,
+        }
+    )
+
+    assert selection == PromptPoolSelection(
+        index=1, suffix="heldout one", pool="heldout"
+    )
 
 
 def test_training_student_prompt_selection_ignores_eval_index(monkeypatch):
@@ -203,6 +233,7 @@ def test_training_student_prompt_selection_ignores_eval_index(monkeypatch):
         tutor_workflow.TutorAgentWorkflow
     )
     workflow.student_prompt_pool = ("zero", "one", "two")
+    workflow.student_prompt_include_base = False
     workflow.prompt_pool_seed = 42
     workflow._student_prompt_pool_fallback_rng = random.Random(2)
     monkeypatch.setattr(
@@ -219,6 +250,37 @@ def test_training_student_prompt_selection_ignores_eval_index(monkeypatch):
     assert selection == PromptPoolSelection(
         index=expected_index,
         suffix=workflow.student_prompt_pool[expected_index],
+        pool="seen",
+    )
+
+
+def test_training_student_prompt_selection_respects_include_base(monkeypatch):
+    """Test the base prompt is an equal training option only when enabled."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_prompt_pool = ("zero", "one", "two")
+    workflow.prompt_pool_seed = 42
+
+    class ChooseLast:
+        def randrange(self, stop):
+            return stop - 1
+
+    workflow._student_prompt_pool_fallback_rng = ChooseLast()
+    monkeypatch.setattr(
+        tutor_workflow.workflow_context,
+        "get",
+        lambda: types.SimpleNamespace(is_eval=False, task_id=None),
+    )
+
+    workflow.student_prompt_include_base = True
+    assert workflow._select_student_prompt({}) is None
+
+    workflow.student_prompt_include_base = False
+    assert workflow._select_student_prompt({}) == PromptPoolSelection(
+        index=2,
+        suffix="two",
+        pool="seen",
     )
 
 
@@ -253,7 +315,7 @@ def test_eval_student_prompt_selection_requires_loaded_pool(monkeypatch):
         lambda: types.SimpleNamespace(is_eval=True, task_id=17),
     )
 
-    with pytest.raises(ValueError, match="non-empty student prompt pool"):
+    with pytest.raises(ValueError, match="non-empty seen student prompt pool"):
         workflow._select_student_prompt({TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD: 0})
 
 
@@ -482,6 +544,94 @@ def test_rollout_stats_report_selected_student_prompt(monkeypatch):
     assert captured["student_prompt/1/reward"] == pytest.approx(1.5)
     assert captured["student_prompt/1/turns"] == pytest.approx(0.0)
     assert captured["student_prompt/1/call_failed"] == pytest.approx(0.0)
+
+
+def test_eval_student_summary_uses_only_base_prompt_rows(monkeypatch):
+    """Test the comparable student score excludes forced persona rollouts."""
+    captured = []
+    monkeypatch.setattr(
+        tutor_workflow,
+        "_safe_scalar",
+        lambda **metrics: captured.append(metrics),
+    )
+    monkeypatch.setattr(
+        tutor_workflow.workflow_context,
+        "get",
+        lambda: types.SimpleNamespace(is_eval=True),
+    )
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_model_runtimes = {}
+    workflow.student_prompt_pool = ("persona zero", "persona one")
+
+    workflow._log_rollout_stats(
+        total_reward=0.0,
+        traces=[],
+        termination_reason="max_turns",
+        pre_success=False,
+        leak_count=0,
+        student_name="qwen3-1.7b",
+    )
+    workflow._log_rollout_stats(
+        total_reward=0.0,
+        traces=[],
+        termination_reason="max_turns",
+        pre_success=False,
+        leak_count=0,
+        student_name="qwen3-1.7b",
+        student_prompt_selection=PromptPoolSelection(
+            index=1,
+            suffix="persona one",
+            pool="seen",
+        ),
+    )
+
+    base_metrics, persona_metrics = captured
+    assert base_metrics["solved"] == pytest.approx(0.0)
+    assert base_metrics["student/qwen3-1.7b/solved"] == pytest.approx(0.0)
+    assert "solved" not in persona_metrics
+    assert "reward" not in persona_metrics
+    assert "student/qwen3-1.7b/solved" not in persona_metrics
+    assert persona_metrics["student_prompt/seen/1/solved"] == pytest.approx(0.0)
+
+
+def test_training_persona_keeps_student_summary_metrics(monkeypatch):
+    """Test persona sampling does not remove the existing training summary."""
+    captured = {}
+    monkeypatch.setattr(
+        tutor_workflow,
+        "_safe_scalar",
+        lambda **metrics: captured.update(metrics),
+    )
+    monkeypatch.setattr(
+        tutor_workflow.workflow_context,
+        "get",
+        lambda: types.SimpleNamespace(is_eval=False),
+    )
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_model_runtimes = {}
+    workflow.student_prompt_pool = ("persona zero",)
+
+    workflow._log_rollout_stats(
+        total_reward=0.0,
+        traces=[],
+        termination_reason="max_turns",
+        pre_success=False,
+        leak_count=0,
+        student_name="qwen3-1.7b",
+        student_prompt_selection=PromptPoolSelection(
+            index=0,
+            suffix="persona zero",
+            pool="seen",
+        ),
+    )
+
+    assert captured["solved"] == pytest.approx(0.0)
+    assert captured["student/qwen3-1.7b/solved"] == pytest.approx(0.0)
+    assert captured["student_prompt/seen/0/solved"] == pytest.approx(0.0)
 
 
 def test_teacher_rollout_uses_suffix_but_training_tensor_uses_clean_prompt():
@@ -766,14 +916,26 @@ def test_prompt_pool_example_yaml_loads_typed_config(monkeypatch):
     )
 
 
-def test_pass2_student_personality_pool_config_loads_five_personas(monkeypatch):
+@pytest.mark.parametrize(
+    ("config_name", "baseline_name"),
+    [
+        (
+            "qwen8b-qwen1.7b-math-student5.yaml",
+            "qwen8b-qwen1.7b-math-baseline.yaml",
+        ),
+        (
+            "qwen8b-qwen1.7b-math-student5-pre.yaml",
+            "qwen8b-qwen1.7b-math-pre.yaml",
+        ),
+    ],
+)
+def test_pass2_student_personality_pool_config_loads_five_personas(
+    monkeypatch, config_name, baseline_name
+):
     """Test the pass@2 pilot changes only the five-way student persona pool."""
     monkeypatch.setenv("INF_API_KEY", "test-key")
-    path = Path(
-        "examples/tutor/configs/math/july/pass@2/"
-        "qwen8b-qwen1.7b-math-student-personality-pool-5.yaml"
-    )
-    baseline_path = path.with_name("qwen8b-qwen1.7b-math-baseline.yaml")
+    path = Path("examples/tutor/configs/math/july/pass@2") / config_name
+    baseline_path = path.with_name(baseline_name)
 
     config = OmegaConf.to_object(
         OmegaConf.merge(OmegaConf.structured(TutorConfig), OmegaConf.load(path))
@@ -783,6 +945,7 @@ def test_pass2_student_personality_pool_config_loads_five_personas(monkeypatch):
     )
     pilot_source = OmegaConf.load(path)
     baseline_source = OmegaConf.load(baseline_path)
+    assert pilot_source.prompt_pool.include_base is True
     pilot_source.pop("trial_name")
     pilot_source.pop("prompt_pool")
     baseline_source.pop("trial_name")
@@ -813,6 +976,36 @@ def test_pass2_student_personality_pool_config_loads_five_personas(monkeypatch):
     assert OmegaConf.to_container(
         pilot_source, resolve=False
     ) == OmegaConf.to_container(baseline_source, resolve=False)
+
+
+def test_pass2_heldout_persona_config_separates_train_and_eval_pools(monkeypatch):
+    """Test held-out personas evaluate without entering the training pool."""
+    monkeypatch.setenv("INF_API_KEY", "test-key")
+    path = Path(
+        "examples/tutor/configs/math/july/pass@2/"
+        "qwen8b-qwen1.7b-math-student5-heldout5.yaml"
+    )
+
+    config = OmegaConf.to_object(
+        OmegaConf.merge(OmegaConf.structured(TutorConfig), OmegaConf.load(path))
+    )
+    seen_prompts = tutor_workflow.load_prompt_pool(
+        config.prompt_pool.student_seen_path, role="seen student"
+    )
+    heldout_prompts = tutor_workflow.load_prompt_pool(
+        config.prompt_pool.student_heldout_path, role="held-out student"
+    )
+
+    assert config.prompt_pool.student_path == ""
+    assert config.prompt_pool.include_base is True
+    assert OmegaConf.load(path).prompt_pool.include_base is True
+    assert config.prompt_pool.student_train_path == config.prompt_pool.student_seen_path
+    assert config.prompt_pool.student_eval_paths == {
+        "seen": config.prompt_pool.student_seen_path,
+        "heldout": config.prompt_pool.student_heldout_path,
+    }
+    assert len(seen_prompts) == len(heldout_prompts) == 5
+    assert set(seen_prompts).isdisjoint(heldout_prompts)
 
 
 def test_teacher_warmup_asset_exactly_matches_20260704_prompt():

@@ -8,11 +8,13 @@ from omegaconf import OmegaConf
 from examples.tutor import workflow as tutor_workflow
 from examples.tutor.configs import (
     TUTOR_EVAL_STUDENT_FIELD,
+    TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
     TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
     TutorConfig,
     TutorStudentModelConfig,
 )
 from examples.tutor.train import (
+    EvalStudentPrompt,
     _expand_eval_dataset_for_student_prompts,
     _expand_eval_dataset_for_students,
 )
@@ -173,14 +175,37 @@ def test_expand_eval_dataset_covers_every_row_for_every_student():
 
 
 def test_expand_eval_dataset_covers_every_row_for_every_student_prompt():
-    """Test each validation row is paired with every student prompt index."""
+    """Test base-prompt rows remain alongside every persona prompt index."""
     dataset = Dataset.from_dict({"id": [1, 2], "task": ["a", "b"]})
 
-    expanded = _expand_eval_dataset_for_student_prompts(dataset, 3)
+    prompts = tuple(
+        EvalStudentPrompt(pool="seen", index=index, suffix=f"prompt-{index}")
+        for index in range(3)
+    )
+    expanded = _expand_eval_dataset_for_student_prompts(dataset, prompts)
 
-    assert len(expanded) == 6
-    assert expanded["id"] == [1, 2, 1, 2, 1, 2]
-    assert expanded[TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD] == [0, 0, 1, 1, 2, 2]
+    assert len(expanded) == 8
+    assert expanded["id"] == [1, 2, 1, 2, 1, 2, 1, 2]
+    assert expanded[TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD] == [
+        None,
+        None,
+        0,
+        0,
+        1,
+        1,
+        2,
+        2,
+    ]
+    assert expanded[TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD] == [
+        None,
+        None,
+        "seen",
+        "seen",
+        "seen",
+        "seen",
+        "seen",
+        "seen",
+    ]
 
 
 def test_expand_eval_dataset_covers_student_model_prompt_cross_product():
@@ -188,7 +213,11 @@ def test_expand_eval_dataset_covers_student_model_prompt_cross_product():
     dataset = Dataset.from_dict({"id": [1, 2], "task": ["a", "b"]})
     expanded = _expand_eval_dataset_for_students(dataset, ["student-a", "student-b"])
 
-    expanded = _expand_eval_dataset_for_student_prompts(expanded, 3)
+    prompts = tuple(
+        EvalStudentPrompt(pool="seen", index=index, suffix=f"prompt-{index}")
+        for index in range(3)
+    )
+    expanded = _expand_eval_dataset_for_student_prompts(expanded, prompts)
 
     combinations = set(
         zip(
@@ -202,9 +231,9 @@ def test_expand_eval_dataset_covers_student_model_prompt_cross_product():
         (item_id, student_name, prompt_index)
         for item_id in (1, 2)
         for student_name in ("student-a", "student-b")
-        for prompt_index in range(3)
+        for prompt_index in (None, 0, 1, 2)
     }
-    assert len(expanded) == 12
+    assert len(expanded) == 16
     assert combinations == expected
 
 
@@ -212,7 +241,7 @@ def test_expand_eval_dataset_with_zero_student_prompts_returns_input():
     """Test disabled all-prompt evaluation leaves the dataset untouched."""
     dataset = Dataset.from_dict({"id": [1], "task": ["a"]})
 
-    assert _expand_eval_dataset_for_student_prompts(dataset, 0) is dataset
+    assert _expand_eval_dataset_for_student_prompts(dataset, ()) is dataset
 
 
 def test_expand_eval_dataset_rejects_reserved_student_prompt_column():
@@ -225,7 +254,38 @@ def test_expand_eval_dataset_rejects_reserved_student_prompt_column():
     )
 
     with pytest.raises(ValueError, match="reserved column"):
-        _expand_eval_dataset_for_student_prompts(dataset, 2)
+        _expand_eval_dataset_for_student_prompts(
+            dataset,
+            (EvalStudentPrompt(pool="seen", index=0, suffix="prompt"),),
+        )
+
+
+def test_expand_eval_dataset_separates_seen_and_heldout_prompt_indices():
+    """Test equal local indices remain distinct across persona pools."""
+    dataset = Dataset.from_dict({"id": [1, 2]})
+    prompts = (
+        EvalStudentPrompt(pool="seen", index=0, suffix="seen"),
+        EvalStudentPrompt(pool="heldout", index=0, suffix="heldout"),
+    )
+
+    expanded = _expand_eval_dataset_for_student_prompts(dataset, prompts)
+
+    assert expanded[TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD] == [
+        None,
+        None,
+        "seen",
+        "seen",
+        "heldout",
+        "heldout",
+    ]
+    assert expanded[TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD] == [
+        None,
+        None,
+        0,
+        0,
+        0,
+        0,
+    ]
 
 
 def test_select_student_uses_weighted_training_sample(monkeypatch):

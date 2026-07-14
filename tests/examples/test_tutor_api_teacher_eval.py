@@ -13,6 +13,7 @@ from datasets import Dataset
 
 from examples.tutor.configs import (
     TUTOR_EVAL_STUDENT_FIELD,
+    TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
     TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
 )
 from examples.tutor.scripts.evaluate_api_teacher import (
@@ -39,12 +40,14 @@ from examples.tutor.scripts.evaluate_api_teacher import (
     run_without_proxy_environment,
     student_prompt_row_counts,
 )
+from examples.tutor.train import EvalStudentPrompt
 
 CONFIG_PATH = Path(
     "examples/tutor/configs/math/july/pass@2/qwen8b-qwen1.7b-math-baseline.yaml"
 )
-PERSONA_CONFIG_PATH = CONFIG_PATH.with_name(
-    "qwen8b-qwen1.7b-math-student-personality-pool-5.yaml"
+PERSONA_CONFIG_PATH = CONFIG_PATH.with_name("qwen8b-qwen1.7b-math-student5.yaml")
+HELDOUT_CONFIG_PATH = CONFIG_PATH.with_name(
+    "qwen8b-qwen1.7b-math-student5-heldout5.yaml"
 )
 
 PROXY_ENV_VARS = (
@@ -106,6 +109,7 @@ def _result(
     generalization: dict[str, dict[str, Any]] | None = None,
     dataset_index: int = 0,
     attempt: int = 1,
+    student_prompt_pool: str = "",
     student_prompt_index: int | None = None,
 ) -> EpisodeResult:
     return EpisodeResult(
@@ -139,6 +143,7 @@ def _result(
         latest_student_answer_preview="",
         trace_path=None,
         duration_seconds=0.1,
+        student_prompt_pool=student_prompt_pool,
         student_prompt_index=student_prompt_index,
     )
 
@@ -321,12 +326,35 @@ def test_build_eval_workflow_kwargs_enables_exhaustive_student_prompt_pool(
 
     assert config.prompt_pool.eval_all_student_prompts is True
     assert kwargs["student_prompt_pool_path"] == config.prompt_pool.student_path
+    assert kwargs["student_heldout_prompt_pool_path"] == ""
+
+
+def test_build_eval_workflow_kwargs_loads_heldout_student_prompt_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The standalone evaluator keeps seen and held-out pools separate."""
+    monkeypatch.setenv("INF_API_KEY", "test-key")
+    config, students = load_experiment_config(str(HELDOUT_CONFIG_PATH), [])
+
+    kwargs = build_eval_workflow_kwargs(
+        config=config,
+        student_models=students,
+        tokenizer=object(),
+        args=_args(),
+        presolve_enabled=False,
+    )
+
+    assert kwargs["student_prompt_pool_path"] == config.prompt_pool.student_seen_path
+    assert (
+        kwargs["student_heldout_prompt_pool_path"]
+        == config.prompt_pool.student_heldout_path
+    )
 
 
 def test_prepare_test_dataset_limits_base_items_before_full_prompt_product(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A smoke-test limit still covers every student and student prompt."""
+    """A smoke-test limit covers the base prompt and every student persona."""
 
     import examples.tutor.scripts.evaluate_api_teacher as module
 
@@ -341,7 +369,10 @@ def test_prepare_test_dataset_limits_base_items_before_full_prompt_product(
     monkeypatch.setattr(
         module.tutor_train,
         "_load_eval_student_prompts",
-        lambda _config: ("prompt-0", "prompt-1", "prompt-2"),
+        lambda _config: tuple(
+            EvalStudentPrompt(pool="seen", index=index, suffix=f"prompt-{index}")
+            for index in range(3)
+        ),
     )
 
     dataset = prepare_test_dataset(
@@ -355,17 +386,24 @@ def test_prepare_test_dataset_limits_base_items_before_full_prompt_product(
         zip(
             dataset["id"],
             dataset[TUTOR_EVAL_STUDENT_FIELD],
+            dataset[TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD],
             dataset[TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD],
             strict=True,
         )
     )
-    assert len(dataset) == 6
+    assert len(dataset) == 8
     assert combinations == {
-        (10, student_name, prompt_index)
+        (10, student_name, None, None) for student_name in ("student-a", "student-b")
+    } | {
+        (10, student_name, "seen", prompt_index)
         for student_name in ("student-a", "student-b")
         for prompt_index in range(3)
     }
-    assert student_prompt_row_counts(dataset) == {0: 2, 1: 2, 2: 2}
+    assert student_prompt_row_counts(dataset) == {
+        ("seen", 0): 2,
+        ("seen", 1): 2,
+        ("seen", 2): 2,
+    }
 
 
 def test_aggregate_mode_separates_initial_and_teaching_success() -> None:
@@ -672,20 +710,28 @@ def test_aggregate_report_adds_item_any_success_for_multiple_attempts() -> None:
 
 
 def test_aggregate_report_separates_student_prompt_results() -> None:
-    """Each persona receives an independent teaching-quality summary."""
+    """The main summary stays base-only while personas report independently."""
 
     results = [
+        _result(
+            key="off:base:1",
+            termination_reason="success",
+            taught_success=True,
+            dataset_index=0,
+        ),
         _result(
             key="off:0:1",
             termination_reason="success",
             taught_success=True,
             dataset_index=0,
+            student_prompt_pool="seen",
             student_prompt_index=0,
         ),
         _result(
             key="off:1:1",
             termination_reason="max_turns",
             dataset_index=1,
+            student_prompt_pool="heldout",
             student_prompt_index=1,
         ),
     ]
@@ -693,16 +739,22 @@ def test_aggregate_report_separates_student_prompt_results() -> None:
     report = aggregate_report(
         results,
         modes=[PresolveMode("presolve_off", False)],
-        dataset_size=2,
+        dataset_size=3,
         attempts=1,
-        student_prompt_rows={0: 1, 1: 1},
+        student_prompt_rows={("seen", 0): 1, ("heldout", 1): 1},
     )
 
+    mode = report["modes"]["presolve_off"]
+    assert report["base_prompt_rows"] == 1
+    assert mode["recorded_attempts"] == 1
+    assert mode["taught_success_count"] == 1
+    assert mode["teaching_lift_full_set"] == pytest.approx(1.0)
+    assert mode["item_any_taught_success_rate_full_set"] == pytest.approx(1.0)
     prompts = report["modes"]["presolve_off"]["student_prompts"]
-    assert prompts["0"]["taught_success_count"] == 1
-    assert prompts["0"]["teaching_lift_full_set"] == pytest.approx(1.0)
-    assert prompts["1"]["taught_success_count"] == 0
-    assert prompts["1"]["teaching_lift_full_set"] == pytest.approx(0.0)
+    assert prompts["seen"]["0"]["taught_success_count"] == 1
+    assert prompts["seen"]["0"]["teaching_lift_full_set"] == pytest.approx(1.0)
+    assert prompts["heldout"]["1"]["taught_success_count"] == 0
+    assert prompts["heldout"]["1"]["teaching_lift_full_set"] == pytest.approx(0.0)
 
 
 def test_aggregate_mode_deduplicates_retry_records() -> None:

@@ -21,6 +21,7 @@ class PromptPoolSelection:
     rollout_version: int | None = None
     warmup_probability: float = 0.0
     prompt_path: str = ""
+    pool: str = ""
 
 
 @dataclass(slots=True)

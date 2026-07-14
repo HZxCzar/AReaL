@@ -18,6 +18,7 @@ teacher_show_ground_truth: false
 prompt_pool:
   student_path: examples/tutor/prompt_pools/student_personality_suffixes_5.json
   eval_all_student_prompts: true
+  include_base: true
 
 student_generalize:
   enabled: true

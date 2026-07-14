@@ -2,13 +2,14 @@ import pathlib
 import random
 import sys
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any
 
 sys.path.append(str(pathlib.Path(__file__).parent))
 from configs import (
     TUTOR_EVAL_STUDENT_FIELD,
+    TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
     TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
     TutorConfig,
 )
@@ -29,6 +30,13 @@ from core.polaris_generalization import (
 from areal.api.cli_args import load_expr_config
 from areal.dataset import get_custom_dataset
 from areal.utils.hf_utils import load_hf_tokenizer
+
+
+@dataclass(frozen=True, slots=True)
+class EvalStudentPrompt:
+    pool: str
+    index: int
+    suffix: str
 
 
 def _without_remote_dataset_loading(dataset_config: Any) -> Any:
@@ -177,37 +185,51 @@ def _expand_eval_dataset_for_students(dataset: Any, student_names: list[str]) ->
 
 
 def _expand_eval_dataset_for_student_prompts(
-    dataset: Any, student_prompt_count: int
+    dataset: Any, student_prompts: tuple[EvalStudentPrompt, ...]
 ) -> Any:
-    if student_prompt_count == 0:
+    if not student_prompts:
         return dataset
-    if student_prompt_count < 0:
-        raise ValueError("student_prompt_count must be non-negative.")
-    if TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD in dataset.column_names:
+    reserved_fields = {
+        TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
+        TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
+    }
+    collisions = sorted(reserved_fields.intersection(dataset.column_names))
+    if collisions:
         raise ValueError(
-            "Validation dataset already contains reserved column "
-            f"{TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD!r}."
+            f"Validation dataset already contains reserved columns {collisions}."
         )
 
     from datasets import concatenate_datasets
 
-    expanded = [
+    base_prompt_dataset = dataset.add_column(
+        TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
+        [None] * len(dataset),
+    ).add_column(
+        TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
+        [None] * len(dataset),
+    )
+    persona_datasets = [
         dataset.add_column(
-            TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
-            [prompt_index] * len(dataset),
+            TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
+            [prompt.pool] * len(dataset),
+        ).add_column(
+            TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD, [prompt.index] * len(dataset)
         )
-        for prompt_index in range(student_prompt_count)
+        for prompt in student_prompts
     ]
-    return concatenate_datasets(expanded)
+    return concatenate_datasets([base_prompt_dataset, *persona_datasets])
 
 
-def _load_eval_student_prompts(config: TutorConfig) -> tuple[str, ...]:
-    if not config.prompt_pool.eval_all_student_prompts:
-        return ()
-
+def _load_eval_student_prompts(config: TutorConfig) -> tuple[EvalStudentPrompt, ...]:
     from examples.tutor.workflow import load_prompt_pool
 
-    return load_prompt_pool(config.prompt_pool.student_path, role="student")
+    prompts = []
+    for pool, path in config.prompt_pool.student_eval_paths.items():
+        prompts.extend(
+            EvalStudentPrompt(pool=pool, index=index, suffix=suffix)
+            for index, suffix in enumerate(load_prompt_pool(path, role="student"))
+        )
+    return tuple(prompts)
 
 
 def _build_eval_workflow_kwargs(
@@ -218,12 +240,11 @@ def _build_eval_workflow_kwargs(
     eval_workflow_kwargs = workflow_kwargs.copy()
     eval_workflow_kwargs["gconfig"] = config.eval_gconfig.new(n_samples=1)
     eval_workflow_kwargs["teacher_prompt_pool_path"] = ""
-    if config.prompt_pool.eval_all_student_prompts:
-        eval_workflow_kwargs["student_prompt_pool_path"] = (
-            config.prompt_pool.student_path
-        )
-    else:
-        eval_workflow_kwargs["student_prompt_pool_path"] = ""
+    eval_paths = config.prompt_pool.student_eval_paths
+    eval_workflow_kwargs["student_prompt_pool_path"] = eval_paths.get("seen", "")
+    eval_workflow_kwargs["student_heldout_prompt_pool_path"] = eval_paths.get(
+        "heldout", ""
+    )
     eval_workflow_kwargs["teacher_warmup_enabled"] = False
     eval_workflow_kwargs["teacher_warmup_prompt_path"] = ""
     eval_workflow_kwargs["teacher_warmup_steps"] = 0
@@ -286,7 +307,7 @@ def main(args):
     )
     valid_dataset = _expand_eval_dataset_for_student_prompts(
         valid_dataset,
-        len(eval_student_prompts),
+        eval_student_prompts,
     )
 
     workflow_kwargs = dict(
@@ -341,7 +362,9 @@ def main(args):
         teacher_pre_attempts=teacher_pre.attempts,
         teacher_pre_max_tokens=teacher_pre.max_tokens,
         student_system_prompt=config.student_system_prompt,
-        student_prompt_pool_path=config.prompt_pool.student_path,
+        student_prompt_pool_path=config.prompt_pool.student_train_path,
+        student_heldout_prompt_pool_path="",
+        student_prompt_include_base=config.prompt_pool.include_base,
         prompt_pool_seed=config.seed,
         leak_check_system_prompt=config.leak_check_system_prompt,
         answer_judge_enabled=auxiliary_model.answer_judge_enabled,

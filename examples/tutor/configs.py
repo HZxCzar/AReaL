@@ -20,6 +20,7 @@ _STUDENT_GENERALIZE_SOURCES = {"sidecar", "train"}
 _STUDENT_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 TUTOR_EVAL_STUDENT_FIELD = "__tutor_student_name"
+TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD = "__tutor_student_prompt_group"
 TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD = "__tutor_student_prompt_index"
 
 
@@ -131,9 +132,27 @@ class TutorPromptPoolConfig:
         default="",
         metadata={
             "help": (
-                "Optional JSON string-array of student behavior suffixes sampled "
-                "once per training episode and optionally covered exhaustively "
-                "during evaluation."
+                "Legacy JSON string-array of student behavior suffixes. Prefer "
+                "student_seen_path for new persona experiments."
+            )
+        },
+    )
+    student_seen_path: str = field(
+        default="",
+        metadata={
+            "help": (
+                "JSON string-array of seen student persona suffixes sampled during "
+                "training and covered exhaustively during evaluation."
+            )
+        },
+    )
+    student_heldout_path: str = field(
+        default="",
+        metadata={
+            "help": (
+                "Optional JSON string-array of held-out student persona suffixes. "
+                "These are never sampled during training and are evaluated "
+                "exhaustively alongside the seen personas."
             )
         },
     )
@@ -146,16 +165,57 @@ class TutorPromptPoolConfig:
             )
         },
     )
+    include_base: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Whether training samples the clean base student prompt as an "
+                "equal-probability option alongside configured student suffixes."
+            )
+        },
+    )
     teacher_warmup: TutorTeacherWarmupPromptConfig = field(
         default_factory=TutorTeacherWarmupPromptConfig
     )
 
     def __post_init__(self) -> None:
-        if self.eval_all_student_prompts and not str(self.student_path or "").strip():
+        self.student_path = str(self.student_path or "").strip()
+        self.student_seen_path = str(self.student_seen_path or "").strip()
+        self.student_heldout_path = str(self.student_heldout_path or "").strip()
+        if self.student_path and self.student_seen_path:
             raise ValueError(
-                "prompt_pool.student_path is required when "
-                "prompt_pool.eval_all_student_prompts=true."
+                "prompt_pool.student_path and prompt_pool.student_seen_path are "
+                "mutually exclusive."
             )
+        if self.student_heldout_path and not self.student_seen_path:
+            raise ValueError(
+                "prompt_pool.student_seen_path is required when "
+                "prompt_pool.student_heldout_path is set."
+            )
+        if self.eval_all_student_prompts and not self.student_train_path:
+            raise ValueError(
+                "prompt_pool.student_path or prompt_pool.student_seen_path is "
+                "required when prompt_pool.eval_all_student_prompts=true."
+            )
+
+    @property
+    def student_train_path(self) -> str:
+        """Return the only student persona pool eligible for training."""
+
+        return self.student_seen_path or self.student_path
+
+    @property
+    def student_eval_paths(self) -> dict[str, str]:
+        """Return named persona pools covered exhaustively during evaluation."""
+
+        if self.student_seen_path:
+            paths = {"seen": self.student_seen_path}
+            if self.student_heldout_path:
+                paths["heldout"] = self.student_heldout_path
+            return paths
+        if self.eval_all_student_prompts and self.student_path:
+            return {"seen": self.student_path}
+        return {}
 
 
 @dataclass
