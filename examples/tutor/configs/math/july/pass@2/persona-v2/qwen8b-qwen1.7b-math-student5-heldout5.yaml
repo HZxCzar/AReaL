@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-qwen1.7b-math-pass@2-student5
+trial_name: qwen8b-qwen1.7b-math-pass@2-student5-heldout5-aleak
 
 seed: 42
 enable_offload: false
@@ -14,10 +14,11 @@ max_turns: 10
 enable_thinking: false
 leak_handling_mode: terminate
 teacher_show_ground_truth: false
-teacher_anti_leak_instruction_enabled: false
+teacher_anti_leak_instruction_enabled: true
 
 prompt_pool:
-  student_seen_path: examples/tutor/prompt_pools/student_personality_suffixes_5.json
+  student_seen_path: examples/tutor/prompt_pools/student_personality_behavior_v2_suffixes_5.json
+  student_heldout_path: examples/tutor/prompt_pools/student_personality_heldout_behavior_v2_suffixes_5.json
   include_base: true
 
 student_generalize:
@@ -29,7 +30,7 @@ student_generalize:
 auxiliary_model:
   mode: api
   enable_thinking: false
-  base_url: https://chj8bobdbm9acbj8kkcqgemj8pj8e9gp.openapi-qb-ai.sii.edu.cn/v1
+  base_url: https://9jgodagb8ogpceemkhc58boma8oddqoa.openapi-qb-ai.sii.edu.cn/v1
   model: qwen3-8b
   api_key: ${oc.env:INF_API_KEY}
   timeout: 120

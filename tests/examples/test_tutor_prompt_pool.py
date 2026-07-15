@@ -510,8 +510,8 @@ def test_rollout_stats_report_warmup_source_and_prompt_token_delta(monkeypatch):
     assert captured["prompt_source/pool_base/selected"] == pytest.approx(0.0)
 
 
-def test_rollout_stats_report_selected_student_prompt(monkeypatch):
-    """Test prompt-index metrics expose per-persona evaluation outcomes."""
+def test_rollout_stats_report_only_grouped_student_prompt_metrics(monkeypatch):
+    """Test persona metrics include their pool and omit legacy flat aliases."""
     captured = {}
     monkeypatch.setattr(
         tutor_workflow,
@@ -536,14 +536,16 @@ def test_rollout_stats_report_selected_student_prompt(monkeypatch):
         ),
     )
 
-    assert captured["student_prompt/0/selected"] == pytest.approx(0.0)
-    assert captured["student_prompt/1/selected"] == pytest.approx(1.0)
-    assert captured["student_prompt/2/selected"] == pytest.approx(0.0)
-    assert captured["student_prompt/1/solved"] == pytest.approx(0.0)
-    assert captured["student_prompt/1/pre_solved"] == pytest.approx(1.0)
-    assert captured["student_prompt/1/reward"] == pytest.approx(1.5)
-    assert captured["student_prompt/1/turns"] == pytest.approx(0.0)
-    assert captured["student_prompt/1/call_failed"] == pytest.approx(0.0)
+    assert captured["student_prompt/seen/0/selected"] == pytest.approx(0.0)
+    assert captured["student_prompt/seen/1/selected"] == pytest.approx(1.0)
+    assert captured["student_prompt/seen/2/selected"] == pytest.approx(0.0)
+    assert captured["student_prompt/seen/1/solved"] == pytest.approx(0.0)
+    assert captured["student_prompt/seen/1/pre_solved"] == pytest.approx(1.0)
+    assert captured["student_prompt/seen/1/reward"] == pytest.approx(1.5)
+    assert captured["student_prompt/seen/1/turns"] == pytest.approx(0.0)
+    assert captured["student_prompt/seen/1/call_failed"] == pytest.approx(0.0)
+    flat_prefixes = tuple(f"student_prompt/{index}/" for index in range(3))
+    assert not any(key.startswith(flat_prefixes) for key in captured)
 
 
 def test_eval_student_summary_uses_only_base_prompt_rows(monkeypatch):
@@ -957,6 +959,7 @@ def test_pass2_student_personality_pool_config_loads_five_personas(
     assert config.prompt_pool.student_seen_path.endswith(
         "student_personality_suffixes_5.json"
     )
+    assert config.prompt_pool.test_persona is True
     assert config.prompt_pool.student_eval_paths == {
         "seen": config.prompt_pool.student_seen_path
     }
@@ -1094,6 +1097,72 @@ def test_pass2_preference_persona_config_uses_short_non_mandatory_prompts(monkey
         normalized = prompt.lower()
         assert len(prompt.split()) <= 42
         assert any(word in normalized for word in preference_words)
+        assert all(rule not in normalized for rule in forbidden_rules)
+
+
+def test_pass2_persona_v2_configs_use_validated_behavior_pools(monkeypatch):
+    """Test persona-v2 configs share concise seen and held-out behavior pools."""
+    # Arrange
+    monkeypatch.setenv("INF_API_KEY", "test-key")
+    config_dir = Path("examples/tutor/configs/math/july/pass@2/persona-v2")
+    config_paths = sorted(config_dir.glob("*.yaml"))
+
+    # Act
+    configs = [
+        OmegaConf.to_object(
+            OmegaConf.merge(OmegaConf.structured(TutorConfig), OmegaConf.load(path))
+        )
+        for path in config_paths
+    ]
+    heldout_config = next(
+        config
+        for path, config in zip(config_paths, configs, strict=True)
+        if path.name == "qwen8b-qwen1.7b-math-student5-heldout5.yaml"
+    )
+    seen_prompts = tutor_workflow.load_prompt_pool(
+        heldout_config.prompt_pool.student_seen_path, role="persona-v2 seen student"
+    )
+    heldout_prompts = tutor_workflow.load_prompt_pool(
+        heldout_config.prompt_pool.student_heldout_path,
+        role="persona-v2 held-out student",
+    )
+
+    # Assert
+    assert len(configs) == 4
+    assert all(
+        config.prompt_pool.student_seen_path.endswith(
+            "student_personality_behavior_v2_suffixes_5.json"
+        )
+        for config in configs
+    )
+    assert heldout_config.prompt_pool.student_heldout_path.endswith(
+        "student_personality_heldout_behavior_v2_suffixes_5.json"
+    )
+    assert tuple(
+        prompt.split("]", 1)[0].removeprefix("[Persona: ")
+        for prompt in seen_prompts
+    ) == (
+        "QuickHelpSeeker",
+        "IndependentPerseverer",
+        "ReceptiveFollower",
+        "SkepticalDefender",
+        "ThinkAloudCollaborator",
+    )
+    assert tuple(
+        prompt.split("]", 1)[0].removeprefix("[Persona: ")
+        for prompt in heldout_prompts
+    ) == (
+        "MinimalHintSeeker",
+        "CriticalFollower",
+        "ConfidenceSharer",
+        "ChoiceExplainer",
+        "FeedbackRestater",
+    )
+    forbidden_rules = ("always", "mandatory", "must", "exactly", "every reply")
+    for prompt in (*seen_prompts, *heldout_prompts):
+        normalized = prompt.lower()
+        assert len(prompt.split()) <= 42
+        assert any(word in normalized for word in ("prefer", "feel", "like", "tend"))
         assert all(rule not in normalized for rule in forbidden_rules)
 
 

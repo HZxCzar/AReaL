@@ -133,7 +133,8 @@ class TutorPromptPoolConfig:
         metadata={
             "help": (
                 "JSON string-array of seen student persona suffixes sampled during "
-                "training and covered exhaustively during evaluation."
+                "training and, when test_persona is enabled, covered exhaustively "
+                "during evaluation."
             )
         },
     )
@@ -142,8 +143,8 @@ class TutorPromptPoolConfig:
         metadata={
             "help": (
                 "Optional JSON string-array of held-out student persona suffixes. "
-                "These are never sampled during training and are evaluated "
-                "exhaustively alongside the seen personas."
+                "These are never sampled during training and, when test_persona is "
+                "enabled, are evaluated exhaustively alongside the seen personas."
             )
         },
     )
@@ -153,6 +154,16 @@ class TutorPromptPoolConfig:
             "help": (
                 "Whether training samples the clean base student prompt as an "
                 "equal-probability option alongside configured student suffixes."
+            )
+        },
+    )
+    test_persona: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Whether evaluation covers every configured student persona in "
+                "addition to the clean base prompt. When disabled, evaluation "
+                "uses only the base prompt."
             )
         },
     )
@@ -179,7 +190,7 @@ class TutorPromptPoolConfig:
     def student_eval_paths(self) -> dict[str, str]:
         """Return named persona pools covered exhaustively during evaluation."""
 
-        if not self.student_seen_path:
+        if not self.test_persona or not self.student_seen_path:
             return {}
         paths = {"seen": self.student_seen_path}
         if self.student_heldout_path:
@@ -498,11 +509,34 @@ class TutorEvaluatorConfig(EvaluatorConfig):
             )
         },
     )
+    student_model_names: list[str] | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional subset of student_models to evaluate. None evaluates every "
+                "configured student model."
+            )
+        },
+    )
 
     def __post_init__(self) -> None:
         self.average_rollouts = int(self.average_rollouts)
         if self.average_rollouts < 1:
             raise ValueError("evaluator.average_rollouts must be >= 1.")
+        if self.student_model_names is None:
+            return
+
+        self.student_model_names = [
+            str(name).strip() for name in self.student_model_names
+        ]
+        if not self.student_model_names or any(
+            not name for name in self.student_model_names
+        ):
+            raise ValueError(
+                "evaluator.student_model_names must contain non-empty names."
+            )
+        if len(self.student_model_names) != len(set(self.student_model_names)):
+            raise ValueError("evaluator.student_model_names must be unique.")
 
 
 @dataclass
@@ -724,6 +758,14 @@ class TutorConfig(GRPOConfig):
         student_names = [student.name for student in self.student_models]
         if len(student_names) != len(set(student_names)):
             raise ValueError("student_models names must be unique.")
+        eval_student_names = self.evaluator.student_model_names
+        if eval_student_names is not None:
+            unknown_eval_students = sorted(set(eval_student_names) - set(student_names))
+            if unknown_eval_students:
+                raise ValueError(
+                    "evaluator.student_model_names must reference configured "
+                    f"student_models; unknown names: {unknown_eval_students}."
+                )
         if self.student_models and not any(
             student.weight > 0.0 for student in self.student_models
         ):

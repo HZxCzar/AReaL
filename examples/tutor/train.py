@@ -166,6 +166,12 @@ def _apply_eval_average_rollouts(config: TutorConfig) -> None:
     )
 
 
+def _resolve_eval_student_names(config: TutorConfig) -> list[str]:
+    configured_names = [student.name for student in config.student_models]
+    requested_names = config.evaluator.student_model_names
+    return configured_names if requested_names is None else list(requested_names)
+
+
 def _expand_eval_dataset_for_students(dataset: Any, student_names: list[str]) -> Any:
     if not student_names:
         return dataset
@@ -303,7 +309,7 @@ def main(args):
         valid_dataset = valid_dataset.select(eval_indices)
     valid_dataset = _expand_eval_dataset_for_students(
         valid_dataset,
-        [student.name for student in config.student_models],
+        _resolve_eval_student_names(config),
     )
     valid_dataset = _expand_eval_dataset_for_student_prompts(
         valid_dataset,

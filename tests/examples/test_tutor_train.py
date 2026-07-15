@@ -18,11 +18,24 @@ def test_tutor_evaluator_config_defaults_to_three_average_rollouts():
     assert config.average_rollouts == 3
 
 
-def test_seen_student_prompt_pool_is_evaluated_by_default():
-    """Test seen personas are exhaustively evaluated without a separate switch."""
+def test_student_personas_are_evaluated_by_default():
+    """Test existing configs keep exhaustive persona evaluation by default."""
     config = TutorPromptPoolConfig(student_seen_path="student.json")
 
+    assert config.test_persona is True
     assert config.student_eval_paths == {"seen": "student.json"}
+
+
+def test_student_persona_evaluation_can_be_disabled():
+    """Test disabling persona evaluation leaves only the clean base prompt."""
+    config = TutorPromptPoolConfig(
+        student_seen_path="student.json",
+        student_heldout_path="heldout.json",
+        test_persona=False,
+    )
+
+    assert config.student_train_path == "student.json"
+    assert config.student_eval_paths == {}
 
 
 def test_student_prompt_training_includes_base_by_default():
@@ -170,3 +183,31 @@ def test_build_eval_workflow_kwargs_loads_seen_and_heldout_student_pools():
     assert eval_workflow_kwargs["student_prompt_pool_path"] == "seen.json"
     assert eval_workflow_kwargs["student_heldout_prompt_pool_path"] == "heldout.json"
     assert workflow_kwargs["student_heldout_prompt_pool_path"] == ""
+
+
+def test_build_eval_workflow_kwargs_disables_student_persona_pools():
+    """Test base-only evaluation does not load seen or held-out persona pools."""
+    config = TutorConfig(
+        dataset_type="math",
+        prompt_pool=TutorPromptPoolConfig(
+            student_seen_path="seen.json",
+            student_heldout_path="heldout.json",
+            test_persona=False,
+        ),
+    )
+    _apply_eval_average_rollouts(config)
+    workflow_kwargs = {
+        "gconfig": config.gconfig,
+        "teacher_prompt_pool_path": "teacher.json",
+        "student_prompt_pool_path": "seen.json",
+        "student_heldout_prompt_pool_path": "",
+        "teacher_warmup_enabled": False,
+        "teacher_warmup_prompt_path": "",
+        "teacher_warmup_steps": 0,
+    }
+
+    eval_workflow_kwargs = _build_eval_workflow_kwargs(workflow_kwargs, config)
+
+    assert eval_workflow_kwargs["student_prompt_pool_path"] == ""
+    assert eval_workflow_kwargs["student_heldout_prompt_pool_path"] == ""
+    assert workflow_kwargs["student_prompt_pool_path"] == "seen.json"

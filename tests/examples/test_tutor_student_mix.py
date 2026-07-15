@@ -11,12 +11,14 @@ from examples.tutor.configs import (
     TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
     TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
     TutorConfig,
+    TutorEvaluatorConfig,
     TutorStudentModelConfig,
 )
 from examples.tutor.train import (
     EvalStudentPrompt,
     _expand_eval_dataset_for_student_prompts,
     _expand_eval_dataset_for_students,
+    _resolve_eval_student_names,
 )
 
 
@@ -86,13 +88,66 @@ def test_mixed_student_example_yaml_loads_typed_student_configs(monkeypatch):
     ]
     assert [student.max_tokens for student in config.student_models] == [2048, 1024]
     expected_base_url = (
-        "https://8aghgobam9gpcqjqmaac9jaooeqj5p89.openapi-qb-ai.sii.edu.cn/v1"
+        "https://9jgodagb8ogpceemkhc58boma8oddqoa.openapi-qb-ai.sii.edu.cn/v1"
     )
     assert config.auxiliary_model.base_url == expected_base_url
     assert all(
         student.base_url == expected_base_url for student in config.student_models
     )
     assert config.evaluator.average_rollouts == 3
+
+
+def test_mixed_17b_7b_yaml_trains_both_and_evaluates_only_17b(monkeypatch):
+    """Test the mixed experiment samples both students but pins 1.7B for eval."""
+    # Arrange
+    monkeypatch.setenv("INF_API_KEY", "test-key")
+    path = Path(
+        "examples/tutor/configs/math/july/pass@2/"
+        "qwen8b-qwen1.7b-math-baseline-aleak-mix1.7_7.yaml"
+    )
+
+    # Act
+    config = OmegaConf.to_object(
+        OmegaConf.merge(OmegaConf.structured(TutorConfig), OmegaConf.load(path))
+    )
+
+    # Assert
+    assert [student.name for student in config.student_models] == [
+        "qwen3-1.7b",
+        "qwen2.5-7b-instruct",
+    ]
+    assert [student.weight for student in config.student_models] == [0.5, 0.5]
+    qwen25_student = config.student_models[1]
+    assert qwen25_student.temperature == 0.7
+    assert qwen25_student.top_p == 0.8
+    assert qwen25_student.request_params["extra_body"] == {
+        "top_k": 20,
+        "repetition_penalty": 1.05,
+    }
+    assert _resolve_eval_student_names(config) == ["qwen3-1.7b"]
+
+
+def test_eval_student_subset_defaults_to_all_configured_students():
+    """Test existing mixed configs retain exhaustive per-student evaluation."""
+    # Arrange
+    config = TutorConfig(
+        dataset_type="math",
+        student_models=[_student("student-a"), _student("student-b")],
+    )
+
+    # Act / Assert
+    assert _resolve_eval_student_names(config) == ["student-a", "student-b"]
+
+
+def test_tutor_config_rejects_unknown_eval_student_name():
+    """Test evaluation subsets only reference configured student runtimes."""
+    # Arrange / Act / Assert
+    with pytest.raises(ValueError, match="unknown names"):
+        TutorConfig(
+            dataset_type="math",
+            student_models=[_student("student-a")],
+            evaluator=TutorEvaluatorConfig(student_model_names=["student-b"]),
+        )
 
 
 @pytest.mark.parametrize("name", ["contains/slash", "contains space", "_leading"])

@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen32b-baseline-generalization-001020-lora-batch128-rebn-nomean-v2
+trial_name: qwen8b-qwen1.7b-math-pass@2-student5-aleak-pre-v1
 
 seed: 42
 enable_offload: false
@@ -11,15 +11,27 @@ eval_workflow: ${workflow}
 dataset_type: math
 answer_scorer: math
 max_turns: 10
-enable_thinking: true
-leak_handling_mode: disabled
+enable_thinking: false
+leak_handling_mode: terminate
 teacher_show_ground_truth: false
+teacher_anti_leak_instruction_enabled: true
+
+prompt_pool:
+  student_seen_path: examples/tutor/prompt_pools/student_personality_suffixes_5.json
+  include_base: true
+  test_persona: false
 
 student_generalize:
   enabled: true
-  path: examples/tutor/generalization/version2/math_overfit_8_independent_hard_generalization.json
-  level1_reward: 1.0
-  level2_reward: 2.0
+  source: train
+  level1_reward: 0.0
+  level2_reward: 0.0
+
+teacher_pre:
+  enabled: true
+  mode: filter_solver
+  attempts: 3
+  max_tokens: 0
 
 auxiliary_model:
   mode: api
@@ -35,7 +47,7 @@ auxiliary_model:
   request_params:
     seed: 42
     extra_headers:
-      x-inspire-inference-key: tutor-train-qwen48
+      x-inspire-inference-key: tutor-train-qwen8b-auxiliary
     extra_body:
       top_k: 20
       min_p: 0
@@ -44,13 +56,38 @@ auxiliary_model:
   answer_judge_enabled: true
   answer_judge_max_tokens: 256
 
+student_models:
+  - name: qwen3-1.7b
+    weight: 1.0
+    base_url: ${auxiliary_model.base_url}
+    model: qwen3-1.7b
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    max_concurrent_calls: 4
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-qwen17b-student
+      extra_body:
+        top_k: 20
+        min_p: 0
+        chat_template_kwargs:
+          enable_thinking: false
+
 reward:
-  success: 0.0
+  format_error_penalty: -0.5
+  success: 1.0
+  leak_penalty_mode: rawbase
   assign_success_reward: false
-  leak_penalty: 0.0
+  leak_penalty: -1.0
+  leak_penalty_aggregation: episode
   outcome_prior_turn_weight: 0.5
   outcome_credit_gamma: 0.9
   early_success_bonus: 0.0
+  max_turn_penalty: -1.0
   enable_turn_penalty: false
   turn_penalty: -0.01
   length_penalty_threshold_chars: 0
@@ -97,20 +134,20 @@ rollout:
 gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 16384
+  max_new_tokens: 4096
   max_tokens: 24576
   greedy: false
-  temperature: 0.6
+  temperature: 0.7
   top_p: 1.0
   lora_name: default_lora
 
 eval_gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 16384
+  max_new_tokens: 4096
   max_tokens: 24576
   greedy: false
-  temperature: 0.6
+  temperature: 0.7
   top_p: 1.0
   lora_name: default_lora
 
@@ -118,7 +155,7 @@ actor:
   backend: "fsdp:d2p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-32B/snapshots/9216db5781bf21249d130ec9da846c4624c16137
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
@@ -150,7 +187,7 @@ actor:
   behave_imp_weight_cap: 5.0
   reward_norm: null
   adv_norm:
-    mean_level: null
+    mean_level: batch
     std_level: batch
   weight_update_mode: disk
   use_lora: ${rollout.use_lora}
@@ -200,7 +237,7 @@ train_dataset:
   shuffle: false
   pin_memory: false
   num_workers: 0
-  path: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/math_dataset_overfit8_generalization_batch128
+  path: examples/tutor/data/math_1.7b_8b/math_pass@2
   type: rl
   max_length: 16384
 
@@ -208,7 +245,7 @@ valid_dataset:
   batch_size: ${train_dataset.batch_size}
   pin_memory: false
   num_workers: 0
-  path: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/AReaL/examples/tutor/data/math_dataset_overfit8_generalization_batch128
+  path: examples/tutor/data/math_1.7b_8b/math_pass@2
   type: rl
 
 saver:
@@ -233,9 +270,10 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: 5
+  freq_steps: 10
   freq_secs: null
   max_samples: null
+  average_rollouts: 1
 
 stats_logger:
   experiment_name: ${experiment_name}
@@ -246,4 +284,4 @@ stats_logger:
     entity: hz-czar-stanford
     project: TAgent
     name: ${trial_name}
-    group: generalize-8
+    group: 8&17-leakt

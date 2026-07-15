@@ -2970,15 +2970,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     metrics[f"student_prompt/{pool_name}/{prompt_index}/selected"] = (
                         float(is_selected)
                     )
-                    if pool_name == "seen":
-                        metrics[f"student_prompt/{prompt_index}/selected"] = float(
-                            is_selected
-                        )
             if selected_index is not None:
                 prefixes = [f"student_prompt/{selected_pool}"]
                 prefixes.append(f"student_prompt/{selected_pool}/{selected_index}")
-                if selected_pool == "seen":
-                    prefixes.append(f"student_prompt/{selected_index}")
                 for prefix in prefixes:
                     metrics[f"{prefix}/solved"] = float(success_round > 0)
                     metrics[f"{prefix}/pre_solved"] = float(pre_success)

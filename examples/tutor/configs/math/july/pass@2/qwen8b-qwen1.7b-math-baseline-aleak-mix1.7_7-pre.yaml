@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-qwen1.7b-math-pass@2-student5-preference-heldout5
+trial_name: qwen8b-mix-qwen1.7b-qwen2.5-7b-math-pass@2-baseline-aleak-mix177-pre
 
 seed: 42
 enable_offload: false
@@ -14,12 +14,7 @@ max_turns: 10
 enable_thinking: false
 leak_handling_mode: terminate
 teacher_show_ground_truth: false
-teacher_anti_leak_instruction_enabled: false
-
-prompt_pool:
-  student_seen_path: examples/tutor/prompt_pools/student_personality_preference_suffixes_5.json
-  student_heldout_path: examples/tutor/prompt_pools/student_personality_heldout_preference_suffixes_5.json
-  include_base: true
+teacher_anti_leak_instruction_enabled: true
 
 student_generalize:
   enabled: true
@@ -27,10 +22,16 @@ student_generalize:
   level1_reward: 0.0
   level2_reward: 0.0
 
+teacher_pre:
+  enabled: true
+  mode: filter_solver
+  attempts: 3
+  max_tokens: 0
+
 auxiliary_model:
   mode: api
   enable_thinking: false
-  base_url: https://chj8bobdbm9acbj8kkcqgemj8pj8e9gp.openapi-qb-ai.sii.edu.cn/v1
+  base_url: https://9jgodagb8ogpceemkhc58boma8oddqoa.openapi-qb-ai.sii.edu.cn/v1
   model: qwen3-8b
   api_key: ${oc.env:INF_API_KEY}
   timeout: 120
@@ -52,7 +53,7 @@ auxiliary_model:
 
 student_models:
   - name: qwen3-1.7b
-    weight: 1.0
+    weight: 0.5
     base_url: ${auxiliary_model.base_url}
     model: qwen3-1.7b
     api_key: ${auxiliary_model.api_key}
@@ -70,6 +71,23 @@ student_models:
         min_p: 0
         chat_template_kwargs:
           enable_thinking: false
+  - name: qwen2.5-7b-instruct
+    weight: 0.5
+    base_url: ${auxiliary_model.base_url}
+    model: qwen2.5-7b-instruct
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    max_concurrent_calls: 4
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-qwen25-7b-student
+      extra_body:
+        top_k: 20
+        repetition_penalty: 1.05
 
 reward:
   format_error_penalty: -0.5
@@ -268,6 +286,8 @@ evaluator:
   freq_secs: null
   max_samples: null
   average_rollouts: 1
+  student_model_names:
+    - qwen3-1.7b
 
 stats_logger:
   experiment_name: ${experiment_name}
