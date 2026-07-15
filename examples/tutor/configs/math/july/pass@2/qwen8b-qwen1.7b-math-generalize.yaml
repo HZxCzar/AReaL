@@ -14,6 +14,7 @@ max_turns: 10
 enable_thinking: false
 leak_handling_mode: terminate
 teacher_show_ground_truth: false
+teacher_anti_leak_instruction_enabled: false
 
 student_generalize:
   enabled: true

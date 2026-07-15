@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-qwen1.7b-math-pass@2-baseline
+trial_name: qwen8b-qwen1.7b-math-pass@2-pre
 
 seed: 42
 enable_offload: false
@@ -14,13 +14,19 @@ max_turns: 10
 enable_thinking: false
 leak_handling_mode: terminate
 teacher_show_ground_truth: false
-teacher_anti_leak_instruction_enabled: false
+teacher_anti_leak_instruction_enabled: true
 
 student_generalize:
   enabled: true
   source: train
   level1_reward: 0.0
   level2_reward: 0.0
+
+teacher_pre:
+  enabled: true
+  mode: filter_solver
+  attempts: 3
+  max_tokens: 0
 
 auxiliary_model:
   mode: api
