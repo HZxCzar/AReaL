@@ -439,6 +439,9 @@ def build_eval_workflow_kwargs(
         "length_penalty_min": reward.length_penalty_min,
         "zero_reward_on_length_stop": reward.zero_reward_on_length_stop,
         "teacher_system_prompt": config.teacher_system_prompt,
+        "teacher_anti_leak_instruction_enabled": (
+            config.teacher_anti_leak_instruction_enabled
+        ),
         # Evaluation never samples teacher prompts. Student prompts are loaded only
         # when the config explicitly requests exhaustive prompt coverage.
         "teacher_prompt_pool_path": "",

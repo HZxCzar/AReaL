@@ -18,16 +18,16 @@ def test_tutor_evaluator_config_defaults_to_three_average_rollouts():
     assert config.average_rollouts == 3
 
 
-def test_student_prompt_eval_coverage_defaults_disabled():
-    """Test existing configs keep clean student prompts during evaluation."""
-    config = TutorPromptPoolConfig()
+def test_seen_student_prompt_pool_is_evaluated_by_default():
+    """Test seen personas are exhaustively evaluated without a separate switch."""
+    config = TutorPromptPoolConfig(student_seen_path="student.json")
 
-    assert config.eval_all_student_prompts is False
+    assert config.student_eval_paths == {"seen": "student.json"}
 
 
 def test_student_prompt_training_includes_base_by_default():
     """Test persona training treats the clean base prompt as a default option."""
-    config = TutorPromptPoolConfig(student_path="student.json")
+    config = TutorPromptPoolConfig(student_seen_path="student.json")
 
     assert config.include_base is True
 
@@ -35,17 +35,11 @@ def test_student_prompt_training_includes_base_by_default():
 def test_student_prompt_training_can_exclude_base():
     """Test configs can preserve persona-only training when explicitly requested."""
     config = TutorPromptPoolConfig(
-        student_path="student.json",
+        student_seen_path="student.json",
         include_base=False,
     )
 
     assert config.include_base is False
-
-
-def test_student_prompt_eval_coverage_requires_prompt_pool():
-    """Test all-prompt evaluation fails fast without student prompt data."""
-    with pytest.raises(ValueError, match="student_path"):
-        TutorPromptPoolConfig(eval_all_student_prompts=True)
 
 
 def test_split_student_prompt_paths_define_train_and_eval_pools():
@@ -122,14 +116,13 @@ def test_build_eval_workflow_kwargs_keeps_single_episode_generation():
     assert workflow_kwargs["teacher_warmup_steps"] == 50
 
 
-def test_build_eval_workflow_kwargs_keeps_enabled_student_prompt_pool():
-    """Test all-prompt evaluation retains only the student prompt pool."""
+def test_build_eval_workflow_kwargs_keeps_seen_student_prompt_pool():
+    """Test evaluation retains the seen student prompt pool by default."""
     config = TutorConfig(
         dataset_type="math",
         prompt_pool=TutorPromptPoolConfig(
             teacher_path="teacher.json",
-            student_path="student.json",
-            eval_all_student_prompts=True,
+            student_seen_path="student.json",
         ),
     )
     _apply_eval_average_rollouts(config)

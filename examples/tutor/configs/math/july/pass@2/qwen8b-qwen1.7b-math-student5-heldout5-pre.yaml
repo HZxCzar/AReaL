@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-qwen1.7b-math-pass@2-student5-heldout5
+trial_name: qwen8b-qwen1.7b-math-pass@2-student5-heldout5-pre
 
 seed: 42
 enable_offload: false
@@ -26,6 +26,12 @@ student_generalize:
   source: train
   level1_reward: 0.0
   level2_reward: 0.0
+
+teacher_pre:
+  enabled: true
+  mode: filter_solver
+  attempts: 3
+  max_tokens: 0
 
 auxiliary_model:
   mode: api

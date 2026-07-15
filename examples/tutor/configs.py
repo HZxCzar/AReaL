@@ -128,15 +128,6 @@ class TutorPromptPoolConfig:
             )
         },
     )
-    student_path: str = field(
-        default="",
-        metadata={
-            "help": (
-                "Legacy JSON string-array of student behavior suffixes. Prefer "
-                "student_seen_path for new persona experiments."
-            )
-        },
-    )
     student_seen_path: str = field(
         default="",
         metadata={
@@ -156,15 +147,6 @@ class TutorPromptPoolConfig:
             )
         },
     )
-    eval_all_student_prompts: bool = field(
-        default=False,
-        metadata={
-            "help": (
-                "Whether evaluation expands every validation item across all "
-                "configured student prompt suffixes."
-            )
-        },
-    )
     include_base: bool = field(
         default=True,
         metadata={
@@ -179,43 +161,30 @@ class TutorPromptPoolConfig:
     )
 
     def __post_init__(self) -> None:
-        self.student_path = str(self.student_path or "").strip()
         self.student_seen_path = str(self.student_seen_path or "").strip()
         self.student_heldout_path = str(self.student_heldout_path or "").strip()
-        if self.student_path and self.student_seen_path:
-            raise ValueError(
-                "prompt_pool.student_path and prompt_pool.student_seen_path are "
-                "mutually exclusive."
-            )
         if self.student_heldout_path and not self.student_seen_path:
             raise ValueError(
                 "prompt_pool.student_seen_path is required when "
                 "prompt_pool.student_heldout_path is set."
-            )
-        if self.eval_all_student_prompts and not self.student_train_path:
-            raise ValueError(
-                "prompt_pool.student_path or prompt_pool.student_seen_path is "
-                "required when prompt_pool.eval_all_student_prompts=true."
             )
 
     @property
     def student_train_path(self) -> str:
         """Return the only student persona pool eligible for training."""
 
-        return self.student_seen_path or self.student_path
+        return self.student_seen_path
 
     @property
     def student_eval_paths(self) -> dict[str, str]:
         """Return named persona pools covered exhaustively during evaluation."""
 
-        if self.student_seen_path:
-            paths = {"seen": self.student_seen_path}
-            if self.student_heldout_path:
-                paths["heldout"] = self.student_heldout_path
-            return paths
-        if self.eval_all_student_prompts and self.student_path:
-            return {"seen": self.student_path}
-        return {}
+        if not self.student_seen_path:
+            return {}
+        paths = {"seen": self.student_seen_path}
+        if self.student_heldout_path:
+            paths["heldout"] = self.student_heldout_path
+        return paths
 
 
 @dataclass
@@ -720,6 +689,15 @@ class TutorConfig(GRPOConfig):
     evaluator: TutorEvaluatorConfig = field(default_factory=TutorEvaluatorConfig)
     reward: TutorRewardConfig = field(default_factory=TutorRewardConfig)
     teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
+    teacher_anti_leak_instruction_enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to append an instruction forbidding the teacher from "
+                "revealing the answer to the student."
+            )
+        },
+    )
     teacher_user_prompt_template: str = field(default=TEACHER_STATE_USER_TEMPLATE)
     student_system_prompt: str = field(default=DEFAULT_STUDENT_SYSTEM_PROMPT)
     leak_check_system_prompt: str = field(default=DEFAULT_LEAK_CHECK_SYSTEM_PROMPT)

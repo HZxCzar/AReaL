@@ -351,6 +351,9 @@ def main(args):
         length_penalty_min=reward.length_penalty_min,
         zero_reward_on_length_stop=reward.zero_reward_on_length_stop,
         teacher_system_prompt=config.teacher_system_prompt,
+        teacher_anti_leak_instruction_enabled=(
+            config.teacher_anti_leak_instruction_enabled
+        ),
         teacher_prompt_pool_path=config.prompt_pool.teacher_path,
         teacher_warmup_enabled=config.prompt_pool.teacher_warmup.enabled,
         teacher_warmup_prompt_path=config.prompt_pool.teacher_warmup.prompt_path,

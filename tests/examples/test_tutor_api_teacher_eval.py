@@ -308,10 +308,10 @@ def test_build_eval_workflow_kwargs_preserves_role_parameters(
     assert kwargs["student_generalize_enabled"] is True
 
 
-def test_build_eval_workflow_kwargs_enables_exhaustive_student_prompt_pool(
+def test_build_eval_workflow_kwargs_evaluates_seen_student_prompt_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The standalone evaluator honors the config's all-prompts switch."""
+    """The standalone evaluator exhaustively covers the configured seen pool."""
 
     monkeypatch.setenv("INF_API_KEY", "test-key")
     config, students = load_experiment_config(str(PERSONA_CONFIG_PATH), [])
@@ -324,8 +324,7 @@ def test_build_eval_workflow_kwargs_enables_exhaustive_student_prompt_pool(
         presolve_enabled=False,
     )
 
-    assert config.prompt_pool.eval_all_student_prompts is True
-    assert kwargs["student_prompt_pool_path"] == config.prompt_pool.student_path
+    assert kwargs["student_prompt_pool_path"] == config.prompt_pool.student_seen_path
     assert kwargs["student_heldout_prompt_pool_path"] == ""
 
 

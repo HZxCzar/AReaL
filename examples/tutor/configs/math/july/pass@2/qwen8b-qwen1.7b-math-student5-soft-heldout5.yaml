@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-qwen1.7b-math-pass@2-student5-heldout5
+trial_name: qwen8b-qwen1.7b-math-pass@2-student5-soft-heldout5
 
 seed: 42
 enable_offload: false
@@ -17,7 +17,7 @@ teacher_show_ground_truth: false
 teacher_anti_leak_instruction_enabled: false
 
 prompt_pool:
-  student_seen_path: examples/tutor/prompt_pools/student_personality_suffixes_5.json
+  student_seen_path: examples/tutor/prompt_pools/student_personality_soft_suffixes_5.json
   student_heldout_path: examples/tutor/prompt_pools/student_personality_heldout_suffixes_5.json
   include_base: true
 

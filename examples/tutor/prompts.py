@@ -21,6 +21,10 @@ your message shown to the student
 The student will see only the text inside <output>...</output>. Put all private
 thinking inside <reasoning>...</reasoning>. Do not use JSON or Markdown code fences."""
 
+TEACHER_ANTI_LEAK_INSTRUCTION = (
+    "Do not reveal the problem's answer or an equivalent expression to the student."
+)
+
 DEFAULT_STUDENT_SYSTEM_PROMPT = (
     "You are a real student solving the task. Use the visible tutoring history "
     "and the teacher's latest feedback naturally. Continue from your previous "

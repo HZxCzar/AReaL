@@ -208,6 +208,7 @@ from examples.tutor.prompts import (
     STAGED_LEAK_CHECK_USER_TEMPLATE,
     STUDENT_STATE_USER_TEMPLATE,
     STUDENT_TRANSFER_USER_TEMPLATE,
+    TEACHER_ANTI_LEAK_INSTRUCTION,
     TEACHER_PRE_SOLVE_FILTER_CONTEXT_TEMPLATE,
     TEACHER_STATE_USER_TEMPLATE,
     render_prompt,
@@ -405,6 +406,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         length_penalty_min: float = -0.1,
         zero_reward_on_length_stop: bool = False,
         teacher_system_prompt: str = "",
+        teacher_anti_leak_instruction_enabled: bool = False,
         teacher_prompt_pool_path: str = "",
         teacher_warmup_enabled: bool = False,
         teacher_warmup_prompt_path: str = "",
@@ -544,6 +546,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.length_penalty_per_100_chars = float(length_penalty_per_100_chars)
         self.length_penalty_min = float(length_penalty_min)
         self.zero_reward_on_length_stop = bool(zero_reward_on_length_stop)
+        self.teacher_anti_leak_instruction_enabled = bool(
+            teacher_anti_leak_instruction_enabled
+        )
         self.teacher_system_prompt = self._resolve_teacher_system_prompt(
             teacher_system_prompt
         )
@@ -863,14 +868,23 @@ class TutorAgentWorkflow(RolloutWorkflow):
 
     def _resolve_teacher_system_prompt(self, prompt: str) -> str:
         prompt = (prompt or "").strip()
-        if self.enable_thinking:
+        if (
+            not self.enable_thinking
+            and NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT not in prompt
+        ):
+            prompt = (
+                f"{prompt}\n\n{NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT}"
+                if prompt
+                else NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT
+            ).strip()
+        if not getattr(self, "teacher_anti_leak_instruction_enabled", False):
             return prompt
-        if NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT in prompt:
+        if TEACHER_ANTI_LEAK_INSTRUCTION in prompt:
             return prompt
         return (
-            f"{prompt}\n\n{NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT}"
+            f"{prompt}\n\n{TEACHER_ANTI_LEAK_INSTRUCTION}"
             if prompt
-            else NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT
+            else TEACHER_ANTI_LEAK_INSTRUCTION
         ).strip()
 
     def _sample_prompt_pool(

@@ -907,12 +907,14 @@ def test_prompt_pool_example_yaml_loads_typed_config(monkeypatch):
 
     assert isinstance(config, TutorConfig)
     assert config.prompt_pool.teacher_path.endswith("teacher_strategy_suffixes.json")
-    assert config.prompt_pool.student_path.endswith("student_behavior_suffixes.json")
+    assert config.prompt_pool.student_seen_path.endswith(
+        "student_behavior_suffixes.json"
+    )
     assert tutor_workflow.load_prompt_pool(
         config.prompt_pool.teacher_path, role="teacher"
     )
     assert tutor_workflow.load_prompt_pool(
-        config.prompt_pool.student_path, role="student"
+        config.prompt_pool.student_seen_path, role="student"
     )
 
 
@@ -941,7 +943,7 @@ def test_pass2_student_personality_pool_config_loads_five_personas(
         OmegaConf.merge(OmegaConf.structured(TutorConfig), OmegaConf.load(path))
     )
     student_prompts = tutor_workflow.load_prompt_pool(
-        config.prompt_pool.student_path, role="student"
+        config.prompt_pool.student_seen_path, role="student"
     )
     pilot_source = OmegaConf.load(path)
     baseline_source = OmegaConf.load(baseline_path)
@@ -952,10 +954,12 @@ def test_pass2_student_personality_pool_config_loads_five_personas(
 
     assert isinstance(config, TutorConfig)
     assert config.prompt_pool.teacher_path == ""
-    assert config.prompt_pool.student_path.endswith(
+    assert config.prompt_pool.student_seen_path.endswith(
         "student_personality_suffixes_5.json"
     )
-    assert config.prompt_pool.eval_all_student_prompts is True
+    assert config.prompt_pool.student_eval_paths == {
+        "seen": config.prompt_pool.student_seen_path
+    }
     assert len(student_prompts) == 5
     assert all(prompt.startswith("[Persona: ") for prompt in student_prompts)
     assert tuple(
@@ -996,7 +1000,6 @@ def test_pass2_heldout_persona_config_separates_train_and_eval_pools(monkeypatch
         config.prompt_pool.student_heldout_path, role="held-out student"
     )
 
-    assert config.prompt_pool.student_path == ""
     assert config.prompt_pool.include_base is True
     assert OmegaConf.load(path).prompt_pool.include_base is True
     assert config.prompt_pool.student_train_path == config.prompt_pool.student_seen_path
@@ -1006,6 +1009,92 @@ def test_pass2_heldout_persona_config_separates_train_and_eval_pools(monkeypatch
     }
     assert len(seen_prompts) == len(heldout_prompts) == 5
     assert set(seen_prompts).isdisjoint(heldout_prompts)
+
+
+def test_pass2_soft_seen_persona_config_preserves_original_pool(monkeypatch):
+    """Test the soft pilot uses a new seen pool without rewriting the old one."""
+    monkeypatch.setenv("INF_API_KEY", "test-key")
+    config_dir = Path("examples/tutor/configs/math/july/pass@2")
+    soft_path = config_dir / "qwen8b-qwen1.7b-math-student5-soft-heldout5.yaml"
+    original_path = config_dir / "qwen8b-qwen1.7b-math-student5-heldout5.yaml"
+
+    config = OmegaConf.to_object(
+        OmegaConf.merge(OmegaConf.structured(TutorConfig), OmegaConf.load(soft_path))
+    )
+    soft_prompts = tutor_workflow.load_prompt_pool(
+        config.prompt_pool.student_seen_path, role="soft seen student"
+    )
+    original_source = OmegaConf.load(original_path)
+
+    assert config.prompt_pool.student_seen_path.endswith(
+        "student_personality_soft_suffixes_5.json"
+    )
+    assert original_source.prompt_pool.student_seen_path.endswith(
+        "student_personality_suffixes_5.json"
+    )
+    assert config.prompt_pool.include_base is True
+    assert len(soft_prompts) == 5
+    assert tuple(
+        prompt.split("]", 1)[0].removeprefix("[Persona: ") for prompt in soft_prompts
+    ) == (
+        "QuickHelpSeeker",
+        "IndependentPerseverer",
+        "ReceptiveFollower",
+        "SkepticalDefender",
+        "AdaptiveExplorer",
+    )
+    rigid_fragments = (
+        "Mandatory response rule",
+        "entire reply must",
+        "Start with exactly",
+        "This rule overrides",
+    )
+    assert all(
+        fragment not in prompt
+        for prompt in soft_prompts
+        for fragment in rigid_fragments
+    )
+
+
+def test_pass2_preference_persona_config_uses_short_non_mandatory_prompts(monkeypatch):
+    """Test the preference pilot stays concise and avoids response rules."""
+    monkeypatch.setenv("INF_API_KEY", "test-key")
+    path = Path(
+        "examples/tutor/configs/math/july/pass@2/"
+        "qwen8b-qwen1.7b-math-student5-preference-heldout5.yaml"
+    )
+
+    config = OmegaConf.to_object(
+        OmegaConf.merge(OmegaConf.structured(TutorConfig), OmegaConf.load(path))
+    )
+    seen_prompts = tutor_workflow.load_prompt_pool(
+        config.prompt_pool.student_seen_path, role="preference seen student"
+    )
+    heldout_prompts = tutor_workflow.load_prompt_pool(
+        config.prompt_pool.student_heldout_path,
+        role="preference held-out student",
+    )
+
+    assert len(seen_prompts) == len(heldout_prompts) == 5
+    assert config.prompt_pool.include_base is True
+    preference_words = (
+        "comfortable",
+        "satisfying",
+        "naturally",
+        "tend",
+        "enjoy",
+        "curious",
+        "feel",
+        "like",
+        "think best",
+        "dislike",
+    )
+    forbidden_rules = ("always", "mandatory", "must", "exactly", "every reply")
+    for prompt in (*seen_prompts, *heldout_prompts):
+        normalized = prompt.lower()
+        assert len(prompt.split()) <= 42
+        assert any(word in normalized for word in preference_words)
+        assert all(rule not in normalized for rule in forbidden_rules)
 
 
 def test_teacher_warmup_asset_exactly_matches_20260704_prompt():
