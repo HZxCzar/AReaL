@@ -1,6 +1,9 @@
+from types import SimpleNamespace
+
 import pytest
 
 from examples.tutor.configs import (
+    TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
     TutorConfig,
     TutorEvaluatorConfig,
     TutorPromptPoolConfig,
@@ -8,6 +11,8 @@ from examples.tutor.configs import (
 from examples.tutor.train import (
     _apply_eval_average_rollouts,
     _build_eval_workflow_kwargs,
+    _eval_repeat_count_for_item,
+    _TutorEvalRepeatTrainerMixin,
 )
 
 
@@ -16,6 +21,102 @@ def test_tutor_evaluator_config_defaults_to_three_average_rollouts():
     config = TutorEvaluatorConfig()
 
     assert config.average_rollouts == 3
+    assert config.student_prompt_average_rollouts is None
+
+
+def test_student_prompt_average_rollouts_rejects_non_positive_values():
+    """Test additional student prompt repeats must be positive when configured."""
+    with pytest.raises(ValueError, match="student_prompt_average_rollouts"):
+        TutorEvaluatorConfig(student_prompt_average_rollouts=0)
+
+
+def test_eval_repeat_count_distinguishes_base_seen_and_heldout_prompts():
+    """Test only additional student prompt rows use their repeat override."""
+    evaluator = TutorEvaluatorConfig(
+        average_rollouts=3,
+        student_prompt_average_rollouts=1,
+    )
+
+    assert _eval_repeat_count_for_item({}, evaluator) == 3
+    assert (
+        _eval_repeat_count_for_item(
+            {TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD: None}, evaluator
+        )
+        == 3
+    )
+    assert (
+        _eval_repeat_count_for_item(
+            {TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD: "seen"}, evaluator
+        )
+        == 1
+    )
+    assert (
+        _eval_repeat_count_for_item(
+            {TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD: "heldout"}, evaluator
+        )
+        == 1
+    )
+
+
+def test_student_prompt_repeat_count_defaults_to_base_repeat_count():
+    """Test unset student prompt repeats preserve the previous behavior."""
+    evaluator = TutorEvaluatorConfig(average_rollouts=4)
+
+    assert (
+        _eval_repeat_count_for_item(
+            {TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD: "seen"}, evaluator
+        )
+        == 4
+    )
+
+
+def test_tutor_eval_submits_base_and_student_prompts_with_separate_repeats(
+    monkeypatch,
+):
+    """Test tutor evaluation passes the per-row repeat count to rollout submission."""
+    import torch.distributed as dist
+
+    from areal.infra.platforms import current_platform
+
+    submitted_group_sizes = []
+
+    class FakeEvalRollout:
+        def submit(self, _item, _workflow, _kwargs, *, group_size, is_eval):
+            assert is_eval is True
+            submitted_group_sizes.append(group_size)
+
+        def wait(self, count, timeout):
+            assert count == 3
+            assert timeout is None
+
+    class FakeTrainer(_TutorEvalRepeatTrainerMixin):
+        pass
+
+    monkeypatch.setattr(dist, "barrier", lambda **_kwargs: None)
+    monkeypatch.setattr(current_platform, "synchronize", lambda: None)
+    trainer = FakeTrainer()
+    trainer.actor = SimpleNamespace(
+        is_data_parallel_head=lambda: True,
+        cpu_group=None,
+    )
+    trainer.config = SimpleNamespace(
+        evaluator=TutorEvaluatorConfig(
+            average_rollouts=3,
+            student_prompt_average_rollouts=1,
+        )
+    )
+    trainer.valid_dataloader = [
+        [
+            {},
+            {TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD: "seen"},
+            {TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD: "heldout"},
+        ]
+    ]
+    trainer.eval_rollout = FakeEvalRollout()
+
+    trainer._evaluate_fn("workflow", {"key": "value"})
+
+    assert submitted_group_sizes == [3, 1, 1]
 
 
 def test_student_personas_are_evaluated_by_default():
@@ -117,6 +218,7 @@ def test_build_eval_workflow_kwargs_keeps_single_episode_generation():
 
     assert config.eval_gconfig.n_samples == 5
     assert eval_workflow_kwargs["gconfig"].n_samples == 1
+    assert eval_workflow_kwargs["eval_repeat_count"] == 5
     assert eval_workflow_kwargs["teacher_prompt_pool_path"] == ""
     assert eval_workflow_kwargs["student_prompt_pool_path"] == ""
     assert eval_workflow_kwargs["teacher_warmup_enabled"] is False

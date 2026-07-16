@@ -505,7 +505,18 @@ class TutorEvaluatorConfig(EvaluatorConfig):
         metadata={
             "help": (
                 "Number of independent tutor rollout episodes to run for each "
-                "validation sample. Metrics are averaged over rollout attempts."
+                "validation sample. Metrics are averaged over rollout attempts, and "
+                "per-task correctness stability is reported under eval-rollout/repeat."
+            )
+        },
+    )
+    student_prompt_average_rollouts: int | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Number of rollout episodes for each additional seen or held-out "
+                "student instruction prompt during evaluation. None reuses "
+                "average_rollouts."
             )
         },
     )
@@ -523,6 +534,14 @@ class TutorEvaluatorConfig(EvaluatorConfig):
         self.average_rollouts = int(self.average_rollouts)
         if self.average_rollouts < 1:
             raise ValueError("evaluator.average_rollouts must be >= 1.")
+        if self.student_prompt_average_rollouts is not None:
+            self.student_prompt_average_rollouts = int(
+                self.student_prompt_average_rollouts
+            )
+            if self.student_prompt_average_rollouts < 1:
+                raise ValueError(
+                    "evaluator.student_prompt_average_rollouts must be >= 1."
+                )
         if self.student_model_names is None:
             return
 

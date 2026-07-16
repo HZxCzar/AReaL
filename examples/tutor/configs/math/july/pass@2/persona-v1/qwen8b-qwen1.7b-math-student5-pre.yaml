@@ -273,6 +273,7 @@ evaluator:
   freq_secs: null
   max_samples: null
   average_rollouts: 1
+  student_prompt_average_rollouts: 1
 
 stats_logger:
   experiment_name: ${experiment_name}

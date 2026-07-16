@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-qwen1.7b-math-pass@2-student5-soft-heldout5-v1
+trial_name: qwen8b-train-qwen1.7b-eval-qwen1.7b-qwen2.5-7b-math-pass@2-baseline-aleak-pre
 
 seed: 42
 enable_offload: false
@@ -14,18 +14,19 @@ max_turns: 10
 enable_thinking: false
 leak_handling_mode: terminate
 teacher_show_ground_truth: false
-teacher_anti_leak_instruction_enabled: false
-
-prompt_pool:
-  student_seen_path: examples/tutor/prompt_pools/student_personality_soft_suffixes_5.json
-  student_heldout_path: examples/tutor/prompt_pools/student_personality_heldout_suffixes_5.json
-  include_base: true
+teacher_anti_leak_instruction_enabled: true
 
 student_generalize:
   enabled: true
   source: train
   level1_reward: 0.0
   level2_reward: 0.0
+
+teacher_pre:
+  enabled: true
+  mode: filter_solver
+  attempts: 3
+  max_tokens: 0
 
 auxiliary_model:
   mode: api
@@ -70,6 +71,23 @@ student_models:
         min_p: 0
         chat_template_kwargs:
           enable_thinking: false
+  - name: qwen2.5-7b-instruct
+    weight: 0.0
+    base_url: ${auxiliary_model.base_url}
+    model: qwen2.5-7b-instruct
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    max_concurrent_calls: 4
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-qwen25-7b-student
+      extra_body:
+        top_k: 20
+        repetition_penalty: 1.05
 
 reward:
   format_error_penalty: -0.5
@@ -267,8 +285,10 @@ evaluator:
   freq_steps: 10
   freq_secs: null
   max_samples: null
-  average_rollouts: 1
-  student_prompt_average_rollouts: 1
+  average_rollouts: 3
+  student_model_names:
+    - qwen3-1.7b
+    - qwen2.5-7b-instruct
 
 stats_logger:
   experiment_name: ${experiment_name}

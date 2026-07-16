@@ -285,7 +285,7 @@ evaluator:
   freq_steps: 10
   freq_secs: null
   max_samples: null
-  average_rollouts: 1
+  average_rollouts: 3
   student_model_names:
     - qwen3-1.7b
 

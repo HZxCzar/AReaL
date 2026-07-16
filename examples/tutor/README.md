@@ -165,6 +165,20 @@ configured student; `evaluator.average_rollouts` is applied independently to eac
 student. An empty `student_models` list preserves the legacy behavior where
 `auxiliary_model` is also the student.
 
+Repeated evaluation also reports per-task binary stability for both tutoring
+`solved` and overall `final_correct` under `eval-rollout/repeat/<outcome>/...`.
+Metrics include `variance`, `std`, pairwise `agreement`/`disagreement`, `all_equal`,
+`any_success`, `all_success`, the strict all-repeat `success_set_jaccard`, and
+`pairwise_success_set_jaccard` over all repeat pairs. With one rollout these remain
+defined (`variance=0`, `agreement=1`). `variance` is computed within each task before
+being averaged over the test set; the Jaccard metrics are computed from globally
+aggregated intersections and unions.
+
+`evaluator.average_rollouts` controls repeats for the clean base student prompt.
+Additional seen and held-out student instruction prompts use
+`evaluator.student_prompt_average_rollouts`; leaving it unset preserves the previous
+behavior by reusing `average_rollouts`.
+
 Per-student metrics are emitted automatically under `rollout/student/<name>/...` and
 `eval-rollout/student/<name>/...`, including `selected`, `solved`, `pre_solved`,
 `reward`, `turns`, and `call_failed`. Existing overall rollout metrics remain unchanged.

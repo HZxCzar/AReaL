@@ -548,6 +548,75 @@ def test_rollout_stats_report_only_grouped_student_prompt_metrics(monkeypatch):
     assert not any(key.startswith(flat_prefixes) for key in captured)
 
 
+def test_eval_rollout_stats_record_repeat_outcomes(monkeypatch):
+    """Test tutor evaluation exposes solved and final-correct group outcomes."""
+    captured = []
+    monkeypatch.setattr(
+        tutor_workflow, "_safe_scalar", lambda **metrics: captured.append(metrics)
+    )
+    monkeypatch.setattr(
+        tutor_workflow.workflow_context,
+        "get",
+        lambda: types.SimpleNamespace(is_eval=True, task_id=7),
+    )
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_model_runtimes = {}
+    workflow.eval_repeat_count = 1
+    workflow._eval_repeat_outcomes = {}
+
+    workflow._log_rollout_stats(
+        total_reward=0.0,
+        traces=[],
+        termination_reason="pre_solved",
+        pre_success=True,
+        leak_count=0,
+    )
+
+    merged = {key: value for metrics in captured for key, value in metrics.items()}
+    assert merged["repeat/solved/mean"] == pytest.approx(0.0)
+    assert merged["repeat/final_correct/mean"] == pytest.approx(1.0)
+
+
+def test_forced_persona_eval_does_not_record_repeat_outcomes(monkeypatch):
+    """Test persona-only rows do not contaminate comparable repeat metrics."""
+    captured = []
+    monkeypatch.setattr(
+        tutor_workflow, "_safe_scalar", lambda **metrics: captured.append(metrics)
+    )
+    monkeypatch.setattr(
+        tutor_workflow.workflow_context,
+        "get",
+        lambda: types.SimpleNamespace(is_eval=True, task_id=7),
+    )
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_model_runtimes = {}
+    workflow.eval_repeat_count = 1
+    workflow._eval_repeat_outcomes = {}
+    selection = tutor_workflow.PromptPoolSelection(
+        index=0,
+        suffix="persona",
+        source="pool",
+        pool="seen",
+    )
+
+    workflow._log_rollout_stats(
+        total_reward=0.0,
+        traces=[],
+        termination_reason="pre_solved",
+        pre_success=True,
+        leak_count=0,
+        student_prompt_selection=selection,
+    )
+
+    assert not any(
+        key.startswith("repeat/") for metrics in captured for key in metrics
+    )
+
+
 def test_eval_student_summary_uses_only_base_prompt_rows(monkeypatch):
     """Test the comparable student score excludes forced persona rollouts."""
     captured = []

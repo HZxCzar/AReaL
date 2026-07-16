@@ -11,6 +11,7 @@ import time
 import uuid
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -293,6 +294,34 @@ def _safe_generalize_scalar(**metrics: Any) -> None:
         logger.debug("Skipping generalize stats logging outside workflow context.")
 
 
+def _binary_repeat_summary(values: list[float]) -> dict[str, float]:
+    if not values:
+        raise ValueError("Binary repeat outcomes must not be empty.")
+    if any(value not in (0.0, 1.0) for value in values):
+        raise ValueError(f"Binary repeat outcomes must be 0 or 1, got {values!r}.")
+
+    mean = sum(values) / len(values)
+    variance = mean * (1.0 - mean)
+    repeat_pairs = list(combinations(values, 2))
+    agreement = (
+        sum(float(left == right) for left, right in repeat_pairs) / len(repeat_pairs)
+        if repeat_pairs
+        else 1.0
+    )
+    return {
+        "mean": mean,
+        "variance": variance,
+        "std": variance**0.5,
+        "agreement": agreement,
+        "disagreement": 1.0 - agreement,
+        "all_equal": float(all(value == values[0] for value in values)),
+        "any_success": float(any(values)),
+        "all_success": float(all(values)),
+        "success_set_intersection": float(all(values)),
+        "success_set_union": float(any(values)),
+    }
+
+
 def _reward_component_key(name: str) -> str:
     return _REWARD_COMPONENT_ALIASES.get(name, name)
 
@@ -440,7 +469,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_generalize_level2_reward: float = 0.5,
         student_generalize_confidence_enabled: bool = False,
         student_generalize_confidence_reward_scale: float = 0.25,
+        eval_repeat_count: int = 1,
     ):
+        self.eval_repeat_count = int(eval_repeat_count)
+        if self.eval_repeat_count < 1:
+            raise ValueError("eval_repeat_count must be >= 1.")
+        self._eval_repeat_outcomes: dict[int, dict[str, list[float]]] = {}
         self.max_turns = max_turns
         self.dataset_type = (dataset_type or "").strip().lower()
         if self.dataset_type not in {"aime", "math", "polaris"}:
@@ -2848,6 +2882,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
         invalid_success_due_to_leak = sum(
             1 for trace in traces if trace.invalid_due_to_leak and trace.judge_correct
         )
+        solved = success_round > 0
+        is_eval = bool(workflow_context.get().is_eval)
+        is_forced_persona_eval = bool(is_eval and student_prompt_selection is not None)
+        if is_eval and not is_forced_persona_eval:
+            self._record_eval_repeat_outcomes(
+                solved=solved,
+                final_correct=pre_success or solved,
+            )
         metrics = {
             "reward": float(total_reward),
             "turns": len(traces),
@@ -2858,7 +2900,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
             "invalid_success_due_to_leak": int(invalid_success_due_to_leak),
             "pre_solved": float(pre_success),
-            "solved": float(success_round > 0),
+            "solved": float(solved),
             "stop/max_turns": float(termination_reason == "max_turns"),
             "stop/context_limit": float(
                 termination_reason == CONTEXT_BUDGET_TERMINATION_REASON
@@ -2917,12 +2959,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     float(teacher_output_chars) if source_selected else 0.0
                 )
 
-        try:
-            is_forced_persona_eval = bool(
-                workflow_context.get().is_eval and student_prompt_selection is not None
-            )
-        except Exception:
-            is_forced_persona_eval = False
         if is_forced_persona_eval:
             metrics.clear()
         if not is_forced_persona_eval:
@@ -2987,6 +3023,50 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_generalization_results=student_generalization_results,
             )
         _safe_scalar(**metrics)
+
+    def _record_eval_repeat_outcomes(
+        self, *, solved: bool, final_correct: bool
+    ) -> None:
+        task_id = workflow_context.get().task_id
+        if task_id is None:
+            return
+
+        pending_by_task = getattr(self, "_eval_repeat_outcomes", None)
+        if pending_by_task is None:
+            pending_by_task = {}
+            self._eval_repeat_outcomes = pending_by_task
+        task_outcomes = pending_by_task.setdefault(
+            int(task_id), {"solved": [], "final_correct": []}
+        )
+        task_outcomes["solved"].append(float(solved))
+        task_outcomes["final_correct"].append(float(final_correct))
+
+        repeat_count = int(getattr(self, "eval_repeat_count", 1))
+        if len(task_outcomes["solved"]) < repeat_count:
+            return
+        completed = pending_by_task.pop(int(task_id))
+        for outcome_name, values in completed.items():
+            self._log_eval_repeat_metrics(outcome_name, values)
+
+    @staticmethod
+    def _log_eval_repeat_metrics(outcome_name: str, values: list[float]) -> None:
+        prefix = f"repeat/{outcome_name}"
+        summary = _binary_repeat_summary(values)
+        _safe_scalar(**{f"{prefix}/{key}": value for key, value in summary.items()})
+
+        if summary["success_set_union"]:
+            _safe_scalar(
+                **{f"{prefix}/success_set_jaccard": summary["success_set_intersection"]}
+            )
+
+        repeat_pairs = list(combinations(values, 2))
+        if not repeat_pairs:
+            repeat_pairs = [(values[0], values[0])]
+        for left, right in repeat_pairs:
+            if left or right:
+                _safe_scalar(
+                    **{f"{prefix}/pairwise_success_set_jaccard": float(left and right)}
+                )
 
     def _enabled_reward_component_keys(self) -> list[str]:
         keys = []

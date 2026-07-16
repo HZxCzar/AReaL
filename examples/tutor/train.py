@@ -12,6 +12,7 @@ from configs import (
     TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
     TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
     TutorConfig,
+    TutorEvaluatorConfig,
 )
 from core.generalization import (
     load_student_generalize_bank,
@@ -245,6 +246,7 @@ def _build_eval_workflow_kwargs(
         raise ValueError("eval_gconfig must be set before building eval workflow.")
     eval_workflow_kwargs = workflow_kwargs.copy()
     eval_workflow_kwargs["gconfig"] = config.eval_gconfig.new(n_samples=1)
+    eval_workflow_kwargs["eval_repeat_count"] = config.evaluator.average_rollouts
     eval_workflow_kwargs["teacher_prompt_pool_path"] = ""
     eval_paths = config.prompt_pool.student_eval_paths
     eval_workflow_kwargs["student_prompt_pool_path"] = eval_paths.get("seen", "")
@@ -257,8 +259,46 @@ def _build_eval_workflow_kwargs(
     return eval_workflow_kwargs
 
 
+def _eval_repeat_count_for_item(
+    item: dict[str, Any], evaluator: TutorEvaluatorConfig
+) -> int:
+    is_student_prompt_eval = item.get(TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD) is not None
+    if is_student_prompt_eval and evaluator.student_prompt_average_rollouts is not None:
+        return evaluator.student_prompt_average_rollouts
+    return evaluator.average_rollouts
+
+
+class _TutorEvalRepeatTrainerMixin:
+    def _evaluate_fn(self, eval_workflow, eval_workflow_kwargs):
+        import torch.distributed as dist
+
+        from areal.infra.platforms import current_platform
+
+        if self.actor.is_data_parallel_head():
+            count = 0
+            for data in self.valid_dataloader:
+                for item in data:
+                    self.eval_rollout.submit(
+                        item,
+                        eval_workflow,
+                        eval_workflow_kwargs,
+                        group_size=_eval_repeat_count_for_item(
+                            item, self.config.evaluator
+                        ),
+                        is_eval=True,
+                    )
+                    count += 1
+            self.eval_rollout.wait(count, timeout=None)
+
+        dist.barrier(group=self.actor.cpu_group)
+        current_platform.synchronize()
+
+
 def main(args):
     from areal import PPOTrainer
+
+    class TutorPPOTrainer(_TutorEvalRepeatTrainerMixin, PPOTrainer):
+        pass
 
     config_path = pathlib.Path(args[args.index("--config") + 1])
     has_trial_name_override = any(arg.startswith("trial_name=") for arg in args)
@@ -398,7 +438,7 @@ def main(args):
 
     eval_workflow_kwargs = _build_eval_workflow_kwargs(workflow_kwargs, config)
 
-    with PPOTrainer(
+    with TutorPPOTrainer(
         config,
         train_dataset=train_dataset,
         valid_dataset=valid_dataset,

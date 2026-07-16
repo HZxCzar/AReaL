@@ -127,6 +127,32 @@ def test_mixed_17b_7b_yaml_trains_both_and_evaluates_only_17b(monkeypatch):
     assert _resolve_eval_student_names(config) == ["qwen3-1.7b"]
 
 
+def test_pre_17b_only_yaml_trains_17b_and_evaluates_17b_and_7b(monkeypatch):
+    """Test zero-weight 7B is excluded from training but included in evaluation."""
+    # Arrange
+    monkeypatch.setenv("INF_API_KEY", "test-key")
+    path = Path(
+        "examples/tutor/configs/math/july/pass@2/"
+        "qwen8b-qwen1.7b-math-baseline-aleak-train1.7-eval1.7_7-pre.yaml"
+    )
+
+    # Act
+    config = OmegaConf.to_object(
+        OmegaConf.merge(OmegaConf.structured(TutorConfig), OmegaConf.load(path))
+    )
+
+    # Assert
+    assert [student.name for student in config.student_models] == [
+        "qwen3-1.7b",
+        "qwen2.5-7b-instruct",
+    ]
+    assert [student.weight for student in config.student_models] == [1.0, 0.0]
+    assert _resolve_eval_student_names(config) == [
+        "qwen3-1.7b",
+        "qwen2.5-7b-instruct",
+    ]
+
+
 def test_eval_student_subset_defaults_to_all_configured_students():
     """Test existing mixed configs retain exhaustive per-student evaluation."""
     # Arrange
