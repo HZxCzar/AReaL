@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-train-qwen1.7b-eval-qwen1.7b-qwen2.5-7b-math-pass@2-baseline-aleak-pre
+trial_name: qwen8b-qwen1.7b-math-pass@2-baseline-eval7b-aleak-pre
 
 seed: 42
 enable_offload: false
