@@ -7,6 +7,7 @@ import operator
 import os
 import random
 import re
+import socket
 import time
 import uuid
 from contextvars import ContextVar
@@ -474,7 +475,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.eval_repeat_count = int(eval_repeat_count)
         if self.eval_repeat_count < 1:
             raise ValueError("eval_repeat_count must be >= 1.")
-        self._eval_repeat_outcomes: dict[int, dict[str, list[float]]] = {}
+        self._eval_repeat_outcomes: dict[int, list[float]] = {}
         self.max_turns = max_turns
         self.dataset_type = (dataset_type or "").strip().lower()
         if self.dataset_type not in {"aime", "math", "polaris"}:
@@ -1233,7 +1234,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 self.last_traces = []
                 self.last_student_generalization_results = []
                 self.last_total_reward = 0.0
-                self._log_rollout_stats(
+                completed_repeat_outcome = self._log_rollout_stats(
                     total_reward=0.0,
                     traces=[],
                     termination_reason=TEACHER_PRE_SKIPPED_TERMINATION_REASON,
@@ -1244,6 +1245,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     teacher_prompt_selection=teacher_prompt_selection,
                     student_prompt_selection=student_prompt_selection,
                 )
+                if completed_repeat_outcome is not None and self.debug_trace_dir:
+                    await self._dump_eval_repeat_outcomes(*completed_repeat_outcome)
                 await self._maybe_dump_debug_trace(
                     task=task,
                     ground_truth=ground_truth,
@@ -1304,7 +1307,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 teacher_prompt_selection=teacher_prompt_selection,
                 student_prompt_selection=student_prompt_selection,
             )
-            self._log_rollout_stats(
+            completed_repeat_outcome = self._log_rollout_stats(
                 total_reward=0.0,
                 traces=[],
                 termination_reason=episode_artifact.termination_reason,
@@ -1316,6 +1319,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 teacher_prompt_selection=teacher_prompt_selection,
                 student_prompt_selection=student_prompt_selection,
             )
+            if completed_repeat_outcome is not None and self.debug_trace_dir:
+                await self._dump_eval_repeat_outcomes(*completed_repeat_outcome)
             await self._maybe_dump_debug_trace(
                 task=episode_artifact.task,
                 ground_truth=episode_artifact.ground_truth,
@@ -1589,7 +1594,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.last_traces = traces
         self.last_student_generalization_results = student_generalization_results
         self.last_total_reward = total_reward
-        self._log_rollout_stats(
+        completed_repeat_outcome = self._log_rollout_stats(
             total_reward=total_reward,
             traces=traces,
             termination_reason=episode_artifact.termination_reason,
@@ -1616,6 +1621,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
             ),
         )
+        if completed_repeat_outcome is not None and self.debug_trace_dir:
+            await self._dump_eval_repeat_outcomes(*completed_repeat_outcome)
         await self._maybe_dump_debug_trace(
             task=episode_artifact.task,
             ground_truth=episode_artifact.ground_truth,
@@ -2870,7 +2877,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_prompt_selection: PromptPoolSelection | None = None,
         inference_prompt_tokens: int = 0,
         training_prompt_tokens: int = 0,
-    ) -> None:
+    ) -> tuple[int, list[float]] | None:
         success_round = next(
             (
                 trace.turn_idx
@@ -2885,9 +2892,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         solved = success_round > 0
         is_eval = bool(workflow_context.get().is_eval)
         is_forced_persona_eval = bool(is_eval and student_prompt_selection is not None)
+        completed_repeat_outcome = None
         if is_eval and not is_forced_persona_eval:
-            self._record_eval_repeat_outcomes(
-                solved=solved,
+            completed_repeat_outcome = self._record_eval_repeat_outcomes(
                 final_correct=pre_success or solved,
             )
         metrics = {
@@ -2910,6 +2917,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 termination_reason == TEACHER_PRE_SKIPPED_TERMINATION_REASON
             ),
         }
+        if is_eval:
+            metrics["final_correct"] = float(pre_success or solved)
         if teacher_pre_solve_result is not None:
             metrics["teacher_pre/accepted"] = float(teacher_pre_solve_result.accepted)
             metrics["teacher_pre/attempts"] = float(
@@ -3023,41 +3032,40 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_generalization_results=student_generalization_results,
             )
         _safe_scalar(**metrics)
+        return completed_repeat_outcome
 
     def _record_eval_repeat_outcomes(
-        self, *, solved: bool, final_correct: bool
-    ) -> None:
-        task_id = workflow_context.get().task_id
+        self, *, final_correct: bool
+    ) -> tuple[int, list[float]] | None:
+        task_id = getattr(workflow_context.get(), "task_id", None)
         if task_id is None:
-            return
+            return None
 
         pending_by_task = getattr(self, "_eval_repeat_outcomes", None)
         if pending_by_task is None:
             pending_by_task = {}
             self._eval_repeat_outcomes = pending_by_task
-        task_outcomes = pending_by_task.setdefault(
-            int(task_id), {"solved": [], "final_correct": []}
-        )
-        task_outcomes["solved"].append(float(solved))
-        task_outcomes["final_correct"].append(float(final_correct))
+        task_outcomes = pending_by_task.setdefault(int(task_id), [])
+        task_outcomes.append(float(final_correct))
 
         repeat_count = int(getattr(self, "eval_repeat_count", 1))
-        if len(task_outcomes["solved"]) < repeat_count:
-            return
+        if len(task_outcomes) < repeat_count:
+            return None
         completed = pending_by_task.pop(int(task_id))
-        for outcome_name, values in completed.items():
-            self._log_eval_repeat_metrics(outcome_name, values)
+        self._log_eval_repeat_metrics(completed)
+        return int(task_id), completed
 
     @staticmethod
-    def _log_eval_repeat_metrics(outcome_name: str, values: list[float]) -> None:
-        prefix = f"repeat/{outcome_name}"
-        summary = _binary_repeat_summary(values)
-        _safe_scalar(**{f"{prefix}/{key}": value for key, value in summary.items()})
-
-        if summary["success_set_union"]:
-            _safe_scalar(
-                **{f"{prefix}/success_set_jaccard": summary["success_set_intersection"]}
-            )
+    def _log_eval_repeat_metrics(values: list[float]) -> None:
+        mean = sum(values) / len(values)
+        sample_variance = (
+            sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+            if len(values) > 1
+            else 0.0
+        )
+        _safe_scalar(
+            **{"repeat/final_correct/mean_task_sample_variance": sample_variance}
+        )
 
         repeat_pairs = list(combinations(values, 2))
         if not repeat_pairs:
@@ -3065,8 +3073,36 @@ class TutorAgentWorkflow(RolloutWorkflow):
         for left, right in repeat_pairs:
             if left or right:
                 _safe_scalar(
-                    **{f"{prefix}/pairwise_success_set_jaccard": float(left and right)}
+                    **{
+                        "repeat/final_correct/pairwise_success_jaccard": float(
+                            left and right
+                        )
+                    }
                 )
+
+    async def _dump_eval_repeat_outcomes(
+        self, task_id: int, outcomes: list[float]
+    ) -> None:
+        ctx = workflow_context.get()
+
+        try:
+            out_dir = Path(self.debug_trace_dir) / "eval" / "repeat_outcomes"
+            await aiofiles.os.makedirs(out_dir, exist_ok=True)
+            shard_path = out_dir / (
+                f"{socket.gethostname()}_{os.getpid()}_final_correct.jsonl"
+            )
+            payload = {
+                "task_id": int(task_id),
+                "lora_version": getattr(ctx, "lora_version", None),
+                "final_correct": [int(value) for value in outcomes],
+            }
+            async with aiofiles.open(shard_path, "a", encoding="utf-8") as outcome_file:
+                await outcome_file.write(
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                    + "\n"
+                )
+        except Exception:
+            logger.exception("Failed to dump tutor eval repeat outcomes.")
 
     def _enabled_reward_component_keys(self) -> list[str]:
         keys = []

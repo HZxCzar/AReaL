@@ -548,8 +548,8 @@ def test_rollout_stats_report_only_grouped_student_prompt_metrics(monkeypatch):
     assert not any(key.startswith(flat_prefixes) for key in captured)
 
 
-def test_eval_rollout_stats_record_repeat_outcomes(monkeypatch):
-    """Test tutor evaluation exposes solved and final-correct group outcomes."""
+def test_eval_rollout_stats_record_core_repeat_metrics(monkeypatch):
+    """Test evaluation exposes final correctness and core repeat stability."""
     captured = []
     monkeypatch.setattr(
         tutor_workflow, "_safe_scalar", lambda **metrics: captured.append(metrics)
@@ -575,8 +575,13 @@ def test_eval_rollout_stats_record_repeat_outcomes(monkeypatch):
     )
 
     merged = {key: value for metrics in captured for key, value in metrics.items()}
-    assert merged["repeat/solved/mean"] == pytest.approx(0.0)
-    assert merged["repeat/final_correct/mean"] == pytest.approx(1.0)
+    assert merged["solved"] == pytest.approx(0.0)
+    assert merged["final_correct"] == pytest.approx(1.0)
+    assert merged["repeat/final_correct/mean_task_sample_variance"] == pytest.approx(
+        0.0
+    )
+    assert merged["repeat/final_correct/pairwise_success_jaccard"] == pytest.approx(1.0)
+    assert not any(key.startswith("repeat/solved/") for key in merged)
 
 
 def test_forced_persona_eval_does_not_record_repeat_outcomes(monkeypatch):
@@ -612,9 +617,7 @@ def test_forced_persona_eval_does_not_record_repeat_outcomes(monkeypatch):
         student_prompt_selection=selection,
     )
 
-    assert not any(
-        key.startswith("repeat/") for metrics in captured for key in metrics
-    )
+    assert not any(key.startswith("repeat/") for metrics in captured for key in metrics)
 
 
 def test_eval_student_summary_uses_only_base_prompt_rows(monkeypatch):
@@ -1208,8 +1211,7 @@ def test_pass2_persona_v2_configs_use_validated_behavior_pools(monkeypatch):
         "student_personality_heldout_behavior_v2_suffixes_5.json"
     )
     assert tuple(
-        prompt.split("]", 1)[0].removeprefix("[Persona: ")
-        for prompt in seen_prompts
+        prompt.split("]", 1)[0].removeprefix("[Persona: ") for prompt in seen_prompts
     ) == (
         "QuickHelpSeeker",
         "IndependentPerseverer",
@@ -1218,8 +1220,7 @@ def test_pass2_persona_v2_configs_use_validated_behavior_pools(monkeypatch):
         "ThinkAloudCollaborator",
     )
     assert tuple(
-        prompt.split("]", 1)[0].removeprefix("[Persona: ")
-        for prompt in heldout_prompts
+        prompt.split("]", 1)[0].removeprefix("[Persona: ") for prompt in heldout_prompts
     ) == (
         "MinimalHintSeeker",
         "CriticalFollower",

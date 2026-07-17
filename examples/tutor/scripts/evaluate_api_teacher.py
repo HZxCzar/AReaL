@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from itertools import combinations
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, TypeVar
@@ -32,7 +33,7 @@ from examples.tutor.configs import (
     TutorConfig,
 )
 from examples.tutor.core.history import trace_to_json
-from examples.tutor.workflow import TutorAgentWorkflow
+from examples.tutor.workflow import TutorAgentWorkflow, _binary_repeat_summary
 
 from areal import workflow_context
 from areal.api.cli_args import load_expr_config
@@ -46,7 +47,7 @@ logger = logging.getLogger("TutorApiTeacherEval")
 _T = TypeVar("_T")
 
 DEFAULT_CONFIG_PATH = (
-    "examples/tutor/configs/math/july/pass@2/qwen8b-qwen1.7b-math-baseline.yaml"
+    "examples/tutor/configs/math/july/pass@2/qwen8b-qwen1.7b-math-pre-aleak.yaml"
 )
 DEFAULT_DEEPSEEK_MODEL = "DeepSeek-V3.2"
 DEEPSEEK_TEMPERATURE = 1.0
@@ -260,6 +261,21 @@ async def run_without_proxy_environment(
         return await operation()
 
 
+@contextmanager
+def without_config_snapshot_writes() -> Any:
+    """Load standalone-eval configs without writing trainer log snapshots."""
+
+    previous_rank = os.environ.get("RANK")
+    os.environ["RANK"] = "1"
+    try:
+        yield
+    finally:
+        if previous_rank is None:
+            os.environ.pop("RANK", None)
+        else:
+            os.environ["RANK"] = previous_rank
+
+
 def deepseek_non_thinking_params(seed: int) -> dict[str, Any]:
     """Request fields understood by local SGLang DeepSeek-V3.2 servers."""
 
@@ -345,7 +361,7 @@ def snapshot_student_models(config_path: str) -> list[dict[str, Any]]:
 
     # StatsLogger imports HTTP clients while loading config. Do not let a global
     # SOCKS proxy make this purely local operation require optional socksio.
-    with without_proxy_environment():
+    with without_proxy_environment(), without_config_snapshot_writes():
         baseline, _ = load_expr_config(["--config", config_path], TutorConfig)
     students = [asdict(student) for student in baseline.student_models]
     if not students:
@@ -360,7 +376,7 @@ def load_experiment_config(
     overrides: list[str],
 ) -> tuple[TutorConfig, list[dict[str, Any]]]:
     students = snapshot_student_models(config_path)
-    with without_proxy_environment():
+    with without_proxy_environment(), without_config_snapshot_writes():
         config, _ = load_expr_config(
             ["--config", config_path, *overrides],
             TutorConfig,
@@ -1036,6 +1052,112 @@ def aggregate_mode(
     }
 
 
+def aggregate_repeat_metrics(
+    results: list[EpisodeResult],
+    *,
+    expected_items: int,
+    attempts: int,
+) -> dict[str, Any]:
+    """Match the grouped evaluator's per-task repeat stability metrics."""
+
+    expected_attempts = set(range(1, attempts + 1))
+    by_item: dict[int, dict[int, EpisodeResult]] = {}
+    for result in latest_results(results):
+        by_item.setdefault(result.dataset_index, {})[result.attempt] = result
+
+    complete_items = [
+        [attempt_results[attempt] for attempt in range(1, attempts + 1)]
+        for attempt_results in by_item.values()
+        if set(attempt_results) == expected_attempts
+        and all(result.error is None for result in attempt_results.values())
+    ]
+    error_items = sum(
+        any(result.error is not None for result in attempt_results.values())
+        for attempt_results in by_item.values()
+    )
+
+    def summarize(outcome: str) -> dict[str, float | None]:
+        values_by_item = [
+            [
+                float(
+                    result.taught_success
+                    if outcome == "solved"
+                    else result.final_correct
+                )
+                for result in item_results
+            ]
+            for item_results in complete_items
+        ]
+        if not values_by_item:
+            return {
+                key: None
+                for key in (
+                    "mean",
+                    "variance",
+                    "std",
+                    "agreement",
+                    "disagreement",
+                    "all_equal",
+                    "any_success",
+                    "all_success",
+                    "success_set_intersection",
+                    "success_set_union",
+                    "success_set_jaccard",
+                    "pairwise_success_set_jaccard",
+                )
+            }
+
+        per_item = [_binary_repeat_summary(values) for values in values_by_item]
+        summary = {
+            key: sum(item[key] for item in per_item) / len(per_item)
+            for key in (
+                "mean",
+                "variance",
+                "std",
+                "agreement",
+                "disagreement",
+                "all_equal",
+                "any_success",
+                "all_success",
+                "success_set_intersection",
+                "success_set_union",
+            )
+        }
+        success_union = sum(item["success_set_union"] for item in per_item)
+        summary["success_set_jaccard"] = (
+            sum(item["success_set_intersection"] for item in per_item) / success_union
+            if success_union
+            else None
+        )
+
+        pairwise_intersection = 0.0
+        pairwise_union = 0.0
+        for values in values_by_item:
+            repeat_pairs = list(combinations(values, 2))
+            if not repeat_pairs:
+                repeat_pairs = [(values[0], values[0])]
+            for left, right in repeat_pairs:
+                if left or right:
+                    pairwise_intersection += float(left and right)
+                    pairwise_union += 1.0
+        summary["pairwise_success_set_jaccard"] = (
+            pairwise_intersection / pairwise_union if pairwise_union else None
+        )
+        return summary
+
+    complete_item_count = len(complete_items)
+    return {
+        "expected_item_count": int(expected_items),
+        "recorded_item_count": len(by_item),
+        "complete_item_count": complete_item_count,
+        "incomplete_item_count": max(0, int(expected_items) - complete_item_count),
+        "error_item_count": error_items,
+        "complete_item_coverage_rate": _rate(complete_item_count, expected_items),
+        "solved": summarize("solved"),
+        "final_correct": summarize("final_correct"),
+    }
+
+
 def aggregate_report(
     results: list[EpisodeResult],
     *,
@@ -1072,6 +1194,11 @@ def aggregate_report(
                 generalization_enabled=generalization_enabled,
             ),
             **aggregate_items(mode_results, expected_items=base_prompt_rows),
+            "repeat": aggregate_repeat_metrics(
+                mode_results,
+                expected_items=base_prompt_rows,
+                attempts=attempts,
+            ),
         }
         if student_prompt_rows:
             pool_summaries: dict[str, dict[str, Any]] = {}
@@ -1090,6 +1217,11 @@ def aggregate_report(
                         generalization_enabled=generalization_enabled,
                     ),
                     **aggregate_items(prompt_results, expected_items=row_count),
+                    "repeat": aggregate_repeat_metrics(
+                        prompt_results,
+                        expected_items=row_count,
+                        attempts=attempts,
+                    ),
                 }
             mode_summary["student_prompts"] = pool_summaries
         mode_summaries[mode.name] = mode_summary
@@ -1247,6 +1379,9 @@ def build_run_signature(
                 "max_turns": config.max_turns,
                 "leak_handling_mode": config.leak_handling_mode,
                 "teacher_show_ground_truth": config.teacher_show_ground_truth,
+                "teacher_anti_leak_instruction_enabled": (
+                    config.teacher_anti_leak_instruction_enabled
+                ),
                 "student_generalize_enabled": config.student_generalize.enabled,
                 "student_generalize_source": config.student_generalize.source,
                 **(

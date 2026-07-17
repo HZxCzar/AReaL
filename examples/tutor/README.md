@@ -165,14 +165,23 @@ configured student; `evaluator.average_rollouts` is applied independently to eac
 student. An empty `student_models` list preserves the legacy behavior where
 `auxiliary_model` is also the student.
 
-Repeated evaluation also reports per-task binary stability for both tutoring
-`solved` and overall `final_correct` under `eval-rollout/repeat/<outcome>/...`.
-Metrics include `variance`, `std`, pairwise `agreement`/`disagreement`, `all_equal`,
-`any_success`, `all_success`, the strict all-repeat `success_set_jaccard`, and
-`pairwise_success_set_jaccard` over all repeat pairs. With one rollout these remain
-defined (`variance=0`, `agreement=1`). `variance` is computed within each task before
-being averaged over the test set; the Jaccard metrics are computed from globally
-aggregated intersections and unions.
+Repeated online evaluation reports `eval-rollout/solved` and
+`eval-rollout/final_correct` as separate test scores. Per-task stability is logged
+only for `final_correct`:
+
+- `repeat/final_correct/mean_task_sample_variance` computes the unbiased sample
+  variance within each task before averaging over the test set.
+- `repeat/final_correct/pairwise_success_jaccard` aggregates success-set
+  intersections and unions over every repeat pair.
+
+With one rollout, the two stability metrics are still emitted as degenerate values
+(`variance=0`; successful tasks contribute `Jaccard=1`) and should not be interpreted
+as measured stability.
+
+When `debug_trace_dir` is configured, compact per-task outcomes are appended under
+`eval/repeat_outcomes/*.jsonl`. Each row stores only `task_id`, `lora_version`, and the
+binary `final_correct` list, so detailed statistics can be reconstructed without
+adding redundant online metrics or duplicating prompts and responses.
 
 `evaluator.average_rollouts` controls repeats for the clean base student prompt.
 Additional seen and held-out student instruction prompts use

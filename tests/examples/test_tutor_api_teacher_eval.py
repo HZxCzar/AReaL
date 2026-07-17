@@ -17,11 +17,13 @@ from examples.tutor.configs import (
     TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
 )
 from examples.tutor.scripts.evaluate_api_teacher import (
+    DEFAULT_CONFIG_PATH,
     ApiTeacherClient,
     EpisodeResult,
     EpisodeSpec,
     PresolveMode,
     aggregate_mode,
+    aggregate_repeat_metrics,
     aggregate_report,
     append_jsonl,
     build_eval_workflow_kwargs,
@@ -39,14 +41,15 @@ from examples.tutor.scripts.evaluate_api_teacher import (
     run_episode,
     run_without_proxy_environment,
     student_prompt_row_counts,
+    without_config_snapshot_writes,
 )
 from examples.tutor.train import EvalStudentPrompt
 
-CONFIG_PATH = Path(
-    "examples/tutor/configs/math/july/pass@2/qwen8b-qwen1.7b-math-baseline.yaml"
+CONFIG_PATH = Path(DEFAULT_CONFIG_PATH)
+PERSONA_CONFIG_PATH = CONFIG_PATH.with_name("persona-v1") / (
+    "qwen8b-qwen1.7b-math-student5.yaml"
 )
-PERSONA_CONFIG_PATH = CONFIG_PATH.with_name("qwen8b-qwen1.7b-math-student5.yaml")
-HELDOUT_CONFIG_PATH = CONFIG_PATH.with_name(
+HELDOUT_CONFIG_PATH = CONFIG_PATH.with_name("persona-v1") / (
     "qwen8b-qwen1.7b-math-student5-heldout5.yaml"
 )
 
@@ -78,6 +81,26 @@ def test_run_without_proxy_environment_spans_await_and_restores_exactly(
 
     assert result == "ok"
     assert {name: os.environ.get(name) for name in PROXY_ENV_VARS} == expected
+
+
+def test_without_config_snapshot_writes_restores_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Standalone config loading must not leak its synthetic rank setting."""
+
+    monkeypatch.setenv("RANK", "7")
+
+    with without_config_snapshot_writes():
+        assert os.environ["RANK"] == "1"
+
+    assert os.environ["RANK"] == "7"
+
+
+def test_default_config_targets_requested_pre_aleak_experiment() -> None:
+    """The standalone evaluator should be safe against accidental non-aleak runs."""
+
+    assert CONFIG_PATH.name == "qwen8b-qwen1.7b-math-pre-aleak.yaml"
+    assert CONFIG_PATH.exists()
 
 
 def _args(**overrides: Any) -> SimpleNamespace:
@@ -303,6 +326,7 @@ def test_build_eval_workflow_kwargs_preserves_role_parameters(
     assert kwargs["teacher_pre_enabled"] is True
     assert kwargs["teacher_pre_attempts"] == 3
     assert kwargs["teacher_pre_max_tokens"] == 0
+    assert kwargs["teacher_anti_leak_instruction_enabled"] is True
     assert kwargs["teacher_prompt_pool_path"] == ""
     assert kwargs["student_prompt_pool_path"] == ""
     assert kwargs["student_generalize_enabled"] is True
@@ -706,6 +730,109 @@ def test_aggregate_report_adds_item_any_success_for_multiple_attempts() -> None:
     mode = report["modes"]["presolve_off"]
     assert mode["teaching_lift_full_set"] == pytest.approx(0.25)
     assert mode["item_any_taught_success_rate_full_set"] == pytest.approx(0.5)
+
+
+def test_aggregate_repeat_metrics_matches_grouped_eval_stability_semantics() -> None:
+    """Repeat statistics are computed within each task before test-set averaging."""
+
+    results = [
+        _result(
+            key="off:0:1",
+            termination_reason="max_turns",
+            dataset_index=0,
+            attempt=1,
+        ),
+        _result(
+            key="off:0:2",
+            termination_reason="success",
+            taught_success=True,
+            dataset_index=0,
+            attempt=2,
+        ),
+        _result(
+            key="off:0:3",
+            termination_reason="success",
+            taught_success=True,
+            dataset_index=0,
+            attempt=3,
+        ),
+        _result(
+            key="off:1:1",
+            termination_reason="success",
+            taught_success=True,
+            dataset_index=1,
+            attempt=1,
+        ),
+        _result(
+            key="off:1:2",
+            termination_reason="success",
+            taught_success=True,
+            dataset_index=1,
+            attempt=2,
+        ),
+        _result(
+            key="off:1:3",
+            termination_reason="success",
+            taught_success=True,
+            dataset_index=1,
+            attempt=3,
+        ),
+    ]
+
+    repeat = aggregate_repeat_metrics(results, expected_items=2, attempts=3)
+
+    assert repeat["complete_item_count"] == 2
+    assert repeat["complete_item_coverage_rate"] == pytest.approx(1.0)
+    solved = repeat["solved"]
+    assert solved["mean"] == pytest.approx(5 / 6)
+    assert solved["variance"] == pytest.approx(1 / 9)
+    assert solved["std"] == pytest.approx((2 / 9) ** 0.5 / 2)
+    assert solved["agreement"] == pytest.approx(2 / 3)
+    assert solved["disagreement"] == pytest.approx(1 / 3)
+    assert solved["all_equal"] == pytest.approx(0.5)
+    assert solved["any_success"] == pytest.approx(1.0)
+    assert solved["all_success"] == pytest.approx(0.5)
+    assert solved["success_set_jaccard"] == pytest.approx(0.5)
+    assert solved["pairwise_success_set_jaccard"] == pytest.approx(2 / 3)
+    assert repeat["final_correct"] == solved
+
+
+def test_aggregate_repeat_metrics_excludes_incomplete_or_error_items() -> None:
+    """A failed attempt must not be mistaken for a valid low-variance task."""
+
+    results = [
+        _result(
+            key="off:0:1",
+            termination_reason="success",
+            taught_success=True,
+            dataset_index=0,
+            attempt=1,
+        ),
+        _result(
+            key="off:0:2",
+            termination_reason="error",
+            error="timeout",
+            dataset_index=0,
+            attempt=2,
+        ),
+        _result(
+            key="off:1:1",
+            termination_reason="success",
+            taught_success=True,
+            dataset_index=1,
+            attempt=1,
+        ),
+    ]
+
+    repeat = aggregate_repeat_metrics(results, expected_items=2, attempts=3)
+
+    assert repeat["recorded_item_count"] == 2
+    assert repeat["complete_item_count"] == 0
+    assert repeat["incomplete_item_count"] == 2
+    assert repeat["error_item_count"] == 1
+    assert repeat["complete_item_coverage_rate"] == pytest.approx(0.0)
+    assert repeat["solved"]["variance"] is None
+    assert repeat["final_correct"]["success_set_jaccard"] is None
 
 
 def test_aggregate_report_separates_student_prompt_results() -> None:
