@@ -3012,6 +3012,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "invalid_success_due_to_leak": int(invalid_success_due_to_leak),
             "pre_solved": float(pre_success),
             "solved": float(solved),
+            "final_correct": float(pre_success or solved),
             "stop/max_turns": float(termination_reason == "max_turns"),
             "stop/context_limit": float(
                 termination_reason == CONTEXT_BUDGET_TERMINATION_REASON
@@ -3021,8 +3022,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 termination_reason == TEACHER_PRE_SKIPPED_TERMINATION_REASON
             ),
         }
-        if is_eval:
-            metrics["final_correct"] = float(pre_success or solved)
         if teacher_pre_solve_result is not None:
             metrics["teacher_pre/accepted"] = float(teacher_pre_solve_result.accepted)
             metrics["teacher_pre/attempts"] = float(

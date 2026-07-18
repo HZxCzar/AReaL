@@ -2572,6 +2572,7 @@ def test_rollout_stats_uses_clean_metric_names_and_reward_breakdown(monkeypatch)
     assert captured["leaks"] == 1
     assert captured["pre_solved"] == 0.0
     assert captured["solved"] == 1.0
+    assert captured["final_correct"] == 1.0
     assert captured["solve_turn"] == 2
     assert captured["stop/max_turns"] == 0.0
     assert captured["stop/context_limit"] == 0.0
@@ -2624,6 +2625,29 @@ def test_rollout_stats_logs_leak_termination(monkeypatch):
     assert captured["stop/max_turns"] == pytest.approx(0.0)
     assert captured["stop/context_limit"] == pytest.approx(0.0)
     assert captured["stop/leak"] == pytest.approx(1.0)
+
+
+def test_training_rollout_stats_logs_final_correct_for_pre_solved(monkeypatch):
+    """Test training marks an initially correct student answer as final correct."""
+    captured = {}
+    monkeypatch.setattr(
+        tutor_workflow,
+        "_safe_scalar",
+        lambda **metrics: captured.update(metrics),
+    )
+    workflow = _metric_workflow()
+
+    workflow._log_rollout_stats(
+        total_reward=0.0,
+        traces=[],
+        termination_reason="pre_solved",
+        pre_success=True,
+        leak_count=0,
+    )
+
+    assert captured["pre_solved"] == pytest.approx(1.0)
+    assert captured["solved"] == pytest.approx(0.0)
+    assert captured["final_correct"] == pytest.approx(1.0)
 
 
 def test_rollout_stats_routes_student_generalize_metrics_to_generalize(monkeypatch):
