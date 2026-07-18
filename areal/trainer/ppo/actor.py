@@ -116,6 +116,90 @@ def _compute_batch_centered_penalties(
     )
 
 
+def _compute_teacher_context_advantages(
+    real_logps: torch.Tensor,
+    real_loss_mask: torch.Tensor,
+    moved_logps: torch.Tensor,
+    moved_loss_mask: torch.Tensor,
+    weights: torch.Tensor,
+    score_clips: torch.Tensor,
+    score_valid_mask: torch.Tensor,
+    turn_valid_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute a batch-centered local advantage for context-dependent turns."""
+
+    batch_size = real_logps.shape[0]
+    one_dimensional = {
+        "weights": weights,
+        "score_clips": score_clips,
+        "score_valid_mask": score_valid_mask,
+        "turn_valid_mask": turn_valid_mask,
+    }
+    invalid_shapes = {
+        name: value.shape
+        for name, value in one_dimensional.items()
+        if value.shape != (batch_size,)
+    }
+    if invalid_shapes:
+        raise ValueError(
+            "Teacher context metadata must have shape [batch_size]; "
+            f"batch_size={batch_size}, invalid={invalid_shapes}."
+        )
+    if real_logps.shape != real_loss_mask.shape:
+        raise ValueError(
+            "Teacher context real log-probabilities and loss mask must match: "
+            f"logps={real_logps.shape}, mask={real_loss_mask.shape}."
+        )
+    if moved_logps.shape != moved_loss_mask.shape:
+        raise ValueError(
+            "Teacher context moved log-probabilities and loss mask must match: "
+            f"logps={moved_logps.shape}, mask={moved_loss_mask.shape}."
+        )
+    if moved_logps.shape[0] != batch_size:
+        raise ValueError(
+            "Teacher context real and moved batches must have the same size: "
+            f"real={batch_size}, moved={moved_logps.shape[0]}."
+        )
+
+    real_logps = real_logps.detach().float()
+    moved_logps = moved_logps.detach().float()
+    real_mask = real_loss_mask.detach().bool()
+    moved_mask = moved_loss_mask.detach().bool()
+    weights = weights.detach().float()
+    score_clips = score_clips.detach().float()
+
+    real_counts = real_mask.sum(dim=-1)
+    moved_counts = moved_mask.sum(dim=-1)
+    real_means = (real_logps * real_mask).sum(dim=-1) / real_counts.clamp_min(1)
+    moved_means = (moved_logps * moved_mask).sum(dim=-1) / moved_counts.clamp_min(1)
+    information_gain = real_means - moved_means
+    valid_mask = (
+        score_valid_mask.bool()
+        & turn_valid_mask.bool()
+        & (real_counts > 0)
+        & (moved_counts > 0)
+        & torch.isfinite(real_means)
+        & torch.isfinite(moved_means)
+        & torch.isfinite(information_gain)
+        & torch.isfinite(weights)
+        & torch.isfinite(score_clips)
+        & (weights > 0.0)
+        & (score_clips > 0.0)
+    )
+    clipped_gain = torch.maximum(
+        torch.minimum(information_gain, score_clips), -score_clips
+    )
+    valid_gain = torch.where(valid_mask, clipped_gain, torch.zeros_like(clipped_gain))
+    valid_count = valid_mask.sum().clamp_min(1)
+    batch_mean = (valid_gain.sum() / valid_count).detach()
+    local_advantage = torch.where(
+        valid_mask,
+        weights * (clipped_gain - batch_mean),
+        torch.zeros_like(clipped_gain),
+    )
+    return local_advantage, real_means, moved_means, information_gain
+
+
 def _broadcast_turn_values_to_tokens(
     turn_values: torch.Tensor, loss_mask: torch.Tensor
 ) -> torch.Tensor:
@@ -262,6 +346,29 @@ class PPOActor:
             raise ValueError(
                 "Batch-centered local penalties require advantage_estimator='rebn'."
             )
+        teacher_context_keys = {
+            "teacher_context_input_ids",
+            "teacher_context_attention_mask",
+            "teacher_context_loss_mask",
+            "teacher_context_logp",
+            "teacher_context_reward_weight",
+            "teacher_context_reward_score_clip",
+            "teacher_context_reward_valid",
+        }
+        present_teacher_context_keys = teacher_context_keys.intersection(data)
+        if (
+            present_teacher_context_keys
+            and present_teacher_context_keys != teacher_context_keys
+        ):
+            missing = sorted(teacher_context_keys - present_teacher_context_keys)
+            raise ValueError(
+                "Incomplete teacher context reward metadata; missing: "
+                + ", ".join(missing)
+            )
+        if present_teacher_context_keys and self.config.advantage_estimator != "rebn":
+            raise ValueError(
+                "Teacher context local advantages require advantage_estimator='rebn'."
+            )
 
         # Reward Scaling
         reward_score = data["rewards"]
@@ -335,6 +442,35 @@ class PPOActor:
                     data["batch_centered_penalty_valid"].to(reward_score.device),
                     valid_turn_mask,
                 )
+            teacher_context_advantages = None
+            if present_teacher_context_keys:
+                prox_logp = data.get("prox_logp")
+                if prox_logp is None:
+                    raise ValueError(
+                        "Teacher context reward requires prox_logp from the same "
+                        "actor snapshot as the moved-context forward pass."
+                    )
+                moved_loss_mask = torch.roll(
+                    data["teacher_context_loss_mask"].float(), shifts=-1, dims=-1
+                )
+                (
+                    teacher_context_advantages,
+                    real_avg_logp,
+                    moved_avg_logp,
+                    information_gain,
+                ) = _compute_teacher_context_advantages(
+                    prox_logp,
+                    loss_mask,
+                    data["teacher_context_logp"],
+                    moved_loss_mask,
+                    data["teacher_context_reward_weight"].to(reward_score.device),
+                    data["teacher_context_reward_score_clip"].to(reward_score.device),
+                    data["teacher_context_reward_valid"].to(reward_score.device),
+                    valid_turn_mask,
+                )
+                data["teacher_context_real_avg_logp"] = real_avg_logp
+                data["teacher_context_moved_avg_logp"] = moved_avg_logp
+                data["teacher_context_information_gain"] = information_gain
             turn_returns = _compute_rebn_returns(
                 reward_score,
                 data["trajectory_id"].to(reward_score.device),
@@ -354,6 +490,11 @@ class PPOActor:
                     normalized_turn_returns + batch_centered_penalties
                 )
                 data["batch_centered_penalty_advantage"] = batch_centered_penalties
+            if teacher_context_advantages is not None:
+                normalized_turn_returns = (
+                    normalized_turn_returns + teacher_context_advantages
+                )
+                data["teacher_context_advantage"] = teacher_context_advantages
             advantages = kl_advantages + _broadcast_turn_values_to_tokens(
                 normalized_turn_returns, loss_mask
             )
@@ -431,6 +572,10 @@ class PPOActor:
             result_denominators["batch_centered_penalty_valid"] = data[
                 "batch_centered_penalty_valid"
             ].bool()
+        if "teacher_context_reward_valid" in data:
+            result_denominators["teacher_context_reward_valid"] = data[
+                "teacher_context_reward_valid"
+            ].bool()
         if self.config.log_agent_stats:
             if "begin_of_trajectory" not in data:
                 raise RuntimeError(
@@ -481,6 +626,20 @@ class PPOActor:
                 ].float(),
                 denominator="batch_centered_penalty_valid",
             )
+        if "teacher_context_advantage" in data:
+            stats_tracker.stat(
+                teacher_context_real_avg_logp=data[
+                    "teacher_context_real_avg_logp"
+                ].float(),
+                teacher_context_moved_avg_logp=data[
+                    "teacher_context_moved_avg_logp"
+                ].float(),
+                teacher_context_information_gain=data[
+                    "teacher_context_information_gain"
+                ].float(),
+                teacher_context_advantage=data["teacher_context_advantage"].float(),
+                denominator="teacher_context_reward_valid",
+            )
         scalars = dict(
             mask_no_eos_with_zero=self.config.mask_no_eos_with_zero,
             eps_clip=self.config.eps_clip,
@@ -513,6 +672,17 @@ class PPOActor:
             "batch_centered_penalty_weight",
             "batch_centered_penalty_valid",
             "batch_centered_penalty_advantage",
+            "teacher_context_input_ids",
+            "teacher_context_attention_mask",
+            "teacher_context_loss_mask",
+            "teacher_context_logp",
+            "teacher_context_reward_weight",
+            "teacher_context_reward_score_clip",
+            "teacher_context_reward_valid",
+            "teacher_context_real_avg_logp",
+            "teacher_context_moved_avg_logp",
+            "teacher_context_information_gain",
+            "teacher_context_advantage",
         ]:
             data.pop(key, None)
         # NOTE: calling engine.train() is critical to enabling gradient checkpointing

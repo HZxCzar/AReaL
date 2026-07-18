@@ -15,6 +15,9 @@ def response_to_tensordict(
     zero_reward_on_length_stop: bool = False,
     batch_centered_penalty_score: float | None = None,
     batch_centered_penalty_weight: float | None = None,
+    teacher_context_input_tokens: list[int] | None = None,
+    teacher_context_reward_weight: float | None = None,
+    teacher_context_reward_score_clip: float | None = None,
 ) -> dict[str, torch.Tensor]:
     input_tokens = (
         list(response.input_tokens)
@@ -81,5 +84,37 @@ def response_to_tensordict(
         result["batch_centered_penalty_valid"] = torch.tensor(
             [score_valid],
             dtype=torch.bool,
+        )
+    if teacher_context_reward_weight is not None:
+        if teacher_context_reward_score_clip is None:
+            raise ValueError(
+                "teacher_context_reward_score_clip is required when the teacher "
+                "context reward is enabled."
+            )
+        context_valid = teacher_context_input_tokens is not None and output_len > 0
+        context_prompt_tokens = (
+            list(teacher_context_input_tokens)
+            if teacher_context_input_tokens is not None
+            else input_tokens
+        )
+        context_ids = context_prompt_tokens + output_tokens
+        result["teacher_context_input_ids"] = torch.tensor(
+            context_ids, dtype=torch.long
+        ).unsqueeze(0)
+        result["teacher_context_attention_mask"] = torch.ones(
+            len(context_ids), dtype=torch.bool
+        ).unsqueeze(0)
+        result["teacher_context_loss_mask"] = torch.tensor(
+            [0] * len(context_prompt_tokens) + [1] * output_len,
+            dtype=torch.long,
+        ).unsqueeze(0)
+        result["teacher_context_reward_weight"] = torch.tensor(
+            [float(teacher_context_reward_weight)], dtype=torch.float32
+        )
+        result["teacher_context_reward_score_clip"] = torch.tensor(
+            [float(teacher_context_reward_score_clip)], dtype=torch.float32
+        )
+        result["teacher_context_reward_valid"] = torch.tensor(
+            [context_valid], dtype=torch.bool
         )
     return result

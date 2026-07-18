@@ -670,6 +670,47 @@ class TutorTeacherDiversityRewardConfig:
 
 
 @dataclass
+class TutorTeacherContextRewardConfig:
+    enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Reward a later teacher turn when its sampled output is more likely "
+                "at its real position than when moved to the preceding teacher "
+                "turn's position. The length-normalized, batch-centered signal is "
+                "attached only to the later turn's local advantage."
+            )
+        },
+    )
+    weight: float = field(
+        default=0.1,
+        metadata={
+            "help": (
+                "Coefficient for the local context-awareness advantage after "
+                "subtracting the valid training-batch mean information gain."
+            )
+        },
+    )
+    score_clip: float = field(
+        default=5.0,
+        metadata={
+            "help": (
+                "Symmetric clip, in nats per output token, applied to the real-minus-"
+                "moved log-probability gap before batch centering."
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        self.weight = float(self.weight)
+        self.score_clip = float(self.score_clip)
+        if self.enabled and self.weight <= 0.0:
+            raise ValueError("reward.teacher_context.weight must be positive.")
+        if self.enabled and self.score_clip <= 0.0:
+            raise ValueError("reward.teacher_context.score_clip must be positive.")
+
+
+@dataclass
 class TutorRewardConfig:
     success: float = field(default=1.0)
     leaked_success_reward_scale: float = field(
@@ -745,6 +786,9 @@ class TutorRewardConfig:
     )
     teacher_diversity: TutorTeacherDiversityRewardConfig = field(
         default_factory=TutorTeacherDiversityRewardConfig
+    )
+    teacher_context: TutorTeacherContextRewardConfig = field(
+        default_factory=TutorTeacherContextRewardConfig
     )
 
     def __post_init__(self) -> None:

@@ -440,6 +440,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         length_penalty_min: float = -0.1,
         zero_reward_on_length_stop: bool = False,
         teacher_diversity_reward: dict[str, Any] | None = None,
+        teacher_context_reward: dict[str, Any] | None = None,
         teacher_system_prompt: str = "",
         teacher_anti_leak_instruction_enabled: bool = False,
         teacher_prompt_pool_path: str = "",
@@ -633,6 +634,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if self.teacher_diversity_enabled
             else None
         )
+        context_config = dict(teacher_context_reward or {})
+        self.teacher_context_enabled = bool(context_config.get("enabled", False))
+        self.teacher_context_weight = float(context_config.get("weight", 0.1))
+        self.teacher_context_score_clip = float(context_config.get("score_clip", 5.0))
+        if self.teacher_context_enabled and self.teacher_context_weight <= 0.0:
+            raise ValueError("teacher context reward weight must be positive.")
+        if self.teacher_context_enabled and self.teacher_context_score_clip <= 0.0:
+            raise ValueError("teacher context reward score_clip must be positive.")
         self.teacher_anti_leak_instruction_enabled = bool(
             teacher_anti_leak_instruction_enabled
         )
@@ -1627,6 +1636,17 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
             for artifact in turn_artifacts
         ]
+        training_teacher_inputs = [
+            (
+                list(clean_input)
+                if clean_input is not None
+                else list(artifact.tutor_response.input_tokens)
+            )
+            for artifact, clean_input in zip(
+                turn_artifacts, clean_teacher_inputs, strict=True
+            )
+        ]
+        preceding_teacher_inputs = [None, *training_teacher_inputs[:-1]]
         results = [
             response_to_tensordict(
                 artifact.tutor_response,
@@ -1647,9 +1667,28 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     if getattr(self, "teacher_diversity_enabled", False)
                     else None
                 ),
+                teacher_context_input_tokens=(
+                    preceding_input
+                    if getattr(self, "teacher_context_enabled", False)
+                    else None
+                ),
+                teacher_context_reward_weight=(
+                    getattr(self, "teacher_context_weight", 0.0)
+                    if getattr(self, "teacher_context_enabled", False)
+                    else None
+                ),
+                teacher_context_reward_score_clip=(
+                    getattr(self, "teacher_context_score_clip", 5.0)
+                    if getattr(self, "teacher_context_enabled", False)
+                    else None
+                ),
             )
-            for artifact, assignment, clean_input in zip(
-                turn_artifacts, assignments, clean_teacher_inputs, strict=True
+            for artifact, assignment, clean_input, preceding_input in zip(
+                turn_artifacts,
+                assignments,
+                clean_teacher_inputs,
+                preceding_teacher_inputs,
+                strict=True,
             )
         ]
         total_reward = float(sum(assignment.reward for assignment in assignments))

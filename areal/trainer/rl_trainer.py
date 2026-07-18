@@ -71,6 +71,58 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("RLTrainer")
 
+_TEACHER_CONTEXT_ROLLOUT_KEYS = {
+    "teacher_context_input_ids",
+    "teacher_context_attention_mask",
+    "teacher_context_loss_mask",
+    "teacher_context_reward_weight",
+    "teacher_context_reward_score_clip",
+    "teacher_context_reward_valid",
+}
+
+
+def _has_teacher_context_reward(rollout_batch: list[dict[str, Any]]) -> bool:
+    """Return whether every trajectory carries complete context-reward metadata."""
+
+    enabled = []
+    for trajectory in rollout_batch:
+        present = _TEACHER_CONTEXT_ROLLOUT_KEYS.intersection(trajectory)
+        if present and present != _TEACHER_CONTEXT_ROLLOUT_KEYS:
+            missing = sorted(_TEACHER_CONTEXT_ROLLOUT_KEYS - present)
+            raise ValueError(
+                "Incomplete teacher context rollout metadata; missing: "
+                + ", ".join(missing)
+            )
+        enabled.append(bool(present))
+    if enabled and any(enabled) and not all(enabled):
+        raise ValueError(
+            "Teacher context reward metadata must be present on every trajectory "
+            "in a training batch."
+        )
+    return bool(enabled and all(enabled))
+
+
+def _attach_teacher_context_logps(
+    actor: Any, rollout_batch: list[dict[str, Any]]
+) -> None:
+    """Teacher-force moved outputs and attach log-probs from the current actor."""
+
+    moved_batch = [
+        {
+            "input_ids": trajectory["teacher_context_input_ids"],
+            "attention_mask": trajectory["teacher_context_attention_mask"],
+        }
+        for trajectory in rollout_batch
+    ]
+    moved_logps = actor.compute_logp(moved_batch)
+    if moved_logps is None or len(moved_logps) != len(rollout_batch):
+        raise RuntimeError(
+            "Teacher context forward pass did not return one log-probability "
+            "tensor per trajectory."
+        )
+    for trajectory, moved_logp in zip(rollout_batch, moved_logps, strict=True):
+        trajectory["teacher_context_logp"] = moved_logp
+
 
 class _EmptyDataLoader:
     """Minimal dataloader for online mode that yields empty dicts.
@@ -662,7 +714,8 @@ class PPOTrainer:
 
             if self._should_offload_actor:
                 self._onload_model(self.actor, role="actor")
-            if config.actor.should_compute_prox_logp():
+            has_teacher_context_reward = _has_teacher_context_reward(rollout_batch)
+            if config.actor.should_compute_prox_logp() or has_teacher_context_reward:
                 with (
                     stats_tracker.record_timing("recompute_logp"),
                     perf_tracer.trace_scope(
@@ -675,6 +728,18 @@ class PPOTrainer:
                     for traj, logp in zip(rollout_batch, prox_logps):
                         traj["prox_logp"] = logp
                     self.actor.get_device_stats().log("recompute logp")
+
+            if has_teacher_context_reward:
+                with (
+                    stats_tracker.record_timing("teacher_context_logp"),
+                    perf_tracer.trace_scope(
+                        "train.teacher_context_logp",
+                        category=Category.COMPUTE,
+                        args={"global_step": global_step},
+                    ),
+                ):
+                    _attach_teacher_context_logps(self.actor, rollout_batch)
+                    self.actor.get_device_stats().log("teacher context logp")
 
             with (
                 stats_tracker.record_timing("compute_advantage"),

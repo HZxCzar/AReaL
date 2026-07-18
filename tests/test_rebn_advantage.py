@@ -44,6 +44,7 @@ finally:
 PPOActor = _actor_module.PPOActor
 _compute_batch_centered_penalties = _actor_module._compute_batch_centered_penalties
 _compute_rebn_returns = _actor_module._compute_rebn_returns
+_compute_teacher_context_advantages = _actor_module._compute_teacher_context_advantages
 
 
 def _make_actor(config: PPOActorConfig) -> PPOActor:
@@ -167,6 +168,93 @@ def test_rebn_batch_centered_penalty_stays_on_later_teacher_turn():
     )
 
 
+def test_teacher_context_advantage_uses_per_token_gap_and_batch_centering():
+    """Only relative real-minus-moved likelihood receives a local signal."""
+    local_advantage, real_mean, moved_mean, information_gain = (
+        _compute_teacher_context_advantages(
+            real_logps=torch.tensor(
+                [[-1.0, -1.0, 0.0], [-1.0, -1.0, 0.0], [-1.0, -1.0, 0.0]]
+            ),
+            real_loss_mask=torch.tensor(
+                [[1, 1, 0], [1, 1, 0], [1, 1, 0]], dtype=torch.bool
+            ),
+            moved_logps=torch.tensor(
+                [[-1.0, -1.0, 0.0], [-2.0, -2.0, 0.0], [-4.0, -4.0, 0.0]]
+            ),
+            moved_loss_mask=torch.tensor(
+                [[1, 1, 0], [1, 1, 0], [1, 1, 0]], dtype=torch.bool
+            ),
+            weights=torch.full((3,), 0.2),
+            score_clips=torch.full((3,), 5.0),
+            score_valid_mask=torch.tensor([False, True, True]),
+            turn_valid_mask=torch.ones(3, dtype=torch.bool),
+        )
+    )
+
+    torch.testing.assert_close(
+        real_mean, torch.tensor([-1.0, -1.0, -1.0]), rtol=1e-6, atol=1e-6
+    )
+    torch.testing.assert_close(
+        moved_mean, torch.tensor([-1.0, -2.0, -4.0]), rtol=1e-6, atol=1e-6
+    )
+    torch.testing.assert_close(
+        information_gain, torch.tensor([0.0, 1.0, 3.0]), rtol=1e-6, atol=1e-6
+    )
+    torch.testing.assert_close(
+        local_advantage, torch.tensor([0.0, -0.2, 0.2]), rtol=1e-6, atol=1e-6
+    )
+
+
+def test_rebn_teacher_context_advantage_stays_on_later_teacher_turn():
+    """Context information gain is not propagated backward through ReBN."""
+    actor = _make_actor(
+        PPOActorConfig(
+            advantage_estimator="rebn",
+            turn_discount=1.0,
+            kl_ctl=0.0,
+            adv_norm=NormConfig(mean_level="batch", std_level=None),
+            recompute_logprob=True,
+            use_decoupled_loss=True,
+        )
+    )
+    data = {
+        "input_ids": torch.zeros((3, 3), dtype=torch.long),
+        "attention_mask": torch.ones((3, 3), dtype=torch.bool),
+        "loss_mask": torch.tensor([[0, 1, 0]] * 3, dtype=torch.long),
+        "logprobs": torch.zeros((3, 3)),
+        "prox_logp": torch.tensor(
+            [[-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]
+        ),
+        "rewards": torch.tensor([0.0, 0.0, 1.0]),
+        "trajectory_id": torch.tensor([7, 7, 7]),
+        "turn_idx": torch.tensor([1, 2, 3]),
+        "teacher_context_input_ids": torch.zeros((3, 3), dtype=torch.long),
+        "teacher_context_attention_mask": torch.ones((3, 3), dtype=torch.bool),
+        "teacher_context_loss_mask": torch.tensor([[0, 1, 0]] * 3, dtype=torch.long),
+        "teacher_context_logp": torch.tensor(
+            [[-1.0, 0.0, 0.0], [-2.0, 0.0, 0.0], [-4.0, 0.0, 0.0]]
+        ),
+        "teacher_context_reward_weight": torch.full((3,), 0.2),
+        "teacher_context_reward_score_clip": torch.full((3,), 5.0),
+        "teacher_context_reward_valid": torch.tensor([False, True, True]),
+    }
+
+    result = actor._compute_advantages(data)
+
+    torch.testing.assert_close(
+        result["advantages"],
+        torch.tensor([[0.0, 0.0, 0.0], [-0.2, 0.0, 0.0], [0.2, 0.0, 0.0]]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    torch.testing.assert_close(
+        result["teacher_context_advantage"],
+        torch.tensor([0.0, -0.2, 0.2]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
 def test_rebn_advantage_normalizes_each_turn_equally_not_each_token():
     config = PPOActorConfig(
         advantage_estimator="rebn",
@@ -235,6 +323,7 @@ def test_ppo_update_strips_turn_metadata_before_microbatch_split(monkeypatch):
     def fake_split(data, mb_spec):
         assert "trajectory_id" not in data
         assert "turn_idx" not in data
+        assert not any(key.startswith("teacher_context_") for key in data)
         raise RuntimeError("split called")
 
     monkeypatch.setattr(_actor_module, "stats_tracker", FakeStatsTracker())
@@ -253,6 +342,17 @@ def test_ppo_update_strips_turn_metadata_before_microbatch_split(monkeypatch):
         "tot_rewards": torch.tensor([[0.0, 1.0, 0.0]]),
         "trajectory_id": torch.tensor([123]),
         "turn_idx": torch.tensor([2]),
+        "teacher_context_input_ids": torch.tensor([[1, 2, 3]]),
+        "teacher_context_attention_mask": torch.tensor([[True, True, True]]),
+        "teacher_context_loss_mask": torch.tensor([[0, 1, 0]]),
+        "teacher_context_logp": torch.tensor([[-2.0, 0.0, 0.0]]),
+        "teacher_context_reward_weight": torch.tensor([0.1]),
+        "teacher_context_reward_score_clip": torch.tensor([5.0]),
+        "teacher_context_reward_valid": torch.tensor([True]),
+        "teacher_context_real_avg_logp": torch.tensor([-1.0]),
+        "teacher_context_moved_avg_logp": torch.tensor([-2.0]),
+        "teacher_context_information_gain": torch.tensor([1.0]),
+        "teacher_context_advantage": torch.tensor([0.1]),
     }
 
     with pytest.raises(RuntimeError, match="split called"):
@@ -337,6 +437,37 @@ def test_tutor_response_tensordict_includes_batch_centered_penalty_metadata():
     assert valid["batch_centered_penalty_valid"].tolist() == [True]
     assert torch.isnan(missing["batch_centered_penalty_score"]).all()
     assert missing["batch_centered_penalty_valid"].tolist() == [False]
+
+
+def test_tutor_response_tensordict_moves_later_output_to_preceding_prompt():
+    """The counterfactual keeps T2 tokens but replaces its prompt with T1's."""
+    response = types.SimpleNamespace(
+        input_tokens=[10, 11, 12],
+        output_tokens=[20, 21],
+        output_logprobs=[-0.1, -0.2],
+        output_versions=[5, 5],
+    )
+
+    moved = response_to_tensordict(
+        response,
+        reward=0.0,
+        teacher_context_input_tokens=[1, 2],
+        teacher_context_reward_weight=0.3,
+        teacher_context_reward_score_clip=5.0,
+    )
+    first_turn = response_to_tensordict(
+        response,
+        reward=0.0,
+        teacher_context_input_tokens=None,
+        teacher_context_reward_weight=0.3,
+        teacher_context_reward_score_clip=5.0,
+    )
+
+    assert moved["teacher_context_input_ids"].tolist() == [[1, 2, 20, 21]]
+    assert moved["teacher_context_loss_mask"].tolist() == [[0, 0, 1, 1]]
+    assert moved["teacher_context_reward_valid"].tolist() == [True]
+    assert first_turn["teacher_context_input_ids"].tolist() == [[10, 11, 12, 20, 21]]
+    assert first_turn["teacher_context_reward_valid"].tolist() == [False]
 
 
 @pytest.mark.parametrize(

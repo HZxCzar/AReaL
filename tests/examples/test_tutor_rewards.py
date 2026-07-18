@@ -15,6 +15,7 @@ from examples.tutor.configs import (
     TutorRewardConfig,
     TutorStudentGeneralizeConfidenceConfig,
     TutorStudentGeneralizeConfig,
+    TutorTeacherContextRewardConfig,
     TutorTeacherDiversityRewardConfig,
 )
 from examples.tutor.core.callers import (
@@ -440,6 +441,64 @@ def test_teacher_diversity_config_defaults_to_disabled():
     assert config.embedding_batch_wait_ms == pytest.approx(2.0)
     assert config.embedding_max_batch_texts == 64
     assert config.embedding_max_batch_tokens == 32768
+
+
+def test_teacher_context_config_defaults_to_disabled():
+    """Existing tutor configs do not trigger an extra actor forward."""
+    config = TutorTeacherContextRewardConfig()
+
+    assert config.enabled is False
+    assert config.weight == pytest.approx(0.1)
+    assert config.score_clip == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize("field", ["weight", "score_clip"])
+def test_teacher_context_config_requires_positive_enabled_fields(field):
+    """Enabled context rewards reject zero-strength numerical settings."""
+    with pytest.raises(ValueError, match=field):
+        TutorTeacherContextRewardConfig(enabled=True, **{field: 0.0})
+
+
+def test_teacher_context_yaml_section_loads_typed_config():
+    """The nested context reward section accepts its documented parameters."""
+    config = OmegaConf.to_object(
+        OmegaConf.merge(
+            OmegaConf.structured(TutorRewardConfig),
+            {
+                "teacher_context": {
+                    "enabled": True,
+                    "weight": 0.3,
+                    "score_clip": 4.0,
+                }
+            },
+        )
+    )
+
+    context = config.teacher_context
+    assert context.enabled is True
+    assert context.weight == pytest.approx(0.3)
+    assert context.score_clip == pytest.approx(4.0)
+
+
+@pytest.mark.parametrize(
+    ("config_name", "expected_weight"),
+    [
+        ("qwen8b-qwen1.7b-math-pre-aleak-tctx010.yaml", 0.1),
+        ("qwen8b-qwen1.7b-math-pre-aleak-tctx030.yaml", 0.3),
+    ],
+)
+def test_teacher_context_experiment_configs_use_distinct_weights(
+    config_name, expected_weight
+):
+    """The two context experiments differ by a meaningful threefold weight."""
+    path = Path("examples/tutor/configs/math/july/pass@2") / config_name
+
+    reward = OmegaConf.load(path).reward
+
+    assert reward.teacher_context.enabled is True
+    assert reward.teacher_context.weight == pytest.approx(expected_weight)
+    assert reward.teacher_context.score_clip == pytest.approx(5.0)
+    assert "teacher_diversity" not in reward
 
 
 @pytest.mark.parametrize(
