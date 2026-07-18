@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import types
+from pathlib import Path
 
 import pytest
+from omegaconf import OmegaConf
 
 from examples.common.openai_utils import AsyncLLMCaller, AuxModelConfig, TokenLogprob
 from examples.tutor import workflow as tutor_workflow
@@ -13,6 +15,7 @@ from examples.tutor.configs import (
     TutorRewardConfig,
     TutorStudentGeneralizeConfidenceConfig,
     TutorStudentGeneralizeConfig,
+    TutorTeacherDiversityRewardConfig,
 )
 from examples.tutor.core.callers import (
     ApiAuxiliaryCaller,
@@ -22,6 +25,11 @@ from examples.tutor.core.confidence import compute_answer_token_confidence
 from examples.tutor.core.math import score_math_answer
 from examples.tutor.core.parsers import parse_staged_leak_check_result
 from examples.tutor.core.rewards import EpisodeRewardComputer
+from examples.tutor.core.semantic_similarity import (
+    LocalEmbeddingCaller,
+    cosine_similarity,
+    get_local_embedding_caller,
+)
 from examples.tutor.core.types import (
     EpisodeArtifact,
     JudgeResult,
@@ -417,6 +425,317 @@ def test_tutor_reward_config_validates_leak_penalty_modes():
 
     with pytest.raises(ValueError, match="leak_penalty"):
         TutorRewardConfig(leak_penalty_mode="rawbase", leak_penalty=None)
+
+
+def test_teacher_diversity_config_defaults_to_disabled():
+    """Test existing configs do not make embedding calls or change rewards."""
+    config = TutorTeacherDiversityRewardConfig()
+
+    assert config.enabled is False
+    assert config.weight == pytest.approx(0.1)
+    assert config.embedding_model_path == ""
+    assert config.embedding_device == "cuda"
+    assert config.embedding_dtype == "bfloat16"
+    assert config.embedding_max_length == 8192
+    assert config.embedding_batch_wait_ms == pytest.approx(2.0)
+    assert config.embedding_max_batch_texts == 64
+    assert config.embedding_max_batch_tokens == 32768
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"weight": 0.0}, "weight"),
+        ({}, "embedding_model_path"),
+        ({"embedding_model_path": "/model", "embedding_device": ""}, "device"),
+        ({"embedding_model_path": "/model", "embedding_max_length": 0}, "max_length"),
+    ],
+)
+def test_teacher_diversity_config_requires_enabled_fields(kwargs, message):
+    """Test enabled semantic reward cannot silently run with invalid settings."""
+    with pytest.raises(ValueError, match=message):
+        TutorTeacherDiversityRewardConfig(enabled=True, **kwargs)
+
+
+def test_teacher_diversity_yaml_section_loads_typed_config():
+    """Test the nested reward section accepts the documented YAML parameters."""
+    config = OmegaConf.to_object(
+        OmegaConf.merge(
+            OmegaConf.structured(TutorRewardConfig),
+            {
+                "teacher_diversity": {
+                    "enabled": True,
+                    "weight": 0.2,
+                    "embedding_model_path": "/local/embed-model",
+                    "embedding_device": "cuda",
+                    "embedding_dtype": "bfloat16",
+                    "embedding_max_length": 8192,
+                    "embedding_batch_wait_ms": 2.0,
+                    "embedding_max_batch_texts": 64,
+                    "embedding_max_batch_tokens": 32768,
+                },
+            },
+        )
+    )
+
+    diversity = config.teacher_diversity
+    assert diversity.enabled is True
+    assert diversity.weight == pytest.approx(0.2)
+    assert diversity.embedding_model_path == "/local/embed-model"
+    assert diversity.embedding_device == "cuda"
+    assert diversity.embedding_dtype == "bfloat16"
+    assert diversity.embedding_max_length == 8192
+    assert diversity.embedding_batch_wait_ms == pytest.approx(2.0)
+    assert diversity.embedding_max_batch_texts == 64
+    assert diversity.embedding_max_batch_tokens == 32768
+
+
+@pytest.mark.parametrize(
+    ("config_name", "expected_weight"),
+    [
+        ("qwen8b-qwen1.7b-math-pre-aleak-tdiv050.yaml", 0.5),
+        ("qwen8b-qwen1.7b-math-pre-aleak-tdiv200.yaml", 2.0),
+    ],
+)
+def test_teacher_diversity_experiment_configs_use_gpu_and_effective_weights(
+    config_name, expected_weight
+):
+    """Experiment configs use H200-friendly inference and meaningful weights."""
+    path = Path("examples/tutor/configs/math/july/pass@2") / config_name
+
+    config = OmegaConf.load(path).reward.teacher_diversity
+
+    assert config.weight == pytest.approx(expected_weight)
+    assert config.embedding_device == "cuda"
+    assert config.embedding_dtype == "bfloat16"
+    assert config.embedding_max_batch_tokens == 32768
+
+
+def test_semantic_cosine_similarity_is_bounded_and_validated():
+    """Test semantic similarity uses normalized vectors and rejects bad inputs."""
+    assert cosine_similarity([1.0, 0.0], [1.0, 0.0]) == pytest.approx(1.0)
+    assert cosine_similarity([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
+    assert cosine_similarity([1.0, 0.0], [-1.0, 0.0]) == pytest.approx(-1.0)
+
+    with pytest.raises(ValueError, match="equal length"):
+        cosine_similarity([1.0], [1.0, 0.0])
+    with pytest.raises(ValueError, match="non-zero norm"):
+        cosine_similarity([0.0, 0.0], [1.0, 0.0])
+
+
+def test_local_embedding_caller_mean_pools_and_normalizes(tmp_path, monkeypatch):
+    """Test the local caller reproduces sentence-transformers mean pooling."""
+    import torch
+
+    class FakeTokenizer:
+        def __call__(self, texts, **kwargs):
+            assert texts == ["first", "second"]
+            assert kwargs["max_length"] == 32
+            result = {
+                "input_ids": [[1, 1], [2, 2]],
+                "attention_mask": [[1, 1], [1, 1]],
+            }
+            if kwargs.get("return_tensors") == "pt":
+                return {name: torch.tensor(value) for name, value in result.items()}
+            return result
+
+    class FakeModel:
+        def __call__(self, input_ids, attention_mask):
+            del input_ids, attention_mask
+            hidden = torch.tensor(
+                [
+                    [[1.0, 0.0], [1.0, 0.0]],
+                    [[0.0, 2.0], [0.0, 2.0]],
+                ]
+            )
+            return types.SimpleNamespace(last_hidden_state=hidden)
+
+    caller = LocalEmbeddingCaller(
+        model_path=str(tmp_path),
+        device="cpu",
+        max_length=32,
+    )
+    monkeypatch.setattr(caller, "_load_model", lambda: (FakeTokenizer(), FakeModel()))
+
+    vectors = asyncio.run(caller.embed(["first", "second"]))
+
+    assert vectors == [[1.0, 0.0], [0.0, 1.0]]
+
+
+def test_local_embedding_caller_uses_configured_cls_pooling(tmp_path, monkeypatch):
+    """Test BGE-style pooling uses the first token instead of token means."""
+    import torch
+
+    pooling_path = tmp_path / "1_Pooling" / "config.json"
+    pooling_path.parent.mkdir(parents=True)
+    pooling_path.write_text(
+        json.dumps(
+            {
+                "pooling_mode_cls_token": True,
+                "pooling_mode_mean_tokens": False,
+            }
+        )
+    )
+
+    class FakeTokenizer:
+        def __call__(self, _texts, **kwargs):
+            result = {
+                "input_ids": [[1, 1], [2, 2]],
+                "attention_mask": [[1, 1], [1, 1]],
+            }
+            if kwargs.get("return_tensors") == "pt":
+                return {name: torch.tensor(value) for name, value in result.items()}
+            return result
+
+    class FakeModel:
+        def __call__(self, input_ids, attention_mask):
+            del input_ids, attention_mask
+            return types.SimpleNamespace(
+                last_hidden_state=torch.tensor(
+                    [
+                        [[2.0, 0.0], [0.0, 10.0]],
+                        [[0.0, 3.0], [10.0, 0.0]],
+                    ]
+                )
+            )
+
+    caller = LocalEmbeddingCaller(
+        model_path=str(tmp_path),
+        device="cpu",
+        dtype="float32",
+        max_length=8192,
+    )
+    monkeypatch.setattr(caller, "_load_model", lambda: (FakeTokenizer(), FakeModel()))
+
+    vectors = asyncio.run(caller.embed(["first", "second"]))
+
+    assert vectors == [[1.0, 0.0], [0.0, 1.0]]
+
+
+def test_local_embedding_caller_is_shared_within_process(tmp_path):
+    first = get_local_embedding_caller(model_path=str(tmp_path))
+    second = get_local_embedding_caller(model_path=str(tmp_path))
+
+    assert first is second
+
+
+def test_local_embedding_caller_dynamically_batches_concurrent_requests(
+    tmp_path, monkeypatch
+):
+    """Concurrent trajectories share one embedding forward."""
+    calls = []
+    caller = LocalEmbeddingCaller(
+        model_path=str(tmp_path),
+        device="cpu",
+        dtype="float32",
+        batch_wait_ms=1.0,
+    )
+
+    def embed_sync(texts):
+        calls.append(texts)
+        return [[float(index), 1.0] for index in range(len(texts))]
+
+    monkeypatch.setattr(caller, "_embed_sync", embed_sync)
+
+    async def run_requests():
+        return await asyncio.gather(
+            caller.embed(["first"]),
+            caller.embed(["second", "third"]),
+        )
+
+    first, second = asyncio.run(run_requests())
+
+    assert calls == [["first", "second", "third"]]
+    assert first == [[0.0, 1.0]]
+    assert second == [[1.0, 1.0], [2.0, 1.0]]
+
+
+def test_local_embedding_caller_bounds_padded_tokens_per_microbatch(tmp_path):
+    """Long texts are separated before they can inflate the whole GPU batch."""
+    caller = LocalEmbeddingCaller(
+        model_path=str(tmp_path),
+        device="cpu",
+        dtype="float32",
+        max_batch_texts=4,
+        max_batch_tokens=16,
+    )
+
+    batches = caller._allocate_microbatches([2, 4, 8, 8])
+
+    assert batches == [[0, 1], [2, 3]]
+
+
+def test_teacher_diversity_annotation_batches_unique_outputs():
+    """Test adjacent similarities are derived from one batched embedding call."""
+    captured = []
+
+    class FakeEmbeddingCaller:
+        async def embed(self, texts):
+            captured.append(texts)
+            vectors = {
+                "same idea": [1.0, 0.0],
+                "new strategy": [0.0, 1.0],
+            }
+            return [vectors[text] for text in texts]
+
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.teacher_diversity_enabled = True
+    workflow.teacher_diversity_caller = FakeEmbeddingCaller()
+    turns = [
+        _turn(1, tutor_output="same idea"),
+        _turn(2, tutor_output="same idea"),
+        _turn(3, tutor_output="new strategy"),
+    ]
+
+    asyncio.run(workflow._annotate_teacher_diversity(turns))
+
+    assert captured == [["same idea", "new strategy"]]
+    assert turns[0].previous_teacher_similarity is None
+    assert turns[1].previous_teacher_similarity == pytest.approx(1.0)
+    assert turns[2].previous_teacher_similarity == pytest.approx(0.0)
+
+
+def test_teacher_diversity_embedding_failure_is_fatal():
+    """Embedding failures stop training instead of silently disabling the reward."""
+
+    class FailedEmbeddingCaller:
+        async def embed(self, _texts):
+            raise RuntimeError("endpoint unavailable")
+
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.teacher_diversity_enabled = True
+    workflow.teacher_diversity_caller = FailedEmbeddingCaller()
+    turns = [_turn(1), _turn(2)]
+
+    with pytest.raises(RuntimeError, match="endpoint unavailable") as exc_info:
+        asyncio.run(workflow._annotate_teacher_diversity(turns))
+
+    assert turns[1].previous_teacher_similarity is None
+    assert getattr(exc_info.value, "_fatal_rollout_error", False) is True
+
+
+def test_teacher_diversity_invalid_embedding_is_fatal():
+    """Invalid embedding vectors also stop training instead of dropping one pair."""
+
+    class InvalidEmbeddingCaller:
+        async def embed(self, texts):
+            return [[0.0, 0.0] for _ in texts]
+
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.teacher_diversity_enabled = True
+    workflow.teacher_diversity_caller = InvalidEmbeddingCaller()
+    turns = [_turn(1, tutor_output="first"), _turn(2, tutor_output="second")]
+
+    with pytest.raises(ValueError, match="non-zero norm") as exc_info:
+        asyncio.run(workflow._annotate_teacher_diversity(turns))
+
+    assert getattr(exc_info.value, "_fatal_rollout_error", False) is True
 
 
 def test_tutor_config_rejects_official_no_eos_mask():

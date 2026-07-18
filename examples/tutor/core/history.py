@@ -26,6 +26,8 @@ def trace_to_history_record(
         "teacher_format_error": trace.tutor_format_error,
         "public_history_before": trace.public_history_before,
         "public_history_after": trace.public_history_after,
+        "previous_teacher_similarity": trace.previous_teacher_similarity,
+        "teacher_similarity_error": trace.teacher_similarity_error,
     }
     if trace.leak_level is not None:
         record["leak_level"] = trace.leak_level

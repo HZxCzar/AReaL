@@ -42,6 +42,7 @@ finally:
         else:
             sys.modules[_name] = _module
 PPOActor = _actor_module.PPOActor
+_compute_batch_centered_penalties = _actor_module._compute_batch_centered_penalties
 _compute_rebn_returns = _actor_module._compute_rebn_returns
 
 
@@ -88,6 +89,81 @@ def test_rebn_returns_do_not_cross_trajectories():
 
     torch.testing.assert_close(
         returns, torch.tensor([1.0, 1.0, 2.0, 2.0]), rtol=1e-6, atol=1e-6
+    )
+
+
+def test_batch_centered_penalty_subtracts_mean_without_std_scaling():
+    """Tiny above-mean differences remain tiny instead of becoming z-scores."""
+    penalties = _compute_batch_centered_penalties(
+        scores=torch.tensor([0.990, 0.991, 0.989, 0.0]),
+        weights=torch.ones(4),
+        score_valid_mask=torch.tensor([True, True, True, False]),
+        turn_valid_mask=torch.ones(4, dtype=torch.bool),
+    )
+
+    torch.testing.assert_close(
+        penalties,
+        torch.tensor([0.0, -0.001, 0.0, 0.0]),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+def test_batch_centered_penalty_ignores_first_turn_and_failed_embedding():
+    """Invalid scores never enter the batch mean or receive an auxiliary signal."""
+    penalties = _compute_batch_centered_penalties(
+        scores=torch.tensor([float("nan"), 0.9, 0.7, float("nan")]),
+        weights=torch.full((4,), 0.2),
+        score_valid_mask=torch.tensor([False, True, True, False]),
+        turn_valid_mask=torch.ones(4, dtype=torch.bool),
+    )
+
+    torch.testing.assert_close(
+        penalties,
+        torch.tensor([0.0, -0.02, 0.0, 0.0]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_rebn_batch_centered_penalty_stays_on_later_teacher_turn():
+    """The local diversity advantage is not propagated into prior ReBN turns."""
+    actor = _make_actor(
+        PPOActorConfig(
+            advantage_estimator="rebn",
+            turn_discount=1.0,
+            kl_ctl=0.0,
+            adv_norm=NormConfig(mean_level="batch", std_level=None),
+        )
+    )
+    data = {
+        "input_ids": torch.zeros((3, 3), dtype=torch.long),
+        "attention_mask": torch.ones((3, 3), dtype=torch.bool),
+        "loss_mask": torch.tensor([[0, 1, 0]] * 3, dtype=torch.long),
+        "logprobs": torch.zeros((3, 3)),
+        "rewards": torch.tensor([0.0, 0.0, 1.0]),
+        "trajectory_id": torch.tensor([7, 7, 7]),
+        "turn_idx": torch.tensor([1, 2, 3]),
+        "batch_centered_penalty_score": torch.tensor([float("nan"), 0.9, 0.7]),
+        "batch_centered_penalty_weight": torch.full((3,), 0.2),
+        "batch_centered_penalty_valid": torch.tensor([False, True, True]),
+    }
+
+    result = actor._compute_advantages(data)
+
+    expected = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [-0.02, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ]
+    )
+    torch.testing.assert_close(result["advantages"], expected, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(
+        result["batch_centered_penalty_advantage"],
+        torch.tensor([0.0, -0.02, 0.0]),
+        rtol=1e-6,
+        atol=1e-6,
     )
 
 
@@ -232,6 +308,35 @@ def test_tutor_response_tensordict_includes_trajectory_metadata():
     assert tensor_dict["trajectory_id"].tolist() == [123]
     assert tensor_dict["turn_idx"].tolist() == [2]
     assert "no_eos" not in tensor_dict
+
+
+def test_tutor_response_tensordict_includes_batch_centered_penalty_metadata():
+    """Similarity metadata remains raw until the complete training batch exists."""
+    response = types.SimpleNamespace(
+        input_tokens=[1],
+        output_tokens=[2],
+        output_logprobs=[-0.1],
+        output_versions=[5],
+    )
+
+    valid = response_to_tensordict(
+        response,
+        reward=0.0,
+        batch_centered_penalty_score=0.9,
+        batch_centered_penalty_weight=0.2,
+    )
+    missing = response_to_tensordict(
+        response,
+        reward=0.0,
+        batch_centered_penalty_score=None,
+        batch_centered_penalty_weight=0.2,
+    )
+
+    assert valid["batch_centered_penalty_score"].tolist() == pytest.approx([0.9])
+    assert valid["batch_centered_penalty_weight"].tolist() == pytest.approx([0.2])
+    assert valid["batch_centered_penalty_valid"].tolist() == [True]
+    assert torch.isnan(missing["batch_centered_penalty_score"]).all()
+    assert missing["batch_centered_penalty_valid"].tolist() == [False]
 
 
 @pytest.mark.parametrize(

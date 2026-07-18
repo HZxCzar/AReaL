@@ -559,6 +559,117 @@ class TutorEvaluatorConfig(EvaluatorConfig):
 
 
 @dataclass
+class TutorTeacherDiversityRewardConfig:
+    enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Penalize semantic similarity between consecutive visible teacher "
+                "outputs relative to the current training-batch mean. The local "
+                "auxiliary advantage is attached only to the later teacher turn."
+            )
+        },
+    )
+    weight: float = field(
+        default=0.1,
+        metadata={
+            "help": (
+                "Coefficient for the local auxiliary advantage applied when a "
+                "teacher pair is more similar than the current training-batch mean."
+            )
+        },
+    )
+    embedding_model_path: str = field(
+        default="",
+        metadata={
+            "help": (
+                "Local Hugging Face model directory used to embed teacher outputs. "
+                "The model is loaded offline and shared within each rollout process."
+            )
+        },
+    )
+    embedding_device: str = field(
+        default="cuda",
+        metadata={
+            "help": (
+                "Device for the local embedding model. Use cuda on rollout nodes "
+                "with sufficient GPU memory."
+            )
+        },
+    )
+    embedding_dtype: str = field(
+        default="bfloat16",
+        metadata={"help": "Floating-point dtype for the local embedding model."},
+    )
+    embedding_max_length: int = field(
+        default=8192,
+        metadata={"help": "Maximum token length for each teacher output embedding."},
+    )
+    embedding_batch_wait_ms: float = field(
+        default=2.0,
+        metadata={
+            "help": (
+                "Time window used to merge concurrent trajectory embedding requests."
+            )
+        },
+    )
+    embedding_max_batch_texts: int = field(
+        default=64,
+        metadata={"help": "Maximum number of texts in one embedding microbatch."},
+    )
+    embedding_max_batch_tokens: int = field(
+        default=32768,
+        metadata={
+            "help": (
+                "Maximum padded token count in one embedding microbatch. Long texts "
+                "are automatically placed in smaller microbatches."
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        self.weight = float(self.weight)
+        self.embedding_model_path = str(self.embedding_model_path or "").strip()
+        self.embedding_device = str(self.embedding_device or "").strip()
+        self.embedding_dtype = str(self.embedding_dtype or "").strip().lower()
+        self.embedding_max_length = int(self.embedding_max_length)
+        self.embedding_batch_wait_ms = float(self.embedding_batch_wait_ms)
+        self.embedding_max_batch_texts = int(self.embedding_max_batch_texts)
+        self.embedding_max_batch_tokens = int(self.embedding_max_batch_tokens)
+        if self.enabled and self.weight <= 0.0:
+            raise ValueError("reward.teacher_diversity.weight must be positive.")
+        if self.enabled and not self.embedding_model_path:
+            raise ValueError(
+                "reward.teacher_diversity.embedding_model_path is required when enabled."
+            )
+        if self.enabled and not self.embedding_device:
+            raise ValueError(
+                "reward.teacher_diversity.embedding_device is required when enabled."
+            )
+        if self.embedding_dtype not in {"float32", "float16", "bfloat16"}:
+            raise ValueError(
+                "reward.teacher_diversity.embedding_dtype must be float32, "
+                "float16, or bfloat16."
+            )
+        if self.embedding_max_length <= 0:
+            raise ValueError(
+                "reward.teacher_diversity.embedding_max_length must be positive."
+            )
+        if self.embedding_batch_wait_ms < 0.0:
+            raise ValueError(
+                "reward.teacher_diversity.embedding_batch_wait_ms must be non-negative."
+            )
+        if self.embedding_max_batch_texts <= 0:
+            raise ValueError(
+                "reward.teacher_diversity.embedding_max_batch_texts must be positive."
+            )
+        if self.embedding_max_batch_tokens <= 0:
+            raise ValueError(
+                "reward.teacher_diversity.embedding_max_batch_tokens must be positive."
+            )
+
+
+@dataclass
 class TutorRewardConfig:
     success: float = field(default=1.0)
     leaked_success_reward_scale: float = field(
@@ -631,6 +742,9 @@ class TutorRewardConfig:
                 "stops because it reached the generation length limit."
             )
         },
+    )
+    teacher_diversity: TutorTeacherDiversityRewardConfig = field(
+        default_factory=TutorTeacherDiversityRewardConfig
     )
 
     def __post_init__(self) -> None:

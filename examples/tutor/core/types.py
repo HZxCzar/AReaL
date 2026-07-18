@@ -118,6 +118,8 @@ class TurnArtifact:
     student_error: str | None = None
     judge_result: JudgeResult | None = None
     invalid_due_to_leak: bool = False
+    previous_teacher_similarity: float | None = None
+    teacher_similarity_error: str | None = None
 
 
 @dataclass(slots=True)
@@ -162,3 +164,5 @@ class TurnTrace:
     leak_level: int | None = None
     invalid_due_to_leak: bool = False
     tutor_format_error: str | None = None
+    previous_teacher_similarity: float | None = None
+    teacher_similarity_error: str | None = None

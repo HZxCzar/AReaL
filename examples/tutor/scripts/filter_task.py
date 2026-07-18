@@ -10,7 +10,7 @@ import os
 import pathlib
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -895,6 +895,7 @@ def build_workflow(
         length_penalty_threshold_chars=reward.length_penalty_threshold_chars,
         length_penalty_per_100_chars=reward.length_penalty_per_100_chars,
         length_penalty_min=reward.length_penalty_min,
+        teacher_diversity_reward=asdict(reward.teacher_diversity),
         teacher_system_prompt=config.teacher_system_prompt,
         teacher_anti_leak_instruction_enabled=(
             config.teacher_anti_leak_instruction_enabled

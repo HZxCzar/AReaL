@@ -159,6 +159,10 @@ from examples.tutor.core.parsers import (
 )
 from examples.tutor.core.rewards import EpisodeRewardComputer, artifact_to_trace
 from examples.tutor.core.scoring import AnswerScorer, get_answer_scorer
+from examples.tutor.core.semantic_similarity import (
+    cosine_similarity,
+    get_local_embedding_caller,
+)
 from examples.tutor.core.tensors import response_to_tensordict
 from examples.tutor.core.text import (
     strip_reasoning_for_context as _strip_reasoning_for_context,
@@ -435,6 +439,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         length_penalty_per_100_chars: float = -0.005,
         length_penalty_min: float = -0.1,
         zero_reward_on_length_stop: bool = False,
+        teacher_diversity_reward: dict[str, Any] | None = None,
         teacher_system_prompt: str = "",
         teacher_anti_leak_instruction_enabled: bool = False,
         teacher_prompt_pool_path: str = "",
@@ -581,6 +586,53 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.length_penalty_per_100_chars = float(length_penalty_per_100_chars)
         self.length_penalty_min = float(length_penalty_min)
         self.zero_reward_on_length_stop = bool(zero_reward_on_length_stop)
+        diversity_config = dict(teacher_diversity_reward or {})
+        self.teacher_diversity_enabled = bool(diversity_config.get("enabled", False))
+        self.teacher_diversity_weight = float(diversity_config.get("weight", 0.1))
+        diversity_model_path = str(
+            diversity_config.get("embedding_model_path", "") or ""
+        ).strip()
+        diversity_device = str(
+            diversity_config.get("embedding_device", "cuda") or ""
+        ).strip()
+        diversity_dtype = str(
+            diversity_config.get("embedding_dtype", "bfloat16") or ""
+        ).strip()
+        diversity_max_length = int(diversity_config.get("embedding_max_length", 8192))
+        diversity_batch_wait_ms = float(
+            diversity_config.get("embedding_batch_wait_ms", 2.0)
+        )
+        diversity_max_batch_texts = int(
+            diversity_config.get("embedding_max_batch_texts", 64)
+        )
+        diversity_max_batch_tokens = int(
+            diversity_config.get("embedding_max_batch_tokens", 32768)
+        )
+        if self.teacher_diversity_enabled and self.teacher_diversity_weight <= 0.0:
+            raise ValueError("teacher diversity reward weight must be positive.")
+        if self.teacher_diversity_enabled and not diversity_model_path:
+            raise ValueError(
+                "teacher diversity embedding_model_path is required when enabled."
+            )
+        if self.teacher_diversity_enabled and not diversity_device:
+            raise ValueError(
+                "teacher diversity embedding_device is required when enabled."
+            )
+        if diversity_max_length <= 0:
+            raise ValueError("teacher diversity embedding_max_length must be positive.")
+        self.teacher_diversity_caller = (
+            get_local_embedding_caller(
+                model_path=diversity_model_path,
+                device=diversity_device,
+                dtype=diversity_dtype,
+                max_length=diversity_max_length,
+                batch_wait_ms=diversity_batch_wait_ms,
+                max_batch_texts=diversity_max_batch_texts,
+                max_batch_tokens=diversity_max_batch_tokens,
+            )
+            if self.teacher_diversity_enabled
+            else None
+        )
         self.teacher_anti_leak_instruction_enabled = bool(
             teacher_anti_leak_instruction_enabled
         )
@@ -1527,6 +1579,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             aux_caller=student_generalize_caller,
             answer_judge_caller=answer_judge_caller,
         )
+        await self._annotate_teacher_diversity(turn_artifacts)
         reward_computer = EpisodeRewardComputer(
             success_reward=self.success_reward,
             leak_penalty=self.leak_penalty,
@@ -1583,6 +1636,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 input_tokens_override=clean_input,
                 zero_reward_on_length_stop=getattr(
                     self, "zero_reward_on_length_stop", False
+                ),
+                batch_centered_penalty_score=(
+                    artifact.previous_teacher_similarity
+                    if getattr(self, "teacher_diversity_enabled", False)
+                    else None
+                ),
+                batch_centered_penalty_weight=(
+                    getattr(self, "teacher_diversity_weight", 0.0)
+                    if getattr(self, "teacher_diversity_enabled", False)
+                    else None
                 ),
             )
             for artifact, assignment, clean_input in zip(
@@ -2673,6 +2736,47 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
             assignment.reward += correctness_reward + confidence_reward
 
+    async def _annotate_teacher_diversity(
+        self, turn_artifacts: list[TurnArtifact]
+    ) -> None:
+        if not getattr(self, "teacher_diversity_enabled", False):
+            return
+        if len(turn_artifacts) < 2:
+            return
+
+        caller = getattr(self, "teacher_diversity_caller", None)
+        if caller is None:
+            raise RuntimeError("teacher diversity reward has no embedding caller.")
+        texts = [artifact.tutor_visible_output.strip() for artifact in turn_artifacts]
+        unique_texts = list(dict.fromkeys(text for text in texts if text))
+        if not unique_texts:
+            for artifact in turn_artifacts[1:]:
+                artifact.teacher_similarity_error = "empty_teacher_output"
+            return
+
+        try:
+            embeddings = await caller.embed(unique_texts)
+            embedding_by_text = dict(zip(unique_texts, embeddings, strict=True))
+            for index in range(1, len(turn_artifacts)):
+                previous_text = texts[index - 1]
+                current_text = texts[index]
+                artifact = turn_artifacts[index]
+                if not previous_text or not current_text:
+                    artifact.teacher_similarity_error = "empty_teacher_output"
+                    continue
+                artifact.previous_teacher_similarity = cosine_similarity(
+                    embedding_by_text[previous_text],
+                    embedding_by_text[current_text],
+                )
+        except Exception as exc:
+            setattr(exc, "_fatal_rollout_error", True)
+            logger.error(
+                "Teacher diversity embedding or similarity computation failed; "
+                "stopping the experiment.",
+                exc_info=True,
+            )
+            raise
+
     def _log_generalize_stats(
         self,
         *,
@@ -3026,6 +3130,24 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     metrics[f"{prefix}/call_failed"] = float(student_call_failed)
 
         if not is_forced_persona_eval:
+            similarities = [
+                similarity
+                for trace in traces
+                if (similarity := getattr(trace, "previous_teacher_similarity", None))
+                is not None
+            ]
+            if getattr(self, "teacher_diversity_enabled", False):
+                metrics["teacher_diversity/valid_pairs"] = float(len(similarities))
+                metrics["teacher_diversity/errors"] = float(
+                    sum(
+                        bool(getattr(trace, "teacher_similarity_error", None))
+                        for trace in traces
+                    )
+                )
+                if similarities:
+                    metrics["teacher_diversity/mean_similarity"] = float(
+                        sum(similarities) / len(similarities)
+                    )
             metrics.update(self._reward_component_metrics(traces))
             self._log_generalize_stats(
                 solved=success_round > 0,

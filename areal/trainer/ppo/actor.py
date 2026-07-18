@@ -76,6 +76,46 @@ def _compute_rebn_returns(
     return returns
 
 
+def _compute_batch_centered_penalties(
+    scores: torch.Tensor,
+    weights: torch.Tensor,
+    score_valid_mask: torch.Tensor,
+    turn_valid_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Penalize scores above the detached mean of valid pairs without std scaling."""
+
+    if not (
+        scores.shape == weights.shape == score_valid_mask.shape == turn_valid_mask.shape
+    ):
+        raise ValueError(
+            "Batch-centered penalty tensors must have identical shapes: "
+            f"scores={scores.shape}, weights={weights.shape}, "
+            f"score_valid_mask={score_valid_mask.shape}, "
+            f"turn_valid_mask={turn_valid_mask.shape}."
+        )
+    detached_scores = scores.detach().float()
+    detached_weights = weights.detach().float()
+    valid_mask = (
+        score_valid_mask.bool()
+        & turn_valid_mask.bool()
+        & torch.isfinite(detached_scores)
+        & (detached_weights > 0.0)
+    )
+    bounded_scores = detached_scores.clamp(min=-1.0, max=1.0)
+    valid_scores = torch.where(
+        valid_mask,
+        bounded_scores,
+        torch.zeros_like(bounded_scores),
+    )
+    valid_count = valid_mask.sum().clamp_min(1)
+    batch_mean = (valid_scores.sum() / valid_count).detach()
+    return torch.where(
+        valid_mask,
+        -detached_weights * torch.relu(bounded_scores - batch_mean),
+        torch.zeros_like(detached_scores),
+    )
+
+
 def _broadcast_turn_values_to_tokens(
     turn_values: torch.Tensor, loss_mask: torch.Tensor
 ) -> torch.Tensor:
@@ -203,6 +243,26 @@ class PPOActor:
                 max_response_length=self.config.max_new_tokens,
             )
 
+        batch_penalty_keys = {
+            "batch_centered_penalty_score",
+            "batch_centered_penalty_weight",
+            "batch_centered_penalty_valid",
+        }
+        present_batch_penalty_keys = batch_penalty_keys.intersection(data)
+        if (
+            present_batch_penalty_keys
+            and present_batch_penalty_keys != batch_penalty_keys
+        ):
+            missing = sorted(batch_penalty_keys - present_batch_penalty_keys)
+            raise ValueError(
+                "Incomplete batch-centered penalty metadata; missing: "
+                + ", ".join(missing)
+            )
+        if present_batch_penalty_keys and self.config.advantage_estimator != "rebn":
+            raise ValueError(
+                "Batch-centered local penalties require advantage_estimator='rebn'."
+            )
+
         # Reward Scaling
         reward_score = data["rewards"]
         reward_score = (reward_score + self.reward_bias) * self.reward_scaling
@@ -267,6 +327,14 @@ class PPOActor:
                 seq_no_eos_mask=seq_no_eos_mask,
             )
             valid_turn_mask = loss_mask.sum(dim=-1) > 0
+            batch_centered_penalties = None
+            if present_batch_penalty_keys:
+                batch_centered_penalties = _compute_batch_centered_penalties(
+                    data["batch_centered_penalty_score"].to(reward_score.device),
+                    data["batch_centered_penalty_weight"].to(reward_score.device),
+                    data["batch_centered_penalty_valid"].to(reward_score.device),
+                    valid_turn_mask,
+                )
             turn_returns = _compute_rebn_returns(
                 reward_score,
                 data["trajectory_id"].to(reward_score.device),
@@ -281,6 +349,11 @@ class PPOActor:
                 )
             else:
                 normalized_turn_returns = turn_returns
+            if batch_centered_penalties is not None:
+                normalized_turn_returns = (
+                    normalized_turn_returns + batch_centered_penalties
+                )
+                data["batch_centered_penalty_advantage"] = batch_centered_penalties
             advantages = kl_advantages + _broadcast_turn_values_to_tokens(
                 normalized_turn_returns, loss_mask
             )
@@ -354,6 +427,10 @@ class PPOActor:
             "correct_n_seqs": (reward_score > 0).bool(),
             "incorrect_n_seqs": (reward_score <= 0).bool(),
         }
+        if "batch_centered_penalty_valid" in data:
+            result_denominators["batch_centered_penalty_valid"] = data[
+                "batch_centered_penalty_valid"
+            ].bool()
         if self.config.log_agent_stats:
             if "begin_of_trajectory" not in data:
                 raise RuntimeError(
@@ -394,6 +471,16 @@ class PPOActor:
             seq_len=seqlens.float(),
         )
         stats_tracker.stat(**seq_stats, denominator="n_seqs")
+        if "batch_centered_penalty_advantage" in data:
+            stats_tracker.stat(
+                batch_centered_penalty_score=torch.nan_to_num(
+                    data["batch_centered_penalty_score"].float()
+                ),
+                batch_centered_penalty_advantage=data[
+                    "batch_centered_penalty_advantage"
+                ].float(),
+                denominator="batch_centered_penalty_valid",
+            )
         scalars = dict(
             mask_no_eos_with_zero=self.config.mask_no_eos_with_zero,
             eps_clip=self.config.eps_clip,
@@ -422,6 +509,10 @@ class PPOActor:
             "kl_rewards",
             "trajectory_id",
             "turn_idx",
+            "batch_centered_penalty_score",
+            "batch_centered_penalty_weight",
+            "batch_centered_penalty_valid",
+            "batch_centered_penalty_advantage",
         ]:
             data.pop(key, None)
         # NOTE: calling engine.train() is critical to enabling gradient checkpointing

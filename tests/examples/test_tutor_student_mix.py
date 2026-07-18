@@ -132,7 +132,7 @@ def test_eval7b_yaml_trains_17b_and_evaluates_17b_and_7b(monkeypatch):
     # Arrange
     monkeypatch.setenv("INF_API_KEY", "test-key")
     path = Path(
-        "examples/tutor/configs/math/july/pass@2/"
+        "examples/tutor/configs/math/july/pass@2/test/"
         "qwen8b-qwen1.7b-math-baseline-aleak-eval7b-aleak-pre.yaml"
     )
 

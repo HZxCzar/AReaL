@@ -13,6 +13,8 @@ def response_to_tensordict(
     turn_idx: int | None = None,
     input_tokens_override: list[int] | None = None,
     zero_reward_on_length_stop: bool = False,
+    batch_centered_penalty_score: float | None = None,
+    batch_centered_penalty_weight: float | None = None,
 ) -> dict[str, torch.Tensor]:
     input_tokens = (
         list(response.input_tokens)
@@ -47,7 +49,7 @@ def response_to_tensordict(
         and getattr(response, "stop_reason", None) == "length"
     ):
         effective_reward = 0.0
-    return {
+    result = {
         "input_ids": torch.tensor(full_ids, dtype=torch.long).unsqueeze(0),
         "logprobs": torch.tensor(
             [0.0] * input_len + output_logprobs,
@@ -66,3 +68,18 @@ def response_to_tensordict(
         "trajectory_id": torch.tensor([trajectory_value], dtype=torch.long),
         "turn_idx": torch.tensor([turn_value], dtype=torch.long),
     }
+    if batch_centered_penalty_weight is not None:
+        score_valid = batch_centered_penalty_score is not None
+        result["batch_centered_penalty_score"] = torch.tensor(
+            [float(batch_centered_penalty_score) if score_valid else float("nan")],
+            dtype=torch.float32,
+        )
+        result["batch_centered_penalty_weight"] = torch.tensor(
+            [float(batch_centered_penalty_weight)],
+            dtype=torch.float32,
+        )
+        result["batch_centered_penalty_valid"] = torch.tensor(
+            [score_valid],
+            dtype=torch.bool,
+        )
+    return result

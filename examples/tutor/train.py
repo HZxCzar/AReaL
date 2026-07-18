@@ -256,6 +256,7 @@ def _build_eval_workflow_kwargs(
     eval_workflow_kwargs["teacher_warmup_enabled"] = False
     eval_workflow_kwargs["teacher_warmup_prompt_path"] = ""
     eval_workflow_kwargs["teacher_warmup_steps"] = 0
+    eval_workflow_kwargs["teacher_diversity_reward"] = {"enabled": False}
     return eval_workflow_kwargs
 
 
@@ -396,6 +397,7 @@ def main(args):
         length_penalty_per_100_chars=reward.length_penalty_per_100_chars,
         length_penalty_min=reward.length_penalty_min,
         zero_reward_on_length_stop=reward.zero_reward_on_length_stop,
+        teacher_diversity_reward=asdict(reward.teacher_diversity),
         teacher_system_prompt=config.teacher_system_prompt,
         teacher_anti_leak_instruction_enabled=(
             config.teacher_anti_leak_instruction_enabled

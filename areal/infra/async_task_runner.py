@@ -362,6 +362,8 @@ class AsyncTaskRunner(Generic[T]):
                             )
                         result = None
                     except Exception as e:
+                        if getattr(e, "_fatal_rollout_error", False):
+                            raise
                         if self.logger:
                             self.logger.error(
                                 f"AsyncTaskRunner: Task {tid} "

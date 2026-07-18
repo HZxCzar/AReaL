@@ -367,6 +367,25 @@ class TestAsyncTaskRunnerErrorHandling:
 
         runner.destroy()
 
+    def test_fatal_task_exception_stops_runner(self):
+        """Fatal rollout errors propagate instead of becoming rejected results."""
+        runner = AsyncTaskRunner[int](max_queue_size=10)
+        runner.initialize()
+
+        async def fatal_task() -> int:
+            error = RuntimeError("teacher diversity embedding failed")
+            setattr(error, "_fatal_rollout_error", True)
+            raise error
+
+        runner.submit(fatal_task, task_id=1)
+
+        with pytest.raises(RuntimeError, match="thread has died") as exc_info:
+            runner.wait(count=1, timeout=2.0)
+
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+        assert "teacher diversity embedding failed" in str(exc_info.value.__cause__)
+        runner.destroy()
+
     def test_shutdown_with_pending_tasks(self):
         """Test clean shutdown with pending tasks."""
         runner = AsyncTaskRunner[int](max_queue_size=50)
