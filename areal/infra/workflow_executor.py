@@ -985,6 +985,8 @@ class WorkflowExecutor:
         rewards = traj.get("rewards")
         loss_mask = traj.get("loss_mask")
         attention_mask = traj.get("attention_mask")
+        trajectory_ids = traj.get("trajectory_id")
+        turn_indices = traj.get("turn_idx")
 
         if (
             input_ids is None
@@ -1041,6 +1043,16 @@ class WorkflowExecutor:
                 record = {
                     "task_id": task_id,
                     "sample_idx": i,
+                    "trajectory_id": (
+                        int(trajectory_ids[i].item())
+                        if trajectory_ids is not None
+                        else None
+                    ),
+                    "turn_idx": (
+                        int(turn_indices[i].item())
+                        if turn_indices is not None
+                        else None
+                    ),
                     "seqlen": seqlen,
                     "prompt_len": prompt_end,
                     "head_version": head_version,

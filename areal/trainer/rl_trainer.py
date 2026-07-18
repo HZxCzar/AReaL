@@ -8,6 +8,7 @@ from collections.abc import Callable
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
+import torch
 import torch.distributed as dist
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -122,6 +123,76 @@ def _attach_teacher_context_logps(
         )
     for trajectory, moved_logp in zip(rollout_batch, moved_logps, strict=True):
         trajectory["teacher_context_logp"] = moved_logp
+
+
+def _collect_teacher_context_diagnostics(
+    advantage_batch: list[dict[str, Any]],
+) -> list[dict[str, int | float]]:
+    """Collect the context reward and advantage for each valid teacher turn."""
+
+    if not advantage_batch or "teacher_context_advantage" not in advantage_batch[0]:
+        return []
+
+    required_keys = {
+        "trajectory_id",
+        "turn_idx",
+        "teacher_context_reward_valid",
+        "teacher_context_reward_weight",
+        "teacher_context_reward_score_clip",
+        "teacher_context_information_gain",
+        "teacher_context_advantage",
+    }
+    for trajectory in advantage_batch:
+        missing = required_keys - trajectory.keys()
+        if missing:
+            raise ValueError(
+                "Incomplete teacher context diagnostics; missing: "
+                + ", ".join(sorted(missing))
+            )
+
+    def concatenate(key: str) -> torch.Tensor:
+        return torch.cat(
+            [trajectory[key].reshape(-1) for trajectory in advantage_batch], dim=0
+        )
+
+    integer_columns = torch.stack(
+        (
+            concatenate("trajectory_id").long(),
+            concatenate("turn_idx").long(),
+        ),
+        dim=-1,
+    )
+    valid = concatenate("teacher_context_reward_valid").bool()
+    information_gain = concatenate("teacher_context_information_gain").float()
+    reward_weight = concatenate("teacher_context_reward_weight").float()
+    score_clip = concatenate("teacher_context_reward_score_clip").float()
+    reward = torch.where(
+        valid,
+        reward_weight
+        * torch.maximum(torch.minimum(information_gain, score_clip), -score_clip),
+        torch.zeros_like(information_gain),
+    )
+    float_columns = torch.stack(
+        (
+            reward,
+            concatenate("teacher_context_advantage").float(),
+        ),
+        dim=-1,
+    )
+
+    return [
+        {
+            "trajectory_id": int(trajectory_id),
+            "turn_idx": int(turn_idx),
+            "reward": float(reward),
+            "advantage": float(advantage),
+        }
+        for (trajectory_id, turn_idx), (reward, advantage) in zip(
+            integer_columns.detach().cpu().tolist(),
+            float_columns.detach().cpu().tolist(),
+            strict=True,
+        )
+    ]
 
 
 class _EmptyDataLoader:
@@ -751,6 +822,13 @@ class PPOTrainer:
             ):
                 adv_batch = self.actor.compute_advantages(rollout_batch)
                 self.actor.get_device_stats().log("compute advantages")
+
+            teacher_context_diagnostics = _collect_teacher_context_diagnostics(
+                adv_batch
+            )
+            self.stats_logger.log_teacher_context_diagnostics(
+                global_step, teacher_context_diagnostics
+            )
 
             # Wait for async checkpoint staging to complete before modifying parameters
             self.saver.maybe_wait_for_staging()

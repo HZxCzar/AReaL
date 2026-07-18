@@ -36,6 +36,9 @@ class StatsLogger:
         self.ppo_diagnostics_jsonl_path = os.path.join(
             self.log_path, "ppo_diagnostics.jsonl"
         )
+        self.teacher_context_diagnostics_jsonl_path = os.path.join(
+            self.log_path, "teacher_context_diagnostics.jsonl"
+        )
         self.init()
 
         self._last_commit_step = -1
@@ -195,6 +198,26 @@ class StatsLogger:
     def _append_jsonl(path: str, record: dict) -> None:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, sort_keys=True) + "\n")
+
+    def log_teacher_context_diagnostics(
+        self,
+        global_step: int,
+        records: list[dict[str, int | float]],
+    ) -> None:
+        """Persist compact per-turn context rewards without trajectory text."""
+
+        if not records or (dist.is_initialized() and dist.get_rank() != 0):
+            return
+        with open(
+            self.teacher_context_diagnostics_jsonl_path,
+            "a",
+            encoding="utf-8",
+        ) as f:
+            for record in records:
+                output = {"global_step": int(global_step), **record}
+                f.write(
+                    json.dumps(output, sort_keys=True, separators=(",", ":")) + "\n"
+                )
 
     @staticmethod
     def _build_ppo_diagnostics_record(record: dict) -> dict | None:

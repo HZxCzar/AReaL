@@ -5,6 +5,7 @@ import torch
 
 from areal.trainer.rl_trainer import (
     _attach_teacher_context_logps,
+    _collect_teacher_context_diagnostics,
     _has_teacher_context_reward,
 )
 
@@ -51,3 +52,33 @@ def test_has_teacher_context_reward_rejects_partial_metadata():
 
     with pytest.raises(ValueError, match="teacher_context_loss_mask"):
         _has_teacher_context_reward([trajectory])
+
+
+def test_collect_teacher_context_diagnostics_keeps_valid_turn_scalars():
+    """Diagnostics retain join keys and exact local advantages, but no text."""
+    trajectory_id = (1 << 62) + 17
+    advantage_batch = [
+        {
+            "trajectory_id": torch.tensor([trajectory_id] * 3),
+            "turn_idx": torch.tensor([1, 2, 3]),
+            "teacher_context_reward_valid": torch.tensor([False, True, True]),
+            "teacher_context_reward_weight": torch.tensor([0.3, 0.3, 0.3]),
+            "teacher_context_reward_score_clip": torch.tensor([5.0, 5.0, 0.5]),
+            "teacher_context_information_gain": torch.tensor([0.0, 0.3, 0.7]),
+            "teacher_context_advantage": torch.tensor([0.0, -0.06, 0.06]),
+        }
+    ]
+
+    records = _collect_teacher_context_diagnostics(advantage_batch)
+
+    assert len(records) == 3
+    assert records[0]["trajectory_id"] == trajectory_id
+    assert records[0]["turn_idx"] == 1
+    assert records[0]["reward"] == pytest.approx(0.0)
+    assert records[0]["advantage"] == pytest.approx(0.0)
+    assert records[1]["turn_idx"] == 2
+    assert records[1]["reward"] == pytest.approx(0.09)
+    assert records[1]["advantage"] == pytest.approx(-0.06)
+    assert records[2]["turn_idx"] == 3
+    assert records[2]["reward"] == pytest.approx(0.15)
+    assert records[2]["advantage"] == pytest.approx(0.06)
