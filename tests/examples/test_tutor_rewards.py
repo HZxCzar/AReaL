@@ -478,6 +478,7 @@ def test_success_turn_shaping_yaml_section_loads_typed_config():
     [
         ("qwen8b-qwen1.7b-math-pre-aleak-esr120.yaml", 1.2),
         ("qwen8b-qwen1.7b-math-pre-aleak-esr200.yaml", 2.0),
+        ("qwen8b-qwen1.7b-math-pre-aleak-esr1000.yaml", 10.0),
     ],
 )
 def test_success_turn_shaping_experiment_configs_use_distinct_strengths(
@@ -488,7 +489,8 @@ def test_success_turn_shaping_experiment_configs_use_distinct_strengths(
     reward = OmegaConf.load(path).reward
 
     assert reward.success_turn_shaping.enabled is True
-    assert reward.success_turn_shaping.min_reward == pytest.approx(1.0)
+    expected_min_reward = 0.0 if expected_max_reward == 10.0 else 1.0
+    assert reward.success_turn_shaping.min_reward == pytest.approx(expected_min_reward)
     assert reward.success_turn_shaping.max_reward == pytest.approx(expected_max_reward)
     assert reward.enable_turn_penalty is False
 
