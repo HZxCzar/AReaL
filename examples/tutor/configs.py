@@ -720,6 +720,31 @@ class TutorTeacherContextRewardConfig:
 
 
 @dataclass
+class TutorSuccessTurnShapingConfig:
+    """Shape clean success reward linearly by the turn where success occurs."""
+
+    enabled: bool = field(default=False)
+    min_reward: float = field(
+        default=1.0,
+        metadata={"help": "Success reward at the final allowed teacher turn."},
+    )
+    max_reward: float = field(
+        default=1.0,
+        metadata={"help": "Success reward at the first teacher turn."},
+    )
+
+    def __post_init__(self) -> None:
+        self.min_reward = float(self.min_reward)
+        self.max_reward = float(self.max_reward)
+        if self.enabled and self.min_reward < 0.0:
+            raise ValueError("reward.success_turn_shaping.min_reward must be >= 0.")
+        if self.enabled and self.max_reward < self.min_reward:
+            raise ValueError(
+                "reward.success_turn_shaping.max_reward must be >= min_reward."
+            )
+
+
+@dataclass
 class TutorRewardConfig:
     success: float = field(default=1.0)
     leaked_success_reward_scale: float = field(
@@ -770,6 +795,9 @@ class TutorRewardConfig:
     outcome_prior_turn_weight: float = field(default=0.1)
     outcome_credit_gamma: float = field(default=0.9)
     early_success_bonus: float = field(default=0.3)
+    success_turn_shaping: TutorSuccessTurnShapingConfig = field(
+        default_factory=TutorSuccessTurnShapingConfig
+    )
     max_turn_penalty: float = field(
         default=0.0,
         metadata={

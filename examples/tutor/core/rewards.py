@@ -26,6 +26,9 @@ class EpisodeRewardComputer:
         outcome_prior_turn_weight: float = 0.1,
         outcome_credit_gamma: float = 0.9,
         early_success_bonus: float = 0.0,
+        success_turn_shaping_enabled: bool = False,
+        success_turn_shaping_min_reward: float = 1.0,
+        success_turn_shaping_max_reward: float = 1.0,
         max_turn_penalty: float = 0.0,
         enable_turn_penalty: bool = False,
         turn_penalty: float = 0.0,
@@ -47,6 +50,16 @@ class EpisodeRewardComputer:
             raise ValueError("format_error_penalty must be <= 0.")
         if leaked_success_reward_scale < 0.0:
             raise ValueError("leaked_success_reward_scale must be >= 0.")
+        if success_turn_shaping_enabled and success_turn_shaping_min_reward < 0.0:
+            raise ValueError("success_turn_shaping_min_reward must be >= 0.")
+        if (
+            success_turn_shaping_enabled
+            and success_turn_shaping_max_reward < success_turn_shaping_min_reward
+        ):
+            raise ValueError(
+                "success_turn_shaping_max_reward must be >= "
+                "success_turn_shaping_min_reward."
+            )
         staged_penalties = {
             1: ("leak_final_answer", leak_penalty_final_answer),
             2: ("leak_compute", leak_penalty_compute),
@@ -76,6 +89,9 @@ class EpisodeRewardComputer:
         self.outcome_prior_turn_weight = outcome_prior_turn_weight
         self.outcome_credit_gamma = outcome_credit_gamma
         self.early_success_bonus = early_success_bonus
+        self.success_turn_shaping_enabled = bool(success_turn_shaping_enabled)
+        self.success_turn_shaping_min_reward = float(success_turn_shaping_min_reward)
+        self.success_turn_shaping_max_reward = float(success_turn_shaping_max_reward)
         self.max_turn_penalty = float(max_turn_penalty)
         self.enable_turn_penalty = enable_turn_penalty
         self.turn_penalty = turn_penalty
@@ -204,9 +220,14 @@ class EpisodeRewardComputer:
             early_fraction = 0.0
         else:
             early_fraction = max(0.0, (max_turns - success_turn) / (max_turns - 1))
-        budget = (
-            self.success_reward + self.early_success_bonus * early_fraction
-        ) * success_reward_scale
+        if self.success_turn_shaping_enabled:
+            budget = self.success_turn_shaping_min_reward + early_fraction * (
+                self.success_turn_shaping_max_reward
+                - self.success_turn_shaping_min_reward
+            )
+        else:
+            budget = self.success_reward + self.early_success_bonus * early_fraction
+        budget *= success_reward_scale
         if not self.assign_success_reward:
             return {success_turn: float(budget)}
 

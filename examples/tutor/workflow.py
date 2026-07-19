@@ -433,6 +433,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         outcome_prior_turn_weight: float = 0.1,
         outcome_credit_gamma: float = 0.9,
         early_success_bonus: float = 0.3,
+        success_turn_shaping: dict[str, Any] | None = None,
         max_turn_penalty: float = 0.0,
         enable_turn_penalty: bool = False,
         turn_penalty: float = -0.01,
@@ -582,6 +583,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.outcome_prior_turn_weight = float(outcome_prior_turn_weight)
         self.outcome_credit_gamma = float(outcome_credit_gamma)
         self.early_success_bonus = float(early_success_bonus)
+        success_turn_config = dict(success_turn_shaping or {})
+        self.success_turn_shaping_enabled = bool(
+            success_turn_config.get("enabled", False)
+        )
+        self.success_turn_shaping_min_reward = float(
+            success_turn_config.get("min_reward", 1.0)
+        )
+        self.success_turn_shaping_max_reward = float(
+            success_turn_config.get("max_reward", 1.0)
+        )
         self.max_turn_penalty = float(max_turn_penalty)
         self.enable_turn_penalty = bool(enable_turn_penalty)
         self.turn_penalty = float(turn_penalty)
@@ -1613,6 +1624,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
             outcome_prior_turn_weight=self.outcome_prior_turn_weight,
             outcome_credit_gamma=self.outcome_credit_gamma,
             early_success_bonus=self.early_success_bonus,
+            success_turn_shaping_enabled=getattr(
+                self, "success_turn_shaping_enabled", False
+            ),
+            success_turn_shaping_min_reward=getattr(
+                self, "success_turn_shaping_min_reward", 1.0
+            ),
+            success_turn_shaping_max_reward=getattr(
+                self, "success_turn_shaping_max_reward", 1.0
+            ),
             max_turn_penalty=getattr(self, "max_turn_penalty", 0.0),
             enable_turn_penalty=self.enable_turn_penalty,
             turn_penalty=self.turn_penalty,
@@ -3279,8 +3299,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
 
     def _enabled_reward_component_keys(self) -> list[str]:
         keys = []
-        if getattr(self, "success_reward", 0.0) or getattr(
-            self, "early_success_bonus", 0.0
+        if (
+            getattr(self, "success_reward", 0.0)
+            or getattr(self, "early_success_bonus", 0.0)
+            or getattr(self, "success_turn_shaping_enabled", False)
         ):
             keys.append("success")
         leak_penalty_mode = getattr(self, "leak_penalty_mode", "binary")

@@ -573,6 +573,7 @@ def build_workflow(
         outcome_prior_turn_weight=reward.outcome_prior_turn_weight,
         outcome_credit_gamma=reward.outcome_credit_gamma,
         early_success_bonus=reward.early_success_bonus,
+        success_turn_shaping=asdict(reward.success_turn_shaping),
         max_turn_penalty=reward.max_turn_penalty,
         enable_turn_penalty=reward.enable_turn_penalty,
         turn_penalty=reward.turn_penalty,

@@ -15,6 +15,7 @@ from examples.tutor.configs import (
     TutorRewardConfig,
     TutorStudentGeneralizeConfidenceConfig,
     TutorStudentGeneralizeConfig,
+    TutorSuccessTurnShapingConfig,
     TutorTeacherContextRewardConfig,
     TutorTeacherDiversityRewardConfig,
 )
@@ -426,6 +427,70 @@ def test_tutor_reward_config_validates_leak_penalty_modes():
 
     with pytest.raises(ValueError, match="leak_penalty"):
         TutorRewardConfig(leak_penalty_mode="rawbase", leak_penalty=None)
+
+
+def test_success_turn_shaping_config_defaults_to_disabled():
+    shaping = TutorSuccessTurnShapingConfig()
+
+    assert shaping.enabled is False
+    assert shaping.min_reward == pytest.approx(1.0)
+    assert shaping.max_reward == pytest.approx(1.0)
+
+
+def test_success_turn_shaping_config_validates_enabled_range():
+    with pytest.raises(ValueError, match="min_reward"):
+        TutorSuccessTurnShapingConfig(
+            enabled=True,
+            min_reward=-0.1,
+            max_reward=1.0,
+        )
+
+    with pytest.raises(ValueError, match="max_reward"):
+        TutorSuccessTurnShapingConfig(
+            enabled=True,
+            min_reward=1.0,
+            max_reward=0.9,
+        )
+
+
+def test_success_turn_shaping_yaml_section_loads_typed_config():
+    config = OmegaConf.to_object(
+        OmegaConf.merge(
+            OmegaConf.structured(TutorRewardConfig),
+            {
+                "success_turn_shaping": {
+                    "enabled": True,
+                    "min_reward": 1.0,
+                    "max_reward": 1.5,
+                }
+            },
+        )
+    )
+
+    shaping = config.success_turn_shaping
+    assert shaping.enabled is True
+    assert shaping.min_reward == pytest.approx(1.0)
+    assert shaping.max_reward == pytest.approx(1.5)
+
+
+@pytest.mark.parametrize(
+    ("config_name", "expected_max_reward"),
+    [
+        ("qwen8b-qwen1.7b-math-pre-aleak-esr120.yaml", 1.2),
+        ("qwen8b-qwen1.7b-math-pre-aleak-esr200.yaml", 2.0),
+    ],
+)
+def test_success_turn_shaping_experiment_configs_use_distinct_strengths(
+    config_name, expected_max_reward
+):
+    path = Path("examples/tutor/configs/math/july/pass@2") / config_name
+
+    reward = OmegaConf.load(path).reward
+
+    assert reward.success_turn_shaping.enabled is True
+    assert reward.success_turn_shaping.min_reward == pytest.approx(1.0)
+    assert reward.success_turn_shaping.max_reward == pytest.approx(expected_max_reward)
+    assert reward.enable_turn_penalty is False
 
 
 def test_teacher_diversity_config_defaults_to_disabled():
@@ -1245,6 +1310,53 @@ def test_default_success_reward_goes_to_success_turn_only():
     assert [assignment.reward for assignment in assignments] == pytest.approx(
         [0.0, 0.0, expected_budget]
     )
+
+
+@pytest.mark.parametrize(
+    ("success_turn", "expected_reward"),
+    [
+        (1, 1.5),
+        (5, 1.0 + 0.5 * (10 - 5) / (10 - 1)),
+        (10, 1.0),
+    ],
+)
+def test_success_turn_shaping_rewards_earlier_clean_success_more(
+    success_turn, expected_reward
+):
+    turns = [
+        _turn(turn_idx, correct=turn_idx == success_turn)
+        for turn_idx in range(1, success_turn + 1)
+    ]
+    assignments = asyncio.run(
+        _outcome_computer(
+            success_turn_shaping_enabled=True,
+            success_turn_shaping_min_reward=1.0,
+            success_turn_shaping_max_reward=1.5,
+        ).compute(_episode(turns, termination_reason="success"))
+    )
+
+    assert assignments[-1].reward_components["success_credit"] == pytest.approx(
+        expected_reward
+    )
+    assert sum(assignment.reward for assignment in assignments) == pytest.approx(
+        expected_reward
+    )
+
+
+def test_success_turn_shaping_does_not_reward_failed_episode():
+    turns = [_turn(turn_idx) for turn_idx in range(1, 11)]
+    assignments = asyncio.run(
+        _outcome_computer(
+            success_turn_shaping_enabled=True,
+            success_turn_shaping_min_reward=1.0,
+            success_turn_shaping_max_reward=1.5,
+            max_turn_penalty=0.0,
+            enable_turn_penalty=False,
+        ).compute(_episode(turns, termination_reason="max_turns"))
+    )
+
+    assert all("success_credit" not in item.reward_components for item in assignments)
+    assert sum(item.reward for item in assignments) == pytest.approx(0.0)
 
 
 def test_assign_success_reward_distributes_credit_from_final_outcome():
