@@ -44,6 +44,16 @@ class LeakCheckResult:
 
 
 @dataclass(slots=True)
+class TeacherProgressJudgeResult:
+    raw_output: str
+    score: int | None
+    reason: str
+    parse_error: str | None
+    local_advantage: float = 0.0
+    reward_shaping: float = 0.0
+
+
+@dataclass(slots=True)
 class PublicHistoryState:
     summary: str = ""
     turn_count: int = 0
@@ -120,6 +130,7 @@ class TurnArtifact:
     invalid_due_to_leak: bool = False
     previous_teacher_similarity: float | None = None
     teacher_similarity_error: str | None = None
+    teacher_progress_judge_result: TeacherProgressJudgeResult | None = None
 
 
 @dataclass(slots=True)
@@ -166,3 +177,4 @@ class TurnTrace:
     tutor_format_error: str | None = None
     previous_teacher_similarity: float | None = None
     teacher_similarity_error: str | None = None
+    teacher_progress_judge_result: TeacherProgressJudgeResult | None = None

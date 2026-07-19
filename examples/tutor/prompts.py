@@ -105,6 +105,51 @@ DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT = (
     "only with key correct (boolean)."
 )
 
+DEFAULT_TEACHER_PROGRESS_JUDGE_SYSTEM_PROMPT = """\
+You are evaluating whether one reply from a math teacher actually improved a
+particular student's state in a tutoring conversation.
+
+Use the task, private answer key, private reference solution, and full conversation
+history to compare the student's reply immediately before the target teacher reply
+with the student's reply immediately after it. Judge the observed change in the
+student, not how helpful the teacher reply sounds in isolation. A mathematically
+correct explanation is not progress if the student still shows the same error or no
+greater ability to solve the problem afterward. Give credit only for genuine new
+progress in the later student reply that is attributable to the target teacher
+reply and advances the student toward solving the original task. Completing an
+unrelated activity introduced by the teacher is not progress. Completing a
+teacher-introduced intermediate step counts only when that step is relevant to the
+original solution and resolves or reduces a real obstacle in the student's work.
+Base the score on correct understanding or work demonstrated in the later student
+reply, not on claims such as "I understand," increased length, a different
+presentation of the same result, or superficial activity.
+
+Check the student's mathematical claims against the private answer key and reference
+solution rather than trusting either the teacher's or the student's claim that
+something is correct. A later reply that merely continues, reformats, or repeats the
+same incorrect work is score 0. Score 1 requires a specific correct and relevant
+result in the later reply that was not already demonstrated in the earlier reply.
+In the reason, identify that concrete before-to-after change. If there is no such
+change to identify, use score 0.
+
+Use score 2, rather than score 1, when the later student reply newly reaches the
+correct final answer or an essentially complete correct solution matching the answer
+key and reference solution. If the later reply keeps the same incorrect final
+conclusion as the earlier reply, use score 0 unless it also demonstrates a new
+correct intermediate result that materially reduces the remaining work.
+
+Give one integer score:
+0 = no genuine progress: the same material error remains with no new correct and
+relevant intermediate result, or the student's work gets worse
+1 = partial progress: the student demonstrates at least one new correct and relevant
+intermediate result or fixes a material misconception, but important errors remain
+2 = substantial progress: the student resolves the main obstacle and reaches a
+correct or essentially complete solution to the original task
+
+Return valid JSON only with keys score and reason:
+{"score": 0, "reason": "brief comparison of the student's state before and after the target teacher reply"}
+"""
+
 NO_VISIBLE_TUTORING_HISTORY = "No visible tutoring history yet."
 NO_PREVIOUS_VISIBLE_TUTORING_HISTORY = "No previous visible tutoring history."
 EMPTY_PLACEHOLDER = "(empty)"
@@ -296,6 +341,29 @@ Return JSON only with this schema:
 {
   "correct": true or false
 }
+"""
+
+TEACHER_PROGRESS_JUDGE_USER_TEMPLATE = """\
+Task:
+{{ task }}
+
+Private answer key:
+{{ ground_truth }}
+
+Private reference solution:
+{{ reference_solution or '(not available)' }}
+
+Conversation history before the target interaction:
+{{ public_history or '(none)' }}
+
+Student reply immediately before the target teacher reply:
+{{ student_reply_before_teacher or '(empty)' }}
+
+Target teacher reply whose effect is being evaluated:
+{{ target_teacher_reply or '(empty)' }}
+
+Student reply immediately after the target teacher reply:
+{{ student_reply_after_teacher or '(empty)' }}
 """
 
 

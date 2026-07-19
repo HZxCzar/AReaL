@@ -28,6 +28,11 @@ def trace_to_history_record(
         "public_history_after": trace.public_history_after,
         "previous_teacher_similarity": trace.previous_teacher_similarity,
         "teacher_similarity_error": trace.teacher_similarity_error,
+        "teacher_progress_judge": (
+            asdict(trace.teacher_progress_judge_result)
+            if trace.teacher_progress_judge_result is not None
+            else None
+        ),
     }
     if trace.leak_level is not None:
         record["leak_level"] = trace.leak_level

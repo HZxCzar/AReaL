@@ -18,6 +18,7 @@ from examples.tutor.configs import (
     TutorSuccessTurnShapingConfig,
     TutorTeacherContextRewardConfig,
     TutorTeacherDiversityRewardConfig,
+    TutorTeacherProgressJudgeConfig,
 )
 from examples.tutor.core.callers import (
     ApiAuxiliaryCaller,
@@ -37,9 +38,11 @@ from examples.tutor.core.types import (
     JudgeResult,
     LeakCheckResult,
     PublicHistoryState,
+    RewardAssignment,
     StudentTurnState,
     TeacherPreSolveAttempt,
     TeacherPreSolveResult,
+    TeacherProgressJudgeResult,
     TurnArtifact,
     TurnTrace,
     TutorPrivateFeedback,
@@ -517,6 +520,48 @@ def test_teacher_context_config_defaults_to_disabled():
     assert config.enabled is False
     assert config.weight == pytest.approx(0.1)
     assert config.score_clip == pytest.approx(5.0)
+
+
+def test_teacher_progress_judge_config_defaults_to_disabled():
+    config = TutorTeacherProgressJudgeConfig()
+
+    assert config.enabled is False
+    assert config.weight == pytest.approx(0.5)
+
+
+def test_teacher_progress_judge_config_requires_positive_enabled_weight():
+    with pytest.raises(ValueError, match="teacher_progress_judge.weight"):
+        TutorTeacherProgressJudgeConfig(enabled=True, weight=0.0)
+
+
+def test_teacher_progress_judge_yaml_section_loads_typed_config():
+    config = OmegaConf.to_object(
+        OmegaConf.merge(
+            OmegaConf.structured(TutorRewardConfig),
+            {"teacher_progress_judge": {"enabled": True, "weight": 0.5}},
+        )
+    )
+
+    assert config.teacher_progress_judge.enabled is True
+    assert config.teacher_progress_judge.weight == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(
+    ("config_name", "expected_weight"),
+    [
+        ("qwen8b-qwen1.7b-math-pre-aleak-tpj050.yaml", 0.5),
+        ("qwen8b-qwen1.7b-math-pre-aleak-tpj500.yaml", 5.0),
+    ],
+)
+def test_teacher_progress_judge_experiment_configs_use_distinct_weights(
+    config_name, expected_weight
+):
+    path = Path("examples/tutor/configs/math/july/pass@2") / config_name
+
+    config = OmegaConf.load(path).reward.teacher_progress_judge
+
+    assert config.enabled is True
+    assert config.weight == pytest.approx(expected_weight)
 
 
 @pytest.mark.parametrize("field", ["weight", "score_clip"])
@@ -1254,6 +1299,136 @@ def test_teacher_pre_solve_context_is_hidden_in_tutor_prompt():
     assert "Private teacher solution draft hidden from the student" in prompt
     assert '<teacher_private_solution_draft mode="filter_solver">' in prompt
     assert "private solution with \\boxed{42}" in prompt
+
+
+def test_teacher_progress_judge_prompt_compares_student_before_and_after_teacher():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    turn = _turn(2, tutor_output="new teacher reply")
+    turn.public_history_before = (
+        "Tutor round 1:\nold hint\n\nStudent round 1:\nstill wrong"
+    )
+    turn.student_state.previous_student_output = "still wrong"
+    turn.student_output = "fixed the first step"
+    turn.tutor_state.teacher_pre_solve_result = TeacherPreSolveResult(
+        enabled=True,
+        mode="filter_solver",
+        accepted=True,
+        raw_output="private reference solution",
+    )
+
+    prompt = workflow._build_teacher_progress_judge_prompt(turn)
+
+    assert "Private answer key:\n42" in prompt
+    assert "private reference solution" in prompt
+    assert "Tutor round 1:\nold hint" in prompt
+    assert (
+        "Student reply immediately before the target teacher reply:\nstill wrong"
+        in prompt
+    )
+    assert (
+        "Target teacher reply whose effect is being evaluated:\nnew teacher reply"
+        in prompt
+    )
+    assert (
+        "Student reply immediately after the target teacher reply:\n"
+        "fixed the first step" in prompt
+    )
+
+
+def test_teacher_progress_judge_parser_accepts_unescaped_latex_reason():
+    result = tutor_workflow.TutorAgentWorkflow._parse_teacher_progress_judge_result(
+        TextCallResult(
+            text='{"score": 1, "reason": "include $ \\pm15 $"}',
+            raw_text='{"score": 1, "reason": "include $ \\pm15 $"}',
+        )
+    )
+
+    assert result.score == 1
+    assert result.parse_error is not None
+
+
+def test_teacher_progress_judge_scores_valid_turns_and_skips_leaks(monkeypatch):
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.teacher_progress_judge_enabled = True
+    workflow.teacher_progress_judge_system_prompt = "judge new progress"
+    turns = [_turn(1, tutor_output="new hint"), _turn(2, leaked=True)]
+    captured = []
+
+    async def call_auxiliary_prompt(**kwargs):
+        captured.append(kwargs)
+        return TextCallResult(text='{"score": 2, "reason": "new correction"}')
+
+    monkeypatch.setattr(workflow, "_call_auxiliary_prompt", call_auxiliary_prompt)
+
+    asyncio.run(workflow._annotate_teacher_progress(turns, aux_caller=object()))
+
+    assert len(captured) == 1
+    assert captured[0]["rid_prefix"] == "teacher-progress-judge"
+    assert turns[0].teacher_progress_judge_result.score == 2
+    assert turns[1].teacher_progress_judge_result.score is None
+    assert turns[1].teacher_progress_judge_result.parse_error == "skipped_leaked_turn"
+
+
+def test_teacher_progress_judge_skips_failed_student_response(monkeypatch):
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.teacher_progress_judge_enabled = True
+    turns = [_turn(1)]
+    turns[0].student_error = "student request failed"
+
+    async def call_auxiliary_prompt(**kwargs):
+        raise AssertionError("judge must not run without a valid post-teacher student")
+
+    monkeypatch.setattr(workflow, "_call_auxiliary_prompt", call_auxiliary_prompt)
+
+    asyncio.run(workflow._annotate_teacher_progress(turns, aux_caller=object()))
+
+    result = turns[0].teacher_progress_judge_result
+    assert result.score is None
+    assert result.parse_error == "skipped_student_error"
+
+
+def test_teacher_progress_shaping_stays_local_after_turn_return():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.teacher_progress_judge_enabled = True
+    workflow.teacher_progress_judge_weight = 0.5
+    workflow.local_advantage_turn_discount = 0.9
+    turns = [_turn(1), _turn(2)]
+    turns[0].teacher_progress_judge_result = TeacherProgressJudgeResult(
+        raw_output="",
+        score=0,
+        reason="no new progress",
+        parse_error=None,
+    )
+    turns[1].teacher_progress_judge_result = TeacherProgressJudgeResult(
+        raw_output="",
+        score=2,
+        reason="substantial new progress",
+        parse_error=None,
+    )
+    assignments = [
+        RewardAssignment(reward=0.0, reward_components={}),
+        RewardAssignment(reward=0.0, reward_components={}),
+    ]
+
+    workflow._apply_teacher_progress_shaping(turns, assignments)
+
+    assert [assignment.reward for assignment in assignments] == pytest.approx(
+        [-0.95, 0.5]
+    )
+    first_return = assignments[0].reward + 0.9 * assignments[1].reward
+    second_return = assignments[1].reward
+    assert [first_return, second_return] == pytest.approx([-0.5, 0.5])
+    assert [
+        turn.teacher_progress_judge_result.local_advantage for turn in turns
+    ] == pytest.approx([-0.5, 0.5])
 
 
 def test_teacher_pre_solve_retries_until_correct(monkeypatch):

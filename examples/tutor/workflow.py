@@ -174,10 +174,12 @@ from examples.tutor.core.types import (
     LeakHandlingMode,
     PromptPoolSelection,
     PublicHistoryState,
+    RewardAssignment,
     StudentGeneralizeMode,
     StudentTurnState,
     TeacherPreSolveAttempt,
     TeacherPreSolveResult,
+    TeacherProgressJudgeResult,
     TurnArtifact,
     TurnTrace,
     TutorPrivateFeedback,
@@ -188,6 +190,7 @@ from examples.tutor.prompts import (
     DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT,
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
     DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT,
+    DEFAULT_TEACHER_PROGRESS_JUDGE_SYSTEM_PROMPT,
     EMPTY_PLACEHOLDER,
     FEEDBACK_LEAK_CHECK_SYSTEM_PROMPT_SUFFIX,
     FILTER_SOLVER_SYSTEM_PROMPT,
@@ -217,6 +220,7 @@ from examples.tutor.prompts import (
     TEACHER_ADAPTIVE_INSTRUCTION,
     TEACHER_ANTI_LEAK_INSTRUCTION,
     TEACHER_PRE_SOLVE_FILTER_CONTEXT_TEMPLATE,
+    TEACHER_PROGRESS_JUDGE_USER_TEMPLATE,
     TEACHER_STATE_USER_TEMPLATE,
     render_prompt,
 )
@@ -443,6 +447,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         zero_reward_on_length_stop: bool = False,
         teacher_diversity_reward: dict[str, Any] | None = None,
         teacher_context_reward: dict[str, Any] | None = None,
+        teacher_progress_judge: dict[str, Any] | None = None,
+        local_advantage_turn_discount: float = 1.0,
         teacher_system_prompt: str = "",
         teacher_anti_leak_instruction_enabled: bool = False,
         teacher_adaptive_instruction_enabled: bool = False,
@@ -658,6 +664,22 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError("teacher context reward weight must be positive.")
         if self.teacher_context_enabled and self.teacher_context_score_clip <= 0.0:
             raise ValueError("teacher context reward score_clip must be positive.")
+        progress_config = dict(teacher_progress_judge or {})
+        self.teacher_progress_judge_enabled = bool(
+            progress_config.get("enabled", False)
+        )
+        self.teacher_progress_judge_weight = float(progress_config.get("weight", 0.5))
+        self.teacher_progress_judge_system_prompt = (
+            DEFAULT_TEACHER_PROGRESS_JUDGE_SYSTEM_PROMPT
+        )
+        self.local_advantage_turn_discount = float(local_advantage_turn_discount)
+        if (
+            self.teacher_progress_judge_enabled
+            and self.teacher_progress_judge_weight <= 0.0
+        ):
+            raise ValueError("teacher progress judge weight must be positive.")
+        if self.local_advantage_turn_discount < 0.0:
+            raise ValueError("local advantage turn discount must be non-negative.")
         self.teacher_anti_leak_instruction_enabled = bool(
             teacher_anti_leak_instruction_enabled
         )
@@ -1584,6 +1606,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
             leak_count = sum(
                 1 for artifact in turn_artifacts if artifact.leak_result.leaked
             )
+        await self._annotate_teacher_progress(
+            turn_artifacts,
+            aux_caller=aux_caller,
+        )
         episode_artifact = EpisodeArtifact(
             task=task,
             ground_truth=ground_truth,
@@ -1641,6 +1667,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             length_penalty_min=self.length_penalty_min,
         )
         assignments = await reward_computer.compute(episode_artifact)
+        self._apply_teacher_progress_shaping(turn_artifacts, assignments)
         self._apply_student_generalization_rewards(
             turn_artifacts, assignments, student_generalization_results
         )
@@ -2528,6 +2555,166 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
 
     @staticmethod
+    def _teacher_progress_reference_solution(artifact: TurnArtifact) -> str:
+        result = artifact.tutor_state.teacher_pre_solve_result
+        if result is None or not result.accepted:
+            return ""
+        return str(result.raw_output or "").strip()
+
+    def _build_teacher_progress_judge_prompt(self, artifact: TurnArtifact) -> str:
+        student_reply_before_teacher = (
+            artifact.student_state.previous_student_output
+            if artifact.student_state is not None
+            else artifact.tutor_state.previous_feedback.student_output
+        )
+        return render_prompt(
+            TEACHER_PROGRESS_JUDGE_USER_TEMPLATE,
+            task=artifact.tutor_state.task,
+            ground_truth=artifact.tutor_state.ground_truth,
+            reference_solution=self._teacher_progress_reference_solution(artifact),
+            public_history=artifact.public_history_before,
+            student_reply_before_teacher=student_reply_before_teacher,
+            target_teacher_reply=artifact.tutor_visible_output,
+            student_reply_after_teacher=artifact.student_output,
+        )
+
+    @staticmethod
+    def _parse_teacher_progress_judge_result(
+        judge_call: TextCallResult,
+    ) -> TeacherProgressJudgeResult:
+        raw_output = judge_call.raw_text or judge_call.text
+        if judge_call.error:
+            return TeacherProgressJudgeResult(
+                raw_output=raw_output,
+                score=None,
+                reason="",
+                parse_error=judge_call.error,
+            )
+
+        parsed, parse_error = parse_json_dict(judge_call.text)
+        score = parsed.get("score") if isinstance(parsed, dict) else None
+        reason = parsed.get("reason", "") if isinstance(parsed, dict) else ""
+        if isinstance(score, int) and not isinstance(score, bool) and 0 <= score <= 2:
+            return TeacherProgressJudgeResult(
+                raw_output=raw_output,
+                score=score,
+                reason=str(reason),
+                parse_error=parse_error,
+            )
+
+        # Some models emit unescaped LaTeX in the reason, making the surrounding
+        # JSON invalid even though the integer score is unambiguous.
+        match = re.search(r'"score"\s*:\s*([012])', judge_call.text)
+        if match is not None:
+            return TeacherProgressJudgeResult(
+                raw_output=raw_output,
+                score=int(match.group(1)),
+                reason="",
+                parse_error=parse_error,
+            )
+
+        error = (
+            parse_error or 'Teacher progress judge field "score" must be 0, 1, or 2.'
+        )
+        return TeacherProgressJudgeResult(
+            raw_output=raw_output,
+            score=None,
+            reason="",
+            parse_error=error,
+        )
+
+    async def _run_teacher_progress_judge(
+        self,
+        artifact: TurnArtifact,
+        *,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller,
+    ) -> TeacherProgressJudgeResult:
+        judge_call = await self._call_auxiliary_prompt(
+            system_prompt=self.teacher_progress_judge_system_prompt,
+            user_prompt=self._build_teacher_progress_judge_prompt(artifact),
+            aux_caller=aux_caller,
+            rid_prefix="teacher-progress-judge",
+        )
+        return self._parse_teacher_progress_judge_result(judge_call)
+
+    async def _annotate_teacher_progress(
+        self,
+        turn_artifacts: list[TurnArtifact],
+        *,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
+    ) -> None:
+        if not getattr(self, "teacher_progress_judge_enabled", False):
+            return
+        if aux_caller is None:
+            raise RuntimeError("teacher progress judge caller is unavailable.")
+
+        async def judge(artifact: TurnArtifact) -> TeacherProgressJudgeResult:
+            if artifact.invalid_due_to_leak or artifact.leak_result.leaked:
+                return TeacherProgressJudgeResult(
+                    raw_output="",
+                    score=None,
+                    reason="",
+                    parse_error="skipped_leaked_turn",
+                )
+            if artifact.student_error:
+                return TeacherProgressJudgeResult(
+                    raw_output="",
+                    score=None,
+                    reason="",
+                    parse_error="skipped_student_error",
+                )
+            return await self._run_teacher_progress_judge(
+                artifact,
+                aux_caller=aux_caller,
+            )
+
+        results = await asyncio.gather(
+            *(judge(artifact) for artifact in turn_artifacts)
+        )
+        for artifact, result in zip(turn_artifacts, results, strict=True):
+            artifact.teacher_progress_judge_result = result
+
+    def _apply_teacher_progress_shaping(
+        self,
+        turn_artifacts: list[TurnArtifact],
+        assignments: list[RewardAssignment],
+    ) -> None:
+        if not getattr(self, "teacher_progress_judge_enabled", False):
+            return
+        if len(turn_artifacts) != len(assignments):
+            raise ValueError(
+                "Teacher progress shaping requires one reward assignment per turn."
+            )
+
+        weight = float(self.teacher_progress_judge_weight)
+        targets = []
+        for artifact in turn_artifacts:
+            result = artifact.teacher_progress_judge_result
+            target = (
+                weight * (int(result.score) - 1)
+                if result is not None and result.score is not None
+                else 0.0
+            )
+            if result is not None:
+                result.local_advantage = float(target)
+            targets.append(float(target))
+
+        gamma = float(self.local_advantage_turn_discount)
+        for index, (artifact, assignment) in enumerate(
+            zip(turn_artifacts, assignments, strict=True)
+        ):
+            next_target = targets[index + 1] if index + 1 < len(targets) else 0.0
+            shaping = targets[index] - gamma * next_target
+            result = artifact.teacher_progress_judge_result
+            if result is not None:
+                result.reward_shaping = float(shaping)
+            if shaping:
+                assignment.reward_components["teacher_progress_shaping"] = float(
+                    shaping
+                )
+                assignment.reward = float(assignment.reward + shaping)
+
+    @staticmethod
     def _load_student_generalize_bank(path: str) -> dict[str, Any]:
         if not path:
             return {}
@@ -3219,6 +3406,30 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     metrics["teacher_diversity/mean_similarity"] = float(
                         sum(similarities) / len(similarities)
                     )
+            if getattr(self, "teacher_progress_judge_enabled", False):
+                progress_results = [
+                    trace.teacher_progress_judge_result for trace in traces
+                ]
+                valid_progress = [
+                    result
+                    for result in progress_results
+                    if result is not None and result.score is not None
+                ]
+                metrics["teacher_progress_judge/valid_turns"] = float(
+                    len(valid_progress)
+                )
+                metrics["teacher_progress_judge/errors"] = float(
+                    len(progress_results) - len(valid_progress)
+                )
+                if valid_progress:
+                    metrics["teacher_progress_judge/mean_score"] = float(
+                        sum(int(result.score) for result in valid_progress)
+                        / len(valid_progress)
+                    )
+                    metrics["teacher_progress_judge/mean_local_advantage"] = float(
+                        sum(result.local_advantage for result in valid_progress)
+                        / len(valid_progress)
+                    )
             metrics.update(self._reward_component_metrics(traces))
             self._log_generalize_stats(
                 solved=success_round > 0,
@@ -3335,6 +3546,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     keys.append(f"student_generalize_{level}")
                     if getattr(self, "student_generalize_confidence_enabled", False):
                         keys.append(f"student_generalize_{level}_confidence")
+        if getattr(self, "teacher_progress_judge_enabled", False):
+            keys.append("teacher_progress_shaping")
         return keys
 
     def _reward_component_metrics(self, traces: list[TurnTrace]) -> dict[str, float]:

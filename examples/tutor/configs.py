@@ -720,6 +720,27 @@ class TutorTeacherContextRewardConfig:
 
 
 @dataclass
+class TutorTeacherProgressJudgeConfig:
+    """Give a teacher turn local advantage for observed student improvement."""
+
+    enabled: bool = field(default=False)
+    weight: float = field(
+        default=0.5,
+        metadata={
+            "help": (
+                "Magnitude of the local turn advantage. Judge scores 0/1/2 map "
+                "to -weight/0/+weight."
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        self.weight = float(self.weight)
+        if self.enabled and self.weight <= 0.0:
+            raise ValueError("reward.teacher_progress_judge.weight must be positive.")
+
+
+@dataclass
 class TutorSuccessTurnShapingConfig:
     """Shape clean success reward linearly by the turn where success occurs."""
 
@@ -826,6 +847,9 @@ class TutorRewardConfig:
     )
     teacher_context: TutorTeacherContextRewardConfig = field(
         default_factory=TutorTeacherContextRewardConfig
+    )
+    teacher_progress_judge: TutorTeacherProgressJudgeConfig = field(
+        default_factory=TutorTeacherProgressJudgeConfig
     )
 
     def __post_init__(self) -> None:
