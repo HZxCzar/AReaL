@@ -25,6 +25,12 @@ TEACHER_ANTI_LEAK_INSTRUCTION = (
     "Do not reveal the problem's answer or an equivalent expression to the student."
 )
 
+TEACHER_ADAPTIVE_INSTRUCTION = (
+    "Pay close attention to the student's responses and adapt your teaching strategy "
+    "accordingly. Respond flexibly to the student's current behavior instead of "
+    "following or repeating a fixed approach."
+)
+
 DEFAULT_STUDENT_SYSTEM_PROMPT = (
     "You are a real student solving the task. Use the visible tutoring history "
     "and the teacher's latest feedback naturally. Continue from your previous "

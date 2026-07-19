@@ -70,20 +70,31 @@ def test_commit_writes_local_jsonl_diagnostics(
     assert diagnostics_record["derived"]["behave_imp_weight_min"] == 0.01
     assert "unrelated_metric" not in diagnostics_record["diagnostics"]
 
-    logger.log_teacher_context_diagnostics(
+    logger.log_turn_diagnostics(
         global_step=2,
         records=[
             {
                 "trajectory_id": 123,
                 "turn_idx": 2,
                 "reward": 0.3,
+                "context_reward": 0.3,
                 "advantage": -0.04,
             }
         ],
     )
-    with open(logger.teacher_context_diagnostics_jsonl_path, encoding="utf-8") as f:
+    with open(logger.turn_diagnostics_jsonl_path, encoding="utf-8") as f:
         context_record = json.loads(f.readline())
     assert context_record == {
+        "global_step": 2,
+        "trajectory_id": 123,
+        "turn_idx": 2,
+        "reward": 0.3,
+        "context_reward": 0.3,
+        "advantage": -0.04,
+    }
+    with open(logger.teacher_context_diagnostics_jsonl_path, encoding="utf-8") as f:
+        legacy_context_record = json.loads(f.readline())
+    assert legacy_context_record == {
         "global_step": 2,
         "trajectory_id": 123,
         "turn_idx": 2,

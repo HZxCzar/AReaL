@@ -677,8 +677,17 @@ class TutorTeacherContextRewardConfig:
             "help": (
                 "Reward a later teacher turn when its sampled output is more likely "
                 "at its real position than when moved to the preceding teacher "
-                "turn's position. The length-normalized, batch-centered signal is "
-                "attached only to the later turn's local advantage."
+                "turn's position. The length-normalized, batch-centered signal can "
+                "be logged alone or attached to the later turn's local advantage."
+            )
+        },
+    )
+    apply_to_advantage: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Whether to add the computed context signal to the training "
+                "advantage. Disable this to compute and log the signal only."
             )
         },
     )
@@ -906,6 +915,15 @@ class TutorConfig(GRPOConfig):
             "help": (
                 "Whether to append an instruction forbidding the teacher from "
                 "revealing the answer to the student."
+            )
+        },
+    )
+    teacher_adaptive_instruction_enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to tell the teacher to adapt to the student's latest "
+                "responses instead of following or repeating a fixed approach."
             )
         },
     )

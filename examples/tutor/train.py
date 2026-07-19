@@ -404,6 +404,9 @@ def main(args):
         teacher_anti_leak_instruction_enabled=(
             config.teacher_anti_leak_instruction_enabled
         ),
+        teacher_adaptive_instruction_enabled=(
+            config.teacher_adaptive_instruction_enabled
+        ),
         teacher_prompt_pool_path=config.prompt_pool.teacher_path,
         teacher_warmup_enabled=config.prompt_pool.teacher_warmup.enabled,
         teacher_warmup_prompt_path=config.prompt_pool.teacher_warmup.prompt_path,

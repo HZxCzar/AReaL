@@ -39,6 +39,9 @@ class StatsLogger:
         self.teacher_context_diagnostics_jsonl_path = os.path.join(
             self.log_path, "teacher_context_diagnostics.jsonl"
         )
+        self.turn_diagnostics_jsonl_path = os.path.join(
+            self.log_path, "turn_diagnostics.jsonl"
+        )
         self.init()
 
         self._last_commit_step = -1
@@ -199,20 +202,55 @@ class StatsLogger:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, sort_keys=True) + "\n")
 
+    def log_turn_diagnostics(
+        self,
+        global_step: int,
+        records: list[dict[str, int | float]],
+    ) -> None:
+        """Persist compact per-turn rewards and advantages without trajectory text."""
+
+        if not records or (dist.is_initialized() and dist.get_rank() != 0):
+            return
+        self._append_turn_diagnostic_records(
+            self.turn_diagnostics_jsonl_path, global_step, records
+        )
+        context_records = [
+            {
+                "trajectory_id": record["trajectory_id"],
+                "turn_idx": record["turn_idx"],
+                "reward": record["context_reward"],
+                "advantage": record["advantage"],
+            }
+            for record in records
+            if "context_reward" in record
+        ]
+        if context_records:
+            self._append_turn_diagnostic_records(
+                self.teacher_context_diagnostics_jsonl_path,
+                global_step,
+                context_records,
+            )
+
     def log_teacher_context_diagnostics(
         self,
         global_step: int,
         records: list[dict[str, int | float]],
     ) -> None:
-        """Persist compact per-turn context rewards without trajectory text."""
+        """Retain the legacy CTX diagnostics API and output path."""
 
         if not records or (dist.is_initialized() and dist.get_rank() != 0):
             return
-        with open(
-            self.teacher_context_diagnostics_jsonl_path,
-            "a",
-            encoding="utf-8",
-        ) as f:
+        self._append_turn_diagnostic_records(
+            self.teacher_context_diagnostics_jsonl_path, global_step, records
+        )
+
+    @staticmethod
+    def _append_turn_diagnostic_records(
+        path: str,
+        global_step: int,
+        records: list[dict[str, int | float]],
+    ) -> None:
+        with open(path, "a", encoding="utf-8") as f:
             for record in records:
                 output = {"global_step": int(global_step), **record}
                 f.write(

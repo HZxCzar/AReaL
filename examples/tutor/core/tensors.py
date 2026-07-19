@@ -18,6 +18,7 @@ def response_to_tensordict(
     teacher_context_input_tokens: list[int] | None = None,
     teacher_context_reward_weight: float | None = None,
     teacher_context_reward_score_clip: float | None = None,
+    teacher_context_reward_apply_to_advantage: bool | None = None,
 ) -> dict[str, torch.Tensor]:
     input_tokens = (
         list(response.input_tokens)
@@ -116,5 +117,13 @@ def response_to_tensordict(
         )
         result["teacher_context_reward_valid"] = torch.tensor(
             [context_valid], dtype=torch.bool
+        )
+        result["teacher_context_reward_apply_to_advantage"] = torch.tensor(
+            [
+                True
+                if teacher_context_reward_apply_to_advantage is None
+                else bool(teacher_context_reward_apply_to_advantage)
+            ],
+            dtype=torch.bool,
         )
     return result

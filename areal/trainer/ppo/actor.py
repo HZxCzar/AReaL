@@ -353,6 +353,7 @@ class PPOActor:
             "teacher_context_logp",
             "teacher_context_reward_weight",
             "teacher_context_reward_score_clip",
+            "teacher_context_reward_apply_to_advantage",
             "teacher_context_reward_valid",
         }
         present_teacher_context_keys = teacher_context_keys.intersection(data)
@@ -491,10 +492,21 @@ class PPOActor:
                 )
                 data["batch_centered_penalty_advantage"] = batch_centered_penalties
             if teacher_context_advantages is not None:
+                applied_teacher_context_advantages = (
+                    teacher_context_advantages
+                    * data["teacher_context_reward_apply_to_advantage"]
+                    .to(reward_score.device)
+                    .bool()
+                )
                 normalized_turn_returns = (
-                    normalized_turn_returns + teacher_context_advantages
+                    normalized_turn_returns + applied_teacher_context_advantages
                 )
                 data["teacher_context_advantage"] = teacher_context_advantages
+            if (
+                batch_centered_penalties is not None
+                or teacher_context_advantages is not None
+            ):
+                data["turn_advantage"] = normalized_turn_returns
             advantages = kl_advantages + _broadcast_turn_values_to_tokens(
                 normalized_turn_returns, loss_mask
             )
@@ -678,11 +690,13 @@ class PPOActor:
             "teacher_context_logp",
             "teacher_context_reward_weight",
             "teacher_context_reward_score_clip",
+            "teacher_context_reward_apply_to_advantage",
             "teacher_context_reward_valid",
             "teacher_context_real_avg_logp",
             "teacher_context_moved_avg_logp",
             "teacher_context_information_gain",
             "teacher_context_advantage",
+            "turn_advantage",
         ]:
             data.pop(key, None)
         # NOTE: calling engine.train() is critical to enabling gradient checkpointing

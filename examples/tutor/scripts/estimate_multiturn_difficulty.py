@@ -585,6 +585,9 @@ def build_workflow(
         teacher_anti_leak_instruction_enabled=(
             config.teacher_anti_leak_instruction_enabled
         ),
+        teacher_adaptive_instruction_enabled=(
+            config.teacher_adaptive_instruction_enabled
+        ),
         teacher_user_prompt_template=config.teacher_user_prompt_template,
         teacher_show_ground_truth=config.teacher_show_ground_truth,
         teacher_pre_enabled=teacher_pre.enabled,

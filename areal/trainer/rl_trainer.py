@@ -78,6 +78,7 @@ _TEACHER_CONTEXT_ROLLOUT_KEYS = {
     "teacher_context_loss_mask",
     "teacher_context_reward_weight",
     "teacher_context_reward_score_clip",
+    "teacher_context_reward_apply_to_advantage",
     "teacher_context_reward_valid",
 }
 
@@ -125,22 +126,30 @@ def _attach_teacher_context_logps(
         trajectory["teacher_context_logp"] = moved_logp
 
 
-def _collect_teacher_context_diagnostics(
+def _collect_turn_diagnostics(
     advantage_batch: list[dict[str, Any]],
 ) -> list[dict[str, int | float]]:
-    """Collect the context reward and advantage for each valid teacher turn."""
+    """Collect the auxiliary reward and final advantage for each teacher turn."""
 
-    if not advantage_batch or "teacher_context_advantage" not in advantage_batch[0]:
+    if not advantage_batch:
+        return []
+
+    reward_keys = {
+        name: key
+        for name, key in (
+            ("diversity_reward", "batch_centered_penalty_advantage"),
+            ("context_reward", "teacher_context_advantage"),
+        )
+        if key in advantage_batch[0]
+    }
+    if not reward_keys:
         return []
 
     required_keys = {
         "trajectory_id",
         "turn_idx",
-        "teacher_context_reward_valid",
-        "teacher_context_reward_weight",
-        "teacher_context_reward_score_clip",
-        "teacher_context_information_gain",
-        "teacher_context_advantage",
+        "turn_advantage",
+        *reward_keys.values(),
     }
     for trajectory in advantage_batch:
         missing = required_keys - trajectory.keys()
@@ -150,9 +159,18 @@ def _collect_teacher_context_diagnostics(
                 + ", ".join(sorted(missing))
             )
 
+    from areal.infra.rpc.rtensor import RTensor
+
+    local_batch = RTensor.localize(
+        [
+            {key: trajectory[key] for key in required_keys}
+            for trajectory in advantage_batch
+        ]
+    )
+
     def concatenate(key: str) -> torch.Tensor:
         return torch.cat(
-            [trajectory[key].reshape(-1) for trajectory in advantage_batch], dim=0
+            [trajectory[key].reshape(-1) for trajectory in local_batch], dim=0
         )
 
     integer_columns = torch.stack(
@@ -162,37 +180,42 @@ def _collect_teacher_context_diagnostics(
         ),
         dim=-1,
     )
-    valid = concatenate("teacher_context_reward_valid").bool()
-    information_gain = concatenate("teacher_context_information_gain").float()
-    reward_weight = concatenate("teacher_context_reward_weight").float()
-    score_clip = concatenate("teacher_context_reward_score_clip").float()
-    reward = torch.where(
-        valid,
-        reward_weight
-        * torch.maximum(torch.minimum(information_gain, score_clip), -score_clip),
-        torch.zeros_like(information_gain),
+    component_columns = {
+        name: concatenate(key).float() for name, key in reward_keys.items()
+    }
+    component_values = {
+        name: values.detach().cpu().tolist()
+        for name, values in component_columns.items()
+    }
+    reward_values = (
+        torch.stack(list(component_columns.values()), dim=0)
+        .sum(dim=0)
+        .detach()
+        .cpu()
+        .tolist()
     )
-    float_columns = torch.stack(
-        (
-            reward,
-            concatenate("teacher_context_advantage").float(),
-        ),
-        dim=-1,
-    )
+    advantage_values = concatenate("turn_advantage").float().detach().cpu().tolist()
 
-    return [
-        {
+    records = []
+    for index, ((trajectory_id, turn_idx), reward, advantage) in enumerate(
+        zip(
+            integer_columns.detach().cpu().tolist(),
+            reward_values,
+            advantage_values,
+            strict=True,
+        )
+    ):
+        record = {
             "trajectory_id": int(trajectory_id),
             "turn_idx": int(turn_idx),
             "reward": float(reward),
             "advantage": float(advantage),
         }
-        for (trajectory_id, turn_idx), (reward, advantage) in zip(
-            integer_columns.detach().cpu().tolist(),
-            float_columns.detach().cpu().tolist(),
-            strict=True,
+        record.update(
+            {name: float(values[index]) for name, values in component_values.items()}
         )
-    ]
+        records.append(record)
+    return records
 
 
 class _EmptyDataLoader:
@@ -823,12 +846,8 @@ class PPOTrainer:
                 adv_batch = self.actor.compute_advantages(rollout_batch)
                 self.actor.get_device_stats().log("compute advantages")
 
-            teacher_context_diagnostics = _collect_teacher_context_diagnostics(
-                adv_batch
-            )
-            self.stats_logger.log_teacher_context_diagnostics(
-                global_step, teacher_context_diagnostics
-            )
+            turn_diagnostics = _collect_turn_diagnostics(adv_batch)
+            self.stats_logger.log_turn_diagnostics(global_step, turn_diagnostics)
 
             # Wait for async checkpoint staging to complete before modifying parameters
             self.saver.maybe_wait_for_staging()

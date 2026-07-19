@@ -941,6 +941,27 @@ def test_teacher_anti_leak_instruction_is_shared_across_modes(enable_thinking):
     assert has_non_thinking_format == (not enable_thinking)
 
 
+@pytest.mark.parametrize("enable_thinking", [False, True])
+def test_teacher_adaptive_instruction_is_shared_across_modes(enable_thinking):
+    """The optional adaptive instruction is appended once in both teacher modes."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.enable_thinking = enable_thinking
+    workflow.teacher_anti_leak_instruction_enabled = False
+    workflow.teacher_adaptive_instruction_enabled = True
+
+    prompt = workflow._resolve_teacher_system_prompt("base prompt")
+    prompt = workflow._resolve_teacher_system_prompt(prompt)
+
+    instruction = tutor_workflow.TEACHER_ADAPTIVE_INSTRUCTION
+    assert instruction in prompt
+    assert prompt.count(instruction) == 1
+    assert "student's responses" in instruction
+    assert "Respond flexibly" in instruction
+    assert "scaffolding" not in instruction
+
+
 def test_non_thinking_tutor_visible_output_uses_tagged_output_only():
     workflow = tutor_workflow.TutorAgentWorkflow.__new__(
         tutor_workflow.TutorAgentWorkflow

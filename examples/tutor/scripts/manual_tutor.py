@@ -192,6 +192,9 @@ def build_workflow(config: Any, max_turns: int, *, hide_ground_truth: bool) -> A
         teacher_anti_leak_instruction_enabled=(
             config.teacher_anti_leak_instruction_enabled
         ),
+        teacher_adaptive_instruction_enabled=(
+            config.teacher_adaptive_instruction_enabled
+        ),
         teacher_user_prompt_template=config.teacher_user_prompt_template,
         teacher_show_ground_truth=(
             bool(config.teacher_show_ground_truth) and not hide_ground_truth

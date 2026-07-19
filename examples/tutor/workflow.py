@@ -214,6 +214,7 @@ from examples.tutor.prompts import (
     STAGED_LEAK_CHECK_USER_TEMPLATE,
     STUDENT_STATE_USER_TEMPLATE,
     STUDENT_TRANSFER_USER_TEMPLATE,
+    TEACHER_ADAPTIVE_INSTRUCTION,
     TEACHER_ANTI_LEAK_INSTRUCTION,
     TEACHER_PRE_SOLVE_FILTER_CONTEXT_TEMPLATE,
     TEACHER_STATE_USER_TEMPLATE,
@@ -443,6 +444,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_context_reward: dict[str, Any] | None = None,
         teacher_system_prompt: str = "",
         teacher_anti_leak_instruction_enabled: bool = False,
+        teacher_adaptive_instruction_enabled: bool = False,
         teacher_prompt_pool_path: str = "",
         teacher_warmup_enabled: bool = False,
         teacher_warmup_prompt_path: str = "",
@@ -636,6 +638,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         context_config = dict(teacher_context_reward or {})
         self.teacher_context_enabled = bool(context_config.get("enabled", False))
+        self.teacher_context_apply_to_advantage = bool(
+            context_config.get("apply_to_advantage", True)
+        )
         self.teacher_context_weight = float(context_config.get("weight", 0.1))
         self.teacher_context_score_clip = float(context_config.get("score_clip", 5.0))
         if self.teacher_context_enabled and self.teacher_context_weight <= 0.0:
@@ -644,6 +649,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError("teacher context reward score_clip must be positive.")
         self.teacher_anti_leak_instruction_enabled = bool(
             teacher_anti_leak_instruction_enabled
+        )
+        self.teacher_adaptive_instruction_enabled = bool(
+            teacher_adaptive_instruction_enabled
         )
         self.teacher_system_prompt = self._resolve_teacher_system_prompt(
             teacher_system_prompt
@@ -973,15 +981,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 if prompt
                 else NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT
             ).strip()
-        if not getattr(self, "teacher_anti_leak_instruction_enabled", False):
-            return prompt
-        if TEACHER_ANTI_LEAK_INSTRUCTION in prompt:
-            return prompt
-        return (
-            f"{prompt}\n\n{TEACHER_ANTI_LEAK_INSTRUCTION}"
-            if prompt
-            else TEACHER_ANTI_LEAK_INSTRUCTION
-        ).strip()
+        instructions = []
+        if getattr(self, "teacher_anti_leak_instruction_enabled", False):
+            instructions.append(TEACHER_ANTI_LEAK_INSTRUCTION)
+        if getattr(self, "teacher_adaptive_instruction_enabled", False):
+            instructions.append(TEACHER_ADAPTIVE_INSTRUCTION)
+        for instruction in instructions:
+            if instruction not in prompt:
+                prompt = f"{prompt}\n\n{instruction}" if prompt else instruction
+        return prompt.strip()
 
     def _sample_prompt_pool(
         self, pool: tuple[str, ...], *, role: str, include_base: bool = False
@@ -1679,6 +1687,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 ),
                 teacher_context_reward_score_clip=(
                     getattr(self, "teacher_context_score_clip", 5.0)
+                    if getattr(self, "teacher_context_enabled", False)
+                    else None
+                ),
+                teacher_context_reward_apply_to_advantage=(
+                    getattr(self, "teacher_context_apply_to_advantage", True)
                     if getattr(self, "teacher_context_enabled", False)
                     else None
                 ),

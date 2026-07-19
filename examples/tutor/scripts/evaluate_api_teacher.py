@@ -458,6 +458,9 @@ def build_eval_workflow_kwargs(
         "teacher_anti_leak_instruction_enabled": (
             config.teacher_anti_leak_instruction_enabled
         ),
+        "teacher_adaptive_instruction_enabled": (
+            config.teacher_adaptive_instruction_enabled
+        ),
         # Evaluation never samples teacher prompts. Student prompts are loaded only
         # when the config explicitly requests exhaustive prompt coverage.
         "teacher_prompt_pool_path": "",
@@ -1381,6 +1384,9 @@ def build_run_signature(
                 "teacher_show_ground_truth": config.teacher_show_ground_truth,
                 "teacher_anti_leak_instruction_enabled": (
                     config.teacher_anti_leak_instruction_enabled
+                ),
+                "teacher_adaptive_instruction_enabled": (
+                    config.teacher_adaptive_instruction_enabled
                 ),
                 "student_generalize_enabled": config.student_generalize.enabled,
                 "student_generalize_source": config.student_generalize.source,

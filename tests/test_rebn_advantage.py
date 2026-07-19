@@ -236,6 +236,7 @@ def test_rebn_teacher_context_advantage_stays_on_later_teacher_turn():
         ),
         "teacher_context_reward_weight": torch.full((3,), 0.2),
         "teacher_context_reward_score_clip": torch.full((3,), 5.0),
+        "teacher_context_reward_apply_to_advantage": torch.ones(3, dtype=torch.bool),
         "teacher_context_reward_valid": torch.tensor([False, True, True]),
     }
 
@@ -252,6 +253,57 @@ def test_rebn_teacher_context_advantage_stays_on_later_teacher_turn():
         torch.tensor([0.0, -0.2, 0.2]),
         rtol=1e-6,
         atol=1e-6,
+    )
+
+
+def test_rebn_teacher_context_log_only_does_not_change_advantage():
+    """Log-only context scoring keeps the terminal training advantage unchanged."""
+    actor = _make_actor(
+        PPOActorConfig(
+            advantage_estimator="rebn",
+            turn_discount=1.0,
+            kl_ctl=0.0,
+            adv_norm=NormConfig(mean_level="batch", std_level=None),
+            recompute_logprob=True,
+            use_decoupled_loss=True,
+        )
+    )
+    data = {
+        "input_ids": torch.zeros((3, 3), dtype=torch.long),
+        "attention_mask": torch.ones((3, 3), dtype=torch.bool),
+        "loss_mask": torch.tensor([[0, 1, 0]] * 3, dtype=torch.long),
+        "logprobs": torch.zeros((3, 3)),
+        "prox_logp": torch.tensor(
+            [[-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]
+        ),
+        "rewards": torch.tensor([0.0, 0.0, 1.0]),
+        "trajectory_id": torch.tensor([7, 7, 7]),
+        "turn_idx": torch.tensor([1, 2, 3]),
+        "teacher_context_input_ids": torch.zeros((3, 3), dtype=torch.long),
+        "teacher_context_attention_mask": torch.ones((3, 3), dtype=torch.bool),
+        "teacher_context_loss_mask": torch.tensor([[0, 1, 0]] * 3, dtype=torch.long),
+        "teacher_context_logp": torch.tensor(
+            [[-1.0, 0.0, 0.0], [-2.0, 0.0, 0.0], [-4.0, 0.0, 0.0]]
+        ),
+        "teacher_context_reward_weight": torch.full((3,), 0.2),
+        "teacher_context_reward_score_clip": torch.full((3,), 5.0),
+        "teacher_context_reward_apply_to_advantage": torch.zeros(3, dtype=torch.bool),
+        "teacher_context_reward_valid": torch.tensor([False, True, True]),
+    }
+
+    result = actor._compute_advantages(data)
+
+    torch.testing.assert_close(
+        result["advantages"], torch.zeros((3, 3)), rtol=0.0, atol=0.0
+    )
+    torch.testing.assert_close(
+        result["teacher_context_advantage"],
+        torch.tensor([0.0, -0.2, 0.2]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    torch.testing.assert_close(
+        result["turn_advantage"], torch.zeros(3), rtol=0.0, atol=0.0
     )
 
 
@@ -348,6 +400,7 @@ def test_ppo_update_strips_turn_metadata_before_microbatch_split(monkeypatch):
         "teacher_context_logp": torch.tensor([[-2.0, 0.0, 0.0]]),
         "teacher_context_reward_weight": torch.tensor([0.1]),
         "teacher_context_reward_score_clip": torch.tensor([5.0]),
+        "teacher_context_reward_apply_to_advantage": torch.tensor([True]),
         "teacher_context_reward_valid": torch.tensor([True]),
         "teacher_context_real_avg_logp": torch.tensor([-1.0]),
         "teacher_context_moved_avg_logp": torch.tensor([-2.0]),
@@ -466,6 +519,7 @@ def test_tutor_response_tensordict_moves_later_output_to_preceding_prompt():
     assert moved["teacher_context_input_ids"].tolist() == [[1, 2, 20, 21]]
     assert moved["teacher_context_loss_mask"].tolist() == [[0, 0, 1, 1]]
     assert moved["teacher_context_reward_valid"].tolist() == [True]
+    assert moved["teacher_context_reward_apply_to_advantage"].tolist() == [True]
     assert first_turn["teacher_context_input_ids"].tolist() == [[10, 11, 12, 20, 21]]
     assert first_turn["teacher_context_reward_valid"].tolist() == [False]
 
