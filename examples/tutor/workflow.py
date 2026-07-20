@@ -163,7 +163,10 @@ from examples.tutor.core.semantic_similarity import (
     cosine_similarity,
     get_local_embedding_caller,
 )
-from examples.tutor.core.tensors import response_to_tensordict
+from examples.tutor.core.tensors import (
+    response_to_tensordict,
+    tokenize_teacher_forced_response,
+)
 from examples.tutor.core.text import (
     strip_reasoning_for_context as _strip_reasoning_for_context,
 )
@@ -191,6 +194,7 @@ from examples.tutor.prompts import (
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
     DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT,
     DEFAULT_TEACHER_PROGRESS_JUDGE_SYSTEM_PROMPT,
+    DEFAULT_WORLD_MODEL_SYSTEM_PROMPT,
     EMPTY_PLACEHOLDER,
     FEEDBACK_LEAK_CHECK_SYSTEM_PROMPT_SUFFIX,
     FILTER_SOLVER_SYSTEM_PROMPT,
@@ -222,6 +226,7 @@ from examples.tutor.prompts import (
     TEACHER_PRE_SOLVE_FILTER_CONTEXT_TEMPLATE,
     TEACHER_PROGRESS_JUDGE_USER_TEMPLATE,
     TEACHER_STATE_USER_TEMPLATE,
+    WORLD_MODEL_USER_TEMPLATE,
     render_prompt,
 )
 
@@ -381,6 +386,17 @@ class StudentGeneralizationAnchor:
 
 
 @dataclass(slots=True)
+class WorldModelExample:
+    input_ids: list[int] = field(default_factory=list)
+    target_mask: list[int] = field(default_factory=list)
+    skip_reason: str = ""
+
+    @property
+    def valid(self) -> bool:
+        return bool(self.input_ids) and bool(self.target_mask) and not self.skip_reason
+
+
+@dataclass(slots=True)
 class StudentModelRuntime:
     name: str
     model: str
@@ -448,6 +464,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_diversity_reward: dict[str, Any] | None = None,
         teacher_context_reward: dict[str, Any] | None = None,
         teacher_progress_judge: dict[str, Any] | None = None,
+        world_model: dict[str, Any] | None = None,
         local_advantage_turn_discount: float = 1.0,
         teacher_system_prompt: str = "",
         teacher_anti_leak_instruction_enabled: bool = False,
@@ -664,6 +681,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError("teacher context reward weight must be positive.")
         if self.teacher_context_enabled and self.teacher_context_score_clip <= 0.0:
             raise ValueError("teacher context reward score_clip must be positive.")
+        world_model_config = dict(world_model or {})
+        self.world_model_enabled = bool(world_model_config.get("enabled", False))
+        self.world_model_loss_weight = float(
+            world_model_config.get("loss_weight", 0.05)
+        )
+        self.world_model_system_prompt = str(
+            world_model_config.get("system_prompt", DEFAULT_WORLD_MODEL_SYSTEM_PROMPT)
+            or ""
+        ).strip()
+        if self.world_model_enabled and self.world_model_loss_weight <= 0.0:
+            raise ValueError("world model loss weight must be positive.")
+        if self.world_model_enabled and not self.world_model_system_prompt:
+            raise ValueError("world model system prompt is required.")
         progress_config = dict(teacher_progress_judge or {})
         self.teacher_progress_judge_enabled = bool(
             progress_config.get("enabled", False)
@@ -1702,6 +1732,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         ]
         preceding_teacher_inputs = [None, *training_teacher_inputs[:-1]]
+        world_model_examples = await self._build_world_model_examples_async(
+            turn_artifacts
+        )
         results = [
             response_to_tensordict(
                 artifact.tutor_response,
@@ -1742,12 +1775,28 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     if getattr(self, "teacher_context_enabled", False)
                     else None
                 ),
+                world_model_input_tokens=(
+                    world_model_example.input_ids
+                    if world_model_example is not None
+                    else None
+                ),
+                world_model_target_mask=(
+                    world_model_example.target_mask
+                    if world_model_example is not None
+                    else None
+                ),
+                world_model_loss_weight=(
+                    self.world_model_loss_weight
+                    if world_model_example is not None
+                    else None
+                ),
             )
-            for artifact, assignment, clean_input, preceding_input in zip(
+            for artifact, assignment, clean_input, preceding_input, world_model_example in zip(
                 turn_artifacts,
                 assignments,
                 clean_teacher_inputs,
                 preceding_teacher_inputs,
+                world_model_examples,
                 strict=True,
             )
         ]
@@ -3187,6 +3236,106 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ],
             enable_thinking=self.enable_thinking,
         )
+
+    def _build_world_model_examples(
+        self, turn_artifacts: list[TurnArtifact]
+    ) -> list[WorldModelExample | None]:
+        if not getattr(self, "world_model_enabled", False) or bool(
+            workflow_context.get().is_eval
+        ):
+            return [None] * len(turn_artifacts)
+
+        examples = [
+            self._build_world_model_example(artifact) for artifact in turn_artifacts
+        ]
+        valid_examples = [example for example in examples if example.valid]
+        skip_counts: dict[str, int] = {}
+        for example in examples:
+            if example.skip_reason:
+                skip_counts[example.skip_reason] = (
+                    skip_counts.get(example.skip_reason, 0) + 1
+                )
+        metrics = {
+            "world_model/valid_responses": float(len(valid_examples)),
+            "world_model/valid_ratio": float(
+                len(valid_examples) / max(1, len(examples))
+            ),
+            "world_model/prompt_tokens": float(
+                sum(
+                    len(example.input_ids) - sum(example.target_mask)
+                    for example in valid_examples
+                )
+            ),
+            "world_model/target_tokens": float(
+                sum(sum(example.target_mask) for example in valid_examples)
+            ),
+        }
+        for reason in (
+            "student_error",
+            "empty",
+            "leak",
+            "overlength",
+            "tokenization",
+        ):
+            metrics[f"world_model/skipped_{reason}"] = float(skip_counts.get(reason, 0))
+        _safe_scalar(**metrics)
+        return [
+            example if example.valid else WorldModelExample() for example in examples
+        ]
+
+    async def _build_world_model_examples_async(
+        self, turn_artifacts: list[TurnArtifact]
+    ) -> list[WorldModelExample | None]:
+        if not getattr(self, "world_model_enabled", False) or bool(
+            workflow_context.get().is_eval
+        ):
+            return [None] * len(turn_artifacts)
+        return await asyncio.to_thread(self._build_world_model_examples, turn_artifacts)
+
+    def _build_world_model_example(self, artifact: TurnArtifact) -> WorldModelExample:
+        if artifact.student_error:
+            return WorldModelExample(skip_reason="student_error")
+        if artifact.invalid_due_to_leak or artifact.leak_result.leaked:
+            return WorldModelExample(skip_reason="leak")
+        if not artifact.student_output.strip():
+            return WorldModelExample(skip_reason="empty")
+
+        teacher_system_prompt = self._teacher_system_prompt_for_selection(
+            artifact.tutor_state.teacher_prompt_selection
+        )
+        user_prompt = render_prompt(
+            WORLD_MODEL_USER_TEMPLATE,
+            teacher_system_prompt=teacher_system_prompt,
+            teacher_user_prompt=artifact.tutor_prompt,
+            teacher_visible_output=artifact.tutor_visible_output,
+        )
+        messages = [
+            {"role": "system", "content": self.world_model_system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        tokenizer = (
+            getattr(artifact.tutor_response, "tokenizer", None) or self.tokenizer
+        )
+        try:
+            input_ids, target_mask = tokenize_teacher_forced_response(
+                tokenizer,
+                messages,
+                artifact.student_output,
+                enable_thinking=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Skipping World Model sample at turn %s after tokenization error: %s",
+                artifact.turn_idx,
+                exc,
+            )
+            return WorldModelExample(skip_reason="tokenization")
+        if (
+            self.max_train_sample_tokens is not None
+            and len(input_ids) > self.max_train_sample_tokens
+        ):
+            return WorldModelExample(skip_reason="overlength")
+        return WorldModelExample(input_ids=input_ids, target_mask=target_mask)
 
     def _clean_teacher_input_token_reserve(
         self,

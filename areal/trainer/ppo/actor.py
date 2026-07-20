@@ -4,6 +4,7 @@ import functools
 from typing import Any
 
 import torch
+import torch.distributed as dist
 
 from areal.api import TrainEngine
 from areal.api.cli_args import MicroBatchSpec, PPOActorConfig
@@ -28,6 +29,8 @@ from areal.utils.data import (
     KLEstimator,
     Normalization,
     batched_call,
+    concat_batch,
+    concat_padded_tensors,
     split_padded_tensor_dict_into_mb_list,
 )
 from areal.utils.functional import (
@@ -38,6 +41,273 @@ from areal.utils.functional import (
 from areal.utils.perf_tracer import trace_perf
 
 logger = logging.getLogger("PPOActor")
+
+
+def _unpack_world_model_rows(
+    world_model_batch: dict[str, Any], expected_rows: int
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """Restore row-aligned variable-length WM samples from rollout sidecars."""
+
+    input_ids = world_model_batch["world_model_packed_input_ids"]
+    target_mask = world_model_batch["world_model_packed_target_mask"]
+    seq_lens = world_model_batch["world_model_seq_lens"]
+    if input_ids.ndim != 1 or target_mask.ndim != 1 or seq_lens.ndim != 1:
+        raise ValueError("World Model sidecar tensors must be packed 1D tensors.")
+    if input_ids.numel() != target_mask.numel():
+        raise ValueError(
+            "World Model packed input/mask length mismatch: "
+            f"input={input_ids.numel()}, mask={target_mask.numel()}."
+        )
+    if seq_lens.numel() != expected_rows:
+        raise ValueError(
+            "World Model row alignment mismatch: "
+            f"expected={expected_rows}, lengths={seq_lens.numel()}."
+        )
+
+    # Rollout transport keeps samples packed. One small metadata copy is required to
+    # restore sequence boundaries before the GPU training forward.
+    lengths = [int(length) for length in seq_lens.detach().cpu().tolist()]
+    if any(length < 0 for length in lengths):
+        raise ValueError("World Model sequence lengths must be non-negative.")
+    if sum(lengths) != input_ids.numel():
+        raise ValueError(
+            "World Model packed length mismatch: "
+            f"sum(seq_lens)={sum(lengths)}, packed={input_ids.numel()}."
+        )
+    input_rows = torch.split(input_ids, lengths)
+    mask_rows = torch.split(target_mask, lengths)
+    return list(zip(input_rows, mask_rows, strict=True))
+
+
+def _append_world_model_rows(
+    policy_batch: dict[str, Any],
+    world_model_rows: list[tuple[torch.Tensor, torch.Tensor]],
+    *,
+    policy_temperature: float,
+) -> dict[str, Any]:
+    """Append independent WM sequences without exposing them to PPO masks."""
+
+    if policy_temperature <= 0:
+        raise ValueError("Policy temperature must be positive.")
+
+    policy_input_ids = policy_batch["input_ids"]
+    policy_attention_mask = policy_batch["attention_mask"]
+    if policy_input_ids.ndim != 2 or policy_attention_mask.ndim != 2:
+        raise ValueError("Policy minibatch must use padded 2D input tensors.")
+    policy_bs, policy_seqlen = policy_input_ids.shape
+
+    valid_rows = [row for row in world_model_rows if row[0].numel() > 0]
+    max_world_model_len = max(
+        (input_ids.numel() for input_ids, _ in valid_rows), default=0
+    )
+    joint_seqlen = max(policy_seqlen, max_world_model_len)
+    world_model_bs = len(valid_rows)
+    joint_batch: dict[str, Any] = {}
+
+    for key, value in policy_batch.items():
+        if (
+            torch.is_tensor(value)
+            and value.ndim >= 2
+            and value.shape[0] == policy_bs
+            and value.shape[1] == policy_seqlen
+        ):
+            if value.ndim != 2:
+                raise ValueError(
+                    f"Unsupported token-aligned tensor rank for {key!r}: {value.ndim}."
+                )
+            policy_pad = torch.zeros(
+                (policy_bs, joint_seqlen - policy_seqlen),
+                dtype=value.dtype,
+                device=value.device,
+            )
+            padded_policy = torch.cat((value, policy_pad), dim=1)
+            world_model_values = torch.zeros(
+                (world_model_bs, joint_seqlen),
+                dtype=value.dtype,
+                device=value.device,
+            )
+            if key == "versions":
+                world_model_values.fill_(-1)
+            joint_batch[key] = torch.cat((padded_policy, world_model_values), dim=0)
+        else:
+            joint_batch[key] = value
+
+    world_model_input_ids = torch.zeros(
+        (world_model_bs, joint_seqlen),
+        dtype=policy_input_ids.dtype,
+        device=policy_input_ids.device,
+    )
+    world_model_attention_mask = torch.zeros(
+        (world_model_bs, joint_seqlen),
+        dtype=policy_attention_mask.dtype,
+        device=policy_attention_mask.device,
+    )
+    world_model_target_mask = torch.zeros(
+        (world_model_bs, joint_seqlen),
+        dtype=torch.bool,
+        device=policy_input_ids.device,
+    )
+    for row_idx, (input_ids, target_mask) in enumerate(valid_rows):
+        if input_ids.numel() != target_mask.numel():
+            raise ValueError(
+                "World Model row input/mask length mismatch: "
+                f"input={input_ids.numel()}, mask={target_mask.numel()}."
+            )
+        row_len = input_ids.numel()
+        world_model_input_ids[row_idx, :row_len] = input_ids
+        world_model_attention_mask[row_idx, :row_len] = True
+        world_model_target_mask[row_idx, :row_len] = target_mask.bool()
+
+    if world_model_bs:
+        joint_batch["input_ids"][policy_bs:] = world_model_input_ids
+        joint_batch["attention_mask"][policy_bs:] = world_model_attention_mask
+
+    aligned_target_mask = torch.roll(world_model_target_mask, shifts=-1, dims=-1)
+    target_counts = aligned_target_mask.sum(dim=-1, keepdim=True).clamp_min(1)
+    world_model_token_weight = aligned_target_mask.float() / target_counts
+    response_start_mask = aligned_target_mask & (
+        aligned_target_mask.long().cumsum(dim=-1) == 1
+    )
+
+    zero_policy_mask = torch.zeros(
+        (policy_bs, joint_seqlen), dtype=torch.bool, device=policy_input_ids.device
+    )
+    zero_policy_weight = torch.zeros(
+        (policy_bs, joint_seqlen), dtype=torch.float32, device=policy_input_ids.device
+    )
+    joint_batch["world_model_loss_mask"] = torch.cat(
+        (zero_policy_mask, aligned_target_mask), dim=0
+    )
+    joint_batch["world_model_token_weight"] = torch.cat(
+        (zero_policy_weight, world_model_token_weight), dim=0
+    )
+    joint_batch["world_model_response_start_mask"] = torch.cat(
+        (zero_policy_mask, response_start_mask), dim=0
+    )
+    joint_batch["token_logprob_temperature"] = torch.cat(
+        (
+            torch.full(
+                (policy_bs, joint_seqlen),
+                float(policy_temperature),
+                dtype=torch.float32,
+                device=policy_input_ids.device,
+            ),
+            torch.ones(
+                (world_model_bs, joint_seqlen),
+                dtype=torch.float32,
+                device=policy_input_ids.device,
+            ),
+        ),
+        dim=0,
+    )
+    return joint_batch
+
+
+def _joint_loss_weight(input_data: dict[str, Any]) -> torch.Tensor:
+    return (
+        input_data["loss_mask"].count_nonzero()
+        + input_data["world_model_response_start_mask"].count_nonzero()
+    )
+
+
+def _policy_loss_weight(input_data: dict[str, Any]) -> torch.Tensor:
+    return input_data["loss_mask"].count_nonzero()
+
+
+def _global_joint_counts(
+    input_data: dict[str, Any],
+    *,
+    device: torch.device,
+    group: dist.ProcessGroup | None,
+) -> torch.Tensor:
+    """Count PPO tokens and WM responses on the collective backend's device."""
+
+    counts = torch.stack(
+        (
+            input_data["loss_mask"].count_nonzero(),
+            input_data["world_model_response_start_mask"].count_nonzero(),
+        )
+    ).to(device=device, dtype=torch.float32)
+    if dist.is_initialized():
+        dist.all_reduce(counts, group=group)
+    return counts
+
+
+def _merge_policy_world_model_loss(
+    policy_loss: torch.Tensor,
+    logprobs: torch.Tensor,
+    input_data: dict[str, Any],
+    *,
+    global_policy_tokens: torch.Tensor,
+    global_world_model_responses: torch.Tensor,
+    world_model_loss_weight: float,
+) -> torch.Tensor:
+    """Return the exact PPO-token-mean plus response-balanced WM objective."""
+
+    policy_tokens = input_data["loss_mask"].count_nonzero().to(logprobs.dtype)
+    response_starts = input_data["world_model_response_start_mask"].bool()
+    world_model_responses = response_starts.count_nonzero().to(logprobs.dtype)
+    local_weight = policy_tokens + world_model_responses
+
+    world_model_token_weight = input_data["world_model_token_weight"].to(logprobs.dtype)
+    response_loss_sum = (-logprobs * world_model_token_weight).sum()
+
+    global_policy_tokens = global_policy_tokens.to(logprobs.dtype)
+    global_world_model_responses = global_world_model_responses.to(logprobs.dtype)
+    global_weight = global_policy_tokens + global_world_model_responses
+    policy_scale = global_weight / global_policy_tokens.clamp_min(1)
+    world_model_scale = global_weight / global_world_model_responses.clamp_min(1)
+    world_model_active = (global_world_model_responses > 0).to(logprobs.dtype)
+    numerator = policy_scale * policy_tokens * policy_loss
+    numerator = numerator + (
+        float(world_model_loss_weight)
+        * world_model_active
+        * world_model_scale
+        * response_loss_sum
+    )
+
+    world_model_loss_mask = input_data["world_model_loss_mask"].bool()
+    stats_tracker.denominator(
+        world_model_target_tokens=world_model_loss_mask,
+        world_model_responses=response_starts,
+    )
+    stats_tracker.stat(
+        world_model_token_nll=(-logprobs.detach()).float(),
+        denominator="world_model_target_tokens",
+    )
+    cu_seqlens = input_data["cu_seqlens"]
+    sequence_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+    sequence_ids = torch.repeat_interleave(
+        torch.arange(
+            sequence_lengths.numel(), device=logprobs.device, dtype=torch.long
+        ),
+        sequence_lengths,
+    )
+    response_losses = torch.zeros(
+        sequence_lengths.numel(), dtype=logprobs.dtype, device=logprobs.device
+    )
+    response_losses.scatter_add_(
+        0, sequence_ids, -logprobs.detach() * world_model_token_weight
+    )
+    response_loss_per_token = response_losses[sequence_ids].float()
+    stats_tracker.stat(
+        world_model_loss=response_loss_per_token,
+        weighted_world_model_loss=(
+            response_loss_per_token * float(world_model_loss_weight)
+        ),
+        world_model_to_ppo_loss_ratio=(
+            response_loss_per_token
+            * float(world_model_loss_weight)
+            / policy_loss.detach().abs().float().clamp_min(1e-6)
+        ),
+        denominator="world_model_responses",
+    )
+
+    return torch.where(
+        local_weight > 0,
+        numerator / local_weight.clamp_min(1),
+        logprobs.sum() * 0.0,
+    )
 
 
 def _compute_rebn_returns(
@@ -566,10 +836,36 @@ class PPOActor:
 
     @trace_perf("ppo_actor.ppo_update", category="compute")
     @stats_tracker.scope_func_wrapper("ppo_actor")
-    def ppo_update(self, data: list[dict[str, Any]]) -> None:
-        batched_call(self._ppo_update, data, unpack=False)
+    def ppo_update(
+        self,
+        data: list[dict[str, Any]],
+        world_model_batch: list[dict[str, Any]] | None = None,
+    ) -> None:
+        if world_model_batch is None:
+            batched_call(self._ppo_update, data, unpack=False)
+            return
+        if len(world_model_batch) != len(data):
+            raise ValueError(
+                "World Model/PPO trajectory count mismatch: "
+                f"world_model={len(world_model_batch)}, ppo={len(data)}."
+            )
+        loss_weights = {
+            float(sidecar["world_model_loss_weight"]) for sidecar in world_model_batch
+        }
+        if len(loss_weights) != 1:
+            raise ValueError(
+                "World Model loss weight must be identical across a training batch."
+            )
+        batched_data, _ = concat_batch(data)
+        batched_world_model = concat_padded_tensors(world_model_batch)
+        batched_world_model["world_model_loss_weight"] = loss_weights.pop()
+        self._ppo_update(batched_data, world_model_batch=batched_world_model)
 
-    def _ppo_update(self, data: dict[str, Any]) -> None:
+    def _ppo_update(
+        self,
+        data: dict[str, Any],
+        world_model_batch: dict[str, Any] | None = None,
+    ) -> None:
         attn_mask = data["attention_mask"]
         loss_mask = data["loss_mask"]
         reward_score = data["rewards"]
@@ -701,36 +997,81 @@ class PPOActor:
             data.pop(key, None)
         # NOTE: calling engine.train() is critical to enabling gradient checkpointing
         self.engine.train()
+        if world_model_batch is not None and getattr(
+            self.engine, "enable_tree_training", False
+        ):
+            raise ValueError(
+                "World Model auxiliary training does not support tree training."
+            )
         mb_inputs = split_padded_tensor_dict_into_mb_list(
             data,
             mb_spec=MicroBatchSpec(n_mbs=self.config.ppo_n_minibatches),
         )
+        world_model_rows = None
+        if world_model_batch is not None:
+            world_model_rows = _unpack_world_model_rows(
+                world_model_batch, expected_rows=data["attention_mask"].shape[0]
+            )
+            if mb_inputs.forward_indices is None:
+                raise RuntimeError(
+                    "PPO minibatch split did not return row indices for World Model."
+                )
+        world_model_row_cursor = 0
 
         with stats_tracker.scope("update"):
             # Get current version for proximal approximation metrics
             current_version = self.engine.get_version()
 
             for mb in mb_inputs.mbs:
+                loss_fn = functools.partial(
+                    grpo_loss_fn,
+                    eps_clip=self.config.eps_clip,
+                    eps_clip_higher=self.config.eps_clip_higher,
+                    c_clip=self.config.c_clip,
+                    use_ppo_clip=self.config.use_ppo_clip,
+                    behave_imp_weight_cap=self.config.behave_imp_weight_cap,
+                    m2_threshold=self.m2_threshold,
+                    importance_sampling_level=self.config.importance_sampling_level,
+                    current_version=current_version,
+                    prox_logp_method=self.config.prox_logp_method,
+                    use_sapo_loss=self.config.use_sapo_loss,
+                    sapo_tau_pos=self.config.sapo_tau_pos,
+                    sapo_tau_neg=self.config.sapo_tau_neg,
+                    use_decoupled_loss=self.config.use_decoupled_loss,
+                    behave_imp_weight_mode=self.config.behave_imp_weight_mode,
+                )
+                loss_weight_fn = _policy_loss_weight
+                train_batch = mb
+                if world_model_rows is not None:
+                    minibatch_rows = mb["attention_mask"].shape[0]
+                    row_indices = mb_inputs.forward_indices[
+                        world_model_row_cursor : world_model_row_cursor + minibatch_rows
+                    ]
+                    world_model_row_cursor += minibatch_rows
+                    train_batch = _append_world_model_rows(
+                        mb,
+                        [world_model_rows[index] for index in row_indices],
+                        policy_temperature=self.config.temperature,
+                    )
+                    counts = _global_joint_counts(
+                        train_batch,
+                        device=self.engine.device,
+                        group=self.engine.data_parallel_group,
+                    )
+                    loss_fn = functools.partial(
+                        joint_grpo_loss_fn,
+                        ppo_loss_fn=loss_fn,
+                        global_policy_tokens=counts[0],
+                        global_world_model_responses=counts[1],
+                        world_model_loss_weight=float(
+                            world_model_batch["world_model_loss_weight"]
+                        ),
+                    )
+                    loss_weight_fn = _joint_loss_weight
                 train_stat = self.engine.train_batch(
-                    mb,
-                    loss_fn=functools.partial(
-                        grpo_loss_fn,
-                        eps_clip=self.config.eps_clip,
-                        eps_clip_higher=self.config.eps_clip_higher,
-                        c_clip=self.config.c_clip,
-                        use_ppo_clip=self.config.use_ppo_clip,
-                        behave_imp_weight_cap=self.config.behave_imp_weight_cap,
-                        m2_threshold=self.m2_threshold,
-                        importance_sampling_level=self.config.importance_sampling_level,
-                        current_version=current_version,
-                        prox_logp_method=self.config.prox_logp_method,
-                        use_sapo_loss=self.config.use_sapo_loss,
-                        sapo_tau_pos=self.config.sapo_tau_pos,
-                        sapo_tau_neg=self.config.sapo_tau_neg,
-                        use_decoupled_loss=self.config.use_decoupled_loss,
-                        behave_imp_weight_mode=self.config.behave_imp_weight_mode,
-                    ),
-                    loss_weight_fn=lambda x: x["loss_mask"].count_nonzero(),
+                    train_batch,
+                    loss_fn=loss_fn,
+                    loss_weight_fn=loss_weight_fn,
                 )
                 stats_tracker.scalar(**train_stat)
 
@@ -966,6 +1307,37 @@ def grpo_loss_fn(
         )
 
     return loss
+
+
+def joint_grpo_loss_fn(
+    logprobs: torch.Tensor,
+    entropy: torch.Tensor,
+    input_data: dict[str, Any],
+    *,
+    ppo_loss_fn: Any,
+    global_policy_tokens: torch.Tensor,
+    global_world_model_responses: torch.Tensor,
+    world_model_loss_weight: float,
+    vocab_min_logits: torch.Tensor | None = None,
+    vocab_max_logits: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Combine the existing PPO loss with response-balanced Student prediction CE."""
+
+    policy_loss = ppo_loss_fn(
+        logprobs,
+        entropy,
+        input_data,
+        vocab_min_logits=vocab_min_logits,
+        vocab_max_logits=vocab_max_logits,
+    )
+    return _merge_policy_world_model_loss(
+        policy_loss,
+        logprobs,
+        input_data,
+        global_policy_tokens=global_policy_tokens,
+        global_world_model_responses=global_world_model_responses,
+        world_model_loss_weight=world_model_loss_weight,
+    )
 
 
 # =============================================================================

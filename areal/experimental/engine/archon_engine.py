@@ -100,7 +100,11 @@ from areal.utils.data import (
     split_padded_tensor_dict_into_mb_list,
     unsqueeze_mb_list,
 )
-from areal.utils.functional import gather_logprobs, gather_logprobs_entropy
+from areal.utils.functional import (
+    gather_logprobs,
+    gather_logprobs_entropy,
+    resolve_logprob_temperature,
+)
 from areal.utils.hf_utils import load_hf_tokenizer
 from areal.utils.lock import DistributedLock
 from areal.utils.offload import is_tms_enabled, torch_memory_saver
@@ -132,6 +136,7 @@ class ArchonTrainContext:
 
     mb_input: dict[str, Any]
     labels: torch.Tensor | None = None
+    logprob_temperature: float | torch.Tensor | None = None
     pad_length: int = 0
     trie_node: TrieNode | None = None
     is_dummy: bool = False
@@ -944,6 +949,9 @@ class ArchonEngine(TrainEngine):
             ctx = ArchonTrainContext(
                 mb_input=mb_item.orig_mb,
                 labels=labels,
+                logprob_temperature=resolve_logprob_temperature(
+                    inputs, self.config.temperature
+                ),
                 pad_length=mb_item.padding_length,
                 is_dummy=mb_item.is_dummy,
             )
@@ -1271,7 +1279,11 @@ class ArchonEngine(TrainEngine):
         logprobs, entropy = gather_logprobs_entropy(
             logits,
             ctx.labels,
-            temperature=self.config.temperature,
+            temperature=(
+                ctx.logprob_temperature
+                if ctx.logprob_temperature is not None
+                else self.config.temperature
+            ),
             tp_group=self._tp_group,
         )
         vocab_min, vocab_max = self._get_vocab_min_max_logits(logits)

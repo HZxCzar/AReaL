@@ -2,7 +2,7 @@
 
 import functools
 from collections.abc import Callable
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import torch
 from torch import distributed as dist
@@ -10,20 +10,47 @@ from torch import distributed as dist
 from areal.infra.platforms import is_npu_available
 
 T = TypeVar("T", torch.Tensor, tuple[torch.Tensor, torch.Tensor])
+Temperature = float | torch.Tensor
+
+
+def resolve_logprob_temperature(
+    inputs: dict[str, Any], default_temperature: float
+) -> Temperature:
+    """Resolve an optional packed per-token temperature override."""
+
+    temperature = inputs.get("token_logprob_temperature")
+    if temperature is None:
+        return default_temperature
+    if not torch.is_tensor(temperature):
+        raise TypeError("token_logprob_temperature must be a tensor.")
+    if temperature.ndim == 2 and temperature.shape[0] == 1:
+        temperature = temperature.squeeze(0)
+    fallback = torch.full_like(temperature, float(default_temperature))
+    return torch.where(temperature > 0, temperature, fallback)
+
+
+def _scale_logits(logits: torch.Tensor, temperature: Temperature = 1.0) -> torch.Tensor:
+    if torch.is_tensor(temperature) and temperature.ndim > 0:
+        temperature = temperature.unsqueeze(-1)
+    return logits.float() / temperature
 
 
 def _gather_logprobs(
-    logits: torch.Tensor, labels: torch.Tensor, temperature: float = 1.0
+    logits: torch.Tensor, labels: torch.Tensor, temperature: Temperature = 1.0
 ):
-    log_probs = torch.nn.functional.log_softmax(logits.float() / temperature, dim=-1)
+    log_probs = torch.nn.functional.log_softmax(
+        _scale_logits(logits, temperature), dim=-1
+    )
     log_probs_labels = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
     return log_probs_labels
 
 
 def _gather_logprobs_entropy(
-    logits: torch.Tensor, labels: torch.Tensor, temperature: float = 1.0
+    logits: torch.Tensor, labels: torch.Tensor, temperature: Temperature = 1.0
 ):
-    log_probs = torch.nn.functional.log_softmax(logits.float() / temperature, dim=-1)
+    log_probs = torch.nn.functional.log_softmax(
+        _scale_logits(logits, temperature), dim=-1
+    )
     entropy = -torch.sum(log_probs.exp() * log_probs, dim=-1)
     log_probs_labels = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
     return log_probs_labels, entropy
@@ -58,6 +85,41 @@ def _chunked_apply(
     if isinstance(results[0], tuple):
         num_outputs = len(results[0])
         return tuple(torch.cat([r[i] for r in results]) for i in range(num_outputs))
+    return torch.cat(results)
+
+
+def _chunked_apply_mixed_temperature(
+    fn: Callable[..., T],
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    temperature: torch.Tensor,
+    chunk_size: int = 1024,
+) -> T:
+    """Apply a vocab function with one temperature per token."""
+
+    total_seqlen = logits.shape[0]
+    assert total_seqlen > 0, "Input logits must have at least one element"
+    if temperature.shape != labels.shape:
+        raise ValueError(
+            "Token temperatures must match labels: "
+            f"temperature={temperature.shape}, labels={labels.shape}."
+        )
+    results: list = []
+    for start in range(0, total_seqlen, chunk_size):
+        end = min(start + chunk_size, total_seqlen)
+        results.append(
+            fn(
+                logits[start:end],
+                labels[start:end],
+                temperature=temperature[start:end],
+            )
+        )
+
+    if isinstance(results[0], tuple):
+        return tuple(
+            torch.cat([result[index] for result in results])
+            for index in range(len(results[0]))
+        )
     return torch.cat(results)
 
 
@@ -376,12 +438,9 @@ def _vocab_parallel_logprobs(
     vocab_parallel_logits: torch.Tensor,
     labels: torch.Tensor,
     tp_group: dist.ProcessGroup,
-    temperature: float = 1.0,
+    temperature: Temperature = 1.0,
 ) -> torch.Tensor:
-    if temperature != 1.0:
-        logits = vocab_parallel_logits.float() / temperature
-    else:
-        logits = vocab_parallel_logits.float()
+    logits = _scale_logits(vocab_parallel_logits, temperature)
     return _VocabParallelLogProbs.apply(logits, labels, tp_group)
 
 
@@ -389,19 +448,16 @@ def _vocab_parallel_logprobs_entropy(
     vocab_parallel_logits: torch.Tensor,
     labels: torch.Tensor,
     tp_group: dist.ProcessGroup,
-    temperature: float = 1.0,
+    temperature: Temperature = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if temperature != 1.0:
-        logits = vocab_parallel_logits.float() / temperature
-    else:
-        logits = vocab_parallel_logits.float()
+    logits = _scale_logits(vocab_parallel_logits, temperature)
     return _VocabParallelLogProbsEntropy.apply(logits, labels, tp_group)
 
 
 def gather_logprobs(
     logits: torch.Tensor,
     labels: torch.Tensor,
-    temperature: float = 1.0,
+    temperature: Temperature = 1.0,
     tp_group: dist.ProcessGroup | None = None,
     chunk_size: int = 1024,
 ) -> torch.Tensor:
@@ -411,7 +467,7 @@ def gather_logprobs(
         logits: Model logits with shape [..., vocab_size] or [..., vocab_size/tp]
             when tensor parallelism is enabled.
         labels: Token indices with shape [...] for which to compute log probabilities.
-        temperature: Softmax temperature scaling. Default is 1.0.
+        temperature: A scalar or one value per label token. Default is 1.0.
         tp_group: If provided with tp_size > 1, uses vocab-parallel computation
             to avoid gathering the full vocab dimension across TP ranks.
         chunk_size: Chunk size for memory-efficient processing along the sequence
@@ -420,6 +476,15 @@ def gather_logprobs(
     Returns:
         Log probabilities at the label positions with shape [...].
     """
+    if torch.is_tensor(temperature) and temperature.ndim > 0:
+        fn = (
+            functools.partial(_vocab_parallel_logprobs, tp_group=tp_group)
+            if tp_group is not None and dist.get_world_size(tp_group) > 1
+            else _gather_logprobs
+        )
+        return _chunked_apply_mixed_temperature(
+            fn, logits, labels, temperature, chunk_size
+        )
     if tp_group is not None and dist.get_world_size(tp_group) > 1:
         fn = functools.partial(
             _vocab_parallel_logprobs,
@@ -434,7 +499,7 @@ def gather_logprobs(
 def gather_logprobs_entropy(
     logits: torch.Tensor,
     labels: torch.Tensor,
-    temperature: float = 1.0,
+    temperature: Temperature = 1.0,
     tp_group: dist.ProcessGroup | None = None,
     chunk_size: int = 1024,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -447,7 +512,7 @@ def gather_logprobs_entropy(
         logits: Model logits with shape [..., vocab_size] or [..., vocab_size/tp]
             when tensor parallelism is enabled.
         labels: Token indices with shape [...] for which to compute log probabilities.
-        temperature: Softmax temperature scaling. Default is 1.0.
+        temperature: A scalar or one value per label token. Default is 1.0.
         tp_group: If provided with tp_size > 1, uses vocab-parallel computation
             to avoid gathering the full vocab dimension across TP ranks.
         chunk_size: Chunk size for memory-efficient processing along the sequence
@@ -458,6 +523,15 @@ def gather_logprobs_entropy(
             - logprobs: Log probabilities at the label positions with shape [...].
             - entropy: Entropy of the probability distribution with shape [...].
     """
+    if torch.is_tensor(temperature) and temperature.ndim > 0:
+        fn = (
+            functools.partial(_vocab_parallel_logprobs_entropy, tp_group=tp_group)
+            if tp_group is not None and dist.get_world_size(tp_group) > 1
+            else _gather_logprobs_entropy
+        )
+        return _chunked_apply_mixed_temperature(
+            fn, logits, labels, temperature, chunk_size
+        )
     if tp_group is not None and dist.get_world_size(tp_group) > 1:
         fn = functools.partial(
             _vocab_parallel_logprobs_entropy,

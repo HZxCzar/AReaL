@@ -4,6 +4,39 @@ from typing import Any
 
 import torch
 
+from examples.tutor.core.callers import apply_chat_template
+
+
+def tokenize_teacher_forced_response(
+    tokenizer: Any,
+    messages: list[dict[str, str]],
+    response: str,
+    *,
+    enable_thinking: bool = False,
+) -> tuple[list[int], list[int]]:
+    """Tokenize a chat response and mask only its assistant target suffix."""
+
+    prompt_ids = apply_chat_template(
+        tokenizer,
+        messages,
+        enable_thinking=enable_thinking,
+        add_generation_prompt=True,
+    )
+    full_ids = apply_chat_template(
+        tokenizer,
+        [*messages, {"role": "assistant", "content": response}],
+        enable_thinking=enable_thinking,
+        add_generation_prompt=False,
+    )
+    if full_ids[: len(prompt_ids)] != prompt_ids:
+        raise ValueError(
+            "World Model chat template is not prefix aligned between prompt and target."
+        )
+    target_len = len(full_ids) - len(prompt_ids)
+    if target_len <= 0:
+        raise ValueError("World Model response produced no target tokens.")
+    return full_ids, [0] * len(prompt_ids) + [1] * target_len
+
 
 def response_to_tensordict(
     response: Any,
@@ -19,6 +52,9 @@ def response_to_tensordict(
     teacher_context_reward_weight: float | None = None,
     teacher_context_reward_score_clip: float | None = None,
     teacher_context_reward_apply_to_advantage: bool | None = None,
+    world_model_input_tokens: list[int] | None = None,
+    world_model_target_mask: list[int] | None = None,
+    world_model_loss_weight: float | None = None,
 ) -> dict[str, torch.Tensor]:
     input_tokens = (
         list(response.input_tokens)
@@ -126,4 +162,24 @@ def response_to_tensordict(
             ],
             dtype=torch.bool,
         )
+    if world_model_loss_weight is not None:
+        wm_input_tokens = list(world_model_input_tokens or [])
+        wm_target_mask = list(world_model_target_mask or [])
+        if len(wm_input_tokens) != len(wm_target_mask):
+            raise ValueError(
+                "World Model input/mask length mismatch: "
+                f"input={len(wm_input_tokens)}, mask={len(wm_target_mask)}."
+            )
+        if wm_input_tokens and not any(wm_target_mask):
+            raise ValueError("World Model sample has no target tokens.")
+        result["world_model_packed_input_ids"] = torch.tensor(
+            wm_input_tokens, dtype=torch.long
+        )
+        result["world_model_packed_target_mask"] = torch.tensor(
+            wm_target_mask, dtype=torch.bool
+        )
+        result["world_model_seq_lens"] = torch.tensor(
+            [len(wm_input_tokens)], dtype=torch.long
+        )
+        result["world_model_loss_weight"] = float(world_model_loss_weight)
     return result

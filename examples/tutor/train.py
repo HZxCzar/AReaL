@@ -259,6 +259,7 @@ def _build_eval_workflow_kwargs(
     eval_workflow_kwargs["teacher_diversity_reward"] = {"enabled": False}
     eval_workflow_kwargs["teacher_context_reward"] = {"enabled": False}
     eval_workflow_kwargs["teacher_progress_judge"] = {"enabled": False}
+    eval_workflow_kwargs["world_model"] = {"enabled": False}
     return eval_workflow_kwargs
 
 
@@ -403,6 +404,7 @@ def main(args):
         teacher_diversity_reward=asdict(reward.teacher_diversity),
         teacher_context_reward=asdict(reward.teacher_context),
         teacher_progress_judge=asdict(reward.teacher_progress_judge),
+        world_model=asdict(config.world_model),
         local_advantage_turn_discount=config.actor.turn_discount,
         teacher_system_prompt=config.teacher_system_prompt,
         teacher_anti_leak_instruction_enabled=(

@@ -11,6 +11,7 @@ from areal.utils.functional.functional import (
 from areal.utils.functional.vocab_parallel import (
     gather_logprobs,
     gather_logprobs_entropy,
+    resolve_logprob_temperature,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     # logprobs.py
     "gather_logprobs",
     "gather_logprobs_entropy",
+    "resolve_logprob_temperature",
 ]

@@ -82,6 +82,13 @@ _TEACHER_CONTEXT_ROLLOUT_KEYS = {
     "teacher_context_reward_valid",
 }
 
+_WORLD_MODEL_ROLLOUT_KEYS = {
+    "world_model_packed_input_ids",
+    "world_model_packed_target_mask",
+    "world_model_seq_lens",
+    "world_model_loss_weight",
+}
+
 
 def _has_teacher_context_reward(rollout_batch: list[dict[str, Any]]) -> bool:
     """Return whether every trajectory carries complete context-reward metadata."""
@@ -102,6 +109,34 @@ def _has_teacher_context_reward(rollout_batch: list[dict[str, Any]]) -> bool:
             "in a training batch."
         )
     return bool(enabled and all(enabled))
+
+
+def _pop_world_model_sidecars(
+    rollout_batch: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    """Detach optional WM tensors before PPO/ref/critic batch processing."""
+
+    enabled = []
+    for trajectory in rollout_batch:
+        present = _WORLD_MODEL_ROLLOUT_KEYS.intersection(trajectory)
+        if present and present != _WORLD_MODEL_ROLLOUT_KEYS:
+            missing = sorted(_WORLD_MODEL_ROLLOUT_KEYS - present)
+            raise ValueError(
+                "Incomplete World Model rollout metadata; missing: "
+                + ", ".join(missing)
+            )
+        enabled.append(bool(present))
+    if enabled and any(enabled) and not all(enabled):
+        raise ValueError(
+            "World Model metadata must be present on every trajectory in a batch."
+        )
+    if not enabled or not all(enabled):
+        return None
+
+    return [
+        {key: trajectory.pop(key) for key in _WORLD_MODEL_ROLLOUT_KEYS}
+        for trajectory in rollout_batch
+    ]
 
 
 def _attach_teacher_context_logps(
@@ -745,6 +780,7 @@ class PPOTrainer:
                     group_size=config.gconfig.n_samples,
                     dynamic_bs=self.config.dynamic_bs,
                 )
+                world_model_batch = _pop_world_model_sidecars(rollout_batch)
             if self._should_offload_rollout:
                 self._offload_rollout()
 
@@ -860,7 +896,12 @@ class PPOTrainer:
                     args={"global_step": global_step},
                 ),
             ):
-                self.actor.ppo_update(adv_batch)
+                if world_model_batch is None:
+                    self.actor.ppo_update(adv_batch)
+                else:
+                    self.actor.ppo_update(
+                        adv_batch, world_model_batch=world_model_batch
+                    )
                 self.actor.step_lr_scheduler()
                 self.actor.get_device_stats().log("ppo update")
             if self._should_offload_actor:

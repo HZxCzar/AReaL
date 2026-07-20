@@ -7,6 +7,7 @@ from areal.infra.platforms import current_platform
 from areal.utils.functional.vocab_parallel import (
     _vocab_parallel_logprobs,
     _vocab_parallel_logprobs_entropy,
+    gather_logprobs_entropy,
 )
 
 
@@ -164,6 +165,46 @@ def test_vocab_parallel_with_temperature():
 
     if rank == 0:
         print("✓ test_vocab_parallel_with_temperature passed")
+
+
+def test_vocab_parallel_with_mixed_temperature():
+    """Test one temperature per token without a second logits forward."""
+
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    device = current_platform.current_device()
+    seq_len, vocab_size = 8, 512
+    partition_size = vocab_size // world_size
+
+    torch.manual_seed(654)
+    full_logits = torch.randn(seq_len, vocab_size, device=device)
+    labels = torch.randint(0, vocab_size, (seq_len,), device=device)
+    temperatures = torch.tensor([0.7, 0.7, 1.0, 1.0, 0.7, 1.0, 0.7, 1.0], device=device)
+    start_idx = rank * partition_size
+    end_idx = start_idx + partition_size
+
+    logprobs, entropy = gather_logprobs_entropy(
+        full_logits[:, start_idx:end_idx].clone(),
+        labels,
+        temperature=temperatures,
+        tp_group=get_tp_group(),
+        chunk_size=3,
+    )
+    expected_distribution = torch.log_softmax(
+        full_logits / temperatures.unsqueeze(-1), dim=-1
+    )
+    expected_logprobs = expected_distribution.gather(-1, labels.unsqueeze(-1)).squeeze(
+        -1
+    )
+    expected_entropy = -(expected_distribution.exp() * expected_distribution).sum(-1)
+
+    if not torch.allclose(logprobs, expected_logprobs, atol=1e-5, rtol=1e-5):
+        raise ValueError(f"[Rank {rank}] mixed-temperature logprobs mismatch")
+    if not torch.allclose(entropy, expected_entropy, atol=1e-5, rtol=1e-5):
+        raise ValueError(f"[Rank {rank}] mixed-temperature entropy mismatch")
+
+    if rank == 0:
+        print("✓ test_vocab_parallel_with_mixed_temperature passed")
 
 
 def test_vocab_parallel_numerical_stability():
@@ -389,6 +430,7 @@ def run_all_tests():
     dist.barrier()
 
     test_vocab_parallel_with_temperature()
+    test_vocab_parallel_with_mixed_temperature()
     dist.barrier()
 
     test_vocab_parallel_numerical_stability()

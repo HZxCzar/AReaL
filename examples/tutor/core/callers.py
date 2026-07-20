@@ -46,6 +46,7 @@ def apply_chat_template(
     messages: list[dict[str, str]],
     *,
     enable_thinking: bool,
+    add_generation_prompt: bool = True,
 ) -> list[int]:
     if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
         try:
@@ -53,7 +54,7 @@ def apply_chat_template(
                 tokenizer.apply_chat_template(
                     messages,
                     tokenize=True,
-                    add_generation_prompt=True,
+                    add_generation_prompt=add_generation_prompt,
                     enable_thinking=enable_thinking,
                 )
             )
@@ -62,7 +63,7 @@ def apply_chat_template(
                 tokenizer.apply_chat_template(
                     messages,
                     tokenize=True,
-                    add_generation_prompt=True,
+                    add_generation_prompt=add_generation_prompt,
                 )
             )
     text = "\n".join(

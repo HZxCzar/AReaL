@@ -10,6 +10,25 @@ DEFAULT_TEACHER_SYSTEM_PROMPT = (
     "from the last \\boxed{...} and checks with the answer key after normalization."
 )
 
+DEFAULT_WORLD_MODEL_SYSTEM_PROMPT = (
+    "You are a student response predictor. Given the context available to the "
+    "teacher and the teacher's latest visible reply, predict the same student's "
+    "next visible reply. Output only the predicted student reply."
+)
+
+WORLD_MODEL_USER_TEMPLATE = """\
+Teacher system prompt:
+{{ teacher_system_prompt }}
+
+Teacher context:
+{{ teacher_user_prompt }}
+
+Teacher's latest visible reply:
+{{ teacher_visible_output }}
+
+Predict the same student's next visible reply. Output only that reply.
+"""
+
 NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT = """\
 For each reply, use exactly these two tagged sections:
 <reasoning>

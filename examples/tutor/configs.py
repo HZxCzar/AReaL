@@ -7,6 +7,7 @@ from examples.tutor.prompts import (
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
     DEFAULT_STUDENT_SYSTEM_PROMPT,
     DEFAULT_TEACHER_SYSTEM_PROMPT,
+    DEFAULT_WORLD_MODEL_SYSTEM_PROMPT,
     TEACHER_STATE_USER_TEMPLATE,
 )
 
@@ -891,6 +892,31 @@ class TutorRewardConfig:
 
 
 @dataclass
+class TutorWorldModelConfig:
+    """Auxiliary supervised objective for predicting the next Student reply."""
+
+    enabled: bool = field(default=False)
+    loss_weight: float = field(
+        default=0.05,
+        metadata={
+            "help": (
+                "Weight of the response-balanced Student prediction CE loss "
+                "added to the PPO actor loss."
+            )
+        },
+    )
+    system_prompt: str = field(default=DEFAULT_WORLD_MODEL_SYSTEM_PROMPT)
+
+    def __post_init__(self) -> None:
+        self.loss_weight = float(self.loss_weight)
+        self.system_prompt = str(self.system_prompt or "").strip()
+        if self.enabled and self.loss_weight <= 0.0:
+            raise ValueError("world_model.loss_weight must be positive when enabled.")
+        if self.enabled and not self.system_prompt:
+            raise ValueError("world_model.system_prompt is required when enabled.")
+
+
+@dataclass
 class TutorConfig(GRPOConfig):
     workflow: str = field(
         default="examples.tutor.workflow.TutorAgentWorkflow",
@@ -960,6 +986,7 @@ class TutorConfig(GRPOConfig):
     )
     evaluator: TutorEvaluatorConfig = field(default_factory=TutorEvaluatorConfig)
     reward: TutorRewardConfig = field(default_factory=TutorRewardConfig)
+    world_model: TutorWorldModelConfig = field(default_factory=TutorWorldModelConfig)
     teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
     teacher_anti_leak_instruction_enabled: bool = field(
         default=False,

@@ -61,6 +61,10 @@ def ulysses_slice_inputs(
     inputs["position_ids"] = _ulysses_slice_tensor(
         inputs["position_ids"], cp_rank, cp_size
     )
+    if "token_logprob_temperature" in inputs:
+        inputs["token_logprob_temperature"] = _ulysses_slice_tensor(
+            inputs["token_logprob_temperature"], cp_rank, cp_size
+        )
 
     return inputs, labels
 

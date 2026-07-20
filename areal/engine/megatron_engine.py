@@ -102,7 +102,11 @@ from areal.utils.data import (
     split_padded_tensor_dict_into_mb_list,
     unpad_logits,
 )
-from areal.utils.functional import gather_logprobs, gather_logprobs_entropy
+from areal.utils.functional import (
+    gather_logprobs,
+    gather_logprobs_entropy,
+    resolve_logprob_temperature,
+)
 from areal.utils.hf_utils import load_hf_tokenizer
 from areal.utils.lock import DistributedLock
 from areal.utils.network import find_free_ports, format_host_for_url, gethostip
@@ -1743,7 +1747,9 @@ class MegatronEngine(TrainEngine):
                 logprobs, entropy = gather_logprobs_entropy(
                     output,
                     labels,
-                    temperature=self.config.temperature,
+                    temperature=resolve_logprob_temperature(
+                        inputs, self.config.temperature
+                    ),
                     tp_group=mpu.get_tensor_model_parallel_group()
                     if mpu.get_tensor_model_parallel_world_size() > 1
                     else None,
@@ -1789,7 +1795,9 @@ class MegatronEngine(TrainEngine):
             logprobs = gather_logprobs(
                 output,
                 labels,
-                temperature=self.config.temperature,
+                temperature=resolve_logprob_temperature(
+                    inputs, self.config.temperature
+                ),
                 tp_group=mpu.get_tensor_model_parallel_group()
                 if mpu.get_tensor_model_parallel_world_size() > 1
                 else None,
