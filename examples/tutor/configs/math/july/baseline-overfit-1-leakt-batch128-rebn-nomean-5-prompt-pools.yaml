@@ -34,7 +34,7 @@ teacher_pre:
 auxiliary_model:
   mode: api
   enable_thinking: false
-  base_url: https://9jgodagb8ogpceemkhc58boma8oddqoa.openapi-qb-ai.sii.edu.cn/v1
+  base_url: https://qpdcdoekbjaccjkohdhb8abmaa58jmcb.openapi-qb-ai.sii.edu.cn/v1
   model: qwen3-8b
   api_key: ${oc.env:INF_API_KEY}
   timeout: 120
