@@ -361,7 +361,8 @@ def test_world_model_turn_nll_logs_standard_ce_and_episode_outcome():
 
     class FakeActor:
         def compute_logp(self, batches):
-            assert len(batches) == 1
+            # Mimic a two-way DP controller, which requires a divisible group count.
+            assert len(batches) == 2
             batch = batches[0]
             torch.testing.assert_close(
                 batch["token_logprob_temperature"],
@@ -369,14 +370,29 @@ def test_world_model_turn_nll_logs_standard_ce_and_episode_outcome():
                 rtol=0,
                 atol=0,
             )
-            return [torch.tensor([[-2.0] * 4, [-4.0] * 4])]
+            assert batches[1]["attention_mask"].all()
+            torch.testing.assert_close(
+                batches[1]["token_logprob_temperature"],
+                torch.ones((1, 4)),
+                rtol=0,
+                atol=0,
+            )
+            return [
+                torch.tensor([[-2.0] * 4, [-4.0] * 4]),
+                torch.zeros((1, 4)),
+            ]
 
     rollout_batch = [
         {
             "trajectory_id": torch.tensor([99, 99]),
             "turn_idx": torch.tensor([1, 2]),
             "rewards": torch.tensor([-0.2, -0.8]),
-        }
+        },
+        {
+            "trajectory_id": torch.tensor([100]),
+            "turn_idx": torch.tensor([1]),
+            "rewards": torch.tensor([0.0]),
+        },
     ]
     sidecars = [
         {
@@ -387,7 +403,8 @@ def test_world_model_turn_nll_logs_standard_ce_and_episode_outcome():
             ),
             "world_model_selected": torch.tensor([True, False]),
             "world_model_response_weight": torch.tensor([0.5, 0.0]),
-        }
+        },
+        _sidecar([], [], [0]),
     ]
 
     records = _collect_world_model_turn_nll(FakeActor(), rollout_batch, sidecars)
@@ -414,6 +431,61 @@ def test_world_model_turn_nll_logs_standard_ce_and_episode_outcome():
             "target_tokens": 2,
         },
     ]
+
+
+def test_world_model_turn_nll_preserves_empty_leading_dp_group():
+    """An empty first group keeps its DP slot and produces no diagnostic row."""
+
+    class FakeActor:
+        def compute_logp(self, batches):
+            assert len(batches) == 2
+            assert batches[0]["attention_mask"].all()
+            return [torch.zeros((1, 3)), torch.full((1, 3), -3.0)]
+
+    rollout_batch = [
+        {
+            "trajectory_id": torch.tensor([100]),
+            "turn_idx": torch.tensor([1]),
+            "rewards": torch.tensor([0.0]),
+        },
+        {
+            "trajectory_id": torch.tensor([101]),
+            "turn_idx": torch.tensor([1]),
+            "rewards": torch.tensor([1.0]),
+        },
+    ]
+    sidecars = [
+        _sidecar([], [], [0]),
+        _sidecar([10, 11, 12], [0, 1, 1], [3]),
+    ]
+
+    records = _collect_world_model_turn_nll(FakeActor(), rollout_batch, sidecars)
+
+    assert len(records) == 1
+    assert records[0]["trajectory_id"] == 101
+    assert records[0]["world_model_nll"] == pytest.approx(3.0)
+
+
+def test_world_model_turn_nll_skips_forward_when_all_groups_are_empty():
+    """An update without any real WM targets does not invoke the actor."""
+
+    class FakeActor:
+        def compute_logp(self, batches):
+            raise AssertionError(f"unexpected forward: {batches}")
+
+    rollout_batch = [
+        {
+            "trajectory_id": torch.tensor([100 + index]),
+            "turn_idx": torch.tensor([1]),
+            "rewards": torch.tensor([0.0]),
+        }
+        for index in range(2)
+    ]
+    sidecars = [_sidecar([], [], [0]), _sidecar([], [], [0])]
+
+    records = _collect_world_model_turn_nll(FakeActor(), rollout_batch, sidecars)
+
+    assert records == []
 
 
 def test_world_model_rows_use_disjoint_shifted_loss_masks():

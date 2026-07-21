@@ -313,16 +313,19 @@ def _collect_world_model_turn_nll(
             sidecars,
         )
     )
-    forward_batches: list[dict[str, torch.Tensor]] = []
-    target_masks: list[torch.Tensor] = []
+    prepared_batches: list[dict[str, torch.Tensor] | None] = []
+    prepared_target_masks: list[torch.Tensor | None] = []
     row_metadata: list[list[dict[str, int | float | bool]]] = []
     for trajectory, sidecar in zip(local_batch, local_sidecars, strict=True):
         prepared = _prepare_world_model_logp_batch(sidecar)
         if prepared is None:
+            prepared_batches.append(None)
+            prepared_target_masks.append(None)
+            row_metadata.append([])
             continue
         forward_batch, target_mask, valid_indices = prepared
-        forward_batches.append(forward_batch)
-        target_masks.append(target_mask)
+        prepared_batches.append(forward_batch)
+        prepared_target_masks.append(target_mask)
 
         trajectory_ids = trajectory["trajectory_id"].reshape(-1).tolist()
         turn_indices = trajectory["turn_idx"].reshape(-1).tolist()
@@ -350,8 +353,29 @@ def _collect_world_model_turn_nll(
             ]
         )
 
-    if not forward_batches:
+    template_batch = next(
+        (batch for batch in prepared_batches if batch is not None), None
+    )
+    if template_batch is None:
         return []
+    # TrainController requires the number of dispatched groups to remain divisible
+    # by the DP size. Preserve every original rollout-group slot. Empty groups repeat
+    # one valid row for a safe forward, but carry no targets or diagnostic metadata.
+    forward_batches: list[dict[str, torch.Tensor]] = []
+    target_masks: list[torch.Tensor] = []
+    for batch, target_mask in zip(prepared_batches, prepared_target_masks, strict=True):
+        if batch is None:
+            dummy_batch = {
+                key: value[:1].clone() for key, value in template_batch.items()
+            }
+            forward_batches.append(dummy_batch)
+            target_masks.append(
+                torch.zeros_like(dummy_batch["attention_mask"], dtype=torch.bool)
+            )
+        else:
+            assert target_mask is not None
+            forward_batches.append(batch)
+            target_masks.append(target_mask)
     computed_logps = actor.compute_logp(forward_batches)
     if computed_logps is None or len(computed_logps) != len(forward_batches):
         raise RuntimeError(
@@ -363,6 +387,8 @@ def _collect_world_model_turn_nll(
     for logps, target_mask, metadata in zip(
         local_logps, target_masks, row_metadata, strict=True
     ):
+        if not metadata:
+            continue
         aligned_mask = torch.roll(target_mask, shifts=-1, dims=-1)
         target_counts = aligned_mask.sum(dim=-1)
         mean_nll = (-logps.detach().float() * aligned_mask).sum(
