@@ -1,9 +1,0 @@
-defaults:
-  - qwen8b-qwen1.7b-math-pre-aleak-paw-cmae
-  - _self_
-
-trial_name: qwen8b-qwen1.7b-math-pass@2-pre-aleak-paw-cmae-nlllog
-
-world_model:
-  log_per_turn_nll: true
-  per_turn_nll_log_every_n_steps: 1

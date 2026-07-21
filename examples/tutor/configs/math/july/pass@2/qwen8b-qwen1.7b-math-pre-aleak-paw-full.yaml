@@ -19,6 +19,8 @@ teacher_anti_leak_instruction_enabled: true
 world_model:
   enabled: true
   loss_weight: 1.0
+  log_per_turn_nll: true
+  per_turn_nll_log_every_n_steps: 1
   system_prompt: >-
     You are a student response predictor. Given the context available to the
     teacher and the teacher's latest visible reply, predict the same student's
