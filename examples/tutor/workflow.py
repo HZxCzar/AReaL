@@ -690,10 +690,32 @@ class TutorAgentWorkflow(RolloutWorkflow):
             world_model_config.get("system_prompt", DEFAULT_WORLD_MODEL_SYSTEM_PROMPT)
             or ""
         ).strip()
+        paw_config = dict(world_model_config.get("paw") or {})
+        self.world_model_paw_config = {
+            "enabled": bool(paw_config.get("enabled", False)),
+            "entropy_filter_enabled": bool(
+                paw_config.get("entropy_filter_enabled", True)
+            ),
+            "entropy_keep_ratio": float(paw_config.get("entropy_keep_ratio", 0.75)),
+            "cmae_enabled": bool(paw_config.get("cmae_enabled", True)),
+            "confidence_threshold": float(paw_config.get("confidence_threshold", 0.2)),
+            "reward_adaptive_enabled": bool(
+                paw_config.get("reward_adaptive_enabled", False)
+            ),
+            "max_episode_return": float(paw_config.get("max_episode_return", 1.0)),
+        }
         if self.world_model_enabled and self.world_model_loss_weight <= 0.0:
             raise ValueError("world model loss weight must be positive.")
         if self.world_model_enabled and not self.world_model_system_prompt:
             raise ValueError("world model system prompt is required.")
+        if self.world_model_paw_config["enabled"] and not self.world_model_enabled:
+            raise ValueError("world model must be enabled when PaW is enabled.")
+        if not 0.0 < self.world_model_paw_config["entropy_keep_ratio"] <= 1.0:
+            raise ValueError("PaW entropy keep ratio must be in (0, 1].")
+        if not 0.0 < self.world_model_paw_config["confidence_threshold"] < 1.0:
+            raise ValueError("PaW confidence threshold must be in (0, 1).")
+        if self.world_model_paw_config["max_episode_return"] <= 0.0:
+            raise ValueError("PaW max episode return must be positive.")
         progress_config = dict(teacher_progress_judge or {})
         self.teacher_progress_judge_enabled = bool(
             progress_config.get("enabled", False)
@@ -1380,6 +1402,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 if completed_repeat_outcome is not None and self.debug_trace_dir:
                     await self._dump_eval_repeat_outcomes(*completed_repeat_outcome)
                 await self._maybe_dump_debug_trace(
+                    trajectory_id=trajectory_id,
                     task=task,
                     ground_truth=ground_truth,
                     initial_student_answer="",
@@ -1454,6 +1477,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if completed_repeat_outcome is not None and self.debug_trace_dir:
                 await self._dump_eval_repeat_outcomes(*completed_repeat_outcome)
             await self._maybe_dump_debug_trace(
+                trajectory_id=trajectory_id,
                 task=episode_artifact.task,
                 ground_truth=episode_artifact.ground_truth,
                 initial_student_answer=episode_artifact.initial_student_answer,
@@ -1790,6 +1814,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     if world_model_example is not None
                     else None
                 ),
+                world_model_paw_config=(
+                    self.world_model_paw_config
+                    if world_model_example is not None
+                    else None
+                ),
             )
             for artifact, assignment, clean_input, preceding_input, world_model_example in zip(
                 turn_artifacts,
@@ -1835,6 +1864,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if completed_repeat_outcome is not None and self.debug_trace_dir:
             await self._dump_eval_repeat_outcomes(*completed_repeat_outcome)
         await self._maybe_dump_debug_trace(
+            trajectory_id=trajectory_id,
             task=episode_artifact.task,
             ground_truth=episode_artifact.ground_truth,
             initial_student_answer=episode_artifact.initial_student_answer,
@@ -3723,6 +3753,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
     async def _maybe_dump_debug_trace(
         self,
         *,
+        trajectory_id: int,
         task: str,
         ground_truth: str,
         initial_student_answer: str,
@@ -3753,6 +3784,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             file_path = out_dir / f"task_{task_id:08d}_{int(time.time() * 1000)}.json"
             payload = {
                 "task_id": task_id,
+                "trajectory_id": int(trajectory_id),
                 "is_eval": bool(ctx.is_eval),
                 "termination_reason": termination_reason,
                 "total_reward": float(total_reward),

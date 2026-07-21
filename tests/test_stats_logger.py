@@ -101,3 +101,32 @@ def test_commit_writes_local_jsonl_diagnostics(
         "reward": 0.3,
         "advantage": -0.04,
     }
+
+    logger.log_world_model_turn_diagnostics(
+        global_step=2,
+        records=[
+            {
+                "trajectory_id": 123,
+                "turn_idx": 2,
+                "world_model_nll": 1.25,
+                "target_tokens": 8,
+                "turn_reward": -0.1,
+                "episode_return": -1.0,
+                "paw_selected": False,
+                "world_model_response_weight": 0.0,
+            }
+        ],
+    )
+    with open(logger.world_model_turn_diagnostics_jsonl_path, encoding="utf-8") as f:
+        world_model_record = json.loads(f.readline())
+    assert world_model_record == {
+        "global_step": 2,
+        "trajectory_id": 123,
+        "turn_idx": 2,
+        "world_model_nll": 1.25,
+        "target_tokens": 8,
+        "turn_reward": -0.1,
+        "episode_return": -1.0,
+        "paw_selected": False,
+        "world_model_response_weight": 0.0,
+    }

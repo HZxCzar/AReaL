@@ -1816,6 +1816,7 @@ def test_debug_trace_dump_writes_json_asynchronously(tmp_path, monkeypatch):
 
     asyncio.run(
         workflow._maybe_dump_debug_trace(
+            trajectory_id=123,
             task="task",
             ground_truth="42",
             initial_student_answer="0",
@@ -1832,6 +1833,7 @@ def test_debug_trace_dump_writes_json_asynchronously(tmp_path, monkeypatch):
     assert len(trace_files) == 1
     payload = json.loads(trace_files[0].read_text(encoding="utf-8"))
     assert payload["task_id"] == 7
+    assert payload["trajectory_id"] == 123
     assert payload["termination_reason"] == "success"
 
 

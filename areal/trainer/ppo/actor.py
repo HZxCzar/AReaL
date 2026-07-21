@@ -45,7 +45,7 @@ logger = logging.getLogger("PPOActor")
 
 def _unpack_world_model_rows(
     world_model_batch: dict[str, Any], expected_rows: int
-) -> list[tuple[torch.Tensor, torch.Tensor]]:
+) -> list[tuple[torch.Tensor, torch.Tensor, bool, float]]:
     """Restore row-aligned variable-length WM samples from rollout sidecars."""
 
     input_ids = world_model_batch["world_model_packed_input_ids"]
@@ -76,12 +76,72 @@ def _unpack_world_model_rows(
         )
     input_rows = torch.split(input_ids, lengths)
     mask_rows = torch.split(target_mask, lengths)
-    return list(zip(input_rows, mask_rows, strict=True))
+    selected = world_model_batch.get("world_model_selected")
+    if selected is None:
+        selected_values = [length > 0 for length in lengths]
+    else:
+        if selected.numel() != expected_rows:
+            raise ValueError("World Model selection metadata is not row-aligned.")
+        selected_values = [bool(value) for value in selected.cpu().reshape(-1)]
+    response_weight = world_model_batch.get("world_model_response_weight")
+    if response_weight is None:
+        response_weights = [1.0] * expected_rows
+    else:
+        if response_weight.numel() != expected_rows:
+            raise ValueError("World Model response weights are not row-aligned.")
+        response_weights = [float(value) for value in response_weight.cpu().reshape(-1)]
+    return list(
+        zip(
+            input_rows,
+            mask_rows,
+            selected_values,
+            response_weights,
+            strict=True,
+        )
+    )
+
+
+def _prepare_world_model_logp_batch(
+    world_model_batch: dict[str, Any],
+) -> tuple[dict[str, torch.Tensor], torch.Tensor, list[int]] | None:
+    """Build one temperature-one forward batch containing every valid WM row."""
+
+    expected_rows = world_model_batch["world_model_seq_lens"].numel()
+    rows = _unpack_world_model_rows(world_model_batch, expected_rows)
+    valid_indices = [
+        index
+        for index, (input_ids, target_mask, _, _) in enumerate(rows)
+        if input_ids.numel() > 0 and bool(target_mask.any())
+    ]
+    if not valid_indices:
+        return None
+
+    input_ids = torch.nn.utils.rnn.pad_sequence(
+        [rows[index][0] for index in valid_indices], batch_first=True
+    )
+    target_mask = torch.nn.utils.rnn.pad_sequence(
+        [rows[index][1].bool() for index in valid_indices], batch_first=True
+    )
+    attention_mask = torch.nn.utils.rnn.pad_sequence(
+        [torch.ones_like(rows[index][0], dtype=torch.bool) for index in valid_indices],
+        batch_first=True,
+    )
+    return (
+        {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "token_logprob_temperature": torch.ones_like(
+                input_ids, dtype=torch.float32
+            ),
+        },
+        target_mask,
+        valid_indices,
+    )
 
 
 def _append_world_model_rows(
     policy_batch: dict[str, Any],
-    world_model_rows: list[tuple[torch.Tensor, torch.Tensor]],
+    world_model_rows: list[tuple[Any, ...]],
     *,
     policy_temperature: float,
 ) -> dict[str, Any]:
@@ -96,9 +156,18 @@ def _append_world_model_rows(
         raise ValueError("Policy minibatch must use padded 2D input tensors.")
     policy_bs, policy_seqlen = policy_input_ids.shape
 
-    valid_rows = [row for row in world_model_rows if row[0].numel() > 0]
+    normalized_rows = [
+        (
+            row[0],
+            row[1],
+            bool(row[2]) if len(row) > 2 else True,
+            float(row[3]) if len(row) > 3 else 1.0,
+        )
+        for row in world_model_rows
+    ]
+    valid_rows = [row for row in normalized_rows if row[0].numel() > 0 and row[2]]
     max_world_model_len = max(
-        (input_ids.numel() for input_ids, _ in valid_rows), default=0
+        (input_ids.numel() for input_ids, _, _, _ in valid_rows), default=0
     )
     joint_seqlen = max(policy_seqlen, max_world_model_len)
     world_model_bs = len(valid_rows)
@@ -147,7 +216,10 @@ def _append_world_model_rows(
         dtype=torch.bool,
         device=policy_input_ids.device,
     )
-    for row_idx, (input_ids, target_mask) in enumerate(valid_rows):
+    world_model_response_weight = torch.zeros(
+        (world_model_bs, 1), dtype=torch.float32, device=policy_input_ids.device
+    )
+    for row_idx, (input_ids, target_mask, _, response_weight) in enumerate(valid_rows):
         if input_ids.numel() != target_mask.numel():
             raise ValueError(
                 "World Model row input/mask length mismatch: "
@@ -157,6 +229,7 @@ def _append_world_model_rows(
         world_model_input_ids[row_idx, :row_len] = input_ids
         world_model_attention_mask[row_idx, :row_len] = True
         world_model_target_mask[row_idx, :row_len] = target_mask.bool()
+        world_model_response_weight[row_idx] = response_weight
 
     if world_model_bs:
         joint_batch["input_ids"][policy_bs:] = world_model_input_ids
@@ -164,7 +237,9 @@ def _append_world_model_rows(
 
     aligned_target_mask = torch.roll(world_model_target_mask, shifts=-1, dims=-1)
     target_counts = aligned_target_mask.sum(dim=-1, keepdim=True).clamp_min(1)
-    world_model_token_weight = aligned_target_mask.float() / target_counts
+    world_model_token_weight = (
+        aligned_target_mask.float() / target_counts * world_model_response_weight
+    )
     response_start_mask = aligned_target_mask & (
         aligned_target_mask.long().cumsum(dim=-1) == 1
     )
@@ -241,8 +316,11 @@ def _merge_policy_world_model_loss(
     global_policy_tokens: torch.Tensor,
     global_world_model_responses: torch.Tensor,
     world_model_loss_weight: float,
+    paw_enabled: bool = False,
+    cmae_enabled: bool = False,
+    confidence_threshold: float = 0.2,
 ) -> torch.Tensor:
-    """Return the exact PPO-token-mean plus response-balanced WM objective."""
+    """Combine separately normalized PPO and optional CE/CMAE WM objectives."""
 
     policy_tokens = input_data["loss_mask"].count_nonzero().to(logprobs.dtype)
     response_starts = input_data["world_model_response_start_mask"].bool()
@@ -250,7 +328,17 @@ def _merge_policy_world_model_loss(
     local_weight = policy_tokens + world_model_responses
 
     world_model_token_weight = input_data["world_model_token_weight"].to(logprobs.dtype)
-    response_loss_sum = (-logprobs * world_model_token_weight).sum()
+    world_model_loss_mask = input_data["world_model_loss_mask"].bool()
+    target_probabilities = logprobs.exp()
+    if paw_enabled and cmae_enabled:
+        confidence_mask = target_probabilities <= float(confidence_threshold)
+        token_loss = (1.0 - target_probabilities) * confidence_mask
+        clipped_mask = world_model_loss_mask & ~confidence_mask
+    else:
+        confidence_mask = world_model_loss_mask
+        clipped_mask = torch.zeros_like(world_model_loss_mask)
+        token_loss = -logprobs
+    response_loss_sum = (token_loss * world_model_token_weight).sum()
 
     global_policy_tokens = global_policy_tokens.to(logprobs.dtype)
     global_world_model_responses = global_world_model_responses.to(logprobs.dtype)
@@ -258,21 +346,25 @@ def _merge_policy_world_model_loss(
     policy_scale = global_weight / global_policy_tokens.clamp_min(1)
     world_model_scale = global_weight / global_world_model_responses.clamp_min(1)
     world_model_active = (global_world_model_responses > 0).to(logprobs.dtype)
+    world_model_coefficient = torch.as_tensor(
+        world_model_loss_weight, dtype=logprobs.dtype, device=logprobs.device
+    )
     numerator = policy_scale * policy_tokens * policy_loss
     numerator = numerator + (
-        float(world_model_loss_weight)
+        world_model_coefficient
         * world_model_active
         * world_model_scale
         * response_loss_sum
     )
 
-    world_model_loss_mask = input_data["world_model_loss_mask"].bool()
     stats_tracker.denominator(
         world_model_target_tokens=world_model_loss_mask,
         world_model_responses=response_starts,
     )
     stats_tracker.stat(
         world_model_token_nll=(-logprobs.detach()).float(),
+        world_model_cmae_active=confidence_mask.detach().float(),
+        world_model_cmae_clipped=clipped_mask.detach().float(),
         denominator="world_model_target_tokens",
     )
     cu_seqlens = input_data["cu_seqlens"]
@@ -287,17 +379,17 @@ def _merge_policy_world_model_loss(
         sequence_lengths.numel(), dtype=logprobs.dtype, device=logprobs.device
     )
     response_losses.scatter_add_(
-        0, sequence_ids, -logprobs.detach() * world_model_token_weight
+        0, sequence_ids, token_loss.detach() * world_model_token_weight
     )
     response_loss_per_token = response_losses[sequence_ids].float()
     stats_tracker.stat(
         world_model_loss=response_loss_per_token,
         weighted_world_model_loss=(
-            response_loss_per_token * float(world_model_loss_weight)
+            response_loss_per_token * world_model_coefficient.detach().float()
         ),
         world_model_to_ppo_loss_ratio=(
             response_loss_per_token
-            * float(world_model_loss_weight)
+            * world_model_coefficient.detach().float()
             / policy_loss.detach().abs().float().clamp_min(1e-6)
         ),
         denominator="world_model_responses",
@@ -1008,7 +1100,11 @@ class PPOActor:
             mb_spec=MicroBatchSpec(n_mbs=self.config.ppo_n_minibatches),
         )
         world_model_rows = None
+        world_model_paw_config: dict[str, Any] = {}
         if world_model_batch is not None:
+            world_model_paw_config = dict(
+                world_model_batch.get("world_model_paw_config") or {}
+            )
             world_model_rows = _unpack_world_model_rows(
                 world_model_batch, expected_rows=data["attention_mask"].shape[0]
             )
@@ -1065,6 +1161,13 @@ class PPOActor:
                         global_world_model_responses=counts[1],
                         world_model_loss_weight=float(
                             world_model_batch["world_model_loss_weight"]
+                        ),
+                        paw_enabled=bool(world_model_paw_config.get("enabled", False)),
+                        cmae_enabled=bool(
+                            world_model_paw_config.get("cmae_enabled", True)
+                        ),
+                        confidence_threshold=float(
+                            world_model_paw_config.get("confidence_threshold", 0.2)
                         ),
                     )
                     loss_weight_fn = _joint_loss_weight
@@ -1318,10 +1421,13 @@ def joint_grpo_loss_fn(
     global_policy_tokens: torch.Tensor,
     global_world_model_responses: torch.Tensor,
     world_model_loss_weight: float,
+    paw_enabled: bool = False,
+    cmae_enabled: bool = False,
+    confidence_threshold: float = 0.2,
     vocab_min_logits: torch.Tensor | None = None,
     vocab_max_logits: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Combine the existing PPO loss with response-balanced Student prediction CE."""
+    """Combine PPO with the configured Student-prediction auxiliary objective."""
 
     policy_loss = ppo_loss_fn(
         logprobs,
@@ -1337,6 +1443,9 @@ def joint_grpo_loss_fn(
         global_policy_tokens=global_policy_tokens,
         global_world_model_responses=global_world_model_responses,
         world_model_loss_weight=world_model_loss_weight,
+        paw_enabled=paw_enabled,
+        cmae_enabled=cmae_enabled,
+        confidence_threshold=confidence_threshold,
     )
 
 

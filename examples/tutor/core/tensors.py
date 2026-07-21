@@ -55,6 +55,7 @@ def response_to_tensordict(
     world_model_input_tokens: list[int] | None = None,
     world_model_target_mask: list[int] | None = None,
     world_model_loss_weight: float | None = None,
+    world_model_paw_config: dict[str, Any] | None = None,
 ) -> dict[str, torch.Tensor]:
     input_tokens = (
         list(response.input_tokens)
@@ -182,4 +183,5 @@ def response_to_tensordict(
             [len(wm_input_tokens)], dtype=torch.long
         )
         result["world_model_loss_weight"] = float(world_model_loss_weight)
+        result["world_model_paw_config"] = dict(world_model_paw_config or {})
     return result

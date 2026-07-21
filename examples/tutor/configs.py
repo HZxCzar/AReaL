@@ -892,6 +892,30 @@ class TutorRewardConfig:
 
 
 @dataclass
+class TutorPaWConfig:
+    """Optional PaW-style filtering and robust World Model objective."""
+
+    enabled: bool = field(default=False)
+    entropy_filter_enabled: bool = field(default=True)
+    entropy_keep_ratio: float = field(default=0.75)
+    cmae_enabled: bool = field(default=True)
+    confidence_threshold: float = field(default=0.2)
+    reward_adaptive_enabled: bool = field(default=False)
+    max_episode_return: float = field(default=1.0)
+
+    def __post_init__(self) -> None:
+        self.entropy_keep_ratio = float(self.entropy_keep_ratio)
+        self.confidence_threshold = float(self.confidence_threshold)
+        self.max_episode_return = float(self.max_episode_return)
+        if not 0.0 < self.entropy_keep_ratio <= 1.0:
+            raise ValueError("world_model.paw.entropy_keep_ratio must be in (0, 1].")
+        if not 0.0 < self.confidence_threshold < 1.0:
+            raise ValueError("world_model.paw.confidence_threshold must be in (0, 1).")
+        if self.max_episode_return <= 0.0:
+            raise ValueError("world_model.paw.max_episode_return must be positive.")
+
+
+@dataclass
 class TutorWorldModelConfig:
     """Auxiliary supervised objective for predicting the next Student reply."""
 
@@ -900,20 +924,44 @@ class TutorWorldModelConfig:
         default=0.05,
         metadata={
             "help": (
-                "Weight of the response-balanced Student prediction CE loss "
-                "added to the PPO actor loss."
+                "Weight of the response-balanced Student prediction auxiliary "
+                "loss added to the PPO actor loss."
             )
         },
     )
     system_prompt: str = field(default=DEFAULT_WORLD_MODEL_SYSTEM_PROMPT)
+    log_per_turn_nll: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Log the current actor's mean token NLL for every valid World "
+                "Model turn before the PPO update. This adds one extra WM forward "
+                "pass on logging steps."
+            )
+        },
+    )
+    per_turn_nll_log_every_n_steps: int = field(
+        default=1,
+        metadata={"help": "Log per-turn World Model NLL every N training steps."},
+    )
+    paw: TutorPaWConfig = field(default_factory=TutorPaWConfig)
 
     def __post_init__(self) -> None:
         self.loss_weight = float(self.loss_weight)
         self.system_prompt = str(self.system_prompt or "").strip()
+        self.per_turn_nll_log_every_n_steps = int(self.per_turn_nll_log_every_n_steps)
         if self.enabled and self.loss_weight <= 0.0:
             raise ValueError("world_model.loss_weight must be positive when enabled.")
         if self.enabled and not self.system_prompt:
             raise ValueError("world_model.system_prompt is required when enabled.")
+        if self.per_turn_nll_log_every_n_steps < 1:
+            raise ValueError(
+                "world_model.per_turn_nll_log_every_n_steps must be at least 1."
+            )
+        if self.paw.enabled and not self.enabled:
+            raise ValueError(
+                "world_model.enabled must be true when world_model.paw.enabled."
+            )
 
 
 @dataclass

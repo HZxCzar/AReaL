@@ -109,6 +109,7 @@ class DifficultyTutorWorkflow:
     async def _maybe_dump_debug_trace(
         self,
         *,
+        trajectory_id: int,
         task: str,
         ground_truth: str,
         initial_student_answer: str,
@@ -121,6 +122,7 @@ class DifficultyTutorWorkflow:
         student_generalization_results: list[Any] | None = None,
     ) -> None:
         self.last_episode_trace_payload = {
+            "trajectory_id": int(trajectory_id),
             "termination_reason": str(termination_reason),
             "total_reward": float(total_reward),
             "num_turns": len(traces),
@@ -137,6 +139,7 @@ class DifficultyTutorWorkflow:
             ],
         }
         await super()._maybe_dump_debug_trace(  # type: ignore[misc]
+            trajectory_id=trajectory_id,
             task=task,
             ground_truth=ground_truth,
             initial_student_answer=initial_student_answer,

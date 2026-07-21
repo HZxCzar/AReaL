@@ -42,6 +42,9 @@ class StatsLogger:
         self.turn_diagnostics_jsonl_path = os.path.join(
             self.log_path, "turn_diagnostics.jsonl"
         )
+        self.world_model_turn_diagnostics_jsonl_path = os.path.join(
+            self.log_path, "world_model_turn_diagnostics.jsonl"
+        )
         self.init()
 
         self._last_commit_step = -1
@@ -244,11 +247,24 @@ class StatsLogger:
             self.teacher_context_diagnostics_jsonl_path, global_step, records
         )
 
+    def log_world_model_turn_diagnostics(
+        self,
+        global_step: int,
+        records: list[dict[str, int | float | bool]],
+    ) -> None:
+        """Persist per-turn World Model predictability and outcome metadata."""
+
+        if not records or (dist.is_initialized() and dist.get_rank() != 0):
+            return
+        self._append_turn_diagnostic_records(
+            self.world_model_turn_diagnostics_jsonl_path, global_step, records
+        )
+
     @staticmethod
     def _append_turn_diagnostic_records(
         path: str,
         global_step: int,
-        records: list[dict[str, int | float]],
+        records: list[dict[str, int | float | bool]],
     ) -> None:
         with open(path, "a", encoding="utf-8") as f:
             for record in records:

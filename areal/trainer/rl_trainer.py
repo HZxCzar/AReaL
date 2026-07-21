@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import math
 import os
 from collections.abc import Callable
 from copy import deepcopy
@@ -47,6 +48,7 @@ from areal.infra.data_service import DataController
 from areal.infra.data_service.controller.config import DataServiceConfig
 from areal.infra.data_service.rdataset import RDataset
 from areal.infra.utils.concurrent import call_maybe_async
+from areal.trainer.ppo.actor import _prepare_world_model_logp_batch
 from areal.utils import logging, perf_tracer, seeding, stats_tracker
 from areal.utils.dataloader import create_dataloader
 from areal.utils.environ import is_single_controller
@@ -89,6 +91,149 @@ _WORLD_MODEL_ROLLOUT_KEYS = {
     "world_model_loss_weight",
 }
 
+_WORLD_MODEL_PAW_CONFIG_KEY = "world_model_paw_config"
+
+
+def _prepare_paw_world_model_sidecars(
+    rollout_batch: list[dict[str, Any]],
+    sidecars: list[dict[str, Any]],
+) -> None:
+    """Attach update-global PaW selection and rollout-group-balanced weights."""
+
+    if len(rollout_batch) != len(sidecars):
+        raise ValueError(
+            "PaW rollout/World Model group count mismatch: "
+            f"rollout={len(rollout_batch)}, sidecars={len(sidecars)}."
+        )
+    if not sidecars:
+        return
+
+    configs = [
+        dict(sidecar.get(_WORLD_MODEL_PAW_CONFIG_KEY) or {}) for sidecar in sidecars
+    ]
+    if any(config != configs[0] for config in configs[1:]):
+        raise ValueError("PaW config must be identical across the training batch.")
+    config = configs[0]
+    if not bool(config.get("enabled", False)):
+        return
+
+    valid_by_group = [
+        [int(length) > 0 for length in sidecar["world_model_seq_lens"].reshape(-1)]
+        for sidecar in sidecars
+    ]
+    valid_turns = [
+        (group_index, turn_index)
+        for group_index, valid in enumerate(valid_by_group)
+        for turn_index, is_valid in enumerate(valid)
+        if is_valid
+    ]
+    selected = set(valid_turns)
+    entropies: dict[tuple[int, int], float] = {}
+
+    if bool(config.get("entropy_filter_enabled", True)) and valid_turns:
+        for group_index, turn_index in valid_turns:
+            trajectory = rollout_batch[group_index]
+            logprobs = trajectory["logprobs"]
+            loss_mask = trajectory["loss_mask"]
+            turn_count = len(valid_by_group[group_index])
+            if (
+                logprobs.ndim != 2
+                or loss_mask.shape != logprobs.shape
+                or logprobs.shape[0] != turn_count
+            ):
+                raise ValueError(
+                    f"PaW Teacher/World Model turn mismatch in group {group_index}."
+                )
+            action_logprobs = logprobs[turn_index].float()[loss_mask[turn_index].bool()]
+            if action_logprobs.numel() == 0:
+                raise ValueError("Valid PaW turn has no Teacher action tokens.")
+            probabilities = action_logprobs.exp()
+            entropies[(group_index, turn_index)] = float(
+                (-probabilities * action_logprobs).mean()
+            )
+
+        keep_ratio = float(config.get("entropy_keep_ratio", 0.75))
+        keep_count = max(1, math.ceil(len(valid_turns) * keep_ratio))
+        selected = set(
+            sorted(valid_turns, key=lambda turn: (-entropies[turn], *turn))[:keep_count]
+        )
+
+    group_weights = [1.0] * len(sidecars)
+    if bool(config.get("reward_adaptive_enabled", False)):
+        max_return = float(config.get("max_episode_return", 1.0))
+        for group_index, (trajectory, valid) in enumerate(
+            zip(rollout_batch, valid_by_group, strict=True)
+        ):
+            rewards = trajectory["rewards"].reshape(-1)
+            if rewards.numel() != len(valid):
+                raise ValueError(f"PaW reward/turn mismatch in group {group_index}.")
+            trajectory_ids = trajectory["trajectory_id"].reshape(-1)
+            if trajectory_ids.numel() != len(valid):
+                raise ValueError(
+                    f"PaW trajectory-id/turn mismatch in group {group_index}."
+                )
+            episode_returns: dict[int, float] = {}
+            for trajectory_id, reward in zip(
+                trajectory_ids.detach().cpu().tolist(),
+                rewards.detach().cpu().tolist(),
+                strict=True,
+            ):
+                episode_returns[int(trajectory_id)] = episode_returns.get(
+                    int(trajectory_id), 0.0
+                ) + float(reward)
+            if not episode_returns:
+                raise ValueError(f"PaW group {group_index} contains no episodes.")
+            for episode_return in episode_returns.values():
+                if episode_return > max_return + 1e-6:
+                    raise ValueError(
+                        "PaW episode return exceeds max_episode_return: "
+                        f"return={episode_return}, max={max_return}."
+                    )
+            mean_return = sum(episode_returns.values()) / len(episode_returns)
+            group_weights[group_index] = 1.0 - mean_return / max_return
+
+    selected_per_group = [0] * len(sidecars)
+    for group_index, _ in selected:
+        selected_per_group[group_index] += 1
+    selected_count = len(selected)
+    group_count = len(sidecars)
+
+    for group_index, (sidecar, valid) in enumerate(
+        zip(sidecars, valid_by_group, strict=True)
+    ):
+        selected_turns = [
+            (group_index, turn_index) in selected for turn_index in range(len(valid))
+        ]
+        group_selected_count = selected_per_group[group_index]
+        # The actor averages over all N selected responses. Giving each selected
+        # transition N / (G * k_g) mass makes that mean equal the PaW objective:
+        # first average k_g transitions inside each rollout group, then average G
+        # rollout groups. A group with k_g == 0 contributes a zero auxiliary term.
+        group_balance = (
+            selected_count / (group_count * group_selected_count)
+            if group_selected_count > 0
+            else 0.0
+        )
+        sidecar["world_model_selected"] = torch.tensor(selected_turns, dtype=torch.bool)
+        sidecar["world_model_response_weight"] = torch.tensor(
+            [
+                group_weights[group_index] * group_balance if keep else 0.0
+                for keep in selected_turns
+            ],
+            dtype=torch.float32,
+        )
+
+    stats_tracker.scalar(
+        world_model_paw_valid_transitions=float(len(valid_turns)),
+        world_model_paw_selected_transitions=float(len(selected)),
+        world_model_paw_selected_ratio=(
+            float(len(selected) / len(valid_turns)) if valid_turns else 0.0
+        ),
+        world_model_paw_action_entropy=(
+            float(sum(entropies.values()) / len(entropies)) if entropies else 0.0
+        ),
+    )
+
 
 def _has_teacher_context_reward(rollout_batch: list[dict[str, Any]]) -> bool:
     """Return whether every trajectory carries complete context-reward metadata."""
@@ -117,6 +262,7 @@ def _pop_world_model_sidecars(
     """Detach optional WM tensors before PPO/ref/critic batch processing."""
 
     enabled = []
+    paw_metadata_enabled = []
     for trajectory in rollout_batch:
         present = _WORLD_MODEL_ROLLOUT_KEYS.intersection(trajectory)
         if present and present != _WORLD_MODEL_ROLLOUT_KEYS:
@@ -126,17 +272,115 @@ def _pop_world_model_sidecars(
                 + ", ".join(missing)
             )
         enabled.append(bool(present))
+        paw_metadata_enabled.append(_WORLD_MODEL_PAW_CONFIG_KEY in trajectory)
     if enabled and any(enabled) and not all(enabled):
         raise ValueError(
             "World Model metadata must be present on every trajectory in a batch."
         )
     if not enabled or not all(enabled):
         return None
+    if any(paw_metadata_enabled) and not all(paw_metadata_enabled):
+        raise ValueError("PaW metadata must be present on every World Model row.")
 
-    return [
-        {key: trajectory.pop(key) for key in _WORLD_MODEL_ROLLOUT_KEYS}
-        for trajectory in rollout_batch
+    keys = set(_WORLD_MODEL_ROLLOUT_KEYS)
+    if all(paw_metadata_enabled):
+        keys.add(_WORLD_MODEL_PAW_CONFIG_KEY)
+    sidecars = [
+        {key: trajectory.pop(key) for key in keys} for trajectory in rollout_batch
     ]
+    _prepare_paw_world_model_sidecars(rollout_batch, sidecars)
+    return sidecars
+
+
+def _collect_world_model_turn_nll(
+    actor: Any,
+    rollout_batch: list[dict[str, Any]],
+    sidecars: list[dict[str, Any]],
+) -> list[dict[str, int | float | bool]]:
+    """Score each real Student reply with the current actor at temperature one."""
+
+    from areal.infra.rpc.rtensor import RTensor
+
+    local_batch, local_sidecars = RTensor.localize(
+        (
+            [
+                {
+                    key: trajectory[key]
+                    for key in ("rewards", "trajectory_id", "turn_idx")
+                }
+                for trajectory in rollout_batch
+            ],
+            sidecars,
+        )
+    )
+    forward_batches: list[dict[str, torch.Tensor]] = []
+    target_masks: list[torch.Tensor] = []
+    row_metadata: list[list[dict[str, int | float | bool]]] = []
+    for trajectory, sidecar in zip(local_batch, local_sidecars, strict=True):
+        prepared = _prepare_world_model_logp_batch(sidecar)
+        if prepared is None:
+            continue
+        forward_batch, target_mask, valid_indices = prepared
+        forward_batches.append(forward_batch)
+        target_masks.append(target_mask)
+
+        trajectory_ids = trajectory["trajectory_id"].reshape(-1).tolist()
+        turn_indices = trajectory["turn_idx"].reshape(-1).tolist()
+        rewards = trajectory["rewards"].reshape(-1).float().tolist()
+        selected = sidecar.get("world_model_selected")
+        selected = (
+            selected.reshape(-1).bool().tolist() if selected is not None else None
+        )
+        weights = sidecar.get("world_model_response_weight")
+        weights = weights.reshape(-1).float().tolist() if weights is not None else None
+        episode_return = float(sum(rewards))
+        row_metadata.append(
+            [
+                {
+                    "trajectory_id": int(trajectory_ids[index]),
+                    "turn_idx": int(turn_indices[index]),
+                    "turn_reward": float(rewards[index]),
+                    "episode_return": episode_return,
+                    "paw_selected": bool(selected[index]) if selected else True,
+                    "world_model_response_weight": (
+                        float(weights[index]) if weights else 1.0
+                    ),
+                }
+                for index in valid_indices
+            ]
+        )
+
+    if not forward_batches:
+        return []
+    computed_logps = actor.compute_logp(forward_batches)
+    if computed_logps is None or len(computed_logps) != len(forward_batches):
+        raise RuntimeError(
+            "World Model diagnostics forward pass did not return one tensor per group."
+        )
+    local_logps = RTensor.localize(computed_logps)
+
+    records: list[dict[str, int | float | bool]] = []
+    for logps, target_mask, metadata in zip(
+        local_logps, target_masks, row_metadata, strict=True
+    ):
+        aligned_mask = torch.roll(target_mask, shifts=-1, dims=-1)
+        target_counts = aligned_mask.sum(dim=-1)
+        mean_nll = (-logps.detach().float() * aligned_mask).sum(
+            dim=-1
+        ) / target_counts.clamp_min(1)
+        nll_values = mean_nll.cpu().tolist()
+        count_values = target_counts.cpu().tolist()
+        for row, nll, token_count in zip(
+            metadata, nll_values, count_values, strict=True
+        ):
+            records.append(
+                {
+                    **row,
+                    "world_model_nll": float(nll),
+                    "target_tokens": int(token_count),
+                }
+            )
+    return records
 
 
 def _attach_teacher_context_logps(
@@ -844,6 +1088,33 @@ class PPOTrainer:
 
             if self._should_offload_actor:
                 self._onload_model(self.actor, role="actor")
+            world_model_config = getattr(config, "world_model", None)
+            log_world_model_nll = bool(
+                getattr(world_model_config, "log_per_turn_nll", False)
+            )
+            world_model_nll_log_interval = int(
+                getattr(world_model_config, "per_turn_nll_log_every_n_steps", 1)
+            )
+            if (
+                log_world_model_nll
+                and world_model_batch is not None
+                and global_step % world_model_nll_log_interval == 0
+            ):
+                with (
+                    stats_tracker.record_timing("world_model_nll_diagnostics"),
+                    perf_tracer.trace_scope(
+                        "train.world_model_nll_diagnostics",
+                        category=Category.COMPUTE,
+                        args={"global_step": global_step},
+                    ),
+                ):
+                    world_model_turn_diagnostics = _collect_world_model_turn_nll(
+                        self.actor, rollout_batch, world_model_batch
+                    )
+                    self.stats_logger.log_world_model_turn_diagnostics(
+                        global_step, world_model_turn_diagnostics
+                    )
+                    self.actor.get_device_stats().log("world model NLL diagnostics")
             has_teacher_context_reward = _has_teacher_context_reward(rollout_batch)
             if config.actor.should_compute_prox_logp() or has_teacher_context_reward:
                 with (

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from examples.tutor.configs import TutorWorldModelConfig
+from examples.tutor.configs import TutorPaWConfig, TutorWorldModelConfig
 from examples.tutor.core.tensors import (
     response_to_tensordict,
     tokenize_teacher_forced_response,
@@ -26,7 +26,11 @@ from areal.trainer.ppo.actor import (
     _merge_policy_world_model_loss,
     _unpack_world_model_rows,
 )
-from areal.trainer.rl_trainer import _pop_world_model_sidecars
+from areal.trainer.rl_trainer import (
+    _collect_world_model_turn_nll,
+    _pop_world_model_sidecars,
+    _prepare_paw_world_model_sidecars,
+)
 from areal.utils.data import concat_padded_tensors, split_and_unpad_tensor
 from areal.utils.functional import (
     gather_logprobs_entropy,
@@ -64,13 +68,41 @@ def _response(input_tokens: list[int], output_tokens: list[int]):
 
 
 def _sidecar(
-    input_ids: list[int], target_mask: list[int], seq_lens: list[int], weight=0.1
+    input_ids: list[int],
+    target_mask: list[int],
+    seq_lens: list[int],
+    weight=0.1,
+    paw: dict | None = None,
 ):
-    return {
+    result = {
         "world_model_packed_input_ids": torch.tensor(input_ids, dtype=torch.long),
         "world_model_packed_target_mask": torch.tensor(target_mask, dtype=torch.bool),
         "world_model_seq_lens": torch.tensor(seq_lens, dtype=torch.long),
         "world_model_loss_weight": weight,
+    }
+    if paw is not None:
+        settings = {
+            "enabled": True,
+            "entropy_filter_enabled": True,
+            "entropy_keep_ratio": 0.75,
+            "cmae_enabled": True,
+            "confidence_threshold": 0.2,
+            "reward_adaptive_enabled": False,
+            "max_episode_return": 1.0,
+            **paw,
+        }
+        result["world_model_paw_config"] = settings
+    return result
+
+
+def _policy_row(
+    *, trajectory_id: int, reward: float, action_logprob: float
+) -> dict[str, torch.Tensor]:
+    return {
+        "trajectory_id": torch.tensor([trajectory_id]),
+        "rewards": torch.tensor([reward]),
+        "logprobs": torch.tensor([[0.0, action_logprob]]),
+        "loss_mask": torch.tensor([[0, 1]]),
     }
 
 
@@ -82,6 +114,20 @@ def test_world_model_config_disabled_by_default_and_validates_enabled_fields():
         TutorWorldModelConfig(enabled=True, loss_weight=0.0)
     with pytest.raises(ValueError, match="system_prompt"):
         TutorWorldModelConfig(enabled=True, system_prompt="")
+    with pytest.raises(ValueError, match="at least 1"):
+        TutorWorldModelConfig(per_turn_nll_log_every_n_steps=0)
+
+
+def test_paw_config_is_opt_in_and_validates_ranges():
+    """PaW must not alter legacy WM unless explicitly enabled."""
+
+    assert TutorWorldModelConfig().paw.enabled is False
+    with pytest.raises(ValueError, match="world_model.enabled"):
+        TutorWorldModelConfig(enabled=False, paw=TutorPaWConfig(enabled=True))
+    with pytest.raises(ValueError, match="entropy_keep_ratio"):
+        TutorPaWConfig(entropy_keep_ratio=0.0)
+    with pytest.raises(ValueError, match="confidence_threshold"):
+        TutorPaWConfig(confidence_threshold=1.0)
 
 
 def test_teacher_forced_tokenization_masks_each_student_target_token():
@@ -239,6 +285,31 @@ def test_response_tensor_has_no_world_model_fields_when_disabled():
     assert not any(key.startswith("world_model_") for key in result)
 
 
+def test_response_tensor_carries_paw_switches_only_inside_world_model_sidecar():
+    """Rollout transport preserves PaW settings without changing PPO tensors."""
+
+    result = response_to_tensordict(
+        _response([1], [2]),
+        reward=0.0,
+        trajectory_id=7,
+        world_model_input_tokens=[10, 11],
+        world_model_target_mask=[0, 1],
+        world_model_loss_weight=1.0,
+        world_model_paw_config={
+            "enabled": True,
+            "reward_adaptive_enabled": False,
+        },
+    )
+
+    assert result["world_model_paw_config"] == {
+        "enabled": True,
+        "reward_adaptive_enabled": False,
+    }
+    torch.testing.assert_close(
+        result["trajectory_id"], torch.tensor([7]), rtol=0, atol=0
+    )
+
+
 def test_packed_sidecar_survives_trajectory_unpadding():
     """WM sequences longer than PPO rows must not be trimmed by async transport."""
 
@@ -283,6 +354,66 @@ def test_world_model_sidecar_requires_complete_batch_metadata():
                 {"input_ids": torch.tensor([[2]])},
             ]
         )
+
+
+def test_world_model_turn_nll_logs_standard_ce_and_episode_outcome():
+    """Per-turn diagnostics align next-token NLL with rollout and PaW metadata."""
+
+    class FakeActor:
+        def compute_logp(self, batches):
+            assert len(batches) == 1
+            batch = batches[0]
+            torch.testing.assert_close(
+                batch["token_logprob_temperature"],
+                torch.ones((2, 4)),
+                rtol=0,
+                atol=0,
+            )
+            return [torch.tensor([[-2.0] * 4, [-4.0] * 4])]
+
+    rollout_batch = [
+        {
+            "trajectory_id": torch.tensor([99, 99]),
+            "turn_idx": torch.tensor([1, 2]),
+            "rewards": torch.tensor([-0.2, -0.8]),
+        }
+    ]
+    sidecars = [
+        {
+            **_sidecar(
+                [10, 11, 12, 13, 20, 21, 22],
+                [0, 0, 1, 1, 0, 1, 1],
+                [4, 3],
+            ),
+            "world_model_selected": torch.tensor([True, False]),
+            "world_model_response_weight": torch.tensor([0.5, 0.0]),
+        }
+    ]
+
+    records = _collect_world_model_turn_nll(FakeActor(), rollout_batch, sidecars)
+
+    assert records == [
+        {
+            "trajectory_id": 99,
+            "turn_idx": 1,
+            "turn_reward": pytest.approx(-0.2),
+            "episode_return": pytest.approx(-1.0),
+            "paw_selected": True,
+            "world_model_response_weight": pytest.approx(0.5),
+            "world_model_nll": pytest.approx(2.0),
+            "target_tokens": 2,
+        },
+        {
+            "trajectory_id": 99,
+            "turn_idx": 2,
+            "turn_reward": pytest.approx(-0.8),
+            "episode_return": pytest.approx(-1.0),
+            "paw_selected": False,
+            "world_model_response_weight": pytest.approx(0.0),
+            "world_model_nll": pytest.approx(4.0),
+            "target_tokens": 2,
+        },
+    ]
 
 
 def test_world_model_rows_use_disjoint_shifted_loss_masks():
@@ -364,9 +495,269 @@ def test_unpack_world_model_rows_preserves_skipped_turns():
         _sidecar([1, 2, 3], [0, 1, 1], [0, 2, 0, 1]), expected_rows=4
     )
 
-    assert [input_ids.numel() for input_ids, _ in rows] == [0, 2, 0, 1]
+    assert [input_ids.numel() for input_ids, _, _, _ in rows] == [0, 2, 0, 1]
     assert rows[1][0].tolist() == [1, 2]
     assert rows[3][0].tolist() == [3]
+
+
+def test_paw_entropy_filter_selects_update_global_top_fraction(monkeypatch):
+    """PaW selects high action entropy across turns inside multi-turn episodes."""
+
+    monkeypatch.setattr(
+        "areal.trainer.rl_trainer.stats_tracker.scalar", lambda **_: None
+    )
+    logprobs = [
+        float(torch.log(torch.tensor(probability)))
+        for probability in (0.5, 0.9, 0.2, 0.99)
+    ]
+    turns = [
+        _policy_row(trajectory_id=index, reward=0.0, action_logprob=logprob)
+        for index, logprob in enumerate(logprobs)
+    ]
+    turns[1]["trajectory_id"] = turns[0]["trajectory_id"].clone()
+    turns[3]["trajectory_id"] = turns[2]["trajectory_id"].clone()
+    rollout = [
+        concat_padded_tensors(turns[:2]),
+        concat_padded_tensors(turns[2:]),
+    ]
+    sidecar_turns = [
+        _sidecar(
+            [10, 11],
+            [0, 1],
+            [2],
+            paw={"entropy_keep_ratio": 0.5},
+        )
+        for _ in turns
+    ]
+    sidecars = [
+        concat_padded_tensors(sidecar_turns[:2]),
+        concat_padded_tensors(sidecar_turns[2:]),
+    ]
+
+    _prepare_paw_world_model_sidecars(rollout, sidecars)
+
+    assert torch.cat([row["world_model_selected"] for row in sidecars]).tolist() == [
+        True,
+        False,
+        True,
+        False,
+    ]
+    torch.testing.assert_close(
+        torch.cat([row["world_model_response_weight"] for row in sidecars]),
+        torch.tensor([1.0, 0.0, 1.0, 0.0]),
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_paw_response_weights_balance_rollout_groups(monkeypatch):
+    """Each rollout group contributes one WM mean regardless of its turn count."""
+
+    monkeypatch.setattr(
+        "areal.trainer.rl_trainer.stats_tracker.scalar", lambda **_: None
+    )
+    rollout = [
+        concat_padded_tensors(
+            [
+                _policy_row(trajectory_id=1, reward=0.0, action_logprob=-0.5),
+                _policy_row(trajectory_id=1, reward=1.0, action_logprob=-0.5),
+            ]
+        ),
+        _policy_row(trajectory_id=2, reward=-1.0, action_logprob=-0.5),
+    ]
+    fixed_turn = _sidecar(
+        [10, 11],
+        [0, 1],
+        [2],
+        paw={
+            "entropy_filter_enabled": False,
+            "reward_adaptive_enabled": False,
+        },
+    )
+    adaptive_turn = _sidecar(
+        [10, 11],
+        [0, 1],
+        [2],
+        paw={
+            "entropy_filter_enabled": False,
+            "reward_adaptive_enabled": True,
+        },
+    )
+    fixed_sidecars = [
+        concat_padded_tensors([fixed_turn, fixed_turn]),
+        fixed_turn,
+    ]
+    adaptive_sidecars = [
+        concat_padded_tensors([adaptive_turn, adaptive_turn]),
+        adaptive_turn,
+    ]
+
+    _prepare_paw_world_model_sidecars(rollout, fixed_sidecars)
+    _prepare_paw_world_model_sidecars(rollout, adaptive_sidecars)
+
+    torch.testing.assert_close(
+        torch.cat([row["world_model_response_weight"] for row in fixed_sidecars]),
+        torch.tensor([0.75, 0.75, 1.5]),
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        torch.cat([row["world_model_response_weight"] for row in adaptive_sidecars]),
+        torch.tensor([0.0, 0.0, 3.0]),
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_paw_reward_adaptive_uses_mean_episode_return_within_rollout_group(
+    monkeypatch,
+):
+    """Grouped rollouts average episode returns before computing their WM weight."""
+
+    monkeypatch.setattr(
+        "areal.trainer.rl_trainer.stats_tracker.scalar", lambda **_: None
+    )
+    rollout = [
+        concat_padded_tensors(
+            [
+                _policy_row(trajectory_id=1, reward=0.0, action_logprob=-0.5),
+                _policy_row(trajectory_id=1, reward=1.0, action_logprob=-0.5),
+                _policy_row(trajectory_id=2, reward=-1.0, action_logprob=-0.5),
+            ]
+        ),
+        _policy_row(trajectory_id=3, reward=1.0, action_logprob=-0.5),
+    ]
+    turn = _sidecar(
+        [10, 11],
+        [0, 1],
+        [2],
+        paw={
+            "entropy_filter_enabled": False,
+            "reward_adaptive_enabled": True,
+        },
+    )
+    sidecars = [concat_padded_tensors([turn, turn, turn]), turn]
+
+    _prepare_paw_world_model_sidecars(rollout, sidecars)
+
+    torch.testing.assert_close(
+        torch.cat([row["world_model_response_weight"] for row in sidecars]),
+        torch.tensor([2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 0.0]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_paw_group_without_selected_transition_contributes_zero_wm_term(monkeypatch):
+    """An empty selected set omits that group instead of inflating other groups."""
+
+    monkeypatch.setattr(
+        "areal.trainer.rl_trainer.stats_tracker.scalar", lambda **_: None
+    )
+    rollout = [
+        concat_padded_tensors(
+            [
+                _policy_row(trajectory_id=1, reward=0.0, action_logprob=-0.5),
+                _policy_row(trajectory_id=1, reward=0.0, action_logprob=-0.5),
+            ]
+        ),
+        _policy_row(trajectory_id=2, reward=0.0, action_logprob=-0.5),
+    ]
+    valid_turn = _sidecar(
+        [10, 11],
+        [0, 1],
+        [2],
+        paw={"entropy_filter_enabled": False},
+    )
+    skipped_turn = _sidecar(
+        [],
+        [],
+        [0],
+        paw={"entropy_filter_enabled": False},
+    )
+    sidecars = [
+        concat_padded_tensors([valid_turn, valid_turn]),
+        skipped_turn,
+    ]
+
+    _prepare_paw_world_model_sidecars(rollout, sidecars)
+
+    torch.testing.assert_close(
+        torch.cat([row["world_model_response_weight"] for row in sidecars]),
+        torch.tensor([0.5, 0.5, 0.0]),
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_paw_selected_row_applies_group_response_weight():
+    """PaW response scaling changes WM only and excluded rows add no forward row."""
+
+    policy_batch = {
+        "input_ids": torch.tensor([[1, 2]]),
+        "attention_mask": torch.ones((1, 2), dtype=torch.bool),
+        "loss_mask": torch.tensor([[0, 1]], dtype=torch.float32),
+        "logprobs": torch.zeros((1, 2)),
+        "advantages": torch.ones((1, 2)),
+        "versions": torch.tensor([[-1, 3]]),
+    }
+
+    joint = _append_world_model_rows(
+        policy_batch,
+        [
+            (
+                torch.tensor([10, 11, 12]),
+                torch.tensor([0, 1, 1], dtype=torch.bool),
+                True,
+                2.0,
+            ),
+            (
+                torch.tensor([20, 21]),
+                torch.tensor([0, 1], dtype=torch.bool),
+                False,
+                1.0,
+            ),
+        ],
+        policy_temperature=0.7,
+    )
+
+    assert joint["input_ids"].shape[0] == 2
+    torch.testing.assert_close(
+        joint["world_model_token_weight"][1],
+        torch.tensor([1.0, 1.0, 0.0]),
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_paw_group_weights_produce_mean_of_group_means(monkeypatch):
+    """Final WM loss gives equal mass to groups with unequal selected turn counts."""
+
+    monkeypatch.setattr(
+        "areal.trainer.ppo.actor.stats_tracker.denominator", lambda **_: None
+    )
+    monkeypatch.setattr("areal.trainer.ppo.actor.stats_tracker.stat", lambda **_: None)
+    # Group A has two selected transitions with loss 0.2; group B has one with
+    # loss 0.8. Their rollout-group-balanced weights are 0.75, 0.75, and 1.5.
+    logprobs = torch.tensor([0.0, -0.2, -0.2, -0.8], requires_grad=True)
+    input_data = {
+        "loss_mask": torch.tensor([True, False, False, False]),
+        "world_model_loss_mask": torch.tensor([False, True, True, True]),
+        "world_model_token_weight": torch.tensor([0.0, 0.75, 0.75, 1.5]),
+        "world_model_response_start_mask": torch.tensor([False, True, True, True]),
+        "cu_seqlens": torch.tensor([0, 1, 2, 3, 4], dtype=torch.int32),
+    }
+
+    loss = _merge_policy_world_model_loss(
+        torch.tensor(0.0),
+        logprobs,
+        input_data,
+        global_policy_tokens=torch.tensor(1.0),
+        global_world_model_responses=torch.tensor(3.0),
+        world_model_loss_weight=1.0,
+    )
+
+    torch.testing.assert_close(loss, torch.tensor(0.5), rtol=1e-6, atol=1e-6)
 
 
 def test_joint_loss_equals_ppo_plus_response_balanced_world_model(monkeypatch):
@@ -404,6 +795,43 @@ def test_joint_loss_equals_ppo_plus_response_balanced_world_model(monkeypatch):
         rtol=1e-6,
         atol=1e-6,
     )
+
+
+def test_paw_cmae_clips_confident_tokens_and_keeps_full_response_denominator(
+    monkeypatch,
+):
+    """CMAE uses 1-p, clips only p above rho, and still divides by all targets."""
+
+    monkeypatch.setattr(
+        "areal.trainer.ppo.actor.stats_tracker.denominator", lambda **_: None
+    )
+    monkeypatch.setattr("areal.trainer.ppo.actor.stats_tracker.stat", lambda **_: None)
+    logprobs = torch.log(torch.tensor([1.0, 0.2, 0.3], requires_grad=True))
+    logprobs.retain_grad()
+    input_data = {
+        "loss_mask": torch.tensor([True, False, False]),
+        "world_model_loss_mask": torch.tensor([False, True, True]),
+        "world_model_token_weight": torch.tensor([0.0, 0.5, 0.5]),
+        "world_model_response_start_mask": torch.tensor([False, True, False]),
+        "cu_seqlens": torch.tensor([0, 1, 3], dtype=torch.int32),
+    }
+
+    loss = _merge_policy_world_model_loss(
+        torch.tensor(0.0),
+        logprobs,
+        input_data,
+        global_policy_tokens=torch.tensor(1.0),
+        global_world_model_responses=torch.tensor(1.0),
+        world_model_loss_weight=1.0,
+        paw_enabled=True,
+        cmae_enabled=True,
+        confidence_threshold=0.2,
+    )
+
+    torch.testing.assert_close(loss, torch.tensor(0.4), rtol=1e-6, atol=1e-6)
+    loss.backward()
+    assert logprobs.grad[1] != 0
+    assert logprobs.grad[2] == 0
 
 
 def test_joint_loss_weight_counts_responses_not_world_model_tokens():
