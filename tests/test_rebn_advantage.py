@@ -331,6 +331,62 @@ def test_rebn_advantage_normalizes_each_turn_equally_not_each_token():
     torch.testing.assert_close(result["advantages"], expected, rtol=1e-6, atol=1e-6)
 
 
+def test_rebn_world_model_gate_scales_normalized_outcome_before_token_broadcast():
+    """The four NLL/advantage quadrants change only normalized outcome credit."""
+
+    actor = _make_actor(
+        PPOActorConfig(
+            advantage_estimator="rebn",
+            turn_discount=1.0,
+            kl_ctl=0.0,
+            adv_norm=None,
+        )
+    )
+    data = {
+        "input_ids": torch.zeros((4, 3), dtype=torch.long),
+        "attention_mask": torch.ones((4, 3), dtype=torch.bool),
+        "loss_mask": torch.tensor([[0, 1, 0]] * 4, dtype=torch.long),
+        "logprobs": torch.zeros((4, 3)),
+        "rewards": torch.tensor([1.0, 1.0, -1.0, -1.0]),
+        "trajectory_id": torch.tensor([1, 2, 3, 4]),
+        "turn_idx": torch.ones(4, dtype=torch.long),
+        "world_model_rl_nll": torch.tensor([0.1, 0.9, 0.1, 0.9]),
+        "world_model_rl_surprise": torch.tensor([-1.0, 1.0, -1.0, 1.0]),
+        "world_model_rl_reweight_valid": torch.ones(4, dtype=torch.bool),
+    }
+
+    result = actor._compute_advantages(
+        data,
+        world_model_rl_reweight_config={
+            "enabled": True,
+            "positive_strength": 0.5,
+            "negative_strength": 0.5,
+            "min_weight": 0.1,
+            "max_weight": 2.0,
+        },
+    )
+
+    torch.testing.assert_close(
+        result["world_model_rl_weight"],
+        torch.tensor([0.5, 1.5, 1.5, 0.5]),
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        result["advantages"],
+        torch.tensor(
+            [
+                [0.5, 0.0, 0.0],
+                [1.5, 0.0, 0.0],
+                [-1.5, 0.0, 0.0],
+                [-0.5, 0.0, 0.0],
+            ]
+        ),
+        rtol=0,
+        atol=0,
+    )
+
+
 def test_rebn_rejects_reward_norm():
     with pytest.raises(ValueError, match="reward_norm"):
         PPOActorConfig(
@@ -376,6 +432,7 @@ def test_ppo_update_strips_turn_metadata_before_microbatch_split(monkeypatch):
         assert "trajectory_id" not in data
         assert "turn_idx" not in data
         assert not any(key.startswith("teacher_context_") for key in data)
+        assert not any(key.startswith("world_model_rl_") for key in data)
         raise RuntimeError("split called")
 
     monkeypatch.setattr(_actor_module, "stats_tracker", FakeStatsTracker())
@@ -406,6 +463,12 @@ def test_ppo_update_strips_turn_metadata_before_microbatch_split(monkeypatch):
         "teacher_context_moved_avg_logp": torch.tensor([-2.0]),
         "teacher_context_information_gain": torch.tensor([1.0]),
         "teacher_context_advantage": torch.tensor([0.1]),
+        "world_model_rl_nll": torch.tensor([0.2]),
+        "world_model_rl_surprise": torch.tensor([-1.0]),
+        "world_model_rl_reweight_valid": torch.tensor([True]),
+        "world_model_rl_weight": torch.tensor([1.5]),
+        "world_model_rl_advantage_before_reweight": torch.tensor([-1.0]),
+        "world_model_rl_advantage_after_reweight": torch.tensor([-1.5]),
     }
 
     with pytest.raises(RuntimeError, match="split called"):

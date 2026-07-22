@@ -7,6 +7,7 @@ import math
 import os
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -292,10 +293,108 @@ def _pop_world_model_sidecars(
     return sidecars
 
 
+def _compute_world_model_surprise_scores(
+    nll_by_group: list[torch.Tensor],
+    turn_indices_by_group: list[torch.Tensor],
+    valid_by_group: list[torch.Tensor],
+    config: dict[str, Any],
+) -> list[torch.Tensor]:
+    """Normalize Student prediction NLL within each turn of one PPO update."""
+
+    if not (len(nll_by_group) == len(turn_indices_by_group) == len(valid_by_group)):
+        raise ValueError("World Model RL score group counts must match.")
+    scores = [torch.zeros_like(nll, dtype=torch.float32) for nll in nll_by_group]
+    valid_turns = [
+        turns[valid.bool() & torch.isfinite(nll)]
+        for nll, turns, valid in zip(
+            nll_by_group, turn_indices_by_group, valid_by_group, strict=True
+        )
+    ]
+    if not any(turns.numel() > 0 for turns in valid_turns):
+        return scores
+
+    mode = str(config.get("mode", "continuous"))
+    temperature = float(config.get("continuous_temperature", 1.0))
+    low_threshold = float(config.get("low_threshold", -0.5))
+    high_threshold = float(config.get("high_threshold", 0.5))
+    min_turn_std = float(config.get("min_turn_std", 1e-6))
+    all_turns = torch.cat([turns for turns in valid_turns if turns.numel() > 0])
+
+    for turn_idx in torch.unique(all_turns).tolist():
+        group_masks = [
+            valid.bool() & torch.isfinite(nll) & (turns == turn_idx)
+            for nll, turns, valid in zip(
+                nll_by_group, turn_indices_by_group, valid_by_group, strict=True
+            )
+        ]
+        turn_nll = torch.cat(
+            [
+                nll.float()[mask]
+                for nll, mask in zip(nll_by_group, group_masks, strict=True)
+                if mask.any()
+            ]
+        )
+        if turn_nll.numel() < 2:
+            continue
+        mean = turn_nll.mean()
+        std = turn_nll.std(unbiased=False)
+        if not torch.isfinite(std) or float(std) < min_turn_std:
+            continue
+        for group_index, (nll, mask) in enumerate(
+            zip(nll_by_group, group_masks, strict=True)
+        ):
+            if not mask.any():
+                continue
+            normalized = (nll.float()[mask] - mean) / std
+            if mode == "continuous":
+                score = torch.tanh(normalized / temperature)
+            elif mode == "threshold":
+                score = torch.where(
+                    normalized <= low_threshold,
+                    -torch.ones_like(normalized),
+                    torch.where(
+                        normalized >= high_threshold,
+                        torch.ones_like(normalized),
+                        torch.zeros_like(normalized),
+                    ),
+                )
+            else:
+                raise ValueError(
+                    "world_model.rl_reweight.mode must be 'continuous' or "
+                    f"'threshold', got {mode!r}."
+                )
+            scores[group_index][mask] = score
+    return scores
+
+
+def _attach_world_model_rl_scores(
+    rollout_batch: list[dict[str, Any]],
+    local_batch: list[dict[str, torch.Tensor]],
+    nll_by_group: list[torch.Tensor],
+    valid_by_group: list[torch.Tensor],
+    config: dict[str, Any],
+) -> None:
+    """Attach row-aligned update-relative NLL surprise to PPO trajectories."""
+
+    turn_indices = [trajectory["turn_idx"].reshape(-1) for trajectory in local_batch]
+    scores = _compute_world_model_surprise_scores(
+        nll_by_group, turn_indices, valid_by_group, config
+    )
+    for trajectory, nll, score, valid in zip(
+        rollout_batch, nll_by_group, scores, valid_by_group, strict=True
+    ):
+        trajectory["world_model_rl_nll"] = torch.where(
+            valid, nll.float(), torch.zeros_like(nll, dtype=torch.float32)
+        )
+        trajectory["world_model_rl_surprise"] = score.float()
+        trajectory["world_model_rl_reweight_valid"] = valid.bool()
+
+
 def _collect_world_model_turn_nll(
     actor: Any,
     rollout_batch: list[dict[str, Any]],
     sidecars: list[dict[str, Any]],
+    rl_reweight_config: dict[str, Any] | None = None,
 ) -> list[dict[str, int | float | bool]]:
     """Score each real Student reply with the current actor at temperature one."""
 
@@ -315,17 +414,20 @@ def _collect_world_model_turn_nll(
     )
     prepared_batches: list[dict[str, torch.Tensor] | None] = []
     prepared_target_masks: list[torch.Tensor | None] = []
+    valid_indices_by_group: list[list[int]] = []
     row_metadata: list[list[dict[str, int | float | bool]]] = []
     for trajectory, sidecar in zip(local_batch, local_sidecars, strict=True):
         prepared = _prepare_world_model_logp_batch(sidecar)
         if prepared is None:
             prepared_batches.append(None)
             prepared_target_masks.append(None)
+            valid_indices_by_group.append([])
             row_metadata.append([])
             continue
         forward_batch, target_mask, valid_indices = prepared
         prepared_batches.append(forward_batch)
         prepared_target_masks.append(target_mask)
+        valid_indices_by_group.append(valid_indices)
 
         trajectory_ids = trajectory["trajectory_id"].reshape(-1).tolist()
         turn_indices = trajectory["turn_idx"].reshape(-1).tolist()
@@ -356,7 +458,20 @@ def _collect_world_model_turn_nll(
     template_batch = next(
         (batch for batch in prepared_batches if batch is not None), None
     )
+    nll_by_group = [
+        torch.zeros_like(trajectory["rewards"].reshape(-1), dtype=torch.float32)
+        for trajectory in local_batch
+    ]
+    valid_by_group = [torch.zeros_like(nll, dtype=torch.bool) for nll in nll_by_group]
     if template_batch is None:
+        if rl_reweight_config is not None:
+            _attach_world_model_rl_scores(
+                rollout_batch,
+                local_batch,
+                nll_by_group,
+                valid_by_group,
+                rl_reweight_config,
+            )
         return []
     # TrainController requires the number of dispatched groups to remain divisible
     # by the DP size. Preserve every original rollout-group slot. Empty groups repeat
@@ -384,8 +499,14 @@ def _collect_world_model_turn_nll(
     local_logps = RTensor.localize(computed_logps)
 
     records: list[dict[str, int | float | bool]] = []
-    for logps, target_mask, metadata in zip(
-        local_logps, target_masks, row_metadata, strict=True
+    for group_index, (logps, target_mask, metadata, valid_indices) in enumerate(
+        zip(
+            local_logps,
+            target_masks,
+            row_metadata,
+            valid_indices_by_group,
+            strict=True,
+        )
     ):
         if not metadata:
             continue
@@ -394,6 +515,9 @@ def _collect_world_model_turn_nll(
         mean_nll = (-logps.detach().float() * aligned_mask).sum(
             dim=-1
         ) / target_counts.clamp_min(1)
+        row_indices = torch.tensor(valid_indices, dtype=torch.long)
+        nll_by_group[group_index][row_indices] = mean_nll.cpu()
+        valid_by_group[group_index][row_indices] = target_counts.cpu() > 0
         nll_values = mean_nll.cpu().tolist()
         count_values = target_counts.cpu().tolist()
         for row, nll, token_count in zip(
@@ -406,6 +530,14 @@ def _collect_world_model_turn_nll(
                     "target_tokens": int(token_count),
                 }
             )
+    if rl_reweight_config is not None:
+        _attach_world_model_rl_scores(
+            rollout_batch,
+            local_batch,
+            nll_by_group,
+            valid_by_group,
+            rl_reweight_config,
+        )
     return records
 
 
@@ -1121,10 +1253,25 @@ class PPOTrainer:
             world_model_nll_log_interval = int(
                 getattr(world_model_config, "per_turn_nll_log_every_n_steps", 1)
             )
-            if (
-                log_world_model_nll
-                and world_model_batch is not None
-                and global_step % world_model_nll_log_interval == 0
+            world_model_rl_reweight = getattr(world_model_config, "rl_reweight", None)
+            world_model_rl_reweight_enabled = bool(
+                getattr(world_model_rl_reweight, "enabled", False)
+            )
+            world_model_rl_reweight_config = (
+                asdict(world_model_rl_reweight)
+                if world_model_rl_reweight_enabled
+                else None
+            )
+            should_log_world_model_nll = bool(
+                log_world_model_nll and global_step % world_model_nll_log_interval == 0
+            )
+            if world_model_rl_reweight_enabled and world_model_batch is None:
+                raise RuntimeError(
+                    "World Model RL reweighting is enabled but the rollout did "
+                    "not produce World Model sidecars."
+                )
+            if world_model_batch is not None and (
+                should_log_world_model_nll or world_model_rl_reweight_enabled
             ):
                 with (
                     stats_tracker.record_timing("world_model_nll_diagnostics"),
@@ -1135,11 +1282,15 @@ class PPOTrainer:
                     ),
                 ):
                     world_model_turn_diagnostics = _collect_world_model_turn_nll(
-                        self.actor, rollout_batch, world_model_batch
+                        self.actor,
+                        rollout_batch,
+                        world_model_batch,
+                        rl_reweight_config=world_model_rl_reweight_config,
                     )
-                    self.stats_logger.log_world_model_turn_diagnostics(
-                        global_step, world_model_turn_diagnostics
-                    )
+                    if should_log_world_model_nll:
+                        self.stats_logger.log_world_model_turn_diagnostics(
+                            global_step, world_model_turn_diagnostics
+                        )
                     self.actor.get_device_stats().log("world model NLL diagnostics")
             has_teacher_context_reward = _has_teacher_context_reward(rollout_batch)
             if config.actor.should_compute_prox_logp() or has_teacher_context_reward:
@@ -1176,7 +1327,10 @@ class PPOTrainer:
                     args={"global_step": global_step},
                 ),
             ):
-                adv_batch = self.actor.compute_advantages(rollout_batch)
+                adv_batch = self.actor.compute_advantages(
+                    rollout_batch,
+                    world_model_rl_reweight_config=(world_model_rl_reweight_config),
+                )
                 self.actor.get_device_stats().log("compute advantages")
 
             turn_diagnostics = _collect_turn_diagnostics(adv_batch)

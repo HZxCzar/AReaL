@@ -5,7 +5,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from examples.tutor.configs import TutorPaWConfig, TutorWorldModelConfig
+from examples.tutor.configs import (
+    TutorPaWConfig,
+    TutorWorldModelConfig,
+    TutorWorldModelRLReweightConfig,
+)
 from examples.tutor.core.tensors import (
     response_to_tensordict,
     tokenize_teacher_forced_response,
@@ -21,6 +25,7 @@ from examples.tutor.workflow import TutorAgentWorkflow
 
 from areal.trainer.ppo.actor import (
     _append_world_model_rows,
+    _apply_world_model_rl_reweight,
     _global_joint_counts,
     _joint_loss_weight,
     _merge_policy_world_model_loss,
@@ -28,6 +33,7 @@ from areal.trainer.ppo.actor import (
 )
 from areal.trainer.rl_trainer import (
     _collect_world_model_turn_nll,
+    _compute_world_model_surprise_scores,
     _pop_world_model_sidecars,
     _prepare_paw_world_model_sidecars,
 )
@@ -407,7 +413,12 @@ def test_world_model_turn_nll_logs_standard_ce_and_episode_outcome():
         _sidecar([], [], [0]),
     ]
 
-    records = _collect_world_model_turn_nll(FakeActor(), rollout_batch, sidecars)
+    records = _collect_world_model_turn_nll(
+        FakeActor(),
+        rollout_batch,
+        sidecars,
+        rl_reweight_config={"mode": "continuous"},
+    )
 
     assert records == [
         {
@@ -431,6 +442,24 @@ def test_world_model_turn_nll_logs_standard_ce_and_episode_outcome():
             "target_tokens": 2,
         },
     ]
+    torch.testing.assert_close(
+        rollout_batch[0]["world_model_rl_nll"],
+        torch.tensor([2.0, 4.0]),
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        rollout_batch[0]["world_model_rl_surprise"],
+        torch.zeros(2),
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        rollout_batch[1]["world_model_rl_reweight_valid"],
+        torch.tensor([False]),
+        rtol=0,
+        atol=0,
+    )
 
 
 def test_world_model_turn_nll_preserves_empty_leading_dp_group():
@@ -486,6 +515,78 @@ def test_world_model_turn_nll_skips_forward_when_all_groups_are_empty():
     records = _collect_world_model_turn_nll(FakeActor(), rollout_batch, sidecars)
 
     assert records == []
+
+
+def test_world_model_continuous_surprise_is_normalized_independently_by_turn():
+    """The same raw NLL may be predictable or surprising at different turns."""
+
+    scores = _compute_world_model_surprise_scores(
+        [torch.tensor([1.0, 3.0, 10.0]), torch.tensor([2.0, 1.0])],
+        [torch.tensor([1, 1, 2]), torch.tensor([1, 2])],
+        [torch.tensor([True, True, True]), torch.tensor([True, True])],
+        {"mode": "continuous", "continuous_temperature": 1.0},
+    )
+
+    assert scores[0][0] < 0.0
+    assert scores[0][1] > 0.0
+    torch.testing.assert_close(scores[1][0], torch.tensor(0.0), rtol=0, atol=1e-6)
+    assert scores[0][2] > 0.0
+    assert scores[1][1] < 0.0
+
+
+def test_world_model_threshold_surprise_has_predictable_neutral_and_surprising_bins():
+    """Threshold mode applies a dead zone to per-turn standardized NLL."""
+
+    scores = _compute_world_model_surprise_scores(
+        [torch.tensor([1.0, 2.0, 3.0, 8.0])],
+        [torch.tensor([1, 1, 1, 2])],
+        [torch.tensor([True, True, True, True])],
+        {
+            "mode": "threshold",
+            "low_threshold": -0.5,
+            "high_threshold": 0.5,
+        },
+    )
+
+    torch.testing.assert_close(
+        scores[0], torch.tensor([-1.0, 0.0, 1.0, 0.0]), rtol=0, atol=0
+    )
+
+
+def test_world_model_rl_reweight_applies_all_four_advantage_quadrants():
+    """Positive and negative outcome credit use opposite predictability gates."""
+
+    advantages = torch.tensor([1.0, 1.0, -1.0, -1.0, 1.0])
+    weighted, weights = _apply_world_model_rl_reweight(
+        advantages,
+        surprise_scores=torch.tensor([-1.0, 1.0, -1.0, 1.0, 1.0]),
+        score_valid_mask=torch.tensor([True, True, True, True, False]),
+        turn_valid_mask=torch.ones(5, dtype=torch.bool),
+        token_counts=torch.ones(5),
+        config={
+            "positive_strength": 0.5,
+            "negative_strength": 0.5,
+            "min_weight": 0.1,
+            "max_weight": 2.0,
+        },
+    )
+
+    torch.testing.assert_close(
+        weights, torch.tensor([0.5, 1.5, 1.5, 0.5, 1.0]), rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        weighted, torch.tensor([0.5, 1.5, -1.5, -0.5, 1.0]), rtol=0, atol=0
+    )
+
+
+def test_world_model_rl_reweight_requires_world_model_training():
+    """The optional PPO gate cannot run without WM rollout targets."""
+
+    with pytest.raises(ValueError, match="world_model.enabled must be true"):
+        TutorWorldModelConfig(
+            enabled=False,
+            rl_reweight=TutorWorldModelRLReweightConfig(enabled=True),
+        )
 
 
 def test_world_model_rows_use_disjoint_shifted_loss_masks():

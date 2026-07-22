@@ -568,6 +568,81 @@ def _broadcast_turn_values_to_tokens(
     return turn_values.float().unsqueeze(-1).expand_as(loss_mask) * loss_mask.float()
 
 
+def _apply_world_model_rl_reweight(
+    turn_advantages: torch.Tensor,
+    surprise_scores: torch.Tensor,
+    score_valid_mask: torch.Tensor,
+    turn_valid_mask: torch.Tensor,
+    token_counts: torch.Tensor,
+    config: dict[str, Any],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply the sign-aware 2x2 World Model gate to normalized turn returns."""
+
+    expected_shape = turn_advantages.shape
+    named_tensors = {
+        "surprise_scores": surprise_scores,
+        "score_valid_mask": score_valid_mask,
+        "turn_valid_mask": turn_valid_mask,
+        "token_counts": token_counts,
+    }
+    invalid_shapes = {
+        name: value.shape
+        for name, value in named_tensors.items()
+        if value.shape != expected_shape
+    }
+    if invalid_shapes:
+        raise ValueError(
+            "World Model RL reweight tensors must have identical row shapes: "
+            f"advantages={expected_shape}, invalid={invalid_shapes}."
+        )
+
+    advantages = turn_advantages.float()
+    scores = surprise_scores.detach().float().clamp(min=-1.0, max=1.0)
+    valid_mask = (
+        score_valid_mask.bool()
+        & turn_valid_mask.bool()
+        & torch.isfinite(scores)
+        & torch.isfinite(advantages)
+        & (token_counts > 0)
+    )
+    positive_mask = valid_mask & (advantages > 0.0)
+    negative_mask = valid_mask & (advantages < 0.0)
+    positive_strength = float(config.get("positive_strength", 1.0))
+    negative_strength = float(config.get("negative_strength", 1.0))
+    min_weight = float(config.get("min_weight", 0.5))
+    max_weight = float(config.get("max_weight", 2.0))
+
+    weights = torch.ones_like(advantages)
+    weights = torch.where(
+        positive_mask,
+        1.0 + positive_strength * scores,
+        weights,
+    )
+    weights = torch.where(
+        negative_mask,
+        1.0 - negative_strength * scores,
+        weights,
+    )
+    weights = weights.clamp(min=min_weight, max=max_weight)
+
+    # Preserve the effective PPO learning rate separately on positive and negative
+    # outcome credit. Token counts match the denominator used after broadcasting.
+    token_counts = token_counts.detach().float()
+    for sign_mask in (positive_mask, negative_mask):
+        weighted_sum = (weights * token_counts * sign_mask).sum()
+        denominator = (token_counts * sign_mask).sum()
+        if dist.is_initialized():
+            dist.all_reduce(weighted_sum, op=dist.ReduceOp.SUM)
+            dist.all_reduce(denominator, op=dist.ReduceOp.SUM)
+        mean_weight = weighted_sum / denominator.clamp_min(1.0)
+        normalized = weights / mean_weight.clamp_min(1e-6)
+        weights = torch.where(sign_mask, normalized, weights)
+
+    weights = weights.clamp(min=min_weight, max=max_weight)
+    weights = torch.where(valid_mask, weights, torch.ones_like(weights))
+    return advantages * weights, weights
+
+
 class PPOActor:
     def __init__(self, config: PPOActorConfig, engine: TrainEngine):
         self.config = config
@@ -666,10 +741,22 @@ class PPOActor:
         )
 
     @trace_perf("ppo_actor.compute_advantages", category="compute")
-    def compute_advantages(self, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return batched_call(self._compute_advantages, data)
+    def compute_advantages(
+        self,
+        data: list[dict[str, Any]],
+        world_model_rl_reweight_config: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        compute_fn = functools.partial(
+            self._compute_advantages,
+            world_model_rl_reweight_config=world_model_rl_reweight_config,
+        )
+        return batched_call(compute_fn, data)
 
-    def _compute_advantages(self, data: dict[str, Any]) -> dict[str, Any]:
+    def _compute_advantages(
+        self,
+        data: dict[str, Any],
+        world_model_rl_reweight_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         bs = data["input_ids"].shape[0]
         batch_indices = torch.arange(
             bs, device=data["input_ids"].device, dtype=torch.long
@@ -732,6 +819,27 @@ class PPOActor:
             raise ValueError(
                 "Teacher context local advantages require advantage_estimator='rebn'."
             )
+        world_model_rl_reweight_enabled = bool(
+            world_model_rl_reweight_config
+            and world_model_rl_reweight_config.get("enabled", False)
+        )
+        world_model_rl_keys = {
+            "world_model_rl_nll",
+            "world_model_rl_surprise",
+            "world_model_rl_reweight_valid",
+        }
+        present_world_model_rl_keys = world_model_rl_keys.intersection(data)
+        if world_model_rl_reweight_enabled:
+            if present_world_model_rl_keys != world_model_rl_keys:
+                missing = sorted(world_model_rl_keys - present_world_model_rl_keys)
+                raise ValueError(
+                    "Incomplete World Model RL reweight metadata; missing: "
+                    + ", ".join(missing)
+                )
+            if self.config.advantage_estimator != "rebn":
+                raise ValueError(
+                    "World Model RL reweighting requires advantage_estimator='rebn'."
+                )
 
         # Reward Scaling
         reward_score = data["rewards"]
@@ -848,6 +956,35 @@ class PPOActor:
                 )
             else:
                 normalized_turn_returns = turn_returns
+            if world_model_rl_reweight_enabled:
+                data["world_model_rl_nll"] = data["world_model_rl_nll"].to(
+                    reward_score.device
+                )
+                data["world_model_rl_surprise"] = data["world_model_rl_surprise"].to(
+                    reward_score.device
+                )
+                data["world_model_rl_reweight_valid"] = data[
+                    "world_model_rl_reweight_valid"
+                ].to(reward_score.device)
+                turn_advantage_before_reweight = normalized_turn_returns.clone()
+                (
+                    normalized_turn_returns,
+                    world_model_rl_weights,
+                ) = _apply_world_model_rl_reweight(
+                    normalized_turn_returns,
+                    data["world_model_rl_surprise"],
+                    data["world_model_rl_reweight_valid"],
+                    valid_turn_mask,
+                    loss_mask.sum(dim=-1),
+                    world_model_rl_reweight_config,
+                )
+                data["world_model_rl_advantage_before_reweight"] = (
+                    turn_advantage_before_reweight
+                )
+                data["world_model_rl_advantage_after_reweight"] = (
+                    normalized_turn_returns
+                )
+                data["world_model_rl_weight"] = world_model_rl_weights
             if batch_centered_penalties is not None:
                 normalized_turn_returns = (
                     normalized_turn_returns + batch_centered_penalties
@@ -976,6 +1113,35 @@ class PPOActor:
             result_denominators["teacher_context_reward_valid"] = data[
                 "teacher_context_reward_valid"
             ].bool()
+        if "world_model_rl_reweight_valid" in data:
+            world_model_rl_valid = data["world_model_rl_reweight_valid"].bool()
+            world_model_rl_advantage = data[
+                "world_model_rl_advantage_before_reweight"
+            ].float()
+            world_model_rl_surprise = data["world_model_rl_surprise"].float()
+            result_denominators.update(
+                world_model_rl_reweight_valid=world_model_rl_valid,
+                world_model_rl_positive_predictable=(
+                    world_model_rl_valid
+                    & (world_model_rl_advantage > 0.0)
+                    & (world_model_rl_surprise < 0.0)
+                ),
+                world_model_rl_positive_surprising=(
+                    world_model_rl_valid
+                    & (world_model_rl_advantage > 0.0)
+                    & (world_model_rl_surprise > 0.0)
+                ),
+                world_model_rl_negative_predictable=(
+                    world_model_rl_valid
+                    & (world_model_rl_advantage < 0.0)
+                    & (world_model_rl_surprise < 0.0)
+                ),
+                world_model_rl_negative_surprising=(
+                    world_model_rl_valid
+                    & (world_model_rl_advantage < 0.0)
+                    & (world_model_rl_surprise > 0.0)
+                ),
+            )
         if self.config.log_agent_stats:
             if "begin_of_trajectory" not in data:
                 raise RuntimeError(
@@ -1040,6 +1206,19 @@ class PPOActor:
                 teacher_context_advantage=data["teacher_context_advantage"].float(),
                 denominator="teacher_context_reward_valid",
             )
+        if "world_model_rl_weight" in data:
+            stats_tracker.stat(
+                world_model_rl_nll=data["world_model_rl_nll"].float(),
+                world_model_rl_surprise=data["world_model_rl_surprise"].float(),
+                world_model_rl_weight=data["world_model_rl_weight"].float(),
+                world_model_rl_advantage_before=data[
+                    "world_model_rl_advantage_before_reweight"
+                ].float(),
+                world_model_rl_advantage_after=data[
+                    "world_model_rl_advantage_after_reweight"
+                ].float(),
+                denominator="world_model_rl_reweight_valid",
+            )
         scalars = dict(
             mask_no_eos_with_zero=self.config.mask_no_eos_with_zero,
             eps_clip=self.config.eps_clip,
@@ -1084,6 +1263,12 @@ class PPOActor:
             "teacher_context_moved_avg_logp",
             "teacher_context_information_gain",
             "teacher_context_advantage",
+            "world_model_rl_nll",
+            "world_model_rl_surprise",
+            "world_model_rl_reweight_valid",
+            "world_model_rl_weight",
+            "world_model_rl_advantage_before_reweight",
+            "world_model_rl_advantage_after_reweight",
             "turn_advantage",
         ]:
             data.pop(key, None)

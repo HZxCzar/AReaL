@@ -916,6 +916,58 @@ class TutorPaWConfig:
 
 
 @dataclass
+class TutorWorldModelRLReweightConfig:
+    """Optional sign-aware PPO advantage scaling from Student prediction NLL."""
+
+    enabled: bool = field(default=False)
+    mode: str = field(
+        default="continuous",
+        metadata={"choices": ["continuous", "threshold"]},
+    )
+    positive_strength: float = field(default=1.0)
+    negative_strength: float = field(default=1.0)
+    min_weight: float = field(default=0.5)
+    max_weight: float = field(default=2.0)
+    continuous_temperature: float = field(default=1.0)
+    low_threshold: float = field(default=-0.5)
+    high_threshold: float = field(default=0.5)
+    min_turn_std: float = field(default=1e-6)
+
+    def __post_init__(self) -> None:
+        self.positive_strength = float(self.positive_strength)
+        self.negative_strength = float(self.negative_strength)
+        self.min_weight = float(self.min_weight)
+        self.max_weight = float(self.max_weight)
+        self.continuous_temperature = float(self.continuous_temperature)
+        self.low_threshold = float(self.low_threshold)
+        self.high_threshold = float(self.high_threshold)
+        self.min_turn_std = float(self.min_turn_std)
+        if self.mode not in {"continuous", "threshold"}:
+            raise ValueError(
+                "world_model.rl_reweight.mode must be 'continuous' or 'threshold'."
+            )
+        if self.positive_strength < 0.0 or self.negative_strength < 0.0:
+            raise ValueError("world_model.rl_reweight strengths must be non-negative.")
+        if not 0.0 < self.min_weight <= 1.0:
+            raise ValueError("world_model.rl_reweight.min_weight must be in (0, 1].")
+        if self.max_weight < 1.0 or self.max_weight < self.min_weight:
+            raise ValueError(
+                "world_model.rl_reweight.max_weight must be >= 1 and min_weight."
+            )
+        if self.continuous_temperature <= 0.0:
+            raise ValueError(
+                "world_model.rl_reweight.continuous_temperature must be positive."
+            )
+        if self.low_threshold >= self.high_threshold:
+            raise ValueError(
+                "world_model.rl_reweight.low_threshold must be smaller than "
+                "high_threshold."
+            )
+        if self.min_turn_std <= 0.0:
+            raise ValueError("world_model.rl_reweight.min_turn_std must be positive.")
+
+
+@dataclass
 class TutorWorldModelConfig:
     """Auxiliary supervised objective for predicting the next Student reply."""
 
@@ -945,6 +997,9 @@ class TutorWorldModelConfig:
         metadata={"help": "Log per-turn World Model NLL every N training steps."},
     )
     paw: TutorPaWConfig = field(default_factory=TutorPaWConfig)
+    rl_reweight: TutorWorldModelRLReweightConfig = field(
+        default_factory=TutorWorldModelRLReweightConfig
+    )
 
     def __post_init__(self) -> None:
         self.loss_weight = float(self.loss_weight)
@@ -961,6 +1016,10 @@ class TutorWorldModelConfig:
         if self.paw.enabled and not self.enabled:
             raise ValueError(
                 "world_model.enabled must be true when world_model.paw.enabled."
+            )
+        if self.rl_reweight.enabled and not self.enabled:
+            raise ValueError(
+                "world_model.enabled must be true when world_model.rl_reweight.enabled."
             )
 
 
