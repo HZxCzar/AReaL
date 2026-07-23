@@ -278,6 +278,47 @@ def _append_world_model_rows(
     return joint_batch
 
 
+def _build_world_model_train_batch(
+    rows: list[tuple[torch.Tensor, torch.Tensor, bool, float]],
+) -> dict[str, torch.Tensor]:
+    """Build a WM-only batch; an empty local shard becomes a zero-loss dummy."""
+
+    if rows:
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            [row[0] for row in rows], batch_first=True
+        )
+        target_mask = torch.nn.utils.rnn.pad_sequence(
+            [row[1].bool() for row in rows], batch_first=True
+        )
+        attention_mask = torch.nn.utils.rnn.pad_sequence(
+            [torch.ones_like(row[0], dtype=torch.bool) for row in rows],
+            batch_first=True,
+        )
+        response_weight = torch.tensor(
+            [row[3] for row in rows], dtype=torch.float32
+        ).unsqueeze(-1)
+    else:
+        input_ids = torch.zeros((1, 1), dtype=torch.long)
+        target_mask = torch.zeros((1, 1), dtype=torch.bool)
+        attention_mask = torch.ones((1, 1), dtype=torch.bool)
+        response_weight = torch.zeros((1, 1), dtype=torch.float32)
+
+    aligned_target_mask = torch.roll(target_mask, shifts=-1, dims=-1)
+    target_counts = aligned_target_mask.sum(dim=-1, keepdim=True).clamp_min(1)
+    token_weight = aligned_target_mask.float() / target_counts * response_weight
+    response_start_mask = aligned_target_mask & (
+        aligned_target_mask.long().cumsum(dim=-1) == 1
+    )
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "token_logprob_temperature": torch.ones_like(input_ids, dtype=torch.float32),
+        "world_model_loss_mask": aligned_target_mask,
+        "world_model_token_weight": token_weight,
+        "world_model_response_start_mask": response_start_mask,
+    }
+
+
 def _joint_loss_weight(input_data: dict[str, Any]) -> torch.Tensor:
     return (
         input_data["loss_mask"].count_nonzero()
@@ -287,6 +328,59 @@ def _joint_loss_weight(input_data: dict[str, Any]) -> torch.Tensor:
 
 def _policy_loss_weight(input_data: dict[str, Any]) -> torch.Tensor:
     return input_data["loss_mask"].count_nonzero()
+
+
+def _world_model_loss_weight(input_data: dict[str, Any]) -> torch.Tensor:
+    return input_data["world_model_response_start_mask"].count_nonzero()
+
+
+def world_model_loss_fn(
+    logprobs: torch.Tensor,
+    entropy: torch.Tensor,
+    input_data: dict[str, Any],
+    *,
+    world_model_loss_weight: float,
+    paw_enabled: bool = False,
+    cmae_enabled: bool = False,
+    confidence_threshold: float = 0.2,
+    **_: Any,
+) -> torch.Tensor:
+    """Response-balanced CE/CMAE objective for the isolated WM adapter."""
+
+    del entropy
+    loss_mask = input_data["world_model_loss_mask"].bool()
+    token_weight = input_data["world_model_token_weight"].to(logprobs.dtype)
+    response_starts = input_data["world_model_response_start_mask"].bool()
+    target_probabilities = logprobs.exp()
+    if paw_enabled and cmae_enabled:
+        confidence_mask = target_probabilities <= float(confidence_threshold)
+        token_loss = (1.0 - target_probabilities) * confidence_mask
+        clipped_mask = loss_mask & ~confidence_mask
+    else:
+        confidence_mask = loss_mask
+        clipped_mask = torch.zeros_like(loss_mask)
+        token_loss = -logprobs
+
+    response_count = response_starts.count_nonzero().to(logprobs.dtype)
+    response_loss_sum = (token_loss * token_weight).sum()
+    coefficient = torch.as_tensor(
+        world_model_loss_weight, dtype=logprobs.dtype, device=logprobs.device
+    )
+    stats_tracker.denominator(
+        world_model_target_tokens=loss_mask,
+        world_model_responses=response_starts,
+    )
+    stats_tracker.stat(
+        world_model_token_nll=(-logprobs.detach()).float(),
+        world_model_cmae_active=confidence_mask.detach().float(),
+        world_model_cmae_clipped=clipped_mask.detach().float(),
+        denominator="world_model_target_tokens",
+    )
+    return torch.where(
+        response_count > 0,
+        coefficient * response_loss_sum / response_count.clamp_min(1),
+        logprobs.sum() * 0.0,
+    )
 
 
 def _global_joint_counts(
@@ -733,6 +827,17 @@ class PPOActor:
     def compute_logp(self, data: list[dict[str, Any]]) -> list[torch.Tensor] | None:
         return batched_call(self._compute_logp, data)
 
+    @trace_perf("ppo_actor.compute_world_model_logp", category="compute")
+    @torch.no_grad()
+    def compute_world_model_logp(
+        self, data: list[dict[str, Any]]
+    ) -> list[torch.Tensor] | None:
+        self.engine.activate_world_model_adapter()
+        return batched_call(self._compute_logp, data)
+
+    def activate_policy_adapter(self) -> None:
+        self.engine.activate_policy_adapter()
+
     def _compute_logp(self, data: dict[str, Any]) -> torch.Tensor | None:
         self.engine.eval()
         return self.engine.forward(
@@ -1090,6 +1195,84 @@ class PPOActor:
         batched_world_model["world_model_loss_weight"] = loss_weights.pop()
         self._ppo_update(batched_data, world_model_batch=batched_world_model)
 
+    @trace_perf("ppo_actor.world_model_update", category="compute")
+    @stats_tracker.scope_func_wrapper("world_model_actor")
+    def world_model_update(
+        self,
+        world_model_batch: list[dict[str, Any]],
+    ) -> bool:
+        if not world_model_batch:
+            return False
+        loss_weights = {
+            float(sidecar["world_model_loss_weight"]) for sidecar in world_model_batch
+        }
+        if len(loss_weights) != 1:
+            raise ValueError(
+                "World Model loss weight must be identical across a training batch."
+            )
+        batched_world_model = concat_padded_tensors(world_model_batch)
+        rows = _unpack_world_model_rows(
+            batched_world_model,
+            expected_rows=batched_world_model["world_model_seq_lens"].numel(),
+        )
+        selected_rows = [
+            row for row in rows if row[2] and row[0].numel() > 0 and bool(row[1].any())
+        ]
+
+        local_count = torch.tensor([len(selected_rows)], dtype=torch.long)
+        if dist.is_initialized():
+            gathered_counts = [
+                torch.zeros_like(local_count)
+                for _ in range(dist.get_world_size(group=self.engine.cpu_group))
+            ]
+            dist.all_gather(
+                gathered_counts,
+                local_count,
+                group=self.engine.cpu_group,
+            )
+            data_parallel_ranks = dist.get_process_group_ranks(
+                self.engine.data_parallel_group
+            )
+            counts = [
+                int(gathered_counts[global_rank]) for global_rank in data_parallel_ranks
+            ]
+            rank = self.engine.data_parallel_rank
+        else:
+            counts = [len(selected_rows)]
+            rank = 0
+        total_selected = sum(counts)
+        if total_selected == 0:
+            return False
+
+        update_count = min(self.config.ppo_n_minibatches, total_selected)
+        prefix = sum(counts[:rank])
+        update_rows: list[list[tuple[torch.Tensor, torch.Tensor, bool, float]]] = [
+            [] for _ in range(update_count)
+        ]
+        for local_index, row in enumerate(selected_rows):
+            update_rows[(prefix + local_index) % update_count].append(row)
+
+        paw_config = dict(batched_world_model.get("world_model_paw_config") or {})
+        loss_fn = functools.partial(
+            world_model_loss_fn,
+            world_model_loss_weight=loss_weights.pop(),
+            paw_enabled=bool(paw_config.get("enabled", False)),
+            cmae_enabled=bool(paw_config.get("cmae_enabled", True)),
+            confidence_threshold=float(paw_config.get("confidence_threshold", 0.2)),
+        )
+        self.engine.activate_world_model_adapter()
+        self.engine.train()
+        with stats_tracker.scope("update"):
+            for rows_for_update in update_rows:
+                train_stat = self.engine.train_batch(
+                    _build_world_model_train_batch(rows_for_update),
+                    loss_fn=loss_fn,
+                    loss_weight_fn=_world_model_loss_weight,
+                )
+                stats_tracker.scalar(**train_stat)
+        self.engine.lr_scheduler_step()
+        return True
+
     def _ppo_update(
         self,
         data: dict[str, Any],
@@ -1369,6 +1552,22 @@ class PPOActorController(TrainController):
         return self._custom_function_call(
             "compute_logp", *args, rpc_meta={"broadcast": True}, **kwargs
         )
+
+    def compute_world_model_logp(self, *args, **kwargs):
+        return self._custom_function_call(
+            "compute_world_model_logp",
+            *args,
+            rpc_meta={"broadcast": True},
+            **kwargs,
+        )
+
+    def world_model_update(self, *args, **kwargs) -> bool:
+        return self._custom_function_call(
+            "world_model_update", *args, rpc_meta={"broadcast": True}, **kwargs
+        )
+
+    def activate_policy_adapter(self) -> None:
+        self._custom_function_call("activate_policy_adapter")
 
     def compute_advantages(self, *args, **kwargs):
         return self._custom_function_call(

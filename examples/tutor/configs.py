@@ -464,12 +464,22 @@ class TutorTeacherPreConfig:
             "choices": ["filter_solver"],
         },
     )
+    verify: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Judge teacher pre-solve drafts and skip the rollout unless one "
+                "is correct. When disabled, generate exactly one unverified draft "
+                "and continue without calling the answer judge."
+            )
+        },
+    )
     attempts: int = field(
         default=3,
         metadata={
             "help": (
-                "Maximum teacher pre-solve attempts. If no attempt is correct, "
-                "the sample is skipped for this rollout."
+                "Maximum teacher pre-solve attempts when verification is enabled. "
+                "If no attempt is correct, the sample is skipped for this rollout."
             )
         },
     )
@@ -972,6 +982,15 @@ class TutorWorldModelConfig:
     """Auxiliary supervised objective for predicting the next Student reply."""
 
     enabled: bool = field(default=False)
+    separate_lora_enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Train the World Model objective with a separate LoRA adapter. "
+                "Disabled by default to preserve joint PPO/World Model training."
+            )
+        },
+    )
     loss_weight: float = field(
         default=0.05,
         metadata={
@@ -1009,6 +1028,11 @@ class TutorWorldModelConfig:
             raise ValueError("world_model.loss_weight must be positive when enabled.")
         if self.enabled and not self.system_prompt:
             raise ValueError("world_model.system_prompt is required when enabled.")
+        if self.separate_lora_enabled and not self.enabled:
+            raise ValueError(
+                "world_model.enabled must be true when "
+                "world_model.separate_lora_enabled."
+            )
         if self.per_turn_nll_log_every_n_steps < 1:
             raise ValueError(
                 "world_model.per_turn_nll_log_every_n_steps must be at least 1."
@@ -1130,6 +1154,17 @@ class TutorConfig(GRPOConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.world_model.separate_lora_enabled:
+            if not self.actor.backend.startswith("fsdp:"):
+                raise ValueError(
+                    "world_model.separate_lora_enabled currently requires an "
+                    "FSDP actor backend."
+                )
+            if self.actor._version != "v1":
+                raise ValueError(
+                    "world_model.separate_lora_enabled currently requires the v1 "
+                    "training controller."
+                )
         if self.actor.mask_no_eos_with_zero:
             raise ValueError(
                 "Tutor does not support actor.mask_no_eos_with_zero because its "

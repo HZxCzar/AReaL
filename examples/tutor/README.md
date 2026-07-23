@@ -121,6 +121,9 @@ python3 examples/tutor/train.py \
   scheduler.type=local
 ```
 
+Set `teacher_pre.verify=false` to generate one private teacher draft without judging
+or retrying it; the rollout continues even if that draft is incorrect.
+
 `auxiliary_model` is the fixed leak/answer judge. To train against a mix of API
 students, configure any number of entries under `student_models`:
 

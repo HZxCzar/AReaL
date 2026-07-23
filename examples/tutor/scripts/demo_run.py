@@ -225,6 +225,7 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         teacher_show_ground_truth=config.teacher_show_ground_truth,
         teacher_pre_enabled=teacher_pre.enabled,
         teacher_pre_mode=teacher_pre.mode,
+        teacher_pre_verify=teacher_pre.verify,
         teacher_pre_attempts=teacher_pre.attempts,
         teacher_pre_max_tokens=teacher_pre.max_tokens,
         student_system_prompt=config.student_system_prompt,

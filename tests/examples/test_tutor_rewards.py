@@ -1472,6 +1472,48 @@ def test_teacher_pre_solve_retries_until_correct(monkeypatch):
     assert calls[0][1]["lora_version"] == 7
 
 
+def test_teacher_pre_solve_without_verification_uses_one_unjudged_draft(
+    monkeypatch,
+):
+    """Disabling verification avoids judging or retrying the private draft."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.teacher_pre_mode = "filter_solver"
+    workflow.teacher_pre_verify = False
+    workflow.teacher_pre_attempts = 3
+    workflow.teacher_pre_max_tokens = 128
+    workflow.max_completion_tokens = 512
+    calls = []
+
+    class FakeActor:
+        async def generate(self, messages, **kwargs):
+            calls.append((messages, kwargs))
+            return types.SimpleNamespace(raw_text="an unverified draft")
+
+    async def fail_score(*_args, **_kwargs):
+        raise AssertionError("an unverified teacher draft must not be judged")
+
+    monkeypatch.setattr(workflow, "_score_answer_async", fail_score)
+
+    result = asyncio.run(
+        workflow._run_teacher_pre_solve(
+            "task",
+            "42",
+            actor_caller=FakeActor(),
+            answer_judge_caller=None,
+            lora_version=7,
+        )
+    )
+
+    assert result.accepted is True
+    assert result.verification_enabled is False
+    assert result.raw_output == "an unverified draft"
+    assert len(result.attempts) == 1
+    assert result.attempts[0].judge_result is None
+    assert len(calls) == 1
+
+
 def test_default_success_reward_goes_to_success_turn_only():
     turns = [_turn(1), _turn(2), _turn(3, correct=True)]
     assignments = asyncio.run(

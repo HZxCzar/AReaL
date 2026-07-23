@@ -477,6 +477,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_show_ground_truth: bool = False,
         teacher_pre_enabled: bool = False,
         teacher_pre_mode: str = "filter_solver",
+        teacher_pre_verify: bool = True,
         teacher_pre_attempts: int = 3,
         teacher_pre_max_tokens: int = 0,
         student_system_prompt: str = "",
@@ -774,6 +775,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.teacher_pre_mode = (teacher_pre_mode or "filter_solver").strip()
         if self.teacher_pre_mode != "filter_solver":
             raise ValueError("teacher_pre_mode must be 'filter_solver'.")
+        self.teacher_pre_verify = bool(teacher_pre_verify)
         self.teacher_pre_attempts = int(teacher_pre_attempts)
         if self.teacher_pre_attempts < 1:
             raise ValueError("teacher_pre_attempts must be >= 1.")
@@ -2048,7 +2050,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         attempts: list[TeacherPreSolveAttempt] = []
         messages = self._build_teacher_pre_solve_messages(task=task)
         max_completion_tokens = self._teacher_pre_solve_tokens()
-        for attempt_idx in range(1, self.teacher_pre_attempts + 1):
+        verification_enabled = bool(getattr(self, "teacher_pre_verify", True))
+        attempt_count = self.teacher_pre_attempts if verification_enabled else 1
+        for attempt_idx in range(1, attempt_count + 1):
             try:
                 result = await actor_caller.generate(
                     messages,
@@ -2069,6 +2073,25 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 continue
 
             raw_output = str(result.raw_text or "").strip()
+            if not verification_enabled:
+                attempts.append(
+                    TeacherPreSolveAttempt(
+                        attempt=attempt_idx,
+                        raw_output=raw_output,
+                        error=None,
+                        accepted=True,
+                        judge_result=None,
+                    )
+                )
+                return TeacherPreSolveResult(
+                    enabled=True,
+                    mode=self.teacher_pre_mode,
+                    accepted=True,
+                    attempts=attempts,
+                    raw_output=raw_output,
+                    error=None,
+                    verification_enabled=False,
+                )
             judge_result = await self._score_answer_async(
                 task,
                 ground_truth,
@@ -2093,6 +2116,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     attempts=attempts,
                     raw_output=raw_output,
                     error=None,
+                    verification_enabled=True,
                 )
 
         return TeacherPreSolveResult(
@@ -2102,9 +2126,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             attempts=attempts,
             raw_output="",
             error=(
-                "no correct teacher pre-solve after "
-                f"{self.teacher_pre_attempts} attempts"
+                f"no correct teacher pre-solve after {attempt_count} attempts"
+                if verification_enabled
+                else "teacher pre-solve draft generation failed"
             ),
+            verification_enabled=verification_enabled,
         )
 
     async def _generate_tutor_response(
@@ -3211,6 +3237,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return {
             "enabled": bool(result.enabled),
             "mode": result.mode,
+            "verification_enabled": bool(result.verification_enabled),
             "accepted": bool(result.accepted),
             "raw_output": result.raw_output,
             "error": result.error,
@@ -3461,6 +3488,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
         }
         if teacher_pre_solve_result is not None:
+            metrics["teacher_pre/verification_enabled"] = float(
+                teacher_pre_solve_result.verification_enabled
+            )
             metrics["teacher_pre/accepted"] = float(teacher_pre_solve_result.accepted)
             metrics["teacher_pre/attempts"] = float(
                 len(teacher_pre_solve_result.attempts)

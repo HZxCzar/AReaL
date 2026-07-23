@@ -395,6 +395,7 @@ def _collect_world_model_turn_nll(
     rollout_batch: list[dict[str, Any]],
     sidecars: list[dict[str, Any]],
     rl_reweight_config: dict[str, Any] | None = None,
+    use_separate_lora: bool = False,
 ) -> list[dict[str, int | float | bool]]:
     """Score each real Student reply with the current actor at temperature one."""
 
@@ -491,7 +492,10 @@ def _collect_world_model_turn_nll(
             assert target_mask is not None
             forward_batches.append(batch)
             target_masks.append(target_mask)
-    computed_logps = actor.compute_logp(forward_batches)
+    if use_separate_lora:
+        computed_logps = actor.compute_world_model_logp(forward_batches)
+    else:
+        computed_logps = actor.compute_logp(forward_batches)
     if computed_logps is None or len(computed_logps) != len(forward_batches):
         raise RuntimeError(
             "World Model diagnostics forward pass did not return one tensor per group."
@@ -855,7 +859,11 @@ class PPOTrainer:
         # Initialize engines first — the scheduler must know about roles
         # before the data controller can colocate with them.
         engine_init_kwargs = {"addr": None, "ft_spec": ft_spec}
-        self.actor.initialize(**engine_init_kwargs, role="actor")
+        actor_init_kwargs = dict(engine_init_kwargs)
+        world_model_config = getattr(config, "world_model", None)
+        if bool(getattr(world_model_config, "separate_lora_enabled", False)):
+            actor_init_kwargs["world_model_separate_lora"] = True
+        self.actor.initialize(**actor_init_kwargs, role="actor")
         if self.critic is not None:
             self.critic.initialize(**engine_init_kwargs, role="critic")
         if self.ref is not None:
@@ -1247,6 +1255,9 @@ class PPOTrainer:
             if self._should_offload_actor:
                 self._onload_model(self.actor, role="actor")
             world_model_config = getattr(config, "world_model", None)
+            separate_world_model_lora = bool(
+                getattr(world_model_config, "separate_lora_enabled", False)
+            )
             log_world_model_nll = bool(
                 getattr(world_model_config, "log_per_turn_nll", False)
             )
@@ -1286,12 +1297,30 @@ class PPOTrainer:
                         rollout_batch,
                         world_model_batch,
                         rl_reweight_config=world_model_rl_reweight_config,
+                        use_separate_lora=separate_world_model_lora,
                     )
                     if should_log_world_model_nll:
                         self.stats_logger.log_world_model_turn_diagnostics(
                             global_step, world_model_turn_diagnostics
                         )
                     self.actor.get_device_stats().log("world model NLL diagnostics")
+            if separate_world_model_lora:
+                if world_model_batch is None:
+                    raise RuntimeError(
+                        "A separate World Model LoRA is enabled but the rollout "
+                        "did not produce World Model sidecars."
+                    )
+                with (
+                    stats_tracker.record_timing("world_model_train_step"),
+                    perf_tracer.trace_scope(
+                        "train.world_model_update",
+                        category=Category.COMPUTE,
+                        args={"global_step": global_step},
+                    ),
+                ):
+                    self.actor.world_model_update(world_model_batch)
+                    self.actor.activate_policy_adapter()
+                    self.actor.get_device_stats().log("world model update")
             has_teacher_context_reward = _has_teacher_context_reward(rollout_batch)
             if config.actor.should_compute_prox_logp() or has_teacher_context_reward:
                 with (
@@ -1347,7 +1376,7 @@ class PPOTrainer:
                     args={"global_step": global_step},
                 ),
             ):
-                if world_model_batch is None:
+                if world_model_batch is None or separate_world_model_lora:
                     self.actor.ppo_update(adv_batch)
                 else:
                     self.actor.ppo_update(

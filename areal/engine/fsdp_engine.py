@@ -9,7 +9,7 @@ import json
 import math
 import os
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future
 from contextlib import contextmanager, nullcontext
 from datetime import datetime
@@ -144,6 +144,8 @@ if TYPE_CHECKING:
 
 _LORA_DCP_METADATA_FILE = "areal_lora_config.json"
 _LORA_DCP_METADATA_SCHEMA_VERSION = 1
+_POLICY_LORA_ADAPTER = "default"
+_WORLD_MODEL_LORA_ADAPTER = "world_model"
 _LORA_BEHAVIOR_CONFIG_FIELDS = (
     "peft_type",
     "task_type",
@@ -170,6 +172,30 @@ _LORA_BEHAVIOR_CONFIG_FIELDS = (
     "arrow_config",
     "ensure_weight_tying",
 )
+
+
+def _merge_saved_lora_adapter_state(
+    full_state: dict[str, torch.Tensor],
+    saved_adapter_state: dict[str, torch.Tensor],
+    adapter_name: str,
+) -> None:
+    """Merge PEFT's adapter-only save format into a full multi-adapter state."""
+
+    adapter_marker = f".{adapter_name}."
+    saved_to_full_key = {
+        full_key.replace(adapter_marker, ".", 1): full_key
+        for full_key in full_state
+        if "lora_" in full_key and adapter_marker in full_key
+    }
+    missing = sorted(set(saved_to_full_key).difference(saved_adapter_state))
+    unexpected = sorted(set(saved_adapter_state).difference(saved_to_full_key))
+    if missing or unexpected:
+        raise ValueError(
+            f"LoRA adapter {adapter_name!r} does not match the current model: "
+            f"missing={missing[:5]!r}, unexpected={unexpected[:5]!r}."
+        )
+    for saved_key, tensor in saved_adapter_state.items():
+        full_state[saved_to_full_key[saved_key]] = tensor
 
 
 @dataclasses.dataclass
@@ -221,6 +247,10 @@ class FSDPEngine(TrainEngine):
 
         self.model: torch.nn.Module
         self.optimizer: torch.optim.Optimizer
+        self._separate_lora_enabled = False
+        self._active_lora_adapter = _POLICY_LORA_ADAPTER
+        self._adapter_optimizers: dict[str, torch.optim.Optimizer] = {}
+        self._adapter_lr_schedulers: dict[str, Any] = {}
         self.tokenizer: PreTrainedTokenizerFast
         self.processor: ProcessorMixin | None = None
         self.model_config: PretrainedConfig
@@ -307,12 +337,21 @@ class FSDPEngine(TrainEngine):
 
         self.logger.info(f"Data parallel head {self.dp_head} and rank {self.dp_rank}")
 
-    def initialize(self, addr: str | None, ft_spec: FinetuneSpec, *args, **kwargs):
+    def initialize(
+        self,
+        addr: str | None,
+        ft_spec: FinetuneSpec,
+        *args,
+        world_model_separate_lora: bool = False,
+        **kwargs,
+    ):
         # Initialize distributed enviroments and load model.
         assert addr is None, "FSDPEngine does not support remote initialization."
         assert ft_spec is not None, "FSDPEngine requires FinetuneSpec to initialize."
         if pkg_version.is_version_less("torch", "2.4.0"):
             raise RuntimeError("areal only supports FSDP2, which requires torch>=2.4.0")
+        self._separate_lora_enabled = bool(world_model_separate_lora)
+        self._validate_separate_lora_config()
 
         if is_tms_enabled():
             torch_memory_saver.hook_mode = "preload"
@@ -420,6 +459,27 @@ class FSDPEngine(TrainEngine):
 
         self._initialized = True
 
+    def _validate_separate_lora_config(self) -> None:
+        """Validate the optional dual-LoRA layout at its engine boundary."""
+
+        if not self._separate_lora_enabled:
+            return
+        if not self.config.use_lora or self.config.peft_type != "lora":
+            raise ValueError(
+                "A separate World Model adapter requires FSDP LoRA training."
+            )
+        if self.config.optimizer is None:
+            raise ValueError("A separate World Model adapter requires an optimizer.")
+        if self.config.fsdp.per_layer_optim_step:
+            raise ValueError(
+                "A separate World Model adapter does not support per-layer "
+                "optimizer stepping."
+            )
+        if self.config.enable_tree_training:
+            raise ValueError(
+                "A separate World Model adapter does not support tree training."
+            )
+
     @property
     def data_parallel_group(self) -> dist.ProcessGroup:
         return self.dp_group
@@ -445,6 +505,8 @@ class FSDPEngine(TrainEngine):
         self._initialized = False
         if hasattr(self, "optimizer"):
             del self.optimizer
+        self._adapter_optimizers.clear()
+        self._adapter_lr_schedulers.clear()
         if hasattr(self, "model"):
             del self.model
         if self._per_layer_optim_wrapper is not None:
@@ -530,6 +592,8 @@ class FSDPEngine(TrainEngine):
     def update_weights(self, meta: WeightUpdateMeta):
         self._check_rollout_engine_connected()
         with self._offload_aware_context():
+            if self._separate_lora_enabled:
+                self.activate_policy_adapter()
             if meta.type == "xccl":
                 assert self.weight_update_group_initialized
                 self._update_weights_from_distributed(meta)
@@ -591,13 +655,44 @@ class FSDPEngine(TrainEngine):
         assert self.optimizer is not None
         self.optimizer.zero_grad()
 
+    def activate_lora_adapter(self, adapter_name: str) -> None:
+        """Activate one resident LoRA and its isolated optimizer state."""
+
+        if not self._separate_lora_enabled:
+            if adapter_name != _POLICY_LORA_ADAPTER:
+                raise RuntimeError(
+                    "The World Model LoRA adapter is not enabled for this engine."
+                )
+            return
+        if adapter_name not in self._adapter_optimizers:
+            raise ValueError(f"Unknown LoRA adapter {adapter_name!r}.")
+        if self._active_lora_adapter != adapter_name or not hasattr(self, "optimizer"):
+            previous_optimizer = self._adapter_optimizers.get(self._active_lora_adapter)
+            if previous_optimizer is not None:
+                previous_optimizer.zero_grad(set_to_none=True)
+            self.model.set_adapter(adapter_name)
+            self._active_lora_adapter = adapter_name
+        self.optimizer = self._adapter_optimizers[adapter_name]
+        self.lr_scheduler = self._adapter_lr_schedulers[adapter_name]
+
+    def activate_policy_adapter(self) -> None:
+        self.activate_lora_adapter(_POLICY_LORA_ADAPTER)
+
+    def activate_world_model_adapter(self) -> None:
+        self.activate_lora_adapter(_WORLD_MODEL_LORA_ADAPTER)
+
     def optimizer_step(self):
         assert self.optimizer is not None
         assert self.optimizer_config is not None
         assert self.lr_scheduler is not None
 
+        optimizer_parameters = [
+            parameter
+            for group in self.optimizer.param_groups
+            for parameter in group["params"]
+        ]
         grad_norm = fsdp2_clip_grad_norm(
-            list(self.model.parameters()),
+            optimizer_parameters,
             max_norm=self.optimizer_config.gradient_clipping,
             fsdp_group=self.world_mesh["dp_sp"].get_group(),
             tp_group=self.world_mesh["tp"].get_group(),
@@ -1074,9 +1169,11 @@ class FSDPEngine(TrainEngine):
         if self.config.peft_type != "lora":
             raise NotImplementedError()
 
+        active_peft_config: PeftConfig
         if config.init_lora_path:
             adapter_config = PeftConfig.from_pretrained(config.init_lora_path)
             self._validate_init_lora_config(adapter_config)
+            active_peft_config = adapter_config
             self._lora_config_signature = self._build_lora_config_signature(
                 adapter_config
             )
@@ -1101,12 +1198,29 @@ class FSDPEngine(TrainEngine):
                 target_modules=target_modules,
                 bias="none",
             )
+            active_peft_config = peft_config
             self._lora_config_signature = self._build_lora_config_signature(peft_config)
             self.model = get_peft_model(
                 self.model,
                 peft_config,
                 autocast_adapter_dtype=False,
             )
+
+        if self._separate_lora_enabled:
+            self.model.add_adapter(
+                _WORLD_MODEL_LORA_ADAPTER,
+                copy.deepcopy(active_peft_config),
+            )
+            self.model.set_adapter(_POLICY_LORA_ADAPTER)
+            self._active_lora_adapter = _POLICY_LORA_ADAPTER
+            # FSDP must see both adapters as trainable while it installs hooks.
+            # The active adapter is made exclusive again after optimizer creation.
+            for name, parameter in self.model.named_parameters():
+                if "lora_" in name and (
+                    f".{_POLICY_LORA_ADAPTER}." in name
+                    or f".{_WORLD_MODEL_LORA_ADAPTER}." in name
+                ):
+                    parameter.requires_grad_(True)
 
         trainable_lora_params = [
             name
@@ -1119,11 +1233,79 @@ class FSDPEngine(TrainEngine):
         if self.rank == 0:
             self.model.print_trainable_parameters()
 
+    def _create_optimizer_and_scheduler(
+        self,
+        parameters: Iterable[nn.Parameter],
+        ft_spec: FinetuneSpec,
+    ) -> tuple[torch.optim.Optimizer, Any]:
+        assert self.optimizer_config is not None
+        parameter_list = list(parameters)
+        if not parameter_list:
+            raise RuntimeError("Cannot create an optimizer without parameters.")
+        lr = self.optimizer_config.lr
+        weight_decay = self.optimizer_config.weight_decay
+        beta1 = self.optimizer_config.beta1
+        beta2 = self.optimizer_config.beta2
+        eps = self.optimizer_config.eps
+        if self.optimizer_config.type == "adam":
+            optimizer = torch.optim.AdamW(
+                parameter_list,
+                lr=lr,
+                weight_decay=weight_decay,
+                betas=(beta1, beta2),
+                eps=eps,
+                # VLM with tensor parallelism is incompatible with fused AdamW
+                fused=not (self.is_vision_model and self.parallel_helper.tp_enabled),
+            )
+        elif self.optimizer_config.type == "adam_bf16":
+            optimizer = AnyPrecisionAdamW(
+                parameter_list,
+                lr=lr,
+                weight_decay=weight_decay,
+                betas=(beta1, beta2),
+                eps=eps,
+                momentum_dtype="bfloat16",
+                variance_dtype="bfloat16",
+            )
+        else:
+            optimizer = torch.optim.SGD(
+                parameter_list,
+                lr=lr,
+                weight_decay=weight_decay,
+            )
+        total_train_steps = ft_spec.total_train_steps
+        num_warmup_steps = int(
+            self.optimizer_config.warmup_steps_proportion * total_train_steps
+        )
+
+        if self.optimizer_config.lr_scheduler_type == "cosine":
+            scheduler = get_cosine_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps,
+                total_train_steps,
+                min_lr_ratio=self.optimizer_config.min_lr_ratio,
+            )
+        elif self.optimizer_config.lr_scheduler_type == "linear":
+            scheduler = get_linear_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps,
+                total_train_steps,
+            )
+        elif self.optimizer_config.lr_scheduler_type == "constant":
+            scheduler = get_constant_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps,
+            )
+        else:
+            raise ValueError(
+                f"Unknown lr scheduler type {self.optimizer_config.lr_scheduler_type}"
+            )
+        return optimizer, scheduler
+
     def _create_optimizer(self, ft_spec: FinetuneSpec) -> None:
         if self.optimizer_config is None:
             return
         assert self.model is not None
-        # Set up optimizer
         tik = time.perf_counter()
         assert self.optimizer_config.type in [
             "adam",
@@ -1134,64 +1316,47 @@ class FSDPEngine(TrainEngine):
             self.logger.warning(
                 f"Using the '{self.optimizer_config.type}' optimizer with FSDP may be less stable. Consider using the 'adam' (AdamW) optimizer for improved stability and performance."
             )
-        lr = self.optimizer_config.lr
-        weight_decay = self.optimizer_config.weight_decay
-        beta1 = self.optimizer_config.beta1
-        beta2 = self.optimizer_config.beta2
-        eps = self.optimizer_config.eps
-        if self.optimizer_config.type == "adam":
-            self.optimizer = torch.optim.AdamW(
-                self.model.parameters(),
-                lr=lr,
-                weight_decay=weight_decay,
-                betas=(beta1, beta2),
-                eps=eps,
-                # VLM with tensor parallelism is incompatible with fused AdamW
-                fused=not (self.is_vision_model and self.parallel_helper.tp_enabled),
-            )
-        elif self.optimizer_config.type == "adam_bf16":
-            self.optimizer = AnyPrecisionAdamW(
-                self.model.parameters(),
-                lr=lr,
-                weight_decay=weight_decay,
-                betas=(beta1, beta2),
-                eps=eps,
-                momentum_dtype="bfloat16",
-                variance_dtype="bfloat16",
-            )
-        else:
-            self.optimizer = torch.optim.SGD(
-                self.model.parameters(),
-                lr=lr,
-                weight_decay=weight_decay,
-            )
-        total_train_steps = ft_spec.total_train_steps
-        num_warmup_steps = int(
-            self.optimizer_config.warmup_steps_proportion * total_train_steps
-        )
 
-        if self.optimizer_config.lr_scheduler_type == "cosine":
-            self.lr_scheduler = get_cosine_schedule_with_warmup(
-                self.optimizer,
-                num_warmup_steps,
-                total_train_steps,
-                min_lr_ratio=self.optimizer_config.min_lr_ratio,
+        if not self._separate_lora_enabled:
+            self.optimizer, self.lr_scheduler = self._create_optimizer_and_scheduler(
+                self.model.parameters(), ft_spec
             )
-        elif self.optimizer_config.lr_scheduler_type == "linear":
-            self.lr_scheduler = get_linear_schedule_with_warmup(
-                self.optimizer,
-                num_warmup_steps,
-                total_train_steps,
+            self.logger.info(f"Create optimizer time: {time.perf_counter() - tik}")
+            return
+
+        named_parameters = dict(self.model.named_parameters())
+        adapter_parameters: dict[str, list[nn.Parameter]] = {}
+        adapter_parameter_ids: dict[str, set[int]] = {}
+        for adapter_name in (_POLICY_LORA_ADAPTER, _WORLD_MODEL_LORA_ADAPTER):
+            marker = f".{adapter_name}."
+            parameters = [
+                parameter
+                for name, parameter in named_parameters.items()
+                if "lora_" in name and marker in name
+            ]
+            if not parameters:
+                raise RuntimeError(
+                    f"No LoRA parameters found for adapter {adapter_name!r}."
+                )
+            adapter_parameters[adapter_name] = parameters
+            adapter_parameter_ids[adapter_name] = {
+                id(parameter) for parameter in parameters
+            }
+
+        overlap = adapter_parameter_ids[_POLICY_LORA_ADAPTER].intersection(
+            adapter_parameter_ids[_WORLD_MODEL_LORA_ADAPTER]
+        )
+        if overlap:
+            raise RuntimeError("Policy and World Model optimizer parameters overlap.")
+
+        for adapter_name in (_POLICY_LORA_ADAPTER, _WORLD_MODEL_LORA_ADAPTER):
+            optimizer, scheduler = self._create_optimizer_and_scheduler(
+                adapter_parameters[adapter_name], ft_spec
             )
-        elif self.optimizer_config.lr_scheduler_type == "constant":
-            self.lr_scheduler = get_constant_schedule_with_warmup(
-                self.optimizer,
-                num_warmup_steps,
-            )
-        else:
-            raise ValueError(
-                f"Unknown lr scheduler type {self.optimizer_config.lr_scheduler_type}"
-            )
+            self._adapter_optimizers[adapter_name] = optimizer
+            self._adapter_lr_schedulers[adapter_name] = scheduler
+
+        self.activate_lora_adapter(_POLICY_LORA_ADAPTER)
         self.logger.info(f"Create optimizer time: {time.perf_counter() - tik}")
 
     def _check_rollout_engine_connected(self) -> None:
@@ -1425,7 +1590,14 @@ class FSDPEngine(TrainEngine):
         named_tensors: list[tuple[str, torch.Tensor]] = []
         pending_bucket: _PendingWeightUpdateBucket | None = None
 
-        if self.config.use_lora:
+        if self.config.use_lora and self._separate_lora_enabled:
+            policy_marker = f".{_POLICY_LORA_ADAPTER}."
+            param_iterator = (
+                (name, param)
+                for name, param in self._get_model_name_parameters(meta)
+                if "lora_" in name and policy_marker in name
+            )
+        elif self.config.use_lora:
             # For LoRA, only iterate over trainable LoRA parameters
             param_iterator = (
                 (name, param)
@@ -1495,7 +1667,14 @@ class FSDPEngine(TrainEngine):
             fut = self.rollout_engine.update_weights_from_disk(meta)
 
         assert meta.path is not None
-        self._save_model_to_hf(meta.path, self.tokenizer, self.processor)
+        self._save_model_to_hf(
+            meta.path,
+            self.tokenizer,
+            self.processor,
+            selected_adapters=(
+                [_POLICY_LORA_ADAPTER] if self._separate_lora_enabled else None
+            ),
+        )
         # dist.barrier() are called when _save_model_to_hf finished
 
         if dist.get_rank() == 0:
@@ -1520,6 +1699,7 @@ class FSDPEngine(TrainEngine):
         path: str,
         tokenizer: PreTrainedTokenizerFast | None,
         processor: ProcessorMixin | None,
+        selected_adapters: list[str] | None = None,
     ):
         """Save model in HuggingFace format."""
         if self.model is None:
@@ -1534,7 +1714,10 @@ class FSDPEngine(TrainEngine):
         # save huggingface model on rank 0
         if dist.get_rank() == 0:
             os.makedirs(path, exist_ok=True)
-            self.model.save_pretrained(path, state_dict=state_dict)
+            save_kwargs: dict[str, Any] = {"state_dict": state_dict}
+            if self._separate_lora_enabled:
+                save_kwargs["selected_adapters"] = selected_adapters
+            self.model.save_pretrained(path, **save_kwargs)
             self.model_config.save_pretrained(path)
             if tokenizer is not None and not self.config.use_lora:
                 tokenizer.save_pretrained(path)
@@ -1544,7 +1727,44 @@ class FSDPEngine(TrainEngine):
 
     def _load_model_from_hf(self, path: str):
         """Load model from HuggingFace format."""
-        if dist.get_rank() == 0:
+        if self._separate_lora_enabled:
+            options = StateDictOptions(full_state_dict=True, cpu_offload=True)
+            full_state = get_model_state_dict(self.model, options=options)
+            load_error: str | None = None
+            if dist.get_rank() == 0:
+                try:
+                    checkpoint_path = path
+                    if not os.path.isdir(checkpoint_path):
+                        from huggingface_hub import snapshot_download
+
+                        checkpoint_path = snapshot_download(repo_id=path)
+                    for adapter_name, adapter_path in (
+                        (_POLICY_LORA_ADAPTER, checkpoint_path),
+                        (
+                            _WORLD_MODEL_LORA_ADAPTER,
+                            os.path.join(checkpoint_path, "world_model"),
+                        ),
+                    ):
+                        saved_adapter_state = get_state_dict_from_repo_id_or_path(
+                            adapter_path
+                        )
+                        _merge_saved_lora_adapter_state(
+                            full_state,
+                            saved_adapter_state,
+                            adapter_name,
+                        )
+                except Exception as exc:
+                    load_error = f"{type(exc).__name__}: {exc}"
+            else:
+                full_state = {}
+            error_payload = [load_error]
+            dist.broadcast_object_list(error_payload, src=0, group=self.cpu_group)
+            if error_payload[0] is not None:
+                raise RuntimeError(
+                    "Failed to load the dual-LoRA HuggingFace checkpoint: "
+                    f"{error_payload[0]}"
+                )
+        elif dist.get_rank() == 0:
             full_state = get_state_dict_from_repo_id_or_path(path)
         else:
             full_state = {}
@@ -1567,7 +1787,28 @@ class FSDPEngine(TrainEngine):
 
         os.makedirs(path, exist_ok=True)
 
-        dcp_state = DCPState(self.model, self.optimizer if with_optim else None)
+        checkpoint_optimizers: (
+            torch.optim.Optimizer | tuple[torch.optim.Optimizer, ...] | None
+        )
+        checkpoint_schedulers: tuple[Any, ...] | None = None
+        if not with_optim:
+            checkpoint_optimizers = None
+        elif self._separate_lora_enabled:
+            checkpoint_optimizers = tuple(
+                self._adapter_optimizers[name]
+                for name in (_POLICY_LORA_ADAPTER, _WORLD_MODEL_LORA_ADAPTER)
+            )
+            checkpoint_schedulers = tuple(
+                self._adapter_lr_schedulers[name]
+                for name in (_POLICY_LORA_ADAPTER, _WORLD_MODEL_LORA_ADAPTER)
+            )
+        else:
+            checkpoint_optimizers = self.optimizer
+        dcp_state = DCPState(
+            self.model,
+            checkpoint_optimizers,
+            lr_schedulers=checkpoint_schedulers,
+        )
         state_dict = {"dcp": dcp_state}
         dcp.save(state_dict, checkpoint_id=path)
         if self.config.use_lora:
@@ -1582,12 +1823,31 @@ class FSDPEngine(TrainEngine):
             metadata = self._read_lora_dcp_metadata_distributed(path)
             self._validate_lora_dcp_metadata(metadata, path)
 
-        dcp_state = DCPState(self.model, self.optimizer if with_optim else None)
+        checkpoint_optimizers = None
+        checkpoint_schedulers = None
+        if with_optim and self._separate_lora_enabled:
+            checkpoint_optimizers = tuple(
+                self._adapter_optimizers[name]
+                for name in (_POLICY_LORA_ADAPTER, _WORLD_MODEL_LORA_ADAPTER)
+            )
+            checkpoint_schedulers = tuple(
+                self._adapter_lr_schedulers[name]
+                for name in (_POLICY_LORA_ADAPTER, _WORLD_MODEL_LORA_ADAPTER)
+            )
+        elif with_optim:
+            checkpoint_optimizers = self.optimizer
+        dcp_state = DCPState(
+            self.model,
+            checkpoint_optimizers,
+            lr_schedulers=checkpoint_schedulers,
+        )
         state_dict = {"dcp": dcp_state}
         dcp.load(
             state_dict=state_dict,
             checkpoint_id=path,
         )
+        if self._separate_lora_enabled:
+            self.activate_policy_adapter()
 
     def _current_lora_dcp_metadata(self) -> dict[str, Any]:
         signature = getattr(self, "_lora_config_signature", None)
@@ -1596,10 +1856,19 @@ class FSDPEngine(TrainEngine):
                 "LoRA config signature is unavailable; PEFT setup must complete "
                 "before saving a checkpoint."
             )
-        return {
+        metadata = {
             "schema_version": _LORA_DCP_METADATA_SCHEMA_VERSION,
             "lora_signature": signature,
         }
+        if self._separate_lora_enabled:
+            metadata.update(
+                separate_world_model_lora=True,
+                adapter_names=[
+                    _POLICY_LORA_ADAPTER,
+                    _WORLD_MODEL_LORA_ADAPTER,
+                ],
+            )
+        return metadata
 
     @staticmethod
     def _write_lora_dcp_metadata(path: str, metadata: dict[str, Any]) -> None:
@@ -1665,13 +1934,29 @@ class FSDPEngine(TrainEngine):
                 f"supported={_LORA_DCP_METADATA_SCHEMA_VERSION}."
             )
         checkpoint_signature = metadata.get("lora_signature")
-        current_signature = self._current_lora_dcp_metadata()["lora_signature"]
+        current_metadata = self._current_lora_dcp_metadata()
+        current_signature = current_metadata["lora_signature"]
         if checkpoint_signature != current_signature:
             raise ValueError(
                 "LoRA config mismatch while resuming checkpoint "
                 f"{path!r}. The checkpoint and current config must be identical. "
                 f"checkpoint={checkpoint_signature!r}, "
                 f"current={current_signature!r}."
+            )
+        checkpoint_separate = bool(metadata.get("separate_world_model_lora", False))
+        if checkpoint_separate != self._separate_lora_enabled:
+            raise ValueError(
+                "LoRA checkpoint adapter layout mismatch: "
+                f"checkpoint separate_world_model_lora={checkpoint_separate}, "
+                f"current={self._separate_lora_enabled}."
+            )
+        checkpoint_adapters = metadata.get("adapter_names", [_POLICY_LORA_ADAPTER])
+        current_adapters = current_metadata.get("adapter_names", [_POLICY_LORA_ADAPTER])
+        if checkpoint_adapters != current_adapters:
+            raise ValueError(
+                "LoRA checkpoint adapter names do not match the current engine: "
+                f"checkpoint={checkpoint_adapters!r}, "
+                f"current={current_adapters!r}."
             )
 
     def _save_optimizer_state(self, path: str):
@@ -1681,7 +1966,19 @@ class FSDPEngine(TrainEngine):
         shard_path = os.path.join(
             path, f"optim_world_size_{self.world_size}_rank_{rank}.pt"
         )
-        state_dict = self.optimizer.state_dict()
+        if self._separate_lora_enabled:
+            state_dict = {
+                "optimizers": {
+                    name: self._adapter_optimizers[name].state_dict()
+                    for name in (_POLICY_LORA_ADAPTER, _WORLD_MODEL_LORA_ADAPTER)
+                },
+                "lr_schedulers": {
+                    name: self._adapter_lr_schedulers[name].state_dict()
+                    for name in (_POLICY_LORA_ADAPTER, _WORLD_MODEL_LORA_ADAPTER)
+                },
+            }
+        else:
+            state_dict = self.optimizer.state_dict()
         torch.save(state_dict, shard_path)
         dist.barrier(group=self.cpu_group)
 
@@ -1693,7 +1990,17 @@ class FSDPEngine(TrainEngine):
             path, f"optim_world_size_{self.world_size}_rank_{rank}.pt"
         )
         optimizer_state_dict = torch.load(shard_path, weights_only=False)
-        self.optimizer.load_state_dict(optimizer_state_dict)
+        if self._separate_lora_enabled:
+            for name in (_POLICY_LORA_ADAPTER, _WORLD_MODEL_LORA_ADAPTER):
+                self._adapter_optimizers[name].load_state_dict(
+                    optimizer_state_dict["optimizers"][name]
+                )
+                self._adapter_lr_schedulers[name].load_state_dict(
+                    optimizer_state_dict["lr_schedulers"][name]
+                )
+            self.activate_policy_adapter()
+        else:
+            self.optimizer.load_state_dict(optimizer_state_dict)
         dist.barrier(group=self.cpu_group)
 
     def _prepare_mb_list(self, input_: dict[str, Any]) -> MicroBatchList:
@@ -2102,6 +2409,13 @@ class FSDPPPOActor(FSDPEngine):
     @torch.no_grad()
     def compute_logp(self, *args, **kwargs) -> list[torch.Tensor] | None:
         return self.actor.compute_logp(*args, **kwargs)
+
+    @torch.no_grad()
+    def compute_world_model_logp(self, *args, **kwargs) -> list[torch.Tensor] | None:
+        return self.actor.compute_world_model_logp(*args, **kwargs)
+
+    def world_model_update(self, *args, **kwargs) -> bool:
+        return self.actor.world_model_update(*args, **kwargs)
 
     @torch.no_grad()
     def compute_advantages(self, *args, **kwargs) -> list[dict[str, Any]]:

@@ -296,6 +296,7 @@ def test_build_eval_workflow_kwargs_preserves_role_parameters(
 
     monkeypatch.setenv("INF_API_KEY", "test-key")
     config, students = load_experiment_config(str(CONFIG_PATH), [])
+    config.teacher_pre.verify = False
 
     kwargs = build_eval_workflow_kwargs(
         config=config,
@@ -324,6 +325,7 @@ def test_build_eval_workflow_kwargs_preserves_role_parameters(
     assert "response_format" not in kwargs["aux_request_params"]
     assert kwargs["student_models"][0]["model"] == "qwen3-1.7b"
     assert kwargs["teacher_pre_enabled"] is True
+    assert kwargs["teacher_pre_verify"] is False
     assert kwargs["teacher_pre_attempts"] == 3
     assert kwargs["teacher_pre_max_tokens"] == 0
     assert kwargs["teacher_anti_leak_instruction_enabled"] is True

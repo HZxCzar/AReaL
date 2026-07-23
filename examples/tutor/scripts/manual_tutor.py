@@ -202,6 +202,7 @@ def build_workflow(config: Any, max_turns: int, *, hide_ground_truth: bool) -> A
         ),
         teacher_pre_enabled=teacher_pre.enabled,
         teacher_pre_mode=teacher_pre.mode,
+        teacher_pre_verify=teacher_pre.verify,
         teacher_pre_attempts=teacher_pre.attempts,
         teacher_pre_max_tokens=teacher_pre.max_tokens,
         student_system_prompt=config.student_system_prompt,

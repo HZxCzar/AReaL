@@ -472,6 +472,7 @@ def build_eval_workflow_kwargs(
         "teacher_show_ground_truth": config.teacher_show_ground_truth,
         "teacher_pre_enabled": presolve_enabled,
         "teacher_pre_mode": teacher_pre.mode,
+        "teacher_pre_verify": teacher_pre.verify,
         "teacher_pre_attempts": presolve_attempts,
         "teacher_pre_max_tokens": presolve_max_tokens,
         "student_system_prompt": config.student_system_prompt,
@@ -1337,6 +1338,7 @@ def build_run_signature(
             "attempts": attempts,
             "modes": [asdict(mode) for mode in modes],
             "presolve": {
+                "verify": bool(config.teacher_pre.verify),
                 "attempts": (
                     int(args.presolve_attempts)
                     if int(args.presolve_attempts) > 0

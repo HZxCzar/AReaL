@@ -24,12 +24,16 @@ from examples.tutor.core.types import (
 from examples.tutor.workflow import TutorAgentWorkflow
 
 from areal.trainer.ppo.actor import (
+    PPOActor,
     _append_world_model_rows,
     _apply_world_model_rl_reweight,
+    _build_world_model_train_batch,
     _global_joint_counts,
     _joint_loss_weight,
     _merge_policy_world_model_loss,
     _unpack_world_model_rows,
+    _world_model_loss_weight,
+    world_model_loss_fn,
 )
 from areal.trainer.rl_trainer import (
     _collect_world_model_turn_nll,
@@ -116,12 +120,15 @@ def test_world_model_config_disabled_by_default_and_validates_enabled_fields():
     """World Model must be opt-in and reject unusable enabled settings."""
 
     assert TutorWorldModelConfig().enabled is False
+    assert TutorWorldModelConfig().separate_lora_enabled is False
     with pytest.raises(ValueError, match="loss_weight"):
         TutorWorldModelConfig(enabled=True, loss_weight=0.0)
     with pytest.raises(ValueError, match="system_prompt"):
         TutorWorldModelConfig(enabled=True, system_prompt="")
     with pytest.raises(ValueError, match="at least 1"):
         TutorWorldModelConfig(per_turn_nll_log_every_n_steps=0)
+    with pytest.raises(ValueError, match="world_model.enabled"):
+        TutorWorldModelConfig(enabled=False, separate_lora_enabled=True)
 
 
 def test_paw_config_is_opt_in_and_validates_ranges():
@@ -495,6 +502,35 @@ def test_world_model_turn_nll_preserves_empty_leading_dp_group():
     assert records[0]["world_model_nll"] == pytest.approx(3.0)
 
 
+def test_world_model_turn_nll_uses_separate_adapter_scorer_when_enabled():
+    """WMRL diagnostics must come from the isolated predictor, not the policy."""
+
+    class FakeActor:
+        def compute_logp(self, batches):
+            raise AssertionError(f"policy scorer was used: {batches}")
+
+        def compute_world_model_logp(self, batches):
+            return [torch.full((1, 3), -2.5) for _ in batches]
+
+    rollout_batch = [
+        {
+            "trajectory_id": torch.tensor([101]),
+            "turn_idx": torch.tensor([1]),
+            "rewards": torch.tensor([1.0]),
+        }
+    ]
+    sidecars = [_sidecar([10, 11, 12], [0, 1, 1], [3])]
+
+    records = _collect_world_model_turn_nll(
+        FakeActor(),
+        rollout_batch,
+        sidecars,
+        use_separate_lora=True,
+    )
+
+    assert records[0]["world_model_nll"] == pytest.approx(2.5)
+
+
 def test_world_model_turn_nll_skips_forward_when_all_groups_are_empty():
     """An update without any real WM targets does not invoke the actor."""
 
@@ -610,7 +646,6 @@ def test_world_model_rows_use_disjoint_shifted_loss_masks():
         ],
         policy_temperature=0.7,
     )
-
     torch.testing.assert_close(joint["loss_mask"][1], torch.zeros(4), rtol=0, atol=0)
     torch.testing.assert_close(
         joint["world_model_loss_mask"][1],
@@ -630,6 +665,111 @@ def test_world_model_rows_use_disjoint_shifted_loss_masks():
         torch.tensor([[0.7, 0.7, 0.7, 0.7], [1.0, 1.0, 1.0, 1.0]]),
         rtol=0,
         atol=0,
+    )
+
+
+def test_world_model_only_batch_and_loss_are_response_balanced(monkeypatch):
+    """Separate-LoRA WM training keeps the original per-response objective."""
+
+    monkeypatch.setattr(
+        "areal.trainer.ppo.actor.stats_tracker.denominator", lambda **_: None
+    )
+    monkeypatch.setattr("areal.trainer.ppo.actor.stats_tracker.stat", lambda **_: None)
+    batch = _build_world_model_train_batch(
+        [
+            (
+                torch.tensor([10, 11, 12]),
+                torch.tensor([False, True, True]),
+                True,
+                1.0,
+            ),
+            (
+                torch.tensor([20, 21]),
+                torch.tensor([False, True]),
+                True,
+                1.0,
+            ),
+        ]
+    )
+    logprobs = torch.tensor([[-2.0, -4.0, 0.0], [-6.0, 0.0, 0.0]], requires_grad=True)
+    loss = world_model_loss_fn(
+        logprobs,
+        torch.zeros_like(logprobs),
+        batch,
+        world_model_loss_weight=1.0,
+    )
+
+    torch.testing.assert_close(loss, torch.tensor(4.5), rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(
+        _world_model_loss_weight(batch), torch.tensor(2), rtol=0, atol=0
+    )
+    loss.backward()
+    torch.testing.assert_close(
+        logprobs.grad,
+        torch.tensor([[-0.25, -0.25, 0.0], [-0.5, 0.0, 0.0]]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_separate_world_model_update_uses_selected_rows_and_one_scheduler_step(
+    monkeypatch,
+):
+    """WM adapter stays active across its minibatches and advances once per step."""
+
+    class FakeEngine:
+        device = torch.device("cpu")
+
+        def __init__(self):
+            self.activations = 0
+            self.train_batches = []
+            self.scheduler_steps = 0
+
+        def activate_world_model_adapter(self):
+            self.activations += 1
+
+        def train(self):
+            return None
+
+        def train_batch(self, batch, loss_fn, loss_weight_fn):
+            del loss_fn
+            self.train_batches.append(batch)
+            assert loss_weight_fn(batch) == 1
+            return {"grad_norm": 1.0, "lr": 1e-4}
+
+        def lr_scheduler_step(self):
+            self.scheduler_steps += 1
+
+    monkeypatch.setattr("areal.trainer.ppo.actor.dist.is_initialized", lambda: False)
+    engine = FakeEngine()
+    actor = PPOActor.__new__(PPOActor)
+    actor.engine = engine
+    actor.config = SimpleNamespace(ppo_n_minibatches=4)
+    sidecars = [
+        {
+            **_sidecar(
+                [10, 11, 12, 20, 21, 30, 31, 32],
+                [0, 1, 1, 0, 1, 0, 1, 1],
+                [3, 2, 3],
+                weight=1.0,
+            ),
+            "world_model_selected": torch.tensor([True, False, True]),
+            "world_model_response_weight": torch.tensor([1.0, 0.0, 1.0]),
+        }
+    ]
+
+    updated = actor.world_model_update(sidecars)
+
+    assert updated is True
+    assert engine.activations == 1
+    assert len(engine.train_batches) == 2
+    assert engine.scheduler_steps == 1
+    assert (
+        sum(
+            int(batch["world_model_response_start_mask"].count_nonzero())
+            for batch in engine.train_batches
+        )
+        == 2
     )
 
 

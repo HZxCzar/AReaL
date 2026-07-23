@@ -86,6 +86,7 @@ class TeacherPreSolveResult:
     attempts: list[TeacherPreSolveAttempt] = field(default_factory=list)
     raw_output: str = ""
     error: str | None = None
+    verification_enabled: bool = True
 
 
 @dataclass(slots=True)
