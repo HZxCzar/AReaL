@@ -1,5 +1,5 @@
 experiment_name: tutor-math-baseline
-trial_name: qwen8b-qwen1.7b-math-pass@2-baseline-aleak
+trial_name: qwen8b-qwen1.7b-math-pass@2-pre-aleak-paw-cmae-wmrl050-seplora
 
 seed: 42
 enable_offload: false
@@ -16,16 +16,52 @@ leak_handling_mode: terminate
 teacher_show_ground_truth: false
 teacher_anti_leak_instruction_enabled: true
 
+world_model:
+  enabled: true
+  separate_lora_enabled: true
+  loss_weight: 1.0
+  log_per_turn_nll: true
+  per_turn_nll_log_every_n_steps: 1
+  system_prompt: >-
+    You are a student response predictor. Given the context available to the
+    teacher and the teacher's latest visible reply, predict the same student's
+    next visible reply. Output only the predicted student reply.
+  paw:
+    enabled: true
+    entropy_filter_enabled: true
+    entropy_keep_ratio: 0.75
+    cmae_enabled: true
+    confidence_threshold: 0.2
+    reward_adaptive_enabled: false
+    max_episode_return: 1.0
+  rl_reweight:
+    enabled: true
+    mode: continuous
+    positive_strength: 0.5
+    negative_strength: 0.5
+    min_weight: 0.5
+    max_weight: 1.5
+    continuous_temperature: 1.0
+    low_threshold: -0.5
+    high_threshold: 0.5
+    min_turn_std: 1.0e-6
+
 student_generalize:
   enabled: true
   source: train
   level1_reward: 0.0
   level2_reward: 0.0
 
+teacher_pre:
+  enabled: true
+  mode: filter_solver
+  attempts: 3
+  max_tokens: 0
+
 auxiliary_model:
   mode: api
   enable_thinking: false
-  base_url: https://9pjmbjcbmj59ch58mq95hdpc59mmbkh9.openapi-qb-nat.sii.edu.cn/v1
+  base_url: https://gedpdkbcbkgjc9qehbbh95j9ao8coqc9.openapi-qb-nat.sii.edu.cn/v1
   model: qwen3-8b
   api_key: ${oc.env:INF_API_KEY}
   timeout: 120
@@ -151,7 +187,7 @@ actor:
   dtype: bfloat16
   mb_spec:
     n_mbs: 1
-    max_tokens_per_mb: 40960
+    max_tokens_per_mb: 24576
   optimizer:
     type: adam
     lr: 5.0e-5
@@ -202,7 +238,7 @@ ref:
   dtype: ${actor.dtype}
   mb_spec:
     n_mbs: 1
-    max_tokens_per_mb: 40960
+    max_tokens_per_mb: 24576
   optimizer: null
   scheduling_strategy:
     type: colocation

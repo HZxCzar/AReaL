@@ -280,9 +280,12 @@ def _append_world_model_rows(
 
 def _build_world_model_train_batch(
     rows: list[tuple[torch.Tensor, torch.Tensor, bool, float]],
+    *,
+    device: torch.device | None = None,
 ) -> dict[str, torch.Tensor]:
     """Build a WM-only batch; an empty local shard becomes a zero-loss dummy."""
 
+    batch_device = rows[0][0].device if rows else device or torch.device("cpu")
     if rows:
         input_ids = torch.nn.utils.rnn.pad_sequence(
             [row[0] for row in rows], batch_first=True
@@ -295,13 +298,15 @@ def _build_world_model_train_batch(
             batch_first=True,
         )
         response_weight = torch.tensor(
-            [row[3] for row in rows], dtype=torch.float32
+            [row[3] for row in rows],
+            dtype=torch.float32,
+            device=batch_device,
         ).unsqueeze(-1)
     else:
-        input_ids = torch.zeros((1, 1), dtype=torch.long)
-        target_mask = torch.zeros((1, 1), dtype=torch.bool)
-        attention_mask = torch.ones((1, 1), dtype=torch.bool)
-        response_weight = torch.zeros((1, 1), dtype=torch.float32)
+        input_ids = torch.zeros((1, 1), dtype=torch.long, device=batch_device)
+        target_mask = torch.zeros((1, 1), dtype=torch.bool, device=batch_device)
+        attention_mask = torch.ones((1, 1), dtype=torch.bool, device=batch_device)
+        response_weight = torch.zeros((1, 1), dtype=torch.float32, device=batch_device)
 
     aligned_target_mask = torch.roll(target_mask, shifts=-1, dims=-1)
     target_counts = aligned_target_mask.sum(dim=-1, keepdim=True).clamp_min(1)
@@ -1265,7 +1270,10 @@ class PPOActor:
         with stats_tracker.scope("update"):
             for rows_for_update in update_rows:
                 train_stat = self.engine.train_batch(
-                    _build_world_model_train_batch(rows_for_update),
+                    _build_world_model_train_batch(
+                        rows_for_update,
+                        device=self.engine.device,
+                    ),
                     loss_fn=loss_fn,
                     loss_weight_fn=_world_model_loss_weight,
                 )

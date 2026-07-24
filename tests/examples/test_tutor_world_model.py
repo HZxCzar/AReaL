@@ -712,6 +712,25 @@ def test_world_model_only_batch_and_loss_are_response_balanced(monkeypatch):
     )
 
 
+def test_world_model_only_batch_preserves_non_cpu_device():
+    """Separate-LoRA WM metadata stays colocated with transported GPU tensors."""
+
+    batch = _build_world_model_train_batch(
+        [
+            (
+                torch.tensor([10, 11, 12], device="meta"),
+                torch.tensor([False, True, True], device="meta"),
+                True,
+                0.5,
+            )
+        ]
+    )
+
+    assert {tensor.device.type for tensor in batch.values()} == {"meta"}
+    empty_batch = _build_world_model_train_batch([], device=torch.device("meta"))
+    assert {tensor.device.type for tensor in empty_batch.values()} == {"meta"}
+
+
 def test_separate_world_model_update_uses_selected_rows_and_one_scheduler_step(
     monkeypatch,
 ):
