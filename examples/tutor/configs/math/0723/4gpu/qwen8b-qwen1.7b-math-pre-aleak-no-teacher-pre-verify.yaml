@@ -1,0 +1,12 @@
+defaults:
+  - ../2gpu/qwen8b-qwen1.7b-math-pre-aleak-no-teacher-pre-verify@_global_
+  - _self_
+
+cluster:
+  n_gpus_per_node: 4
+
+rollout:
+  backend: "sglang:d2p1t1"
+
+actor:
+  backend: "fsdp:d2p1t1"
