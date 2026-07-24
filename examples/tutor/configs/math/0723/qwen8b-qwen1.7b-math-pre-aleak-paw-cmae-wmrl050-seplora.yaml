@@ -124,7 +124,7 @@ debug_trace_every_n_rollouts: 10
 
 cluster:
   n_nodes: 1
-  n_gpus_per_node: 4
+  n_gpus_per_node: 8
   fileroot: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor
   name_resolve:
     type: nfs
@@ -134,7 +134,7 @@ scheduler:
   type: local
 
 rollout:
-  backend: "sglang:d2p1t1"
+  backend: "sglang:d4p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
@@ -177,7 +177,7 @@ eval_gconfig:
   lora_name: default_lora
 
 actor:
-  backend: "fsdp:d2p1t1"
+  backend: "fsdp:d4p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
