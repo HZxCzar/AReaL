@@ -3557,6 +3557,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 prefix = f"student/{metric_name}"
                 metrics[f"{prefix}/solved"] = float(success_round > 0)
                 metrics[f"{prefix}/pre_solved"] = float(pre_success)
+                metrics[f"{prefix}/final_correct"] = float(pre_success or solved)
                 metrics[f"{prefix}/reward"] = float(total_reward)
                 metrics[f"{prefix}/turns"] = float(len(traces))
                 metrics[f"{prefix}/call_failed"] = float(student_call_failed)

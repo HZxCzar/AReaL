@@ -21,6 +21,8 @@ from examples.tutor.train import (
     _resolve_eval_student_names,
 )
 
+from areal.api.cli_args import parse_cli_args
+
 
 @pytest.fixture(autouse=True)
 def _disable_real_openai_clients(monkeypatch):
@@ -177,6 +179,92 @@ def test_train7b_yaml_trains_7b_and_evaluates_17b_and_7b(monkeypatch):
         "qwen3-1.7b",
         "qwen2.5-7b-instruct",
     ]
+
+
+@pytest.mark.parametrize(
+    ("filename", "trained_student"),
+    [
+        (
+            "qwen8b-train-qwen1.7b-eval4-math-pre-aleak.yaml",
+            "qwen3-1.7b",
+        ),
+        (
+            "qwen8b-train-llama3.1-8b-eval4-math-pre-aleak.yaml",
+            "llama-3.1-8b-instruct",
+        ),
+        (
+            "qwen8b-train-gemma3-1b-eval4-math-pre-aleak.yaml",
+            "gemma-3-1b-it",
+        ),
+        (
+            "qwen8b-train-phi4-mini-eval4-math-pre-aleak.yaml",
+            "phi-4-mini-instruct",
+        ),
+    ],
+)
+def test_eval4_yaml_trains_one_student_and_evaluates_all_four(
+    monkeypatch, filename, trained_student
+):
+    """Test each diversity experiment trains one student and evaluates all four."""
+    # Arrange
+    endpoint_env = {
+        "TUTOR_QWEN3_8B_BASE_URL": "http://teacher.invalid/v1",
+        "TUTOR_QWEN3_1_7B_BASE_URL": "http://qwen17b.invalid/v1",
+        "TUTOR_LLAMA31_8B_BASE_URL": "http://llama.invalid/v1",
+        "TUTOR_GEMMA3_1B_BASE_URL": "http://gemma.invalid/v1",
+        "TUTOR_PHI4_MINI_BASE_URL": "http://phi4.invalid/v1",
+    }
+    monkeypatch.setenv("INF_API_KEY", "test-key")
+    for name, value in endpoint_env.items():
+        monkeypatch.setenv(name, value)
+    path = Path("examples/tutor/configs/math/0723/2gpu") / filename
+
+    # Act
+    raw_config, _ = parse_cli_args(["--config", str(path)])
+    config = OmegaConf.to_object(
+        OmegaConf.merge(OmegaConf.structured(TutorConfig), raw_config)
+    )
+
+    # Assert
+    expected_students = [
+        "qwen3-1.7b",
+        "llama-3.1-8b-instruct",
+        "gemma-3-1b-it",
+        "phi-4-mini-instruct",
+    ]
+    assert [student.name for student in config.student_models] == expected_students
+    assert [
+        student.name for student in config.student_models if student.weight > 0.0
+    ] == [trained_student]
+    assert _resolve_eval_student_names(config) == expected_students
+    assert config.evaluator.average_rollouts == 1
+    assert config.auxiliary_model.base_url == endpoint_env["TUTOR_QWEN3_8B_BASE_URL"]
+    students = {student.name: student for student in config.student_models}
+    assert (students["qwen3-1.7b"].temperature, students["qwen3-1.7b"].top_p) == (
+        0.7,
+        0.8,
+    )
+    assert students["qwen3-1.7b"].request_params["extra_body"] == {
+        "top_k": 20,
+        "min_p": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    assert (
+        students["llama-3.1-8b-instruct"].temperature,
+        students["llama-3.1-8b-instruct"].top_p,
+    ) == (0.6, 0.9)
+    assert "extra_body" not in students["llama-3.1-8b-instruct"].request_params
+    assert (students["gemma-3-1b-it"].temperature, students["gemma-3-1b-it"].top_p) == (
+        1.0,
+        0.95,
+    )
+    assert students["gemma-3-1b-it"].request_params["extra_body"] == {"top_k": 64}
+    assert (
+        students["phi-4-mini-instruct"].temperature,
+        students["phi-4-mini-instruct"].top_p,
+    ) == (0.0, None)
+    assert "extra_body" not in students["phi-4-mini-instruct"].request_params
+    assert all(student.max_tokens == 2048 for student in config.student_models)
 
 
 def test_eval_student_subset_defaults_to_all_configured_students():
@@ -529,5 +617,6 @@ def test_rollout_metrics_include_overall_and_dynamic_per_student_values(monkeypa
     assert captured["student/qwen3-8b/selected"] == 1.0
     assert captured["student/future-student/selected"] == 0.0
     assert captured["student/qwen3-8b/solved"] == 1.0
+    assert captured["student/qwen3-8b/final_correct"] == 1.0
     assert captured["student/qwen3-8b/reward"] == 1.5
     assert captured["student/qwen3-8b/call_failed"] == 0.0

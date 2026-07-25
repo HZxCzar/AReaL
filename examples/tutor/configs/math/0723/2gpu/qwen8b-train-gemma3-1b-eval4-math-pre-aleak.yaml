@@ -1,0 +1,85 @@
+defaults:
+  - qwen8b-qwen1.7b-math-pre-aleak@_global_
+  - _self_
+
+trial_name: qwen8b-train-gemma3-1b-eval4-math-pass@2-pre-aleak
+
+auxiliary_model:
+  base_url: ${oc.env:TUTOR_QWEN3_8B_BASE_URL}
+
+student_models:
+  - name: qwen3-1.7b
+    weight: 0.0
+    base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+    model: qwen3-1.7b
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    max_concurrent_calls: 4
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-qwen17b-student
+      extra_body:
+        top_k: 20
+        min_p: 0
+        chat_template_kwargs:
+          enable_thinking: false
+  - name: llama-3.1-8b-instruct
+    weight: 0.0
+    base_url: ${oc.env:TUTOR_LLAMA31_8B_BASE_URL}
+    model: llama-3.1-8b-instruct
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.6
+    top_p: 0.9
+    max_concurrent_calls: 4
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-llama31-8b-student
+  - name: gemma-3-1b-it
+    weight: 1.0
+    base_url: ${oc.env:TUTOR_GEMMA3_1B_BASE_URL}
+    model: gemma-3-1b-it
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 1.0
+    top_p: 0.95
+    max_concurrent_calls: 4
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-gemma3-1b-student
+      extra_body:
+        top_k: 64
+  - name: phi-4-mini-instruct
+    weight: 0.0
+    base_url: ${oc.env:TUTOR_PHI4_MINI_BASE_URL}
+    model: phi-4-mini-instruct
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.0
+    top_p: null
+    max_concurrent_calls: 4
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-phi4-mini-student
+
+evaluator:
+  average_rollouts: 1
+  student_model_names:
+    - qwen3-1.7b
+    - llama-3.1-8b-instruct
+    - gemma-3-1b-it
+    - phi-4-mini-instruct
+
+stats_logger:
+  wandb:
+    group: 8b-student-diversity-eval4
