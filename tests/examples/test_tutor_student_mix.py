@@ -185,34 +185,29 @@ def test_train7b_yaml_trains_7b_and_evaluates_17b_and_7b(monkeypatch):
     ("filename", "trained_student"),
     [
         (
-            "qwen8b-train-qwen1.7b-eval4-math-pre-aleak.yaml",
+            "qwen8b-train-qwen1.7b-eval3-math-pre-aleak.yaml",
             "qwen3-1.7b",
         ),
         (
-            "qwen8b-train-llama3.1-8b-eval4-math-pre-aleak.yaml",
+            "qwen8b-train-llama3.1-8b-eval3-math-pre-aleak.yaml",
             "llama-3.1-8b-instruct",
         ),
         (
-            "qwen8b-train-gemma3-1b-eval4-math-pre-aleak.yaml",
+            "qwen8b-train-gemma3-1b-eval3-math-pre-aleak.yaml",
             "gemma-3-1b-it",
-        ),
-        (
-            "qwen8b-train-phi4-mini-eval4-math-pre-aleak.yaml",
-            "phi-4-mini-instruct",
         ),
     ],
 )
-def test_eval4_yaml_trains_one_student_and_evaluates_all_four(
+def test_eval3_yaml_trains_one_student_and_evaluates_all_three(
     monkeypatch, filename, trained_student
 ):
-    """Test each diversity experiment trains one student and evaluates all four."""
+    """Test each diversity experiment trains one student and evaluates all three."""
     # Arrange
     endpoint_env = {
         "TUTOR_QWEN3_8B_BASE_URL": "http://teacher.invalid/v1",
         "TUTOR_QWEN3_1_7B_BASE_URL": "http://qwen17b.invalid/v1",
         "TUTOR_LLAMA31_8B_BASE_URL": "http://llama.invalid/v1",
         "TUTOR_GEMMA3_1B_BASE_URL": "http://gemma.invalid/v1",
-        "TUTOR_PHI4_MINI_BASE_URL": "http://phi4.invalid/v1",
     }
     monkeypatch.setenv("INF_API_KEY", "test-key")
     for name, value in endpoint_env.items():
@@ -230,7 +225,6 @@ def test_eval4_yaml_trains_one_student_and_evaluates_all_four(
         "qwen3-1.7b",
         "llama-3.1-8b-instruct",
         "gemma-3-1b-it",
-        "phi-4-mini-instruct",
     ]
     assert [student.name for student in config.student_models] == expected_students
     assert [
@@ -255,16 +249,15 @@ def test_eval4_yaml_trains_one_student_and_evaluates_all_four(
     ) == (0.6, 0.9)
     assert "extra_body" not in students["llama-3.1-8b-instruct"].request_params
     assert (students["gemma-3-1b-it"].temperature, students["gemma-3-1b-it"].top_p) == (
-        1.0,
-        0.95,
+        0.0,
+        None,
     )
-    assert students["gemma-3-1b-it"].request_params["extra_body"] == {"top_k": 64}
-    assert (
-        students["phi-4-mini-instruct"].temperature,
-        students["phi-4-mini-instruct"].top_p,
-    ) == (0.0, None)
-    assert "extra_body" not in students["phi-4-mini-instruct"].request_params
-    assert all(student.max_tokens == 2048 for student in config.student_models)
+    assert students["gemma-3-1b-it"].max_tokens == 2048
+    assert students["gemma-3-1b-it"].request_params["extra_body"] == {
+        "repetition_penalty": 1.05,
+    }
+    assert students["qwen3-1.7b"].max_tokens == 2048
+    assert students["llama-3.1-8b-instruct"].max_tokens == 2048
 
 
 def test_eval_student_subset_defaults_to_all_configured_students():
