@@ -483,6 +483,8 @@ def build_eval_workflow_kwargs(
             config.prompt_pool.student_eval_paths.get("heldout", "")
         ),
         "student_prompt_include_base": config.prompt_pool.include_base,
+        "student_turn_behavior_enabled": False,
+        "student_turn_behavior_path": "",
         "prompt_pool_seed": config.seed,
         "leak_check_system_prompt": config.leak_check_system_prompt,
         "answer_judge_enabled": auxiliary_model.answer_judge_enabled,

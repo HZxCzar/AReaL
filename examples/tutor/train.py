@@ -253,6 +253,8 @@ def _build_eval_workflow_kwargs(
     eval_workflow_kwargs["student_heldout_prompt_pool_path"] = eval_paths.get(
         "heldout", ""
     )
+    eval_workflow_kwargs["student_turn_behavior_enabled"] = False
+    eval_workflow_kwargs["student_turn_behavior_path"] = ""
     eval_workflow_kwargs["teacher_warmup_enabled"] = False
     eval_workflow_kwargs["teacher_warmup_prompt_path"] = ""
     eval_workflow_kwargs["teacher_warmup_steps"] = 0
@@ -428,6 +430,10 @@ def main(args):
         student_prompt_pool_path=config.prompt_pool.student_train_path,
         student_heldout_prompt_pool_path="",
         student_prompt_include_base=config.prompt_pool.include_base,
+        student_turn_behavior_enabled=(
+            config.prompt_pool.student_turn_behavior.enabled
+        ),
+        student_turn_behavior_path=config.prompt_pool.student_turn_behavior.path,
         prompt_pool_seed=config.seed,
         leak_check_system_prompt=config.leak_check_system_prompt,
         answer_judge_enabled=auxiliary_model.answer_judge_enabled,

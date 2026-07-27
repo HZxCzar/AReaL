@@ -14,6 +14,7 @@ from examples.tutor.configs import (
     TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
     TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
     TutorConfig,
+    TutorStudentTurnBehaviorConfig,
     TutorTeacherWarmupPromptConfig,
 )
 from examples.tutor.core.tensors import response_to_tensordict
@@ -23,6 +24,7 @@ from examples.tutor.core.types import (
     LeakCheckResult,
     PromptPoolSelection,
     PublicHistoryState,
+    StudentTurnBehavior,
     StudentTurnState,
     TurnArtifact,
     TutorPrivateFeedback,
@@ -96,6 +98,141 @@ def test_load_prompt_pool_reports_missing_and_malformed_files(tmp_path):
     malformed_path.write_text("[", encoding="utf-8")
     with pytest.raises(ValueError, match="student prompt pool must be valid JSON"):
         tutor_workflow.load_prompt_pool(str(malformed_path), role="student")
+
+
+def test_load_student_turn_behaviors_validates_weighted_pool(tmp_path):
+    """Test turn behavior assets preserve names, prompts, and exact probabilities."""
+    path = tmp_path / "turn-behaviors.json"
+    path.write_text(
+        json.dumps(
+            [
+                {"name": "base", "probability": 0.5, "instruction": ""},
+                {
+                    "name": "ask_question",
+                    "probability": 0.3,
+                    "instruction": "Ask one focused question.",
+                },
+                {
+                    "name": "show_work",
+                    "probability": 0.2,
+                    "instruction": "Show one concrete step.",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    behaviors = tutor_workflow.load_student_turn_behaviors(str(path))
+
+    assert [behavior.name for behavior in behaviors] == [
+        "base",
+        "ask_question",
+        "show_work",
+    ]
+    assert [behavior.probability for behavior in behaviors] == [0.5, 0.3, 0.2]
+    assert behaviors[0].instruction == ""
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [
+            {"name": "base", "probability": 0.4, "instruction": ""},
+            {"name": "ask", "probability": 0.4, "instruction": "Ask."},
+        ],
+        [
+            {"name": "base", "probability": 0.5, "instruction": ""},
+            {"name": "also_base", "probability": 0.5, "instruction": ""},
+        ],
+        [
+            {"name": "base", "probability": 0.5, "instruction": ""},
+            {"name": "base", "probability": 0.5, "instruction": "Ask."},
+        ],
+    ],
+)
+def test_load_student_turn_behaviors_rejects_invalid_distribution(tmp_path, payload):
+    """Test malformed probability, base, and name definitions fail early."""
+    path = tmp_path / "invalid-turn-behaviors.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="student turn behavior"):
+        tutor_workflow.load_student_turn_behaviors(str(path))
+
+
+def test_student_turn_behavior_config_requires_path_when_enabled():
+    """Test the config switch cannot silently enable an empty behavior pool."""
+    with pytest.raises(ValueError, match="student_turn_behavior.path"):
+        TutorStudentTurnBehaviorConfig(enabled=True)
+
+
+def test_student_turn_behavior_sampling_is_per_response_and_eval_disabled(
+    monkeypatch,
+):
+    """Test each response has its own deterministic draw and eval has no draw."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.prompt_pool_seed = 42
+    workflow.student_turn_behavior_enabled = True
+    workflow.student_turn_behaviors = (
+        StudentTurnBehavior(0, "base", "", 0.5),
+        StudentTurnBehavior(1, "ask", "Ask one question.", 0.5),
+    )
+    workflow._student_turn_behavior_fallback_rng = random.Random(3)
+    monkeypatch.setattr(
+        tutor_workflow.workflow_context,
+        "get",
+        lambda: types.SimpleNamespace(is_eval=False, task_id=17),
+    )
+
+    first = workflow._select_student_turn_behavior(response_index=0)
+    repeated = workflow._select_student_turn_behavior(response_index=0)
+    second = workflow._select_student_turn_behavior(response_index=1)
+
+    assert first == repeated
+    assert first in workflow.student_turn_behaviors
+    assert second in workflow.student_turn_behaviors
+    expected_draws = [
+        random.Random(f"42:student-turn-behavior:17:{index}").random()
+        for index in (0, 1)
+    ]
+    expected_indices = [int(draw >= 0.5) for draw in expected_draws]
+    assert [first.index, second.index] == expected_indices
+
+    monkeypatch.setattr(
+        tutor_workflow.workflow_context,
+        "get",
+        lambda: types.SimpleNamespace(is_eval=True, task_id=17),
+    )
+    assert workflow._select_student_turn_behavior(response_index=0) is None
+
+
+def test_student_turn_behavior_only_changes_current_system_prompt():
+    """Test base responses stay clean and conditioned responses get one suffix."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_system_prompt = "base student prompt"
+    state = StudentTurnState(
+        task="task",
+        public_history=PublicHistoryState(),
+        previous_student_output="",
+        latest_tutor_visible_output="hint",
+        student_turn_behavior=StudentTurnBehavior(
+            1,
+            "ask",
+            "Ask one focused mathematical question.",
+            0.2,
+        ),
+    )
+
+    conditioned = workflow._student_system_prompt_for_state(state)
+    state.student_turn_behavior = StudentTurnBehavior(0, "base", "", 0.5)
+    clean = workflow._student_system_prompt_for_state(state)
+
+    assert "Ask one focused mathematical question." in conditioned
+    assert "only to your next response" in conditioned
+    assert clean == "base student prompt"
 
 
 def test_teacher_warmup_config_requires_prompt_and_positive_steps():
@@ -546,6 +683,38 @@ def test_rollout_stats_report_only_grouped_student_prompt_metrics(monkeypatch):
     assert captured["student_prompt/seen/1/call_failed"] == pytest.approx(0.0)
     flat_prefixes = tuple(f"student_prompt/{index}/" for index in range(3))
     assert not any(key.startswith(flat_prefixes) for key in captured)
+
+
+def test_rollout_stats_report_initial_student_turn_behavior(monkeypatch):
+    """Test a pre-solved response still contributes to behavior sampling metrics."""
+    captured = {}
+    monkeypatch.setattr(
+        tutor_workflow,
+        "_safe_scalar",
+        lambda **metrics: captured.update(metrics),
+    )
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_model_runtimes = {}
+    workflow.student_turn_behaviors = (
+        StudentTurnBehavior(0, "base", "", 0.5),
+        StudentTurnBehavior(1, "ask", "Ask.", 0.5),
+    )
+
+    workflow._log_rollout_stats(
+        total_reward=0.0,
+        traces=[],
+        termination_reason="pre_solved",
+        pre_success=True,
+        leak_count=0,
+        initial_student_turn_behavior=workflow.student_turn_behaviors[1],
+    )
+
+    assert captured["student_turn_behavior/total_responses"] == pytest.approx(1.0)
+    assert captured["student_turn_behavior/base/selected_count"] == pytest.approx(0.0)
+    assert captured["student_turn_behavior/ask/selected_count"] == pytest.approx(1.0)
+    assert captured["student_turn_behavior/ask/selected_fraction"] == pytest.approx(1.0)
 
 
 def test_eval_rollout_stats_record_core_repeat_metrics(monkeypatch):

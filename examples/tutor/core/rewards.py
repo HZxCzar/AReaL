@@ -294,6 +294,11 @@ def artifact_to_trace(
         reward_components=assignment.reward_components,
         public_history_before=artifact.public_history_before,
         public_history_after=artifact.public_history_after,
+        student_turn_behavior=(
+            artifact.student_state.student_turn_behavior
+            if artifact.student_state is not None
+            else None
+        ),
         leak_level=artifact.leak_result.leak_level,
         invalid_due_to_leak=artifact.invalid_due_to_leak,
         tutor_format_error=artifact.tutor_format_error,

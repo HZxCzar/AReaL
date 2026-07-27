@@ -26,6 +26,11 @@ def trace_to_history_record(
         "teacher_format_error": trace.tutor_format_error,
         "public_history_before": trace.public_history_before,
         "public_history_after": trace.public_history_after,
+        "student_turn_behavior": (
+            asdict(trace.student_turn_behavior)
+            if trace.student_turn_behavior is not None
+            else None
+        ),
         "previous_teacher_similarity": trace.previous_teacher_similarity,
         "teacher_similarity_error": trace.teacher_similarity_error,
         "teacher_progress_judge": (

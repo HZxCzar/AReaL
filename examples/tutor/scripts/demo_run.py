@@ -231,6 +231,10 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         student_system_prompt=config.student_system_prompt,
         student_prompt_pool_path=config.prompt_pool.student_train_path,
         student_prompt_include_base=config.prompt_pool.include_base,
+        student_turn_behavior_enabled=(
+            config.prompt_pool.student_turn_behavior.enabled
+        ),
+        student_turn_behavior_path=config.prompt_pool.student_turn_behavior.path,
         prompt_pool_seed=config.seed,
         leak_check_system_prompt=config.leak_check_system_prompt,
         answer_judge_enabled=auxiliary_model.answer_judge_enabled,

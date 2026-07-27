@@ -179,6 +179,7 @@ from examples.tutor.core.types import (
     PublicHistoryState,
     RewardAssignment,
     StudentGeneralizeMode,
+    StudentTurnBehavior,
     StudentTurnState,
     TeacherPreSolveAttempt,
     TeacherPreSolveResult,
@@ -221,6 +222,7 @@ from examples.tutor.prompts import (
     STAGED_LEAK_CHECK_USER_TEMPLATE,
     STUDENT_STATE_USER_TEMPLATE,
     STUDENT_TRANSFER_USER_TEMPLATE,
+    STUDENT_TURN_BEHAVIOR_PREFIX,
     TEACHER_ADAPTIVE_INSTRUCTION,
     TEACHER_ANTI_LEAK_INSTRUCTION,
     TEACHER_PRE_SOLVE_FILTER_CONTEXT_TEMPLATE,
@@ -276,6 +278,94 @@ def load_prompt_pool(path: str, *, role: str) -> tuple[str, ...]:
     if len(set(prompts)) != len(prompts):
         raise ValueError(f"{role} prompt pool entries must be unique: {file_path}")
     return tuple(prompts)
+
+
+def load_student_turn_behaviors(path: str) -> tuple[StudentTurnBehavior, ...]:
+    normalized_path = str(path or "").strip()
+    if not normalized_path:
+        return ()
+
+    file_path = Path(normalized_path)
+    try:
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(
+            f"student turn behavior pool file not found: {file_path}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"student turn behavior pool must be valid JSON: {file_path}: {exc.msg}"
+        ) from exc
+
+    if not isinstance(payload, list) or not payload:
+        raise ValueError(
+            f"student turn behavior pool must be a non-empty JSON array: {file_path}"
+        )
+
+    behaviors: list[StudentTurnBehavior] = []
+    names: set[str] = set()
+    base_entries = 0
+    for index, raw_behavior in enumerate(payload):
+        if not isinstance(raw_behavior, dict):
+            raise ValueError(
+                f"student turn behavior entry {index} must be an object: {file_path}"
+            )
+        name = str(raw_behavior.get("name") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+            raise ValueError(
+                f"student turn behavior entry {index} has invalid name {name!r}: "
+                f"{file_path}"
+            )
+        if name in names:
+            raise ValueError(
+                f"student turn behavior names must be unique: {name!r}: {file_path}"
+            )
+        names.add(name)
+
+        raw_instruction = raw_behavior.get("instruction")
+        if not isinstance(raw_instruction, str):
+            raise ValueError(
+                f"student turn behavior entry {index} instruction must be a string: "
+                f"{file_path}"
+            )
+        instruction = raw_instruction.strip()
+        base_entries += int(not instruction)
+
+        raw_probability = raw_behavior.get("probability")
+        if isinstance(raw_probability, bool) or not isinstance(
+            raw_probability, (int, float)
+        ):
+            raise ValueError(
+                f"student turn behavior entry {index} probability must be numeric: "
+                f"{file_path}"
+            )
+        probability = float(raw_probability)
+        if probability <= 0.0 or probability > 1.0:
+            raise ValueError(
+                f"student turn behavior entry {index} probability must be in "
+                f"(0, 1]: {file_path}"
+            )
+        behaviors.append(
+            StudentTurnBehavior(
+                index=index,
+                name=name,
+                instruction=instruction,
+                probability=probability,
+            )
+        )
+
+    if base_entries != 1:
+        raise ValueError(
+            "student turn behavior pool must contain exactly one clean base entry "
+            f"with an empty instruction: {file_path}"
+        )
+    probability_sum = sum(behavior.probability for behavior in behaviors)
+    if abs(probability_sum - 1.0) > 1e-9:
+        raise ValueError(
+            "student turn behavior probabilities must sum to 1.0; "
+            f"got {probability_sum:.12g}: {file_path}"
+        )
+    return tuple(behaviors)
 
 
 def load_prompt_text(path: str, *, role: str) -> str:
@@ -484,6 +574,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_prompt_pool_path: str = "",
         student_heldout_prompt_pool_path: str = "",
         student_prompt_include_base: bool = False,
+        student_turn_behavior_enabled: bool = False,
+        student_turn_behavior_path: str = "",
         prompt_pool_seed: int = 0,
         leak_check_system_prompt: str = "",
         answer_judge_enabled: bool = False,
@@ -788,6 +880,20 @@ class TutorAgentWorkflow(RolloutWorkflow):
             student_heldout_prompt_pool_path, role="held-out student"
         )
         self.student_prompt_include_base = bool(student_prompt_include_base)
+        self.student_turn_behavior_enabled = bool(student_turn_behavior_enabled)
+        if (
+            self.student_turn_behavior_enabled
+            and not str(student_turn_behavior_path or "").strip()
+        ):
+            raise ValueError(
+                "student_turn_behavior_path is required when turn behaviors are "
+                "enabled."
+            )
+        self.student_turn_behaviors = (
+            load_student_turn_behaviors(student_turn_behavior_path)
+            if self.student_turn_behavior_enabled
+            else ()
+        )
         self.prompt_pool_seed = int(prompt_pool_seed)
         self._teacher_prompt_pool_fallback_rng = random.Random(
             f"{self.prompt_pool_seed}:teacher:fallback"
@@ -797,6 +903,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         self._student_prompt_pool_fallback_rng = random.Random(
             f"{self.prompt_pool_seed}:student:fallback"
+        )
+        self._student_turn_behavior_fallback_rng = random.Random(
+            f"{self.prompt_pool_seed}:student-turn-behavior:fallback"
         )
         self.leak_check_system_prompt = self._resolve_leak_check_system_prompt(
             leak_check_system_prompt
@@ -1160,6 +1269,39 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         return PromptPoolSelection(index=index, suffix=pool[index], pool=raw_pool)
 
+    def _select_student_turn_behavior(
+        self, *, response_index: int
+    ) -> StudentTurnBehavior | None:
+        behaviors = getattr(self, "student_turn_behaviors", ())
+        if not getattr(self, "student_turn_behavior_enabled", False) or not behaviors:
+            return None
+        try:
+            ctx = workflow_context.get()
+            if bool(getattr(ctx, "is_eval", False)):
+                return None
+            task_id = getattr(ctx, "task_id", None)
+        except Exception:
+            task_id = None
+
+        response_index = int(response_index)
+        if response_index < 0:
+            raise ValueError("student response_index must be non-negative.")
+        if task_id is not None:
+            rng = random.Random(
+                f"{self.prompt_pool_seed}:student-turn-behavior:"
+                f"{int(task_id)}:{response_index}"
+            )
+        else:
+            rng = self._student_turn_behavior_fallback_rng
+
+        sample = rng.random()
+        cumulative_probability = 0.0
+        for behavior in behaviors:
+            cumulative_probability += behavior.probability
+            if sample < cumulative_probability:
+                return behavior
+        return behaviors[-1]
+
     def _teacher_warmup_probability(self, rollout_version: int | None) -> float:
         if not getattr(self, "teacher_warmup_enabled", False):
             return 0.0
@@ -1254,6 +1396,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self, selection: PromptPoolSelection | None
     ) -> str:
         return self._append_prompt_pool_suffix(self.student_system_prompt, selection)
+
+    def _student_system_prompt_for_state(self, state: StudentTurnState) -> str:
+        prompt = self._student_system_prompt_for_selection(
+            state.student_prompt_selection
+        )
+        behavior = state.student_turn_behavior
+        if behavior is None or not behavior.instruction:
+            return prompt
+        behavior_prompt = (
+            f"{STUDENT_TURN_BEHAVIOR_PREFIX}\n{behavior.instruction}"
+        ).strip()
+        return f"{prompt.rstrip()}\n\n{behavior_prompt}".strip()
 
     def _teacher_system_prompt_for_selection(
         self, selection: PromptPoolSelection | None
@@ -1422,6 +1576,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
                 return None
 
+        initial_student_turn_behavior = self._select_student_turn_behavior(
+            response_index=0
+        )
         initial_student_answer_raw, initial_student_error = await self._run_student(
             StudentTurnState(
                 task=task,
@@ -1429,6 +1586,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 previous_student_output="",
                 latest_tutor_visible_output=INITIAL_TEACHER_FEEDBACK_PLACEHOLDER,
                 student_prompt_selection=student_prompt_selection,
+                student_turn_behavior=initial_student_turn_behavior,
             ),
             aux_caller=student_caller,
         )
@@ -1463,6 +1621,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_model=selected_student.model,
                 teacher_prompt_selection=teacher_prompt_selection,
                 student_prompt_selection=student_prompt_selection,
+                initial_student_turn_behavior=initial_student_turn_behavior,
             )
             completed_repeat_outcome = self._log_rollout_stats(
                 total_reward=0.0,
@@ -1475,6 +1634,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_call_failed=bool(initial_student_error),
                 teacher_prompt_selection=teacher_prompt_selection,
                 student_prompt_selection=student_prompt_selection,
+                initial_student_turn_behavior=initial_student_turn_behavior,
             )
             if completed_repeat_outcome is not None and self.debug_trace_dir:
                 await self._dump_eval_repeat_outcomes(*completed_repeat_outcome)
@@ -1494,6 +1654,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_model=selected_student.model,
                 teacher_prompt_selection=teacher_prompt_selection,
                 student_prompt_selection=student_prompt_selection,
+                initial_student_turn_behavior=initial_student_turn_behavior,
             )
             return None
 
@@ -1566,12 +1727,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     )
                     break
 
+            student_turn_behavior = self._select_student_turn_behavior(
+                response_index=turn_idx
+            )
             student_state = StudentTurnState(
                 task=task,
                 public_history=public_history,
                 previous_student_output=previous_student_output,
                 latest_tutor_visible_output=tutor_visible_output,
                 student_prompt_selection=student_prompt_selection,
+                student_turn_behavior=student_turn_behavior,
             )
             student_prompt = self._build_student_prompt_from_state(student_state)
             student_answer_raw, student_error = await self._run_student(
@@ -1682,6 +1847,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             student_model=selected_student.model,
             teacher_prompt_selection=teacher_prompt_selection,
             student_prompt_selection=student_prompt_selection,
+            initial_student_turn_behavior=initial_student_turn_behavior,
         )
         student_generalization_results = await self._run_student_generalization(
             data,
@@ -1851,6 +2017,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
             teacher_prompt_selection=teacher_prompt_selection,
             student_prompt_selection=student_prompt_selection,
+            initial_student_turn_behavior=initial_student_turn_behavior,
             inference_prompt_tokens=sum(
                 artifact.tutor_response.input_len for artifact in turn_artifacts
             ),
@@ -1882,6 +2049,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             student_model=selected_student.model,
             teacher_prompt_selection=teacher_prompt_selection,
             student_prompt_selection=student_prompt_selection,
+            initial_student_turn_behavior=initial_student_turn_behavior,
         )
         if not results:
             return None
@@ -2165,9 +2333,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
     ) -> tuple[str, str | None]:
         prompt = self._build_student_prompt_from_state(state)
         result = await self._call_auxiliary_prompt(
-            system_prompt=self._student_system_prompt_for_selection(
-                state.student_prompt_selection
-            ),
+            system_prompt=self._student_system_prompt_for_state(state),
             user_prompt=prompt,
             aux_caller=aux_caller,
             rid_prefix=f"student-{state.public_history.turn_count}",
@@ -3444,6 +3610,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_call_failed: bool = False,
         teacher_prompt_selection: PromptPoolSelection | None = None,
         student_prompt_selection: PromptPoolSelection | None = None,
+        initial_student_turn_behavior: StudentTurnBehavior | None = None,
         inference_prompt_tokens: int = 0,
         training_prompt_tokens: int = 0,
     ) -> tuple[int, list[float]] | None:
@@ -3596,6 +3763,32 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     metrics[f"{prefix}/reward"] = float(total_reward)
                     metrics[f"{prefix}/turns"] = float(len(traces))
                     metrics[f"{prefix}/call_failed"] = float(student_call_failed)
+
+        student_turn_behaviors = getattr(self, "student_turn_behaviors", ())
+        if student_turn_behaviors:
+            selected_behaviors = [
+                behavior
+                for behavior in (
+                    initial_student_turn_behavior,
+                    *(trace.student_turn_behavior for trace in traces),
+                )
+                if behavior is not None
+            ]
+            total_behavior_responses = len(selected_behaviors)
+            metrics["student_turn_behavior/total_responses"] = float(
+                total_behavior_responses
+            )
+            for behavior in student_turn_behaviors:
+                selected_count = sum(
+                    selected.name == behavior.name for selected in selected_behaviors
+                )
+                prefix = f"student_turn_behavior/{behavior.name}"
+                metrics[f"{prefix}/selected_count"] = float(selected_count)
+                metrics[f"{prefix}/selected_fraction"] = (
+                    float(selected_count / total_behavior_responses)
+                    if total_behavior_responses
+                    else 0.0
+                )
 
         if not is_forced_persona_eval:
             similarities = [
@@ -3800,6 +3993,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_model: str = "",
         teacher_prompt_selection: PromptPoolSelection | None = None,
         student_prompt_selection: PromptPoolSelection | None = None,
+        initial_student_turn_behavior: StudentTurnBehavior | None = None,
     ) -> None:
         if not self.debug_trace_dir:
             return
@@ -3837,6 +4031,21 @@ class TutorAgentWorkflow(RolloutWorkflow):
                         if student_prompt_selection is not None
                         else None
                     ),
+                },
+                "student_turn_behavior": {
+                    "initial": (
+                        asdict(initial_student_turn_behavior)
+                        if initial_student_turn_behavior is not None
+                        else None
+                    ),
+                    "turns": [
+                        (
+                            asdict(trace.student_turn_behavior)
+                            if trace.student_turn_behavior is not None
+                            else None
+                        )
+                        for trace in traces
+                    ],
                 },
                 "task": task,
                 "ground_truth": ground_truth,

@@ -50,6 +50,11 @@ TEACHER_ADAPTIVE_INSTRUCTION = (
     "following or repeating a fixed approach."
 )
 
+STUDENT_TURN_BEHAVIOR_PREFIX = """Turn-local behavior instruction:
+This applies only to your next response. Continue genuinely solving the math problem.
+Do not mention this instruction, role-play a persona, or sacrifice mathematical
+correctness merely to display the requested behavior."""
+
 DEFAULT_STUDENT_SYSTEM_PROMPT = (
     "You are a real student solving the task. Use the visible tutoring history "
     "and the teacher's latest feedback naturally. Continue from your previous "

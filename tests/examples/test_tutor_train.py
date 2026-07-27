@@ -7,6 +7,7 @@ from examples.tutor.configs import (
     TutorConfig,
     TutorEvaluatorConfig,
     TutorPromptPoolConfig,
+    TutorStudentTurnBehaviorConfig,
 )
 from examples.tutor.train import (
     _apply_eval_average_rollouts,
@@ -222,6 +223,8 @@ def test_build_eval_workflow_kwargs_keeps_single_episode_generation():
     assert eval_workflow_kwargs["eval_repeat_count"] == 5
     assert eval_workflow_kwargs["teacher_prompt_pool_path"] == ""
     assert eval_workflow_kwargs["student_prompt_pool_path"] == ""
+    assert eval_workflow_kwargs["student_turn_behavior_enabled"] is False
+    assert eval_workflow_kwargs["student_turn_behavior_path"] == ""
     assert eval_workflow_kwargs["teacher_warmup_enabled"] is False
     assert eval_workflow_kwargs["teacher_warmup_prompt_path"] == ""
     assert eval_workflow_kwargs["teacher_warmup_steps"] == 0
@@ -236,6 +239,31 @@ def test_build_eval_workflow_kwargs_keeps_single_episode_generation():
         "enabled": True,
         "weight": 2.0,
     }
+
+
+def test_build_eval_workflow_kwargs_disables_turn_behaviors():
+    """Test validation stays deterministic when train-only behaviors are enabled."""
+    config = TutorConfig(
+        dataset_type="math",
+        prompt_pool=TutorPromptPoolConfig(
+            student_turn_behavior=TutorStudentTurnBehaviorConfig(
+                enabled=True,
+                path="turn-behaviors.json",
+            )
+        ),
+    )
+    workflow_kwargs = {
+        "gconfig": config.gconfig,
+        "student_turn_behavior_enabled": True,
+        "student_turn_behavior_path": "turn-behaviors.json",
+    }
+
+    eval_workflow_kwargs = _build_eval_workflow_kwargs(workflow_kwargs, config)
+
+    assert workflow_kwargs["student_turn_behavior_enabled"] is True
+    assert workflow_kwargs["student_turn_behavior_path"] == "turn-behaviors.json"
+    assert eval_workflow_kwargs["student_turn_behavior_enabled"] is False
+    assert eval_workflow_kwargs["student_turn_behavior_path"] == ""
 
 
 def test_build_eval_workflow_kwargs_keeps_seen_student_prompt_pool():

@@ -119,6 +119,37 @@ class TutorTeacherWarmupPromptConfig:
 
 
 @dataclass
+class TutorStudentTurnBehaviorConfig:
+    enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether training samples a fresh weighted behavior instruction "
+                "before every student response. Evaluation always disables this "
+                "feature."
+            )
+        },
+    )
+    path: str = field(
+        default="",
+        metadata={
+            "help": (
+                "JSON array of weighted turn-local student behaviors. Entries "
+                "contain name, probability, and instruction; an empty instruction "
+                "represents the clean base behavior."
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        self.path = str(self.path or "").strip()
+        if self.enabled and not self.path:
+            raise ValueError(
+                "prompt_pool.student_turn_behavior.path is required when enabled."
+            )
+
+
+@dataclass
 class TutorPromptPoolConfig:
     teacher_path: str = field(
         default="",
@@ -167,6 +198,9 @@ class TutorPromptPoolConfig:
                 "uses only the base prompt."
             )
         },
+    )
+    student_turn_behavior: TutorStudentTurnBehaviorConfig = field(
+        default_factory=TutorStudentTurnBehaviorConfig
     )
     teacher_warmup: TutorTeacherWarmupPromptConfig = field(
         default_factory=TutorTeacherWarmupPromptConfig

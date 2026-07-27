@@ -197,6 +197,24 @@ Per-student metrics are emitted automatically under `rollout/student/<name>/...`
 The complete two-student example is
 `configs/math/july/baseline-overfit-1-generalize-001020-lora-batch128-rebn-nomean-5-mixed-students.yaml`.
 
+For train-only response-level behavior diversity, configure a weighted JSON pool:
+
+```yaml
+prompt_pool:
+  student_turn_behavior:
+    enabled: true
+    path: examples/tutor/prompt_pools/student_turn_behaviors_v1.json
+```
+
+The behavior file must contain exactly one clean entry with an empty instruction, and
+all probabilities must sum to `1.0`. A new behavior is sampled before the initial
+student answer and before every later student response. The draw is deterministic for
+the same seed, task, and response index. Evaluation always disables turn behaviors,
+so repeated test runs keep the clean student prompt and are not affected by behavior
+sampling. Training metrics record response counts and fractions under
+`rollout/student_turn_behavior/<name>/...`, and debug traces store the selected
+behavior for the initial response and every subsequent turn.
+
 Set common API parameters through their dedicated fields and place backend-specific
 OpenAI request values under `request_params.extra_body`.
 

@@ -1,0 +1,27 @@
+[
+  {
+    "name": "base",
+    "probability": 0.5,
+    "instruction": ""
+  },
+  {
+    "name": "ask_question",
+    "probability": 0.2,
+    "instruction": "Ask one specific, mathematically relevant question about the exact point you are currently unsure about. Do not merely repeat the teacher's words."
+  },
+  {
+    "name": "concrete_attempt",
+    "probability": 0.1,
+    "instruction": "Make one concrete next-step attempt and show the corresponding equation, calculation, or case analysis."
+  },
+  {
+    "name": "verify_feedback",
+    "probability": 0.1,
+    "instruction": "Check the teacher's latest suggestion against your current work, state whether it is consistent, and then continue from the checked step."
+  },
+  {
+    "name": "try_alternative",
+    "probability": 0.1,
+    "instruction": "Try a different mathematically valid representation or approach for the next step, while preserving any correct progress already made."
+  }
+]

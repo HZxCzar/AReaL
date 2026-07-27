@@ -24,6 +24,14 @@ class PromptPoolSelection:
     pool: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class StudentTurnBehavior:
+    index: int
+    name: str
+    instruction: str
+    probability: float
+
+
 @dataclass(slots=True)
 class JudgeResult:
     raw_output: str
@@ -109,6 +117,7 @@ class StudentTurnState:
     previous_student_output: str
     latest_tutor_visible_output: str
     student_prompt_selection: PromptPoolSelection | None = None
+    student_turn_behavior: StudentTurnBehavior | None = None
 
 
 @dataclass(slots=True)
@@ -151,6 +160,7 @@ class EpisodeArtifact:
     student_model: str = ""
     teacher_prompt_selection: PromptPoolSelection | None = None
     student_prompt_selection: PromptPoolSelection | None = None
+    initial_student_turn_behavior: StudentTurnBehavior | None = None
 
 
 @dataclass(slots=True)
@@ -173,6 +183,7 @@ class TurnTrace:
     reward_components: dict[str, float]
     public_history_before: str
     public_history_after: str
+    student_turn_behavior: StudentTurnBehavior | None = None
     leak_level: int | None = None
     invalid_due_to_leak: bool = False
     tutor_format_error: str | None = None
