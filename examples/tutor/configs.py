@@ -786,6 +786,47 @@ class TutorTeacherProgressJudgeConfig:
 
 
 @dataclass
+class TutorStudentRequestJudgeConfig:
+    """Reward a teacher for satisfying a sampled student turn request."""
+
+    enabled: bool = field(default=False)
+    weight: float = field(
+        default=0.5,
+        metadata={
+            "help": (
+                "Magnitude of the target teacher-turn reward. Judge scores "
+                "-1/0/1 map to -weight/0/+weight."
+            )
+        },
+    )
+    behavior_names: list[str] = field(
+        default_factory=lambda: ["ask_question"],
+        metadata={
+            "help": (
+                "Names from prompt_pool.student_turn_behavior.path whose student "
+                "reply should trigger the request-fulfillment judge."
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        self.weight = float(self.weight)
+        self.behavior_names = [
+            str(name).strip() for name in self.behavior_names if str(name).strip()
+        ]
+        if self.enabled and self.weight <= 0.0:
+            raise ValueError("reward.student_request_judge.weight must be positive.")
+        if self.enabled and not self.behavior_names:
+            raise ValueError(
+                "reward.student_request_judge.behavior_names must not be empty."
+            )
+        if len(self.behavior_names) != len(set(self.behavior_names)):
+            raise ValueError(
+                "reward.student_request_judge.behavior_names must be unique."
+            )
+
+
+@dataclass
 class TutorSuccessTurnShapingConfig:
     """Shape clean success reward linearly by the turn where success occurs."""
 
@@ -895,6 +936,9 @@ class TutorRewardConfig:
     )
     teacher_progress_judge: TutorTeacherProgressJudgeConfig = field(
         default_factory=TutorTeacherProgressJudgeConfig
+    )
+    student_request_judge: TutorStudentRequestJudgeConfig = field(
+        default_factory=TutorStudentRequestJudgeConfig
     )
 
     def __post_init__(self) -> None:
@@ -1188,6 +1232,14 @@ class TutorConfig(GRPOConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if (
+            self.reward.student_request_judge.enabled
+            and not self.prompt_pool.student_turn_behavior.enabled
+        ):
+            raise ValueError(
+                "reward.student_request_judge.enabled requires "
+                "prompt_pool.student_turn_behavior.enabled."
+            )
         if self.world_model.separate_lora_enabled:
             if not self.actor.backend.startswith("fsdp:"):
                 raise ValueError(

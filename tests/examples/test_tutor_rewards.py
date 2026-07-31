@@ -15,6 +15,7 @@ from examples.tutor.configs import (
     TutorRewardConfig,
     TutorStudentGeneralizeConfidenceConfig,
     TutorStudentGeneralizeConfig,
+    TutorStudentRequestJudgeConfig,
     TutorSuccessTurnShapingConfig,
     TutorTeacherContextRewardConfig,
     TutorTeacherDiversityRewardConfig,
@@ -39,6 +40,8 @@ from examples.tutor.core.types import (
     LeakCheckResult,
     PublicHistoryState,
     RewardAssignment,
+    StudentRequestJudgeResult,
+    StudentTurnBehavior,
     StudentTurnState,
     TeacherPreSolveAttempt,
     TeacherPreSolveResult,
@@ -103,6 +106,8 @@ def _turn(
     correct: bool = False,
     tutor_output: str = "hint",
     tutor_format_error: str | None = None,
+    preceding_behavior: StudentTurnBehavior | None = None,
+    student_reply_before_teacher: str = "prev",
 ) -> TurnArtifact:
     tutor_state = TutorTurnState(
         task="task",
@@ -112,6 +117,8 @@ def _turn(
         previous_feedback=TutorPrivateFeedback(),
         turn_idx=turn_idx,
         max_turns=max_turns,
+        student_reply_before_teacher=student_reply_before_teacher,
+        preceding_student_turn_behavior=preceding_behavior,
     )
     return TurnArtifact(
         turn_idx=turn_idx,
@@ -544,6 +551,45 @@ def test_teacher_progress_judge_yaml_section_loads_typed_config():
 
     assert config.teacher_progress_judge.enabled is True
     assert config.teacher_progress_judge.weight == pytest.approx(0.5)
+
+
+def test_student_request_judge_config_defaults_to_disabled():
+    config = TutorStudentRequestJudgeConfig()
+
+    assert config.enabled is False
+    assert config.weight == pytest.approx(0.5)
+    assert config.behavior_names == ["ask_question"]
+
+
+def test_student_request_judge_config_validates_enabled_fields():
+    with pytest.raises(ValueError, match="student_request_judge.weight"):
+        TutorStudentRequestJudgeConfig(enabled=True, weight=0.0)
+    with pytest.raises(ValueError, match="behavior_names must not be empty"):
+        TutorStudentRequestJudgeConfig(enabled=True, behavior_names=[])
+    with pytest.raises(ValueError, match="behavior_names must be unique"):
+        TutorStudentRequestJudgeConfig(
+            enabled=True,
+            behavior_names=["ask_question", "ask_question"],
+        )
+
+
+def test_student_request_judge_yaml_section_loads_typed_config():
+    config = OmegaConf.to_object(
+        OmegaConf.merge(
+            OmegaConf.structured(TutorRewardConfig),
+            {
+                "student_request_judge": {
+                    "enabled": True,
+                    "weight": 0.25,
+                    "behavior_names": ["ask_question"],
+                }
+            },
+        )
+    )
+
+    assert config.student_request_judge.enabled is True
+    assert config.student_request_judge.weight == pytest.approx(0.25)
+    assert config.student_request_judge.behavior_names == ["ask_question"]
 
 
 @pytest.mark.parametrize(
@@ -1347,6 +1393,139 @@ def test_teacher_progress_judge_parser_accepts_unescaped_latex_reason():
 
     assert result.score == 1
     assert result.parse_error is not None
+
+
+def test_student_request_judge_prompt_uses_aligned_preceding_student_turn():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    behavior = StudentTurnBehavior(
+        index=1,
+        name="ask_question",
+        instruction="Ask about the exact algebra step that is unclear.",
+        probability=0.2,
+    )
+    turn = _turn(
+        2,
+        tutor_output="Let me explain why that cancellation is valid.",
+        preceding_behavior=behavior,
+        student_reply_before_teacher="Why can we cancel x here?",
+    )
+    turn.public_history_before = "Tutor round 1:\nTry factoring first."
+    # This is the behavior sampled for the *next* student reply and must not
+    # control whether the current teacher reply is judged.
+    turn.student_state.student_turn_behavior = StudentTurnBehavior(
+        index=0,
+        name="base",
+        instruction="",
+        probability=0.8,
+    )
+
+    prompt = workflow._build_student_request_judge_prompt(turn)
+
+    assert behavior.instruction not in prompt
+    assert "Why can we cancel x here?" in prompt
+    assert "Let me explain why that cancellation is valid." in prompt
+
+
+def test_student_request_judge_parser_handles_all_scores_and_latex_reason():
+    no_question = tutor_workflow.TutorAgentWorkflow._parse_student_request_judge_result(
+        TextCallResult(text='{"score": 0, "reason": "student made no request"}')
+    )
+    inappropriate = (
+        tutor_workflow.TutorAgentWorkflow._parse_student_request_judge_result(
+            TextCallResult(
+                text='{"score": -1, "reason": "teacher ignored the question"}'
+            )
+        )
+    )
+    appropriate = tutor_workflow.TutorAgentWorkflow._parse_student_request_judge_result(
+        TextCallResult(text='{"score": 1, "reason": "includes $ \\pm 2 $"}')
+    )
+
+    assert no_question.score == 0
+    assert inappropriate.score == -1
+    assert appropriate.score == 1
+    assert appropriate.parse_error is not None
+
+
+def test_student_request_judge_parser_rejects_out_of_range_score():
+    result = tutor_workflow.TutorAgentWorkflow._parse_student_request_judge_result(
+        TextCallResult(text='{"score": 2, "reason": "unsupported score"}')
+    )
+
+    assert result.score is None
+    assert result.parse_error == (
+        'Student request judge field "score" must be -1, 0, or 1.'
+    )
+
+
+def test_student_request_judge_scores_only_targeted_clean_turns(monkeypatch):
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_request_judge_enabled = True
+    workflow.student_request_judge_behavior_names = frozenset({"ask_question"})
+    workflow.student_request_judge_system_prompt = "judge request fulfillment"
+    ask = StudentTurnBehavior(1, "ask_question", "Ask one question.", 0.2)
+    base = StudentTurnBehavior(0, "base", "", 0.8)
+    turns = [
+        _turn(1, preceding_behavior=ask),
+        _turn(2, preceding_behavior=base),
+        _turn(3, preceding_behavior=ask, leaked=True),
+    ]
+    captured = []
+
+    async def call_auxiliary_prompt(**kwargs):
+        captured.append(kwargs)
+        return TextCallResult(
+            text='{"score": 1, "reason": "teacher answered the question"}'
+        )
+
+    monkeypatch.setattr(workflow, "_call_auxiliary_prompt", call_auxiliary_prompt)
+
+    asyncio.run(workflow._annotate_student_requests(turns, aux_caller=object()))
+
+    assert len(captured) == 1
+    assert captured[0]["rid_prefix"] == "student-request-judge"
+    assert turns[0].student_request_judge_result.score == 1
+    assert turns[1].student_request_judge_result is None
+    assert turns[2].student_request_judge_result.parse_error == "skipped_leaked_turn"
+
+
+def test_student_request_rewards_are_direct_and_turn_local():
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_request_judge_enabled = True
+    workflow.student_request_judge_weight = 0.5
+    turns = [_turn(index) for index in range(1, 5)]
+    turns[0].student_request_judge_result = StudentRequestJudgeResult(
+        raw_output="", score=-1, reason="ignored", parse_error=None
+    )
+    turns[1].student_request_judge_result = StudentRequestJudgeResult(
+        raw_output="", score=0, reason="no question", parse_error=None
+    )
+    turns[2].student_request_judge_result = StudentRequestJudgeResult(
+        raw_output="", score=1, reason="answered", parse_error=None
+    )
+    turns[3].student_request_judge_result = StudentRequestJudgeResult(
+        raw_output="",
+        score=None,
+        reason="judge error",
+        parse_error=None,
+    )
+    assignments = [RewardAssignment(reward=0.0, reward_components={}) for _ in turns]
+
+    workflow._apply_student_request_rewards(turns, assignments)
+
+    assert [assignment.reward for assignment in assignments] == pytest.approx(
+        [-0.5, 0.0, 0.5, 0.0]
+    )
+    assert assignments[0].reward_components == {"student_request_fulfillment": -0.5}
+    assert assignments[1].reward_components == {}
+    assert assignments[2].reward_components == {"student_request_fulfillment": 0.5}
+    assert assignments[3].reward_components == {}
 
 
 def test_teacher_progress_judge_scores_valid_turns_and_skips_leaks(monkeypatch):

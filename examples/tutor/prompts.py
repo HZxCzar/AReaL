@@ -174,6 +174,29 @@ Return valid JSON only with keys score and reason:
 {"score": 0, "reason": "brief comparison of the student's state before and after the target teacher reply"}
 """
 
+DEFAULT_STUDENT_REQUEST_JUDGE_SYSTEM_PROMPT = """\
+Judge only whether the actual student reply explicitly asks a question and,
+if so, whether the target teacher reply appropriately addresses that exact
+question.
+
+Count a student question only when the student directly asks an interrogative
+sentence ending in "?" or "？". Do not infer a question from a submitted
+solution, a mistake, a statement of uncertainty, or an implicit request for
+feedback. Ignore questions appearing in the math task, conversation history,
+or teacher reply.
+
+Give one integer score:
+1 = the student explicitly asked a question and the teacher directly and
+    appropriately addressed it
+0 = the student did not explicitly ask a question
+-1 = the student explicitly asked a question but the teacher did not
+     appropriately address it
+
+Return valid JSON only. Keep the reason brief and use plain text without
+backslashes:
+{"score": 1, "reason": "brief explanation"}
+"""
+
 NO_VISIBLE_TUTORING_HISTORY = "No visible tutoring history yet."
 NO_PREVIOUS_VISIBLE_TUTORING_HISTORY = "No previous visible tutoring history."
 EMPTY_PLACEHOLDER = "(empty)"
@@ -388,6 +411,20 @@ Target teacher reply whose effect is being evaluated:
 
 Student reply immediately after the target teacher reply:
 {{ student_reply_after_teacher or '(empty)' }}
+"""
+
+STUDENT_REQUEST_JUDGE_USER_TEMPLATE = """\
+Original math task:
+{{ task }}
+
+Conversation history before the target interaction:
+{{ public_history or '(none)' }}
+
+Actual student reply immediately before the target teacher reply:
+{{ student_reply_before_teacher or '(empty)' }}
+
+Target teacher reply:
+{{ target_teacher_reply or '(empty)' }}
 """
 
 

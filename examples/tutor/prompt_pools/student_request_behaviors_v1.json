@@ -1,0 +1,12 @@
+[
+  {
+    "name": "base",
+    "probability": 0.8,
+    "instruction": ""
+  },
+  {
+    "name": "ask_question",
+    "probability": 0.2,
+    "instruction": "On this turn, explicitly ask for clarification. Continue working on the problem, but end your reply with exactly one direct, specific, relevant question about the precise concept or step you are currently unsure about. Do not merely present a solution, state uncertainty, or implicitly seek feedback. Your final sentence must be the question and must end with a question mark (?)."
+  }
+]

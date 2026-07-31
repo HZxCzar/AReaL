@@ -210,6 +210,8 @@ def build_workflow_kwargs(config: TutorConfig, trace_sink: TraceSink) -> dict[st
         length_penalty_min=reward.length_penalty_min,
         teacher_diversity_reward=asdict(reward.teacher_diversity),
         teacher_context_reward=asdict(reward.teacher_context),
+        teacher_progress_judge=asdict(reward.teacher_progress_judge),
+        student_request_judge=asdict(reward.student_request_judge),
         teacher_system_prompt=config.teacher_system_prompt,
         teacher_anti_leak_instruction_enabled=(
             config.teacher_anti_leak_instruction_enabled

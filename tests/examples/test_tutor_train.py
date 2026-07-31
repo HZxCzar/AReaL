@@ -7,6 +7,8 @@ from examples.tutor.configs import (
     TutorConfig,
     TutorEvaluatorConfig,
     TutorPromptPoolConfig,
+    TutorRewardConfig,
+    TutorStudentRequestJudgeConfig,
     TutorStudentTurnBehaviorConfig,
 )
 from examples.tutor.train import (
@@ -230,6 +232,7 @@ def test_build_eval_workflow_kwargs_keeps_single_episode_generation():
     assert eval_workflow_kwargs["teacher_warmup_steps"] == 0
     assert eval_workflow_kwargs["teacher_diversity_reward"] == {"enabled": False}
     assert eval_workflow_kwargs["teacher_progress_judge"] == {"enabled": False}
+    assert eval_workflow_kwargs["student_request_judge"] == {"enabled": False}
     assert workflow_kwargs["teacher_prompt_pool_path"] == "teacher.json"
     assert workflow_kwargs["student_prompt_pool_path"] == "student.json"
     assert workflow_kwargs["teacher_warmup_enabled"] is True
@@ -264,6 +267,48 @@ def test_build_eval_workflow_kwargs_disables_turn_behaviors():
     assert workflow_kwargs["student_turn_behavior_path"] == "turn-behaviors.json"
     assert eval_workflow_kwargs["student_turn_behavior_enabled"] is False
     assert eval_workflow_kwargs["student_turn_behavior_path"] == ""
+
+
+def test_student_request_judge_requires_training_turn_behaviors():
+    reward = TutorRewardConfig(
+        student_request_judge=TutorStudentRequestJudgeConfig(enabled=True)
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="student_request_judge.enabled requires.*student_turn_behavior.enabled",
+    ):
+        TutorConfig(dataset_type="math", reward=reward)
+
+
+def test_build_eval_workflow_kwargs_disables_student_request_judge():
+    config = TutorConfig(
+        dataset_type="math",
+        prompt_pool=TutorPromptPoolConfig(
+            student_turn_behavior=TutorStudentTurnBehaviorConfig(
+                enabled=True,
+                path="turn-behaviors.json",
+            )
+        ),
+        reward=TutorRewardConfig(
+            student_request_judge=TutorStudentRequestJudgeConfig(enabled=True)
+        ),
+    )
+    workflow_kwargs = {
+        "gconfig": config.gconfig,
+        "student_turn_behavior_enabled": True,
+        "student_turn_behavior_path": "turn-behaviors.json",
+        "student_request_judge": {
+            "enabled": True,
+            "weight": 0.5,
+            "behavior_names": ["ask_question"],
+        },
+    }
+
+    eval_workflow_kwargs = _build_eval_workflow_kwargs(workflow_kwargs, config)
+
+    assert workflow_kwargs["student_request_judge"]["enabled"] is True
+    assert eval_workflow_kwargs["student_request_judge"] == {"enabled": False}
 
 
 def test_build_eval_workflow_kwargs_keeps_seen_student_prompt_pool():

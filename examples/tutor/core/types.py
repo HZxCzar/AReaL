@@ -62,6 +62,15 @@ class TeacherProgressJudgeResult:
 
 
 @dataclass(slots=True)
+class StudentRequestJudgeResult:
+    raw_output: str
+    score: int | None
+    reason: str
+    parse_error: str | None
+    reward: float = 0.0
+
+
+@dataclass(slots=True)
 class PublicHistoryState:
     summary: str = ""
     turn_count: int = 0
@@ -108,6 +117,8 @@ class TutorTurnState:
     max_turns: int
     teacher_pre_solve_result: TeacherPreSolveResult | None = None
     teacher_prompt_selection: PromptPoolSelection | None = None
+    student_reply_before_teacher: str = ""
+    preceding_student_turn_behavior: StudentTurnBehavior | None = None
 
 
 @dataclass(slots=True)
@@ -141,6 +152,7 @@ class TurnArtifact:
     previous_teacher_similarity: float | None = None
     teacher_similarity_error: str | None = None
     teacher_progress_judge_result: TeacherProgressJudgeResult | None = None
+    student_request_judge_result: StudentRequestJudgeResult | None = None
 
 
 @dataclass(slots=True)
@@ -190,3 +202,4 @@ class TurnTrace:
     previous_teacher_similarity: float | None = None
     teacher_similarity_error: str | None = None
     teacher_progress_judge_result: TeacherProgressJudgeResult | None = None
+    student_request_judge_result: StudentRequestJudgeResult | None = None

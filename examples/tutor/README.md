@@ -215,6 +215,36 @@ sampling. Training metrics record response counts and fractions under
 `rollout/student_turn_behavior/<name>/...`, and debug traces store the selected
 behavior for the initial response and every subsequent turn.
 
+To reward whether the teacher follows a sampled student request, enable the optional
+request judge together with turn behaviors:
+
+```yaml
+prompt_pool:
+  student_turn_behavior:
+    enabled: true
+    path: examples/tutor/prompt_pools/student_request_behaviors_v1.json
+
+reward:
+  student_request_judge:
+    enabled: true
+    weight: 0.5
+    behavior_names:
+      - ask_question
+```
+
+For each listed behavior, the judge compares the actual student reply with the next
+teacher reply. Scores `-1/0/1` mean respectively: the student asked but the teacher
+did not answer appropriately, the student did not ask a question, or the student
+asked and the teacher answered appropriately. The score adds
+`-weight/0/+weight` directly to that teacher turn under the
+`student_request_fulfillment` reward component. Leaked turns are skipped. Like turn
+behavior sampling, this judge is always disabled for evaluation. Metrics are reported
+under `rollout/student_request_judge/...`; the selected behavior, aligned student
+reply, judge verdict, and applied reward are retained in debug traces.
+
+The ready-to-run MATH example is
+`configs/math/0723/2gpu/qwen8b-train-qwen1.7b-student-request-judge-eval3-math-pre-aleak.yaml`.
+
 Set common API parameters through their dedicated fields and place backend-specific
 OpenAI request values under `request_params.extra_body`.
 

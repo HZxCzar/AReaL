@@ -179,6 +179,7 @@ from examples.tutor.core.types import (
     PublicHistoryState,
     RewardAssignment,
     StudentGeneralizeMode,
+    StudentRequestJudgeResult,
     StudentTurnBehavior,
     StudentTurnState,
     TeacherPreSolveAttempt,
@@ -194,6 +195,7 @@ from examples.tutor.prompts import (
     DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT,
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
     DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT,
+    DEFAULT_STUDENT_REQUEST_JUDGE_SYSTEM_PROMPT,
     DEFAULT_TEACHER_PROGRESS_JUDGE_SYSTEM_PROMPT,
     DEFAULT_WORLD_MODEL_SYSTEM_PROMPT,
     EMPTY_PLACEHOLDER,
@@ -220,6 +222,7 @@ from examples.tutor.prompts import (
     RAWBASE_LEAK_CHECK_SYSTEM_PROMPT,
     RAWBASE_LEAK_CHECK_USER_TEMPLATE,
     STAGED_LEAK_CHECK_USER_TEMPLATE,
+    STUDENT_REQUEST_JUDGE_USER_TEMPLATE,
     STUDENT_STATE_USER_TEMPLATE,
     STUDENT_TRANSFER_USER_TEMPLATE,
     STUDENT_TURN_BEHAVIOR_PREFIX,
@@ -554,6 +557,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_diversity_reward: dict[str, Any] | None = None,
         teacher_context_reward: dict[str, Any] | None = None,
         teacher_progress_judge: dict[str, Any] | None = None,
+        student_request_judge: dict[str, Any] | None = None,
         world_model: dict[str, Any] | None = None,
         local_advantage_turn_discount: float = 1.0,
         teacher_system_prompt: str = "",
@@ -823,6 +827,26 @@ class TutorAgentWorkflow(RolloutWorkflow):
             and self.teacher_progress_judge_weight <= 0.0
         ):
             raise ValueError("teacher progress judge weight must be positive.")
+        request_config = dict(student_request_judge or {})
+        self.student_request_judge_enabled = bool(request_config.get("enabled", False))
+        self.student_request_judge_weight = float(request_config.get("weight", 0.5))
+        request_behavior_names = request_config.get("behavior_names", ["ask_question"])
+        self.student_request_judge_behavior_names = frozenset(
+            str(name).strip() for name in request_behavior_names if str(name).strip()
+        )
+        self.student_request_judge_system_prompt = (
+            DEFAULT_STUDENT_REQUEST_JUDGE_SYSTEM_PROMPT
+        )
+        if (
+            self.student_request_judge_enabled
+            and self.student_request_judge_weight <= 0.0
+        ):
+            raise ValueError("student request judge weight must be positive.")
+        if (
+            self.student_request_judge_enabled
+            and not self.student_request_judge_behavior_names
+        ):
+            raise ValueError("student request judge behavior_names must not be empty.")
         if self.local_advantage_turn_discount < 0.0:
             raise ValueError("local advantage turn discount must be non-negative.")
         self.teacher_anti_leak_instruction_enabled = bool(
@@ -894,6 +918,23 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if self.student_turn_behavior_enabled
             else ()
         )
+        if self.student_request_judge_enabled:
+            if not self.student_turn_behavior_enabled:
+                raise ValueError(
+                    "student request judge requires student turn behaviors to be "
+                    "enabled."
+                )
+            configured_behavior_names = {
+                behavior.name for behavior in self.student_turn_behaviors
+            }
+            unknown_behavior_names = sorted(
+                self.student_request_judge_behavior_names - configured_behavior_names
+            )
+            if unknown_behavior_names:
+                raise ValueError(
+                    "student request judge behavior_names are missing from the "
+                    f"student turn behavior pool: {unknown_behavior_names}."
+                )
         self.prompt_pool_seed = int(prompt_pool_seed)
         self._teacher_prompt_pool_fallback_rng = random.Random(
             f"{self.prompt_pool_seed}:teacher:fallback"
@@ -1664,6 +1705,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         previous_tutor_visible_output = ""
         previous_student_output = initial_student_answer
+        preceding_student_turn_behavior = initial_student_turn_behavior
         previous_feedback = TutorPrivateFeedback(
             kind="student_judged",
             student_output=initial_student_answer,
@@ -1682,6 +1724,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 max_turns=self.max_turns,
                 teacher_pre_solve_result=teacher_pre_solve_result,
                 teacher_prompt_selection=teacher_prompt_selection,
+                student_reply_before_teacher=previous_student_output,
+                preceding_student_turn_behavior=preceding_student_turn_behavior,
             )
             try:
                 response, tutor_raw_output = await self._generate_tutor_response(
@@ -1806,6 +1850,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 public_history = next_public_history
                 previous_tutor_visible_output = tutor_visible_output
                 previous_student_output = student_answer
+                preceding_student_turn_behavior = student_turn_behavior
                 previous_feedback = TutorPrivateFeedback(
                     kind="student_judged",
                     student_output=student_answer,
@@ -1827,6 +1872,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
             leak_count = sum(
                 1 for artifact in turn_artifacts if artifact.leak_result.leaked
             )
+        await self._annotate_student_requests(
+            turn_artifacts,
+            aux_caller=aux_caller,
+        )
         await self._annotate_teacher_progress(
             turn_artifacts,
             aux_caller=aux_caller,
@@ -1889,6 +1938,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             length_penalty_min=self.length_penalty_min,
         )
         assignments = await reward_computer.compute(episode_artifact)
+        self._apply_student_request_rewards(turn_artifacts, assignments)
         self._apply_teacher_progress_shaping(turn_artifacts, assignments)
         self._apply_student_generalization_rewards(
             turn_artifacts, assignments, student_generalization_results
@@ -2824,6 +2874,159 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ground_truth=ground_truth,
             extracted_answer=extracted_answer,
         )
+
+    def _build_student_request_judge_prompt(self, artifact: TurnArtifact) -> str:
+        return render_prompt(
+            STUDENT_REQUEST_JUDGE_USER_TEMPLATE,
+            task=artifact.tutor_state.task,
+            public_history=artifact.public_history_before,
+            student_reply_before_teacher=(
+                artifact.tutor_state.student_reply_before_teacher
+            ),
+            target_teacher_reply=artifact.tutor_visible_output,
+        )
+
+    @staticmethod
+    def _parse_student_request_judge_result(
+        judge_call: TextCallResult,
+    ) -> StudentRequestJudgeResult:
+        raw_output = judge_call.raw_text or judge_call.text
+        if judge_call.error:
+            return StudentRequestJudgeResult(
+                raw_output=raw_output,
+                score=None,
+                reason="",
+                parse_error=judge_call.error,
+            )
+
+        parsed, parse_error = parse_json_dict(judge_call.text)
+        score = parsed.get("score") if isinstance(parsed, dict) else None
+        reason = parsed.get("reason", "") if isinstance(parsed, dict) else ""
+        valid_score = (
+            isinstance(score, int)
+            and not isinstance(score, bool)
+            and score in {-1, 0, 1}
+        )
+        if valid_score:
+            return StudentRequestJudgeResult(
+                raw_output=raw_output,
+                score=int(score),
+                reason=str(reason),
+                parse_error=parse_error,
+            )
+
+        # Preserve an unambiguous verdict when a model emits unescaped LaTeX
+        # inside the reason and therefore breaks the surrounding JSON.
+        score_match = re.search(r'"score"\s*:\s*(-1|0|1)(?!\d)', judge_call.text)
+        if score_match is not None:
+            return StudentRequestJudgeResult(
+                raw_output=raw_output,
+                score=int(score_match.group(1)),
+                reason="",
+                parse_error=parse_error,
+            )
+
+        error = parse_error or (
+            'Student request judge field "score" must be -1, 0, or 1.'
+        )
+        return StudentRequestJudgeResult(
+            raw_output=raw_output,
+            score=None,
+            reason="",
+            parse_error=error,
+        )
+
+    async def _run_student_request_judge(
+        self,
+        artifact: TurnArtifact,
+        *,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller,
+    ) -> StudentRequestJudgeResult:
+        judge_call = await self._call_auxiliary_prompt(
+            system_prompt=self.student_request_judge_system_prompt,
+            user_prompt=self._build_student_request_judge_prompt(artifact),
+            aux_caller=aux_caller,
+            rid_prefix="student-request-judge",
+        )
+        return self._parse_student_request_judge_result(judge_call)
+
+    def _student_request_judge_targets(self, artifact: TurnArtifact) -> bool:
+        behavior = artifact.tutor_state.preceding_student_turn_behavior
+        return bool(
+            behavior is not None
+            and behavior.name in self.student_request_judge_behavior_names
+        )
+
+    async def _annotate_student_requests(
+        self,
+        turn_artifacts: list[TurnArtifact],
+        *,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
+    ) -> None:
+        if not getattr(self, "student_request_judge_enabled", False):
+            return
+
+        targets = [
+            artifact
+            for artifact in turn_artifacts
+            if self._student_request_judge_targets(artifact)
+        ]
+        if not targets:
+            return
+        if aux_caller is None:
+            raise RuntimeError("student request judge caller is unavailable.")
+
+        async def judge(artifact: TurnArtifact) -> StudentRequestJudgeResult:
+            if artifact.invalid_due_to_leak or artifact.leak_result.leaked:
+                return StudentRequestJudgeResult(
+                    raw_output="",
+                    score=None,
+                    reason="",
+                    parse_error="skipped_leaked_turn",
+                )
+            if not artifact.tutor_state.student_reply_before_teacher.strip():
+                return StudentRequestJudgeResult(
+                    raw_output="",
+                    score=0,
+                    reason="The student reply before the teacher was empty.",
+                    parse_error=None,
+                )
+            return await self._run_student_request_judge(
+                artifact,
+                aux_caller=aux_caller,
+            )
+
+        results = await asyncio.gather(*(judge(artifact) for artifact in targets))
+        for artifact, result in zip(targets, results, strict=True):
+            artifact.student_request_judge_result = result
+
+    def _apply_student_request_rewards(
+        self,
+        turn_artifacts: list[TurnArtifact],
+        assignments: list[RewardAssignment],
+    ) -> None:
+        if not getattr(self, "student_request_judge_enabled", False):
+            return
+        if len(turn_artifacts) != len(assignments):
+            raise ValueError(
+                "Student request rewards require one reward assignment per turn."
+            )
+
+        weight = float(self.student_request_judge_weight)
+        for artifact, assignment in zip(turn_artifacts, assignments, strict=True):
+            result = artifact.student_request_judge_result
+            reward = (
+                weight * int(result.score)
+                if result is not None and result.score is not None
+                else 0.0
+            )
+            if result is not None:
+                result.reward = float(reward)
+            if reward:
+                assignment.reward_components["student_request_fulfillment"] = float(
+                    reward
+                )
+                assignment.reward = float(assignment.reward + reward)
 
     @staticmethod
     def _teacher_progress_reference_solution(artifact: TurnArtifact) -> str:
@@ -3833,6 +4036,48 @@ class TutorAgentWorkflow(RolloutWorkflow):
                         sum(result.local_advantage for result in valid_progress)
                         / len(valid_progress)
                     )
+            if getattr(self, "student_request_judge_enabled", False):
+                request_results = [
+                    trace.student_request_judge_result
+                    for trace in traces
+                    if trace.student_request_judge_result is not None
+                ]
+                valid_requests = [
+                    result for result in request_results if result.score is not None
+                ]
+                student_questions = [
+                    result for result in valid_requests if result.score in {-1, 1}
+                ]
+                no_question_turns = [
+                    result for result in valid_requests if result.score == 0
+                ]
+                request_errors = [
+                    result for result in request_results if result.score is None
+                ]
+                metrics["student_request_judge/targeted_turns"] = float(
+                    len(request_results)
+                )
+                metrics["student_request_judge/student_question_turns"] = float(
+                    len(student_questions)
+                )
+                metrics["student_request_judge/no_question_turns"] = float(
+                    len(no_question_turns)
+                )
+                metrics["student_request_judge/errors"] = float(len(request_errors))
+                if valid_requests:
+                    metrics["student_request_judge/mean_score"] = float(
+                        sum(int(result.score) for result in valid_requests)
+                        / len(valid_requests)
+                    )
+                    metrics["student_request_judge/mean_reward"] = float(
+                        sum(result.reward for result in valid_requests)
+                        / len(valid_requests)
+                    )
+                if student_questions:
+                    metrics["student_request_judge/appropriate_answer_rate"] = float(
+                        sum(result.score == 1 for result in student_questions)
+                        / len(student_questions)
+                    )
             metrics.update(self._reward_component_metrics(traces))
             self._log_generalize_stats(
                 solved=success_round > 0,
@@ -3951,6 +4196,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                         keys.append(f"student_generalize_{level}_confidence")
         if getattr(self, "teacher_progress_judge_enabled", False):
             keys.append("teacher_progress_shaping")
+        if getattr(self, "student_request_judge_enabled", False):
+            keys.append("student_request_fulfillment")
         return keys
 
     def _reward_component_metrics(self, traces: list[TurnTrace]) -> dict[str, float]:

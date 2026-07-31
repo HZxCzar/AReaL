@@ -38,6 +38,11 @@ def trace_to_history_record(
             if trace.teacher_progress_judge_result is not None
             else None
         ),
+        "student_request_judge": (
+            asdict(trace.student_request_judge_result)
+            if trace.student_request_judge_result is not None
+            else None
+        ),
     }
     if trace.leak_level is not None:
         record["leak_level"] = trace.leak_level
