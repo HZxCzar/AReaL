@@ -44,6 +44,10 @@ def trace_to_history_record(
             else None
         ),
     }
+    if trace.student_question_generation is not None:
+        record["student_question_generation"] = asdict(
+            trace.student_question_generation
+        )
     if trace.leak_level is not None:
         record["leak_level"] = trace.leak_level
     if leak_result is not None:
@@ -53,5 +57,7 @@ def trace_to_history_record(
 
 def trace_to_json(trace: TurnTrace) -> dict[str, Any]:
     data = asdict(trace)
+    if trace.student_question_generation is None:
+        data.pop("student_question_generation", None)
     data["tutor_state"]["ground_truth"] = trace.tutor_state.ground_truth
     return data

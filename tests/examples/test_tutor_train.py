@@ -227,6 +227,12 @@ def test_build_eval_workflow_kwargs_keeps_single_episode_generation():
     assert eval_workflow_kwargs["student_prompt_pool_path"] == ""
     assert eval_workflow_kwargs["student_turn_behavior_enabled"] is False
     assert eval_workflow_kwargs["student_turn_behavior_path"] == ""
+    assert (
+        eval_workflow_kwargs[
+            "student_turn_behavior_separate_call_behavior_names"
+        ]
+        == []
+    )
     assert eval_workflow_kwargs["teacher_warmup_enabled"] is False
     assert eval_workflow_kwargs["teacher_warmup_prompt_path"] == ""
     assert eval_workflow_kwargs["teacher_warmup_steps"] == 0
@@ -252,6 +258,7 @@ def test_build_eval_workflow_kwargs_disables_turn_behaviors():
             student_turn_behavior=TutorStudentTurnBehaviorConfig(
                 enabled=True,
                 path="turn-behaviors.json",
+                separate_call_behavior_names=["ask_question"],
             )
         ),
     )
@@ -259,14 +266,24 @@ def test_build_eval_workflow_kwargs_disables_turn_behaviors():
         "gconfig": config.gconfig,
         "student_turn_behavior_enabled": True,
         "student_turn_behavior_path": "turn-behaviors.json",
+        "student_turn_behavior_separate_call_behavior_names": ["ask_question"],
     }
 
     eval_workflow_kwargs = _build_eval_workflow_kwargs(workflow_kwargs, config)
 
     assert workflow_kwargs["student_turn_behavior_enabled"] is True
     assert workflow_kwargs["student_turn_behavior_path"] == "turn-behaviors.json"
+    assert workflow_kwargs[
+        "student_turn_behavior_separate_call_behavior_names"
+    ] == ["ask_question"]
     assert eval_workflow_kwargs["student_turn_behavior_enabled"] is False
     assert eval_workflow_kwargs["student_turn_behavior_path"] == ""
+    assert (
+        eval_workflow_kwargs[
+            "student_turn_behavior_separate_call_behavior_names"
+        ]
+        == []
+    )
 
 
 def test_student_request_judge_requires_training_turn_behaviors():
@@ -288,6 +305,7 @@ def test_build_eval_workflow_kwargs_disables_student_request_judge():
             student_turn_behavior=TutorStudentTurnBehaviorConfig(
                 enabled=True,
                 path="turn-behaviors.json",
+                separate_call_behavior_names=["ask_question"],
             )
         ),
         reward=TutorRewardConfig(
@@ -298,6 +316,7 @@ def test_build_eval_workflow_kwargs_disables_student_request_judge():
         "gconfig": config.gconfig,
         "student_turn_behavior_enabled": True,
         "student_turn_behavior_path": "turn-behaviors.json",
+        "student_turn_behavior_separate_call_behavior_names": ["ask_question"],
         "student_request_judge": {
             "enabled": True,
             "weight": 0.5,

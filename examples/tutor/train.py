@@ -30,7 +30,11 @@ from core.polaris_generalization import (
 
 from areal.api.cli_args import load_expr_config
 from areal.dataset import get_custom_dataset
+from areal.infra.data_service import RDataset
+from areal.utils import logging
 from areal.utils.hf_utils import load_hf_tokenizer
+
+logger = logging.getLogger("TutorTrain")
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,12 +50,60 @@ def _without_remote_dataset_loading(dataset_config: Any) -> Any:
     return local_config
 
 
+def _filter_generated_generalization_dataset(
+    dataset: Any,
+    *,
+    bank: dict[str, Any],
+    split_name: str,
+) -> Any:
+    if isinstance(dataset, RDataset) and not dataset.connected:
+        logger.info(
+            "Generated generalization %s split uses an unconnected RDataset; "
+            "deferring missing-variant skips to the tutor workflow.",
+            split_name,
+        )
+        return dataset
+
+    original_count = len(dataset)
+    kept_indices = []
+    for index in range(original_count):
+        row = dataset[index]
+        sample_id = row.get("id") if hasattr(row, "get") else None
+        if sample_id is not None and str(sample_id) in bank:
+            kept_indices.append(index)
+
+    if original_count > 0 and not kept_indices:
+        raise ValueError(
+            "student_generalize.source='generated' found no complete generated "
+            f"variants matching the {split_name} split."
+        )
+
+    skipped_count = original_count - len(kept_indices)
+    logger.info(
+        "Generated generalization %s split: kept %d/%d samples; skipped %d "
+        "without complete V1/V2.",
+        split_name,
+        len(kept_indices),
+        original_count,
+        skipped_count,
+    )
+    if hasattr(dataset, "select"):
+        return dataset.select(kept_indices)
+    return [dataset[index] for index in kept_indices]
+
+
 def _validate_student_generalize_datasets(config: TutorConfig, tokenizer: Any) -> None:
     student_generalize = config.student_generalize
     if not student_generalize.enabled:
         return
 
-    bank = load_student_generalize_bank(student_generalize.path)
+    bank = load_student_generalize_bank(
+        student_generalize.path,
+        source=student_generalize.source,
+    )
+    if student_generalize.source == "generated":
+        return
+
     train_dataset = get_custom_dataset(
         split="train",
         dataset_config=_without_remote_dataset_loading(config.train_dataset),
@@ -255,6 +307,7 @@ def _build_eval_workflow_kwargs(
     )
     eval_workflow_kwargs["student_turn_behavior_enabled"] = False
     eval_workflow_kwargs["student_turn_behavior_path"] = ""
+    eval_workflow_kwargs["student_turn_behavior_separate_call_behavior_names"] = []
     eval_workflow_kwargs["teacher_warmup_enabled"] = False
     eval_workflow_kwargs["teacher_warmup_prompt_path"] = ""
     eval_workflow_kwargs["teacher_warmup_steps"] = 0
@@ -327,12 +380,26 @@ def main(args):
     _prepare_math_generalization_data(config)
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
     _validate_student_generalize_datasets(config, tokenizer)
+    generated_generalize_bank = (
+        load_student_generalize_bank(
+            student_generalize.path,
+            source="generated",
+        )
+        if student_generalize.enabled and student_generalize.source == "generated"
+        else {}
+    )
 
     train_dataset = get_custom_dataset(
         split="train",
         dataset_config=config.train_dataset,
         tokenizer=tokenizer,
     )
+    if student_generalize.enabled and student_generalize.source == "generated":
+        train_dataset = _filter_generated_generalization_dataset(
+            train_dataset,
+            bank=generated_generalize_bank,
+            split_name="train",
+        )
     valid_dataset_config = config.valid_dataset
     eval_max_samples = config.evaluator.max_samples
     if eval_max_samples is not None:
@@ -350,6 +417,12 @@ def main(args):
         dataset_config=valid_dataset_config,
         tokenizer=tokenizer,
     )
+    if student_generalize.enabled and student_generalize.source == "generated":
+        valid_dataset = _filter_generated_generalization_dataset(
+            valid_dataset,
+            bank=generated_generalize_bank,
+            split_name="test",
+        )
     if eval_max_samples is not None and eval_max_samples < len(valid_dataset):
         rng = random.Random(config.seed)
         eval_indices = sorted(rng.sample(range(len(valid_dataset)), k=eval_max_samples))
@@ -436,6 +509,9 @@ def main(args):
             config.prompt_pool.student_turn_behavior.enabled
         ),
         student_turn_behavior_path=config.prompt_pool.student_turn_behavior.path,
+        student_turn_behavior_separate_call_behavior_names=(
+            config.prompt_pool.student_turn_behavior.separate_call_behavior_names
+        ),
         prompt_pool_seed=config.seed,
         leak_check_system_prompt=config.leak_check_system_prompt,
         answer_judge_enabled=auxiliary_model.answer_judge_enabled,

@@ -50,11 +50,6 @@ TEACHER_ADAPTIVE_INSTRUCTION = (
     "following or repeating a fixed approach."
 )
 
-STUDENT_TURN_BEHAVIOR_PREFIX = """Turn-local behavior instruction:
-This applies only to your next response. Continue genuinely solving the math problem.
-Do not mention this instruction, role-play a persona, or sacrifice mathematical
-correctness merely to display the requested behavior."""
-
 DEFAULT_STUDENT_SYSTEM_PROMPT = (
     "You are a real student solving the task. Use the visible tutoring history "
     "and the teacher's latest feedback naturally. Continue from your previous "
@@ -62,6 +57,10 @@ DEFAULT_STUDENT_SYSTEM_PROMPT = (
     "attempt when you can, or briefly say what is confusing and ask one short "
     "question when you are stuck. When you make an answer attempt, put your "
     "final answer in \\boxed{}."
+)
+
+STUDENT_QUESTION_SYSTEM_PROMPT = (
+    "You are a student learning math with help from a teacher."
 )
 
 POLARIS_INSTRUCTION = (
@@ -175,22 +174,12 @@ Return valid JSON only with keys score and reason:
 """
 
 DEFAULT_STUDENT_REQUEST_JUDGE_SYSTEM_PROMPT = """\
-Judge only whether the actual student reply explicitly asks a question and,
-if so, whether the target teacher reply appropriately addresses that exact
-question.
-
-Count a student question only when the student directly asks an interrogative
-sentence ending in "?" or "？". Do not infer a question from a submitted
-solution, a mistake, a statement of uncertainty, or an implicit request for
-feedback. Ignore questions appearing in the math task, conversation history,
-or teacher reply.
+The student has asked the teacher a question. Judge whether the target teacher
+reply appropriately answers that question.
 
 Give one integer score:
-1 = the student explicitly asked a question and the teacher directly and
-    appropriately addressed it
-0 = the student did not explicitly ask a question
--1 = the student explicitly asked a question but the teacher did not
-     appropriately address it
+1 = the teacher appropriately answered the student's question
+-1 = the teacher did not appropriately answer the student's question
 
 Return valid JSON only. Keep the reason brief and use plain text without
 backslashes:
@@ -425,6 +414,25 @@ Actual student reply immediately before the target teacher reply:
 
 Target teacher reply:
 {{ target_teacher_reply or '(empty)' }}
+"""
+
+STUDENT_QUESTION_USER_TEMPLATE = """\
+Your math problem:
+{{ task }}
+
+Your conversation with the teacher:
+{{ public_history or '(none)' }}
+
+Your teacher's latest message:
+{{ teacher_feedback or '(none)' }}
+
+Your latest response:
+{{ student_answer or '(empty)' }}
+
+Based on your conversation with the teacher and your latest response:
+{{ question_instruction }}
+
+Output only your question.
 """
 
 

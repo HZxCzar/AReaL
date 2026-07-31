@@ -144,6 +144,7 @@ from examples.tutor.core.callers import (
     apply_chat_template,
 )
 from examples.tutor.core.confidence import compute_answer_token_confidence
+from examples.tutor.core.generalization import load_student_generalize_bank
 from examples.tutor.core.generation_budget import (
     CONTEXT_BUDGET_TERMINATION_REASON,
     ContextBudgetLimitExceeded,
@@ -179,6 +180,7 @@ from examples.tutor.core.types import (
     PublicHistoryState,
     RewardAssignment,
     StudentGeneralizeMode,
+    StudentQuestionGenerationResult,
     StudentRequestJudgeResult,
     StudentTurnBehavior,
     StudentTurnState,
@@ -222,10 +224,11 @@ from examples.tutor.prompts import (
     RAWBASE_LEAK_CHECK_SYSTEM_PROMPT,
     RAWBASE_LEAK_CHECK_USER_TEMPLATE,
     STAGED_LEAK_CHECK_USER_TEMPLATE,
+    STUDENT_QUESTION_SYSTEM_PROMPT,
+    STUDENT_QUESTION_USER_TEMPLATE,
     STUDENT_REQUEST_JUDGE_USER_TEMPLATE,
     STUDENT_STATE_USER_TEMPLATE,
     STUDENT_TRANSFER_USER_TEMPLATE,
-    STUDENT_TURN_BEHAVIOR_PREFIX,
     TEACHER_ADAPTIVE_INSTRUCTION,
     TEACHER_ANTI_LEAK_INSTRUCTION,
     TEACHER_PRE_SOLVE_FILTER_CONTEXT_TEMPLATE,
@@ -580,6 +583,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_prompt_include_base: bool = False,
         student_turn_behavior_enabled: bool = False,
         student_turn_behavior_path: str = "",
+        student_turn_behavior_separate_call_behavior_names: (
+            list[str] | None
+        ) = None,
         prompt_pool_seed: int = 0,
         leak_check_system_prompt: str = "",
         answer_judge_enabled: bool = False,
@@ -918,15 +924,37 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if self.student_turn_behavior_enabled
             else ()
         )
+        self.student_turn_behavior_separate_call_behavior_names = frozenset(
+            str(name).strip()
+            for name in (student_turn_behavior_separate_call_behavior_names or [])
+            if str(name).strip()
+        )
+        if (
+            self.student_turn_behavior_separate_call_behavior_names
+            and not self.student_turn_behavior_enabled
+        ):
+            raise ValueError(
+                "separate-call student turn behaviors require student turn "
+                "behaviors to be enabled."
+            )
+        configured_behavior_names = {
+            behavior.name for behavior in self.student_turn_behaviors
+        }
+        unknown_separate_call_names = sorted(
+            self.student_turn_behavior_separate_call_behavior_names
+            - configured_behavior_names
+        )
+        if unknown_separate_call_names:
+            raise ValueError(
+                "separate-call behavior names are missing from the student turn "
+                f"behavior pool: {unknown_separate_call_names}."
+            )
         if self.student_request_judge_enabled:
             if not self.student_turn_behavior_enabled:
                 raise ValueError(
                     "student request judge requires student turn behaviors to be "
                     "enabled."
                 )
-            configured_behavior_names = {
-                behavior.name for behavior in self.student_turn_behaviors
-            }
             unknown_behavior_names = sorted(
                 self.student_request_judge_behavior_names - configured_behavior_names
             )
@@ -980,8 +1008,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.student_generalize_source = (
             student_generalize_source or "sidecar"
         ).strip()
-        if self.student_generalize_source not in {"sidecar", "train"}:
-            raise ValueError("student_generalize_source must be 'sidecar' or 'train'.")
+        if self.student_generalize_source not in {"generated", "sidecar", "train"}:
+            raise ValueError(
+                "student_generalize_source must be "
+                "'sidecar', 'train', or 'generated'."
+            )
         self.student_generalize_path = student_generalize_path.strip()
         self.student_generalize_level_rewards = {
             "level1": float(student_generalize_level1_reward),
@@ -1017,7 +1048,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     "auxiliary_model.mode='api' or a non-empty student_models API pool."
                 )
         self.student_generalize_bank = (
-            self._load_student_generalize_bank(self.student_generalize_path)
+            self._load_student_generalize_bank(
+                self.student_generalize_path,
+                source=self.student_generalize_source,
+            )
             if self.student_generalize_enabled and self.student_generalize_path
             else {}
         )
@@ -1439,16 +1473,40 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return self._append_prompt_pool_suffix(self.student_system_prompt, selection)
 
     def _student_system_prompt_for_state(self, state: StudentTurnState) -> str:
-        prompt = self._student_system_prompt_for_selection(
+        return self._student_system_prompt_for_selection(
             state.student_prompt_selection
         )
+
+    def _student_question_system_prompt_for_state(
+        self, state: StudentTurnState
+    ) -> str:
+        return self._append_prompt_pool_suffix(
+            STUDENT_QUESTION_SYSTEM_PROMPT,
+            state.student_prompt_selection,
+        )
+
+    def _is_student_separate_call_behavior(
+        self, behavior: StudentTurnBehavior | None
+    ) -> bool:
+        return bool(
+            behavior is not None
+            and behavior.name
+            in getattr(
+                self,
+                "student_turn_behavior_separate_call_behavior_names",
+                frozenset(),
+            )
+        )
+
+    def _student_turn_behavior_prompt(self, state: StudentTurnState) -> str:
         behavior = state.student_turn_behavior
-        if behavior is None or not behavior.instruction:
-            return prompt
-        behavior_prompt = (
-            f"{STUDENT_TURN_BEHAVIOR_PREFIX}\n{behavior.instruction}"
-        ).strip()
-        return f"{prompt.rstrip()}\n\n{behavior_prompt}".strip()
+        if (
+            behavior is None
+            or not behavior.instruction
+            or self._is_student_separate_call_behavior(behavior)
+        ):
+            return ""
+        return behavior.instruction.strip()
 
     def _teacher_system_prompt_for_selection(
         self, selection: PromptPoolSelection | None
@@ -1514,6 +1572,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
             external_client = direct_client
         if (engine is None) == (external_client is None):
             raise ValueError("Exactly one tutor generation source must be provided.")
+
+        if self._should_skip_missing_generated_variants(data):
+            self.last_history = []
+            self.last_traces = []
+            self.last_student_generalization_results = []
+            self.last_teacher_pre_solve_result = None
+            self.last_total_reward = 0.0
+            return None
 
         task = str(data["task"])
         ground_truth = str(data["ground_truth"])
@@ -1620,15 +1686,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
         initial_student_turn_behavior = self._select_student_turn_behavior(
             response_index=0
         )
+        initial_student_state = StudentTurnState(
+            task=task,
+            public_history=PublicHistoryState(),
+            previous_student_output="",
+            latest_tutor_visible_output=INITIAL_TEACHER_FEEDBACK_PLACEHOLDER,
+            student_prompt_selection=student_prompt_selection,
+            student_turn_behavior=initial_student_turn_behavior,
+        )
         initial_student_answer_raw, initial_student_error = await self._run_student(
-            StudentTurnState(
-                task=task,
-                public_history=PublicHistoryState(),
-                previous_student_output="",
-                latest_tutor_visible_output=INITIAL_TEACHER_FEEDBACK_PLACEHOLDER,
-                student_prompt_selection=student_prompt_selection,
-                student_turn_behavior=initial_student_turn_behavior,
-            ),
+            initial_student_state,
             aux_caller=student_caller,
         )
         initial_student_answer = _strip_reasoning_for_context(
@@ -1639,6 +1706,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ground_truth,
             initial_student_answer_raw,
             answer_judge_caller=answer_judge_caller,
+        )
+        (
+            initial_student_answer,
+            initial_effective_student_turn_behavior,
+            initial_student_question_generation,
+        ) = await self._maybe_append_student_question(
+            initial_student_state,
+            initial_student_answer,
+            should_generate=(
+                not initial_judge_result.correct and not initial_student_error
+            ),
+            aux_caller=student_caller,
         )
         if initial_judge_result.correct:
             self.last_history = []
@@ -1696,6 +1775,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 teacher_prompt_selection=teacher_prompt_selection,
                 student_prompt_selection=student_prompt_selection,
                 initial_student_turn_behavior=initial_student_turn_behavior,
+                initial_student_question_generation=(
+                    initial_student_question_generation
+                ),
             )
             return None
 
@@ -1705,7 +1787,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         previous_tutor_visible_output = ""
         previous_student_output = initial_student_answer
-        preceding_student_turn_behavior = initial_student_turn_behavior
+        preceding_student_turn_behavior = initial_effective_student_turn_behavior
         previous_feedback = TutorPrivateFeedback(
             kind="student_judged",
             student_output=initial_student_answer,
@@ -1797,6 +1879,21 @@ class TutorAgentWorkflow(RolloutWorkflow):
             invalid_due_to_leak = (
                 self.leak_handling_mode == "feedback" and leak_result.leaked
             )
+            (
+                student_answer,
+                effective_student_turn_behavior,
+                student_question_generation,
+            ) = await self._maybe_append_student_question(
+                student_state,
+                student_answer,
+                should_generate=(
+                    not judge_result.correct
+                    and not invalid_due_to_leak
+                    and not student_error
+                    and turn_idx < self.max_turns
+                ),
+                aux_caller=student_caller,
+            )
 
             if judge_result.correct and not invalid_due_to_leak:
                 termination_reason = "success"
@@ -1835,6 +1932,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     student_error=student_error,
                     judge_result=judge_result,
                     invalid_due_to_leak=invalid_due_to_leak,
+                    student_question_generation=student_question_generation,
                 )
             )
 
@@ -1850,7 +1948,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 public_history = next_public_history
                 previous_tutor_visible_output = tutor_visible_output
                 previous_student_output = student_answer
-                preceding_student_turn_behavior = student_turn_behavior
+                preceding_student_turn_behavior = effective_student_turn_behavior
                 previous_feedback = TutorPrivateFeedback(
                     kind="student_judged",
                     student_output=student_answer,
@@ -1897,6 +1995,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             teacher_prompt_selection=teacher_prompt_selection,
             student_prompt_selection=student_prompt_selection,
             initial_student_turn_behavior=initial_student_turn_behavior,
+            initial_student_question_generation=(
+                initial_student_question_generation
+            ),
         )
         student_generalization_results = await self._run_student_generalization(
             data,
@@ -2100,6 +2201,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             teacher_prompt_selection=teacher_prompt_selection,
             student_prompt_selection=student_prompt_selection,
             initial_student_turn_behavior=initial_student_turn_behavior,
+            initial_student_question_generation=(
+                initial_student_question_generation
+            ),
         )
         if not results:
             return None
@@ -2391,6 +2495,88 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if result.error:
             return "", result.error
         return result.text, None
+
+    def _build_student_question_prompt(
+        self,
+        state: StudentTurnState,
+        student_answer: str,
+    ) -> str:
+        behavior = state.student_turn_behavior
+        if not self._is_student_separate_call_behavior(behavior):
+            raise ValueError(
+                "student question generation requires a request behavior."
+            )
+        return render_prompt(
+            STUDENT_QUESTION_USER_TEMPLATE,
+            task=state.task,
+            public_history=state.public_history.summary,
+            teacher_feedback=state.latest_tutor_visible_output,
+            student_answer=student_answer,
+            question_instruction=behavior.instruction,
+        )
+
+    async def _run_student_question(
+        self,
+        state: StudentTurnState,
+        student_answer: str,
+        *,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
+    ) -> StudentQuestionGenerationResult:
+        prompt = self._build_student_question_prompt(state, student_answer)
+        result = await self._call_auxiliary_prompt(
+            system_prompt=self._student_question_system_prompt_for_state(state),
+            user_prompt=prompt,
+            aux_caller=aux_caller,
+            rid_prefix=f"student-question-{state.public_history.turn_count}",
+        )
+        raw_output = result.raw_text or result.text
+        if result.error:
+            return StudentQuestionGenerationResult(
+                prompt=prompt,
+                raw_output=raw_output,
+                question="",
+                error=result.error,
+            )
+        question = _strip_reasoning_for_context(result.text).strip()
+        error = None
+        if not question:
+            error = "student question generation returned an empty response."
+        return StudentQuestionGenerationResult(
+            prompt=prompt,
+            raw_output=raw_output,
+            question=question,
+            error=error,
+        )
+
+    async def _maybe_append_student_question(
+        self,
+        state: StudentTurnState,
+        student_answer: str,
+        *,
+        should_generate: bool,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
+    ) -> tuple[
+        str,
+        StudentTurnBehavior | None,
+        StudentQuestionGenerationResult | None,
+    ]:
+        behavior = state.student_turn_behavior
+        if not self._is_student_separate_call_behavior(behavior):
+            return student_answer, behavior, None
+        if not should_generate:
+            return student_answer, None, None
+
+        generation = await self._run_student_question(
+            state,
+            student_answer,
+            aux_caller=aux_caller,
+        )
+        if generation.error or not generation.question:
+            return student_answer, None, generation
+        combined_answer = "\n\n".join(
+            part for part in (student_answer.strip(), generation.question) if part
+        )
+        return combined_answer, behavior, generation
 
     @staticmethod
     def _pending_leak_check_result() -> LeakCheckResult:
@@ -2691,15 +2877,23 @@ class TutorAgentWorkflow(RolloutWorkflow):
             and not state.previous_student_output
             and state.public_history.turn_count == 0
         ):
-            return f"{state.task}\n\n{POLARIS_INSTRUCTION}"
-        return render_prompt(
-            STUDENT_STATE_USER_TEMPLATE,
-            task=state.task,
-            public_history=state.public_history.summary
-            or NO_PREVIOUS_VISIBLE_TUTORING_HISTORY,
-            previous_student_output=state.previous_student_output or EMPTY_PLACEHOLDER,
-            teacher_feedback=state.latest_tutor_visible_output or NONE_PLACEHOLDER,
-        )
+            prompt = f"{state.task}\n\n{POLARIS_INSTRUCTION}"
+        else:
+            prompt = render_prompt(
+                STUDENT_STATE_USER_TEMPLATE,
+                task=state.task,
+                public_history=state.public_history.summary
+                or NO_PREVIOUS_VISIBLE_TUTORING_HISTORY,
+                previous_student_output=(
+                    state.previous_student_output or EMPTY_PLACEHOLDER
+                ),
+                teacher_feedback=state.latest_tutor_visible_output
+                or NONE_PLACEHOLDER,
+            )
+        behavior_prompt = self._student_turn_behavior_prompt(state)
+        if behavior_prompt:
+            return f"{prompt.rstrip()}\n\n{behavior_prompt}".strip()
+        return prompt
 
     def _build_student_transfer_prompt(
         self,
@@ -2905,7 +3099,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         valid_score = (
             isinstance(score, int)
             and not isinstance(score, bool)
-            and score in {-1, 0, 1}
+            and score in {-1, 1}
         )
         if valid_score:
             return StudentRequestJudgeResult(
@@ -2917,7 +3111,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
 
         # Preserve an unambiguous verdict when a model emits unescaped LaTeX
         # inside the reason and therefore breaks the surrounding JSON.
-        score_match = re.search(r'"score"\s*:\s*(-1|0|1)(?!\d)', judge_call.text)
+        score_match = re.search(r'"score"\s*:\s*(-1|1)(?!\d)', judge_call.text)
         if score_match is not None:
             return StudentRequestJudgeResult(
                 raw_output=raw_output,
@@ -2926,9 +3120,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 parse_error=parse_error,
             )
 
-        error = parse_error or (
-            'Student request judge field "score" must be -1, 0, or 1.'
-        )
+        error = parse_error or 'Student request judge field "score" must be -1 or 1.'
         return StudentRequestJudgeResult(
             raw_output=raw_output,
             score=None,
@@ -2987,9 +3179,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if not artifact.tutor_state.student_reply_before_teacher.strip():
                 return StudentRequestJudgeResult(
                     raw_output="",
-                    score=0,
-                    reason="The student reply before the teacher was empty.",
-                    parse_error=None,
+                    score=None,
+                    reason="",
+                    parse_error="missing_generated_student_question",
                 )
             return await self._run_student_request_judge(
                 artifact,
@@ -3189,16 +3381,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 assignment.reward = float(assignment.reward + shaping)
 
     @staticmethod
-    def _load_student_generalize_bank(path: str) -> dict[str, Any]:
-        if not path:
-            return {}
-        file_path = Path(path)
-        payload = json.loads(file_path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            raise ValueError(
-                f"student_generalize sidecar must be a JSON object: {file_path}"
-            )
-        return payload
+    def _load_student_generalize_bank(
+        path: str,
+        *,
+        source: str = "sidecar",
+    ) -> dict[str, Any]:
+        return load_student_generalize_bank(path, source=source)
 
     def _student_generalization_cases(
         self, data: dict[str, Any]
@@ -3238,6 +3426,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 reward=float(rewards.get(level, 0.0)),
             )
         return cases
+
+    def _should_skip_missing_generated_variants(
+        self,
+        data: dict[str, Any],
+    ) -> bool:
+        if not bool(getattr(self, "student_generalize_enabled", False)):
+            return False
+        if getattr(self, "student_generalize_source", "sidecar") != "generated":
+            return False
+        sample_id = data.get("id")
+        bank = getattr(self, "student_generalize_bank", {}) or {}
+        return sample_id is None or str(sample_id) not in bank
 
     def _success_turn(self, episode_artifact: EpisodeArtifact) -> TurnArtifact | None:
         if episode_artifact.termination_reason != "success":
@@ -4045,12 +4245,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 valid_requests = [
                     result for result in request_results if result.score is not None
                 ]
-                student_questions = [
-                    result for result in valid_requests if result.score in {-1, 1}
-                ]
-                no_question_turns = [
-                    result for result in valid_requests if result.score == 0
-                ]
+                student_questions = valid_requests
                 request_errors = [
                     result for result in request_results if result.score is None
                 ]
@@ -4060,9 +4255,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 metrics["student_request_judge/student_question_turns"] = float(
                     len(student_questions)
                 )
-                metrics["student_request_judge/no_question_turns"] = float(
-                    len(no_question_turns)
-                )
+                # Kept for dashboard compatibility. A targeted turn now always
+                # corresponds to a separately generated student question.
+                metrics["student_request_judge/no_question_turns"] = 0.0
                 metrics["student_request_judge/errors"] = float(len(request_errors))
                 if valid_requests:
                     metrics["student_request_judge/mean_score"] = float(
@@ -4241,6 +4436,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_prompt_selection: PromptPoolSelection | None = None,
         student_prompt_selection: PromptPoolSelection | None = None,
         initial_student_turn_behavior: StudentTurnBehavior | None = None,
+        initial_student_question_generation: (
+            StudentQuestionGenerationResult | None
+        ) = None,
     ) -> None:
         if not self.debug_trace_dir:
             return
@@ -4309,6 +4507,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     for result in (student_generalization_results or [])
                 ],
             }
+            if initial_student_question_generation is not None:
+                payload["initial_student_question_generation"] = asdict(
+                    initial_student_question_generation
+                )
             async with aiofiles.open(file_path, "w", encoding="utf-8") as trace_file:
                 await trace_file.write(
                     json.dumps(payload, ensure_ascii=False, indent=2)

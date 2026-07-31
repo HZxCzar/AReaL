@@ -71,6 +71,14 @@ class StudentRequestJudgeResult:
 
 
 @dataclass(slots=True)
+class StudentQuestionGenerationResult:
+    prompt: str
+    raw_output: str
+    question: str
+    error: str | None
+
+
+@dataclass(slots=True)
 class PublicHistoryState:
     summary: str = ""
     turn_count: int = 0
@@ -153,6 +161,7 @@ class TurnArtifact:
     teacher_similarity_error: str | None = None
     teacher_progress_judge_result: TeacherProgressJudgeResult | None = None
     student_request_judge_result: StudentRequestJudgeResult | None = None
+    student_question_generation: StudentQuestionGenerationResult | None = None
 
 
 @dataclass(slots=True)
@@ -173,6 +182,7 @@ class EpisodeArtifact:
     teacher_prompt_selection: PromptPoolSelection | None = None
     student_prompt_selection: PromptPoolSelection | None = None
     initial_student_turn_behavior: StudentTurnBehavior | None = None
+    initial_student_question_generation: StudentQuestionGenerationResult | None = None
 
 
 @dataclass(slots=True)
@@ -203,3 +213,4 @@ class TurnTrace:
     teacher_similarity_error: str | None = None
     teacher_progress_judge_result: TeacherProgressJudgeResult | None = None
     student_request_judge_result: StudentRequestJudgeResult | None = None
+    student_question_generation: StudentQuestionGenerationResult | None = None

@@ -8,6 +8,8 @@ prompt_pool:
   student_turn_behavior:
     enabled: true
     path: examples/tutor/prompt_pools/student_request_behaviors_v1.json
+    separate_call_behavior_names:
+      - ask_question
 
 reward:
   student_request_judge:

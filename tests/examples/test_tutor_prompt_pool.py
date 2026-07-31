@@ -165,6 +165,21 @@ def test_student_turn_behavior_config_requires_path_when_enabled():
         TutorStudentTurnBehaviorConfig(enabled=True)
 
 
+def test_student_turn_behavior_separate_calls_are_explicit_and_unique():
+    """Test separate calls are opt-in and do not replace inline instructions."""
+    assert TutorStudentTurnBehaviorConfig().separate_call_behavior_names == []
+    with pytest.raises(ValueError, match="requires student turn behaviors"):
+        TutorStudentTurnBehaviorConfig(
+            separate_call_behavior_names=["ask_question"]
+        )
+    with pytest.raises(ValueError, match="must be unique"):
+        TutorStudentTurnBehaviorConfig(
+            enabled=True,
+            path="behaviors.json",
+            separate_call_behavior_names=["ask_question", "ask_question"],
+        )
+
+
 def test_student_turn_behavior_sampling_is_per_response_and_eval_disabled(
     monkeypatch,
 ):
@@ -207,12 +222,15 @@ def test_student_turn_behavior_sampling_is_per_response_and_eval_disabled(
     assert workflow._select_student_turn_behavior(response_index=0) is None
 
 
-def test_student_turn_behavior_only_changes_current_system_prompt():
-    """Test base responses stay clean and conditioned responses get one suffix."""
+def test_student_turn_behavior_only_changes_current_user_prompt():
+    """Test a non-request behavior still conditions the normal student response."""
     workflow = tutor_workflow.TutorAgentWorkflow.__new__(
         tutor_workflow.TutorAgentWorkflow
     )
     workflow.student_system_prompt = "base student prompt"
+    workflow.student_turn_behavior_separate_call_behavior_names = frozenset(
+        {"ask_question"}
+    )
     state = StudentTurnState(
         task="task",
         public_history=PublicHistoryState(),
@@ -220,19 +238,203 @@ def test_student_turn_behavior_only_changes_current_system_prompt():
         latest_tutor_visible_output="hint",
         student_turn_behavior=StudentTurnBehavior(
             1,
-            "ask",
-            "Ask one focused mathematical question.",
+            "show_work",
+            "Show one concrete mathematical step.",
             0.2,
         ),
     )
 
-    conditioned = workflow._student_system_prompt_for_state(state)
+    conditioned_system = workflow._student_system_prompt_for_state(state)
+    conditioned_user = workflow._build_student_prompt_from_state(state)
     state.student_turn_behavior = StudentTurnBehavior(0, "base", "", 0.5)
-    clean = workflow._student_system_prompt_for_state(state)
+    clean_system = workflow._student_system_prompt_for_state(state)
+    clean_user = workflow._build_student_prompt_from_state(state)
 
-    assert "Ask one focused mathematical question." in conditioned
-    assert "only to your next response" in conditioned
-    assert clean == "base student prompt"
+    assert conditioned_system == "base student prompt"
+    assert clean_system == "base student prompt"
+    assert conditioned_user.endswith("Show one concrete mathematical step.")
+    assert "Show one concrete mathematical step." not in clean_user
+
+
+def test_inline_student_instruction_remains_available_for_any_behavior_name():
+    """Test behavior names stay inline unless the config explicitly separates them."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_turn_behavior_separate_call_behavior_names = frozenset()
+    instruction = "Ask one short question at the end of this response."
+    state = StudentTurnState(
+        task="task",
+        public_history=PublicHistoryState(),
+        previous_student_output="",
+        latest_tutor_visible_output="hint",
+        student_turn_behavior=StudentTurnBehavior(
+            1,
+            "ask_question",
+            instruction,
+            0.2,
+        ),
+    )
+
+    assert workflow._build_student_prompt_from_state(state).endswith(instruction)
+
+
+def test_student_request_behavior_uses_separate_question_call():
+    """Test a request is absent from the normal prompt and appended by a second call."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_system_prompt = "base student prompt"
+    workflow.student_turn_behavior_separate_call_behavior_names = frozenset(
+        {"ask_question"}
+    )
+    instruction = (
+        "Ask your teacher one specific question about a mathematical step you do not "
+        "understand."
+    )
+    behavior = StudentTurnBehavior(1, "ask_question", instruction, 0.2)
+    state = StudentTurnState(
+        task="Find x.",
+        public_history=PublicHistoryState(summary="Tutor round 1: Factor first."),
+        previous_student_output="I tried expanding.",
+        latest_tutor_visible_output="Look for a common factor.",
+        student_prompt_selection=PromptPoolSelection(
+            index=0,
+            suffix="You prefer short questions.",
+        ),
+        student_turn_behavior=behavior,
+    )
+    captured = {}
+
+    async def call_auxiliary_prompt(**kwargs):
+        captured.update(kwargs)
+        return types.SimpleNamespace(
+            text="Why does factoring help isolate x?",
+            raw_text="Why does factoring help isolate x?",
+            error=None,
+        )
+
+    workflow._call_auxiliary_prompt = call_auxiliary_prompt
+
+    normal_prompt = workflow._build_student_prompt_from_state(state)
+    combined, effective_behavior, generation = asyncio.run(
+        workflow._maybe_append_student_question(
+            state,
+            "I expanded both sides but still got the wrong value.",
+            should_generate=True,
+            aux_caller=object(),
+        )
+    )
+
+    assert instruction not in normal_prompt
+    assert captured["system_prompt"].endswith("You prefer short questions.")
+    assert instruction in captured["user_prompt"]
+    assert "You are a student learning math" in captured["system_prompt"]
+    assert "Your conversation with the teacher" in captured["user_prompt"]
+    assert "Your teacher's latest message" in captured["user_prompt"]
+    assert "Your latest response" in captured["user_prompt"]
+    assert "Look for a common factor." in captured["user_prompt"]
+    assert "I expanded both sides but still got the wrong value." in captured[
+        "user_prompt"
+    ]
+    assert combined.endswith("Why does factoring help isolate x?")
+    assert effective_behavior is behavior
+    assert generation is not None
+    assert generation.question == "Why does factoring help isolate x?"
+    assert generation.error is None
+
+
+def test_student_request_behavior_without_following_teacher_skips_question_call():
+    """Test a sampled request is dropped when no later teacher reply can answer it."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_turn_behavior_separate_call_behavior_names = frozenset(
+        {"ask_question"}
+    )
+    behavior = StudentTurnBehavior(1, "ask_question", "Ask one question.", 0.2)
+    state = StudentTurnState(
+        task="task",
+        public_history=PublicHistoryState(),
+        previous_student_output="",
+        latest_tutor_visible_output="hint",
+        student_turn_behavior=behavior,
+    )
+
+    async def unexpected_call(**_kwargs):
+        raise AssertionError("question model call should be skipped")
+
+    workflow._call_auxiliary_prompt = unexpected_call
+
+    combined, effective_behavior, generation = asyncio.run(
+        workflow._maybe_append_student_question(
+            state,
+            "normal response",
+            should_generate=False,
+            aux_caller=object(),
+        )
+    )
+
+    assert combined == "normal response"
+    assert effective_behavior is None
+    assert generation is None
+
+
+def test_student_question_call_failure_does_not_target_next_teacher():
+    """Test a failed dedicated question call keeps the normal response unmodified."""
+    workflow = tutor_workflow.TutorAgentWorkflow.__new__(
+        tutor_workflow.TutorAgentWorkflow
+    )
+    workflow.student_turn_behavior_separate_call_behavior_names = frozenset(
+        {"ask_question"}
+    )
+    behavior = StudentTurnBehavior(1, "ask_question", "Ask one question.", 0.2)
+    state = StudentTurnState(
+        task="task",
+        public_history=PublicHistoryState(),
+        previous_student_output="",
+        latest_tutor_visible_output="hint",
+        student_turn_behavior=behavior,
+    )
+
+    async def failed_call(**_kwargs):
+        return types.SimpleNamespace(
+            text="",
+            raw_text="",
+            error="student endpoint unavailable",
+        )
+
+    workflow._call_auxiliary_prompt = failed_call
+
+    combined, effective_behavior, generation = asyncio.run(
+        workflow._maybe_append_student_question(
+            state,
+            "normal response",
+            should_generate=True,
+            aux_caller=object(),
+        )
+    )
+
+    assert combined == "normal response"
+    assert effective_behavior is None
+    assert generation is not None
+    assert generation.error == "student endpoint unavailable"
+
+
+def test_question_overlay_explicitly_enables_separate_student_call():
+    """Test the question experiment opts in without changing the base config."""
+    path = Path(
+        "examples/tutor/configs/math/0723/2gpu/"
+        "qwen8b-train-qwen1.7b-eval3-math-pre-aleak-question.yaml"
+    )
+
+    overlay = OmegaConf.load(path)
+
+    assert overlay.prompt_pool.student_turn_behavior.enabled is True
+    assert overlay.prompt_pool.student_turn_behavior.separate_call_behavior_names == [
+        "ask_question"
+    ]
+    assert overlay.reward.student_request_judge.behavior_names == ["ask_question"]
 
 
 def test_teacher_warmup_config_requires_prompt_and_positive_steps():

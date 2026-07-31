@@ -3,7 +3,10 @@ import json
 import pytest
 from datasets import Dataset, DatasetDict, load_from_disk
 
-from examples.tutor.core.generalization import validate_student_generalize_dataset
+from examples.tutor.core.generalization import (
+    load_student_generalize_bank,
+    validate_student_generalize_dataset,
+)
 from examples.tutor.core.math_generalization import (
     prepare_math_generalization_sidecar,
 )
@@ -50,6 +53,66 @@ def test_validate_student_generalize_dataset_rejects_missing_cases():
 
     with pytest.raises(ValueError, match="train split has 2/2 samples"):
         validate_student_generalize_dataset(dataset, split_name="train", bank={})
+
+
+def test_load_generated_generalize_bank_maps_variants_to_levels(tmp_path):
+    path = tmp_path / "verified_triples.json"
+    path.write_text(
+        json.dumps(
+            {
+                "triples": [
+                    {
+                        "source_id": "train-7",
+                        "original": {
+                            "task": "original",
+                            "ground_truth": "1",
+                        },
+                        "variant1": {
+                            "task": "same graph",
+                            "ground_truth": "2",
+                        },
+                        "variant2": {
+                            "task": "one graph edit",
+                            "ground_truth": "3",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    bank = load_student_generalize_bank(str(path), source="generated")
+
+    assert bank == {
+        "train-7": {
+            "level1": {"task": "same graph", "ground_truth": "2"},
+            "level2": {"task": "one graph edit", "ground_truth": "3"},
+        }
+    }
+
+
+def test_load_generated_generalize_bank_rejects_incomplete_triple(tmp_path):
+    path = tmp_path / "verified_triples.json"
+    path.write_text(
+        json.dumps(
+            {
+                "triples": [
+                    {
+                        "source_id": "train-7",
+                        "variant1": {
+                            "task": "same graph",
+                            "ground_truth": "2",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="missing variant2"):
+        load_student_generalize_bank(str(path), source="generated")
 
 
 def test_prepare_math_generalization_sidecar_pairs_fixed_train_samples(tmp_path):

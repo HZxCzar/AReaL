@@ -306,4 +306,5 @@ def artifact_to_trace(
         teacher_similarity_error=artifact.teacher_similarity_error,
         teacher_progress_judge_result=artifact.teacher_progress_judge_result,
         student_request_judge_result=artifact.student_request_judge_result,
+        student_question_generation=artifact.student_question_generation,
     )

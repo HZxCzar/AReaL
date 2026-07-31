@@ -1428,10 +1428,7 @@ def test_student_request_judge_prompt_uses_aligned_preceding_student_turn():
     assert "Let me explain why that cancellation is valid." in prompt
 
 
-def test_student_request_judge_parser_handles_all_scores_and_latex_reason():
-    no_question = tutor_workflow.TutorAgentWorkflow._parse_student_request_judge_result(
-        TextCallResult(text='{"score": 0, "reason": "student made no request"}')
-    )
+def test_student_request_judge_parser_handles_both_scores_and_latex_reason():
     inappropriate = (
         tutor_workflow.TutorAgentWorkflow._parse_student_request_judge_result(
             TextCallResult(
@@ -1443,20 +1440,20 @@ def test_student_request_judge_parser_handles_all_scores_and_latex_reason():
         TextCallResult(text='{"score": 1, "reason": "includes $ \\pm 2 $"}')
     )
 
-    assert no_question.score == 0
     assert inappropriate.score == -1
     assert appropriate.score == 1
     assert appropriate.parse_error is not None
 
 
-def test_student_request_judge_parser_rejects_out_of_range_score():
+@pytest.mark.parametrize("score", [0, 2])
+def test_student_request_judge_parser_rejects_out_of_range_score(score):
     result = tutor_workflow.TutorAgentWorkflow._parse_student_request_judge_result(
-        TextCallResult(text='{"score": 2, "reason": "unsupported score"}')
+        TextCallResult(text=f'{{"score": {score}, "reason": "unsupported score"}}')
     )
 
     assert result.score is None
     assert result.parse_error == (
-        'Student request judge field "score" must be -1, 0, or 1.'
+        'Student request judge field "score" must be -1 or 1.'
     )
 
 
@@ -1499,17 +1496,14 @@ def test_student_request_rewards_are_direct_and_turn_local():
     )
     workflow.student_request_judge_enabled = True
     workflow.student_request_judge_weight = 0.5
-    turns = [_turn(index) for index in range(1, 5)]
+    turns = [_turn(index) for index in range(1, 4)]
     turns[0].student_request_judge_result = StudentRequestJudgeResult(
         raw_output="", score=-1, reason="ignored", parse_error=None
     )
     turns[1].student_request_judge_result = StudentRequestJudgeResult(
-        raw_output="", score=0, reason="no question", parse_error=None
-    )
-    turns[2].student_request_judge_result = StudentRequestJudgeResult(
         raw_output="", score=1, reason="answered", parse_error=None
     )
-    turns[3].student_request_judge_result = StudentRequestJudgeResult(
+    turns[2].student_request_judge_result = StudentRequestJudgeResult(
         raw_output="",
         score=None,
         reason="judge error",
@@ -1520,12 +1514,11 @@ def test_student_request_rewards_are_direct_and_turn_local():
     workflow._apply_student_request_rewards(turns, assignments)
 
     assert [assignment.reward for assignment in assignments] == pytest.approx(
-        [-0.5, 0.0, 0.5, 0.0]
+        [-0.5, 0.5, 0.0]
     )
     assert assignments[0].reward_components == {"student_request_fulfillment": -0.5}
-    assert assignments[1].reward_components == {}
-    assert assignments[2].reward_components == {"student_request_fulfillment": 0.5}
-    assert assignments[3].reward_components == {}
+    assert assignments[1].reward_components == {"student_request_fulfillment": 0.5}
+    assert assignments[2].reward_components == {}
 
 
 def test_teacher_progress_judge_scores_valid_turns_and_skips_leaks(monkeypatch):

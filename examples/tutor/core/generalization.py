@@ -5,9 +5,17 @@ from typing import Any
 
 REQUIRED_STUDENT_GENERALIZE_LEVELS = ("level1", "level2")
 REQUIRED_STUDENT_GENERALIZE_FIELDS = ("task", "ground_truth")
+GENERATED_VARIANT_TO_LEVEL = {
+    "variant1": "level1",
+    "variant2": "level2",
+}
 
 
-def load_student_generalize_bank(path: str) -> dict[str, Any]:
+def load_student_generalize_bank(
+    path: str,
+    *,
+    source: str = "sidecar",
+) -> dict[str, Any]:
     if not path:
         return {}
     file_path = Path(path)
@@ -16,7 +24,61 @@ def load_student_generalize_bank(path: str) -> dict[str, Any]:
         raise ValueError(
             f"student_generalize sidecar must be a JSON object: {file_path}"
         )
+    if source == "generated":
+        return _load_generated_variant_bank(payload, file_path=file_path)
     return payload
+
+
+def _load_generated_variant_bank(
+    payload: Mapping[str, Any],
+    *,
+    file_path: Path,
+) -> dict[str, Any]:
+    triples = payload.get("triples")
+    if not isinstance(triples, list):
+        raise ValueError(
+            "student_generalize.source='generated' expects a JSON object with a "
+            f"'triples' list: {file_path}"
+        )
+
+    bank: dict[str, Any] = {}
+    for index, triple in enumerate(triples):
+        if not isinstance(triple, Mapping):
+            raise ValueError(
+                f"Generated triple at index {index} must be a JSON object: {file_path}"
+            )
+        source_id = triple.get("source_id")
+        if source_id in (None, ""):
+            raise ValueError(
+                f"Generated triple at index {index} is missing source_id: {file_path}"
+            )
+        sample_id = str(source_id)
+        if sample_id in bank:
+            raise ValueError(
+                f"Duplicate generated source_id {sample_id!r}: {file_path}"
+            )
+
+        cases: dict[str, dict[str, str]] = {}
+        for variant_name, level in GENERATED_VARIANT_TO_LEVEL.items():
+            variant = triple.get(variant_name)
+            if not isinstance(variant, Mapping):
+                raise ValueError(
+                    f"Generated triple {sample_id!r} is missing {variant_name}: "
+                    f"{file_path}"
+                )
+            task = variant.get("task")
+            ground_truth = variant.get("ground_truth")
+            if task in (None, "") or ground_truth in (None, ""):
+                raise ValueError(
+                    f"Generated triple {sample_id!r} has incomplete {variant_name}; "
+                    f"task and ground_truth are required: {file_path}"
+                )
+            cases[level] = {
+                "task": str(task),
+                "ground_truth": str(ground_truth),
+            }
+        bank[sample_id] = cases
+    return bank
 
 
 def validate_student_generalize_dataset(

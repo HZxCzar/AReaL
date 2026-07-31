@@ -525,6 +525,21 @@ def prepare_test_dataset(
         dataset_config=valid_config,
         tokenizer=tokenizer,
     )
+    student_generalize = getattr(config, "student_generalize", None)
+    if (
+        student_generalize is not None
+        and student_generalize.enabled
+        and student_generalize.source == "generated"
+    ):
+        bank = tutor_train.load_student_generalize_bank(
+            student_generalize.path,
+            source="generated",
+        )
+        dataset = tutor_train._filter_generated_generalization_dataset(
+            dataset,
+            bank=bank,
+            split_name="test",
+        )
     eval_max_samples = config.evaluator.max_samples
     if eval_max_samples is not None:
         eval_max_samples = int(eval_max_samples)
