@@ -419,6 +419,18 @@ class TutorStudentGeneralizeConfig:
     )
     level1_reward: float = field(default=0.2)
     level2_reward: float = field(default=0.5)
+    replays: int = field(
+        default=1,
+        metadata={
+            "help": (
+                "Number of independent student attempts per transfer variant. "
+                "The reward and the logged success become the fraction correct "
+                "over these attempts instead of a single binary outcome, which "
+                "removes most of the student-resampling noise from the signal. "
+                "Costs (replays - 1) extra student calls per variant."
+            )
+        },
+    )
     confidence: TutorStudentGeneralizeConfidenceConfig = field(
         default_factory=TutorStudentGeneralizeConfidenceConfig
     )
@@ -432,6 +444,10 @@ class TutorStudentGeneralizeConfig:
             raise ValueError(
                 "student_generalize.source must be one of: "
                 "'sidecar', 'train', 'generated'."
+            )
+        if self.replays < 1:
+            raise ValueError(
+                f"student_generalize.replays must be >= 1, got {self.replays}."
             )
         if self.enabled and self.source == "generated" and not self.path.strip():
             raise ValueError(

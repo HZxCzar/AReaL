@@ -1,0 +1,64 @@
+defaults:
+  - qwen8b-train-qwen1.7b-eval3-math-pre-aleak-generated@_global_
+  - _self_
+
+trial_name: qwen8b-train-qwen1.7b-eval3-math-pass@2-pre-aleak-generated-g8k4
+
+# G = 8 teaching episodes per problem.
+#
+# gconfig.n_samples is the ROLLOUT GROUP SIZE, not the teacher's completions per
+# turn: rl_trainer passes it to prepare_batch, which wraps the workflow in
+# GroupedRolloutWorkflow and runs arun_episode G times on the same dataset row.
+# The teacher's per-turn generation stays at 1 (pinned in the workflow's
+# _generation_config). Batch size drops 128 -> 16 so a step still costs ~128
+# episodes. Note this also makes an epoch ~66 steps instead of ~8.
+gconfig:
+  n_samples: 8
+
+train_dataset:
+  batch_size: 16
+
+actor:
+  # Subtract an episode-weighted group mean from the ReBN turn returns. This is
+  # what removes the problem-difficulty component that batch normalization leaves
+  # in the advantage. It is applied as a shift, so within-episode return
+  # differences survive exactly -- important once rewards land on middle turns
+  # rather than only on the terminal one.
+  group_baseline: episode
+  group_baseline_leave1out: true
+  # Off here, on in the -eqw variant, so its effect is attributable.
+  episode_loss_weighting: false
+  # Group centering already happened above, so adv_norm is effectively scale-only.
+  # Deliberately NOT std_level=group: a degenerate group has std ~ 0 and would
+  # turn zero signal into enormous advantages.
+  adv_norm:
+    mean_level: batch
+    std_level: batch
+
+student_generalize:
+  enabled: true
+  mode: only_success
+  source: generated
+  path: ${oc.env:TUTOR_GENERATED_VARIANTS_PATH,../../transfer_pilot_20260730/full_math_variant_generation_20260730/verified_triples.json}
+  # K = 4 student attempts per variant. The reward becomes the fraction correct
+  # instead of one coin flip, which removes most student-resampling noise.
+  replays: 4
+  level1_reward: 0.5
+  # level2 is scored and logged but pays nothing. The current V2 bank is
+  # "solve the original, then double it" (97% of numeric variants have
+  # gt2 = 2 x gt1), so rewarding it pays the teacher to make the base answer
+  # explicit -- directly against the leak penalty.
+  level2_reward: 0.0
+
+# Step-based, not epoch-based. 608 of the 759 train rows have variants, so at
+# bs=16 an epoch is ~38 steps instead of ~4.8 at bs=128 -- freq_epochs=10 would
+# have pushed the first checkpoint from ~step 48 out to ~step 380. Compute per
+# step is unchanged (~128 episodes either way), so 50 steps keeps roughly the old
+# wall-clock cadence. LoRA adapters are small, so this is cheap.
+saver:
+  freq_epochs: null
+  freq_steps: 50
+
+stats_logger:
+  wandb:
+    group: 8b-student-diversity-group-baseline

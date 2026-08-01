@@ -537,6 +537,132 @@ def _compute_rebn_returns(
     return returns
 
 
+def _episode_scalars(
+    turn_returns: torch.Tensor,
+    trajectory_ids: torch.Tensor,
+    turn_indices: torch.Tensor,
+    valid_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Reduce turn rows to one scalar per episode.
+
+    The episode scalar is the ReBN return at the episode's smallest ``turn_idx``,
+    i.e. the full (discounted) episode return. Returns ``(episode_index_per_row,
+    episode_return, n_episodes)`` where ``episode_index_per_row`` is -1 on invalid
+    rows.
+    """
+    device = turn_returns.device
+    n_rows = turn_returns.shape[0]
+    episode_index = torch.full((n_rows,), -1, dtype=torch.long, device=device)
+
+    valid_rows = torch.nonzero(valid_mask, as_tuple=False).flatten()
+    if valid_rows.numel() == 0:
+        return episode_index, turn_returns.new_zeros(0), 0
+
+    unique_ids, inverse = torch.unique(trajectory_ids[valid_rows], return_inverse=True)
+    n_episodes = int(unique_ids.numel())
+    episode_index[valid_rows] = inverse
+
+    # Pick the row with the smallest turn_idx within each episode.
+    big = torch.iinfo(torch.long).max
+    first_turn = torch.full((n_episodes,), big, dtype=torch.long, device=device)
+    first_turn.scatter_reduce_(
+        0, inverse, turn_indices[valid_rows], reduce="amin", include_self=True
+    )
+    is_first = turn_indices[valid_rows] == first_turn[inverse]
+
+    episode_return = turn_returns.new_zeros(n_episodes)
+    episode_return.scatter_(0, inverse[is_first], turn_returns[valid_rows][is_first])
+    return episode_index, episode_return, n_episodes
+
+
+def _compute_episode_group_baseline(
+    turn_returns: torch.Tensor,
+    trajectory_ids: torch.Tensor,
+    turn_indices: torch.Tensor,
+    group_ids: torch.Tensor,
+    valid_mask: torch.Tensor,
+    leave_one_out: bool,
+) -> torch.Tensor:
+    """Per-row baseline: the mean episode return of the row's rollout group.
+
+    The mean is taken over *episodes*, not over turn rows, so an episode that ran
+    ten turns does not pull the baseline ten times harder than a one-turn episode.
+    The caller subtracts this from the turn returns, which preserves within-episode
+    return differences exactly.
+    """
+    device = turn_returns.device
+    baseline = torch.zeros_like(turn_returns)
+
+    episode_index, episode_return, n_episodes = _episode_scalars(
+        turn_returns, trajectory_ids, turn_indices, valid_mask
+    )
+    if n_episodes == 0:
+        return baseline
+
+    # One group id per episode (constant within an episode by construction).
+    valid_rows = torch.nonzero(valid_mask, as_tuple=False).flatten()
+    episode_group = torch.zeros(n_episodes, dtype=torch.long, device=device)
+    episode_group.scatter_(0, episode_index[valid_rows], group_ids[valid_rows])
+
+    unique_groups, group_inverse = torch.unique(episode_group, return_inverse=True)
+    n_groups = int(unique_groups.numel())
+
+    group_sum = turn_returns.new_zeros(n_groups)
+    group_sum.index_add_(0, group_inverse, episode_return)
+    group_count = turn_returns.new_zeros(n_groups)
+    group_count.index_add_(0, group_inverse, torch.ones_like(episode_return))
+
+    if leave_one_out:
+        # Exclude each episode from its own baseline; fall back to the plain mean
+        # for singleton groups, where leave-one-out is undefined.
+        denom = (group_count[group_inverse] - 1.0).clamp_min(1.0)
+        episode_baseline = torch.where(
+            group_count[group_inverse] > 1.0,
+            (group_sum[group_inverse] - episode_return) / denom,
+            group_sum[group_inverse] / group_count[group_inverse].clamp_min(1.0),
+        )
+    else:
+        episode_baseline = group_sum[group_inverse] / group_count[
+            group_inverse
+        ].clamp_min(1.0)
+
+    baseline[valid_rows] = episode_baseline[episode_index[valid_rows]]
+    return baseline
+
+
+def _compute_episode_loss_weights(
+    trajectory_ids: torch.Tensor,
+    valid_mask: torch.Tensor,
+    token_counts: torch.Tensor,
+) -> torch.Tensor:
+    """Per-row weight equalizing each episode's gradient mass.
+
+    The PPO loss is a token-level mean, so an episode's gradient weight is
+    proportional to its total trainable tokens. Scaling every turn's advantage by
+    ``mean_episode_tokens / this_episode_tokens`` makes each episode contribute
+    equally while leaving the overall loss scale unchanged. Scaling advantages is
+    exactly equivalent to scaling the loss contribution: the PPO clip is applied
+    to the ratio, so ``pg_loss`` is positively homogeneous in the advantage.
+    """
+    weights = torch.ones_like(token_counts, dtype=torch.float32)
+    valid_rows = torch.nonzero(valid_mask, as_tuple=False).flatten()
+    if valid_rows.numel() == 0:
+        return weights
+
+    _unique, inverse = torch.unique(trajectory_ids[valid_rows], return_inverse=True)
+    n_episodes = int(_unique.numel())
+
+    episode_tokens = torch.zeros(
+        n_episodes, dtype=torch.float32, device=token_counts.device
+    )
+    episode_tokens.index_add_(0, inverse, token_counts[valid_rows].to(torch.float32))
+    episode_tokens = episode_tokens.clamp_min(1.0)
+    mean_tokens = episode_tokens.mean()
+
+    weights[valid_rows] = (mean_tokens / episode_tokens)[inverse]
+    return weights
+
+
 def _compute_batch_centered_penalties(
     scores: torch.Tensor,
     weights: torch.Tensor,
@@ -1059,6 +1185,26 @@ class PPOActor:
                 self.config.turn_discount,
                 valid_mask=valid_turn_mask,
             )
+            if self.config.group_baseline == "episode":
+                if "group_id" not in data:
+                    raise ValueError(
+                        "actor.group_baseline='episode' requires a 'group_id' "
+                        "column in rollout data. It is attached by the trainer "
+                        "before compute_advantages; check that rollout groups "
+                        "survive to that point."
+                    )
+                group_baseline = _compute_episode_group_baseline(
+                    turn_returns,
+                    data["trajectory_id"].to(reward_score.device),
+                    data["turn_idx"].to(reward_score.device),
+                    data["group_id"].to(reward_score.device),
+                    valid_turn_mask,
+                    self.config.group_baseline_leave1out,
+                )
+                # A_t = G_t - b_g. A shift, so within-episode return differences
+                # (mid-turn rewards) survive untouched.
+                turn_returns = turn_returns - group_baseline
+                data["group_baseline"] = group_baseline
             if self.adv_norm is not None and valid_turn_mask.any():
                 normalized_turn_returns = torch.zeros_like(turn_returns)
                 normalized_turn_returns[valid_turn_mask] = self.adv_norm(
@@ -1095,6 +1241,14 @@ class PPOActor:
                     normalized_turn_returns
                 )
                 data["world_model_rl_weight"] = world_model_rl_weights
+            if self.config.episode_loss_weighting:
+                episode_loss_weights = _compute_episode_loss_weights(
+                    data["trajectory_id"].to(reward_score.device),
+                    valid_turn_mask,
+                    loss_mask.sum(dim=-1),
+                )
+                normalized_turn_returns = normalized_turn_returns * episode_loss_weights
+                data["episode_loss_weight"] = episode_loss_weights
             if batch_centered_penalties is not None:
                 normalized_turn_returns = (
                     normalized_turn_returns + batch_centered_penalties
@@ -1111,11 +1265,7 @@ class PPOActor:
                     normalized_turn_returns + applied_teacher_context_advantages
                 )
                 data["teacher_context_advantage"] = teacher_context_advantages
-            if (
-                batch_centered_penalties is not None
-                or teacher_context_advantages is not None
-            ):
-                data["turn_advantage"] = normalized_turn_returns
+            data["turn_advantage"] = normalized_turn_returns
             advantages = kl_advantages + _broadcast_turn_values_to_tokens(
                 normalized_turn_returns, loss_mask
             )
@@ -1373,6 +1523,20 @@ class PPOActor:
             seq_len=seqlens.float(),
         )
         stats_tracker.stat(**seq_stats, denominator="n_seqs")
+        if "group_baseline" in data:
+            # turn_advantage is exactly 0 for a group whose episodes all scored the
+            # same (and for a group reduced to a single surviving episode), so this
+            # is the share of rows that contributed no gradient.
+            stats_tracker.stat(
+                group_baseline=data["group_baseline"].float(),
+                zero_advantage_turns=(data["turn_advantage"].abs() < 1e-8).float(),
+                denominator="n_seqs",
+            )
+        if "episode_loss_weight" in data:
+            stats_tracker.stat(
+                episode_loss_weight=data["episode_loss_weight"].float(),
+                denominator="n_seqs",
+            )
         if "batch_centered_penalty_advantage" in data:
             stats_tracker.stat(
                 batch_centered_penalty_score=torch.nan_to_num(
@@ -1461,6 +1625,9 @@ class PPOActor:
             "world_model_rl_advantage_before_reweight",
             "world_model_rl_advantage_after_reweight",
             "turn_advantage",
+            "group_id",
+            "group_baseline",
+            "episode_loss_weight",
         ]:
             data.pop(key, None)
         # NOTE: calling engine.train() is critical to enabling gradient checkpointing

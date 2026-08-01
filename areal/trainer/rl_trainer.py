@@ -236,6 +236,30 @@ def _prepare_paw_world_model_sidecars(
     )
 
 
+def _attach_group_ids(rollout_batch: list[dict[str, Any]]) -> None:
+    """Tag every row of trajectory ``i`` with ``group_id == i``, in place.
+
+    One trajectory dict holds all episodes that ``GroupedRolloutWorkflow`` produced
+    for a single dataset row, so trajectory index and rollout-group index coincide.
+    Episodes within a group stay distinguishable via ``trajectory_id``.
+    """
+    for group_index, trajectory in enumerate(rollout_batch):
+        reference = trajectory.get("rewards")
+        if reference is None:
+            reference = trajectory.get("trajectory_id")
+        if reference is None:
+            raise ValueError(
+                "Cannot infer row count for group_id: trajectory has neither "
+                "'rewards' nor 'trajectory_id'."
+            )
+        trajectory["group_id"] = torch.full(
+            (reference.shape[0],),
+            group_index,
+            dtype=torch.long,
+            device=reference.device,
+        )
+
+
 def _has_teacher_context_reward(rollout_batch: list[dict[str, Any]]) -> bool:
     """Return whether every trajectory carries complete context-reward metadata."""
 
@@ -1356,6 +1380,8 @@ class PPOTrainer:
                     args={"global_step": global_step},
                 ),
             ):
+                if config.actor.group_baseline is not None:
+                    _attach_group_ids(rollout_batch)
                 adv_batch = self.actor.compute_advantages(
                     rollout_batch,
                     world_model_rl_reweight_config=(world_model_rl_reweight_config),

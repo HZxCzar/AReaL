@@ -331,6 +331,52 @@ def test_rebn_advantage_normalizes_each_turn_equally_not_each_token():
     torch.testing.assert_close(result["advantages"], expected, rtol=1e-6, atol=1e-6)
 
 
+def test_rebn_group_baseline_stores_turn_advantage_without_auxiliary_rewards():
+    """Group-baseline metrics receive the final weighted training advantage."""
+    actor = _make_actor(
+        PPOActorConfig(
+            advantage_estimator="rebn",
+            turn_discount=1.0,
+            kl_ctl=0.0,
+            adv_norm=None,
+            group_baseline="episode",
+            group_baseline_leave1out=True,
+            episode_loss_weighting=True,
+        )
+    )
+    data = {
+        "input_ids": torch.zeros((2, 4), dtype=torch.long),
+        "attention_mask": torch.ones((2, 4), dtype=torch.bool),
+        "loss_mask": torch.tensor([[0, 1, 0, 0], [0, 1, 1, 0]], dtype=torch.long),
+        "logprobs": torch.zeros((2, 4)),
+        "rewards": torch.tensor([1.0, -1.0]),
+        "trajectory_id": torch.tensor([1, 2]),
+        "turn_idx": torch.ones(2, dtype=torch.long),
+        "group_id": torch.zeros(2, dtype=torch.long),
+    }
+
+    result = actor._compute_advantages(data)
+
+    torch.testing.assert_close(
+        result["group_baseline"],
+        torch.tensor([-1.0, 1.0]),
+        rtol=0.0,
+        atol=0.0,
+    )
+    torch.testing.assert_close(
+        result["episode_loss_weight"],
+        torch.tensor([1.5, 0.75]),
+        rtol=0.0,
+        atol=0.0,
+    )
+    torch.testing.assert_close(
+        result["turn_advantage"],
+        torch.tensor([3.0, -1.5]),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
 def test_rebn_world_model_gate_scales_normalized_outcome_before_token_broadcast():
     """The four NLL/advantage quadrants change only normalized outcome credit."""
 

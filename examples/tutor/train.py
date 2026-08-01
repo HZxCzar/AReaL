@@ -526,6 +526,7 @@ def main(args):
         student_generalize_mode=student_generalize.mode,
         student_generalize_source=student_generalize.source,
         student_generalize_path=student_generalize.path,
+        student_generalize_replays=student_generalize.replays,
         student_generalize_level1_reward=student_generalize.level1_reward,
         student_generalize_level2_reward=student_generalize.level2_reward,
         student_generalize_confidence_enabled=student_generalize.confidence.enabled,

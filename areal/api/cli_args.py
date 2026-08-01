@@ -1292,6 +1292,37 @@ class PPOActorConfig(TrainEngineConfig):
         default=1.0,
         metadata={"help": "Turn-level discount factor for advantage_estimator=rebn."},
     )
+    group_baseline: str | None = field(
+        default=None,
+        metadata={
+            "help": "Group baseline subtracted from ReBN turn returns before "
+            "actor.adv_norm. 'episode' averages one scalar per episode (the return "
+            "at its first turn) across the episodes of a rollout group, so the "
+            "baseline is episode-weighted rather than turn-weighted, and subtracts "
+            "it from every turn return. Because it is a shift, within-episode "
+            "return differences (mid-turn rewards) are preserved exactly. Requires "
+            "advantage_estimator='rebn' and a 'group_id' column in rollout data. "
+            "None disables it.",
+            "choices": ["episode", None],
+        },
+    )
+    group_baseline_leave1out: bool = field(
+        default=True,
+        metadata={
+            "help": "Exclude an episode from its own group baseline. Only used when "
+            "actor.group_baseline='episode'."
+        },
+    )
+    episode_loss_weighting: bool = field(
+        default=False,
+        metadata={
+            "help": "Scale each turn's advantage by (mean episode token count / this "
+            "episode's token count) so every episode contributes equal gradient mass "
+            "regardless of how many turns it ran. Counteracts long failing episodes "
+            "dominating the token-level PPO loss average. Requires "
+            "advantage_estimator='rebn'."
+        },
+    )
 
     # KL Control
     kl_ctl: float = field(default=0.1, metadata={"help": "KL divergence coefficient"})
@@ -1413,6 +1444,19 @@ class PPOActorConfig(TrainEngineConfig):
         if self.turn_discount < 0.0 or self.turn_discount > 1.0:
             raise ValueError(
                 f"turn_discount must be in [0, 1], got {self.turn_discount}."
+            )
+        if self.group_baseline not in {None, "episode"}:
+            raise ValueError(
+                "actor.group_baseline must be 'episode' or None, "
+                f"got {self.group_baseline!r}."
+            )
+        if self.group_baseline is not None and self.advantage_estimator != "rebn":
+            raise ValueError(
+                "actor.group_baseline requires advantage_estimator='rebn'."
+            )
+        if self.episode_loss_weighting and self.advantage_estimator != "rebn":
+            raise ValueError(
+                "actor.episode_loss_weighting requires advantage_estimator='rebn'."
             )
         if self.advantage_estimator == "rebn" and self.reward_norm is not None:
             raise ValueError(
@@ -2640,6 +2684,13 @@ class PPOConfig(BaseExperimentConfig):
                 "actor.advantage_estimator='rebn' is not compatible with critic. "
                 "ReBN stores normalized policy advantages in the returns field; "
                 "disable critic to use ReBN."
+            )
+        if self.actor.group_baseline is not None and self.gconfig.n_samples < 2:
+            raise ValueError(
+                "actor.group_baseline requires gconfig.n_samples >= 2 "
+                f"(got {self.gconfig.n_samples}). gconfig.n_samples is the rollout "
+                "group size: with one episode per group the baseline equals that "
+                "episode's own return and every advantage is exactly zero."
             )
         super().__post_init__()
 

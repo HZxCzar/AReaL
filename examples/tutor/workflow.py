@@ -461,6 +461,8 @@ class StudentGeneralizationResult:
     student_error: str | None = None
     judge_result: JudgeResult | None = None
     correctness_reward: float = 0.0
+    replay_count: int = 0
+    replay_correct: int = 0
     confidence: float = 0.0
     confidence_mean_logprob: float | None = None
     confidence_token_count: int = 0
@@ -601,6 +603,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_generalize_mode: StudentGeneralizeMode | str = "only_success",
         student_generalize_source: str = "sidecar",
         student_generalize_path: str = "",
+        student_generalize_replays: int = 1,
         student_generalize_level1_reward: float = 0.2,
         student_generalize_level2_reward: float = 0.5,
         student_generalize_confidence_enabled: bool = False,
@@ -1014,6 +1017,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "'sidecar', 'train', or 'generated'."
             )
         self.student_generalize_path = student_generalize_path.strip()
+        self.student_generalize_replays = max(
+            1, int(student_generalize_replays)
+        )
         self.student_generalize_level_rewards = {
             "level1": float(student_generalize_level1_reward),
             "level2": float(student_generalize_level2_reward),
@@ -3538,13 +3544,30 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 previous_student_output=anchor.previous_student_output,
                 teacher_feedback=anchor.teacher_feedback,
             )
-            student_result = await self._call_auxiliary_prompt(
-                system_prompt=self._student_system_prompt_for_selection(
-                    episode_artifact.student_prompt_selection
-                ),
-                user_prompt=transfer_prompt,
-                aux_caller=aux_caller,
-                rid_prefix=f"student-transfer-{level}-{anchor.public_history.turn_count}",
+            replays = max(1, int(getattr(self, "student_generalize_replays", 1)))
+            replay_results = await asyncio.gather(
+                *[
+                    self._call_auxiliary_prompt(
+                        system_prompt=self._student_system_prompt_for_selection(
+                            episode_artifact.student_prompt_selection
+                        ),
+                        user_prompt=transfer_prompt,
+                        aux_caller=aux_caller,
+                        rid_prefix=(
+                            f"student-transfer-{level}-"
+                            f"{anchor.public_history.turn_count}-r{replay_idx}"
+                        ),
+                    )
+                    for replay_idx in range(replays)
+                ]
+            )
+            # The first successful attempt is canonical for logging and
+            # confidence. Falling back to attempt 1 keeps traces and confidence
+            # semantics unchanged at replays=1, while making sure a single failed
+            # call does not discard the replays that did succeed.
+            student_result = next(
+                (result for result in replay_results if not result.error),
+                replay_results[0],
             )
             if student_result.error:
                 student_output = ""
@@ -3567,15 +3590,31 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 else ""
             )
             confidence_reward = 0.0
+            replay_correct = 0
+            replay_scored = 0
             if student_error is None:
-                judge_result = await self._score_answer_async(
-                    case.task,
-                    case.ground_truth,
-                    student_output_raw,
-                    answer_judge_caller=answer_judge_caller,
+                judge_results = await asyncio.gather(
+                    *[
+                        self._score_answer_async(
+                            case.task,
+                            case.ground_truth,
+                            result.text,
+                            answer_judge_caller=answer_judge_caller,
+                        )
+                        for result in replay_results
+                        if not result.error
+                    ]
                 )
-                if judge_result.correct:
-                    correctness_reward = case.reward
+                judge_result = judge_results[0]
+                replay_scored = len(judge_results)
+                replay_correct = sum(
+                    1 for judged in judge_results if judged.correct
+                )
+                # Fraction correct, so a variant the student gets right 3 times
+                # out of 4 is worth more than one it gets right once.
+                correctness_reward = case.reward * (
+                    replay_correct / max(replay_scored, 1)
+                )
                 if getattr(self, "student_generalize_confidence_enabled", False):
                     if not student_result.token_logprobs:
                         raise RuntimeError(
@@ -3607,6 +3646,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     student_error=student_error,
                     judge_result=judge_result,
                     correctness_reward=correctness_reward,
+                    replay_count=replay_scored,
+                    replay_correct=replay_correct,
                     confidence=confidence,
                     confidence_mean_logprob=confidence_mean_logprob,
                     confidence_token_count=confidence_token_count,
@@ -3740,10 +3781,25 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 and level_result.judge_result is not None
                 and level_result.judge_result.correct
             )
+            # With replays > 1 the headline series is the fraction correct, which
+            # carries far less student-resampling noise than a single coin flip.
+            # The binary series tracks attempt 1 only, so it stays comparable
+            # with runs recorded before replays existed.
+            replay_count = int(getattr(level_result, "replay_count", 0) or 0)
+            replay_correct = int(getattr(level_result, "replay_correct", 0) or 0)
+            score = (
+                replay_correct / replay_count if replay_count > 0 else float(correct)
+            )
             metrics[f"student_{level}_attempted"] = float(attempted)
-            metrics[f"student_{level}_success"] = float(correct)
+            metrics[f"student_{level}_success"] = float(score)
+            metrics[f"student_{level}_success_binary"] = float(correct)
             if attempted:
-                metrics[f"student_{level}_correct_given_attempted"] = float(correct)
+                metrics[f"student_{level}_correct_given_attempted"] = float(score)
+                metrics[f"student_{level}_correct_given_attempted_binary"] = float(
+                    correct
+                )
+                if replay_count > 0:
+                    metrics[f"student_{level}_replay_count"] = float(replay_count)
                 if (
                     getattr(self, "student_generalize_confidence_enabled", False)
                     and level_result is not None
@@ -3786,6 +3842,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "student_error": result.student_error,
             "judge_correct": bool(judge.correct) if judge is not None else False,
             "judge_feedback": judge.feedback if judge is not None else "",
+            # judge_correct is attempt 1 only; these are the whole replay set the
+            # reward is actually computed from.
+            "replay_count": int(result.replay_count),
+            "replay_correct": int(result.replay_correct),
             "correctness_reward": float(result.correctness_reward),
             "confidence": float(result.confidence),
             "confidence_mean_logprob": result.confidence_mean_logprob,
