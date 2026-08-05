@@ -1,0 +1,19 @@
+defaults:
+  - qwen8b-train-qwen1.7b-eval3-math-pre-aleak-generated-g8k4-tonly-leak1@_global_
+  - _self_
+
+trial_name: qwen8b-train-qwen1.7b-eval3-math-pass@2-pre-aleak-generated-g8k4-tonly-leak0
+
+# Same as -tonly-leak1 (transfer is the only positive signal, no termination on
+# leak) with the leak penalty removed entirely. Leaks are still detected, still
+# logged in rollout/leaks, still recorded as a reward component -- they just cost
+# nothing, so the teacher is free to reveal whatever it likes and the only thing
+# that pays is the student transferring to the variant.
+#
+# Set this to -0.1 instead of 0.0 for the "very small penalty" variant.
+reward:
+  leak_penalty: 0.0
+
+stats_logger:
+  wandb:
+    group: 8b-student-diversity-transfer-only

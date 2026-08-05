@@ -15,8 +15,98 @@ trial_name: qwen8b-train-qwen1.7b-eval3-math-pass@2-pre-aleak-generated-g8k4
 gconfig:
   n_samples: 8
 
+evaluator:
+  # Only the trained-against student. The inherited config evaluates all three,
+  # which made an eval pass 528 test rows x 3 students = 1584 episodes and left
+  # eval eating ~70% of wall clock (~2.3h per pass, every 10 steps). llama and
+  # gemma carry weight 0.0 in training -- they are cross-student diagnostics,
+  # not part of these experiments. student_models is untouched; those two are
+  # simply no longer evaluated.
+  student_model_names:
+    - qwen3-1.7b
+
 train_dataset:
   batch_size: 16
+  # MUST be true at this batch size. The dataset is sorted by subject, so with
+  # shuffle=false every 16-row batch is one topic; the 20260801 runs hit 9 steps
+  # (13%) where all 16 problems were pre-solvable by the student -> zero turns,
+  # zero gradient. At bs=128 a batch spanned enough topics to hide this
+  # (pre_solved sd 0.037, never above 0.34; at bs=16 sd 0.280, max 1.000).
+  shuffle: true
+
+rollout:
+  # Counted in GROUPS, not episodes, and consumer_batch_size is 16 -- so 128 here
+  # meant prefetching EIGHT steps' worth: 128 groups x G=8 = 1024 in-flight
+  # episodes. The answer-judge caller is constructed per episode (workflow.py
+  # _make_answer_judge_caller) with its own 4-wide semaphore, so that was up to
+  # 4096 concurrent judge requests; the 20260801 runs began timing out rollouts
+  # at step 9 and dropped 483/616 of them. 16 = one step in flight = <=512
+  # concurrent judge calls, the level the G=1 runs sustained with zero timeouts.
+  # This bounds concurrency only; per-step work is unchanged at 128 episodes.
+  max_concurrent_rollouts: 16
+
+# Throughput, as opposed to the timeout fix above. The aux and student callers
+# are built once in __init__, so their max_concurrent_calls is a GLOBAL gate on
+# every episode in the step. At 4 it was sized for G=1 and ~14 calls/episode;
+# K=4 replays push that to ~26, which is why rollout stopped overlapping with
+# training (timeperf/rollout 0 -> ~275s). 4 is nowhere near the endpoint limit:
+# the old runs already drove ~512 concurrent judge requests at these endpoints.
+auxiliary_model:
+  max_concurrent_calls: 16
+
+# NOTE: OmegaConf replaces lists rather than merging them, so this whole block
+# has to be restated to change one field -- and all three students must stay,
+# because evaluator.student_model_names still references llama and gemma.
+student_models:
+  - name: qwen3-1.7b
+    weight: 1.0
+    base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+    model: qwen3-1.7b
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    max_concurrent_calls: 16
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-qwen17b-student
+      extra_body:
+        top_k: 20
+        min_p: 0
+        chat_template_kwargs:
+          enable_thinking: false
+  - name: llama-3.1-8b-instruct
+    weight: 0.0
+    base_url: ${oc.env:TUTOR_LLAMA31_8B_BASE_URL}
+    model: llama-3.1-8b-instruct
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.6
+    top_p: 0.9
+    max_concurrent_calls: 16
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-llama31-8b-student
+  - name: gemma-3-1b-it
+    weight: 0.0
+    base_url: ${oc.env:TUTOR_GEMMA3_1B_BASE_URL}
+    model: gemma-3-1b-it
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.0
+    top_p: null
+    max_concurrent_calls: 16
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-gemma3-1b-student
+      extra_body:
+        repetition_penalty: 1.05
 
 actor:
   # Subtract an episode-weighted group mean from the ReBN turn returns. This is

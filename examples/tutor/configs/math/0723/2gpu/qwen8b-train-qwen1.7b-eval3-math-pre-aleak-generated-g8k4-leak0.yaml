@@ -1,0 +1,31 @@
+defaults:
+  - qwen8b-train-qwen1.7b-eval3-math-pre-aleak-generated-g8k4@_global_
+  - _self_
+
+trial_name: qwen8b-train-qwen1.7b-eval3-math-pass@2-pre-aleak-generated-g8k4-leak0
+
+# Inherits g8k4: G=8, bs=16, group_baseline=episode, episode_loss_weighting=false,
+# shuffle=true, max_concurrent_rollouts=16, K=4 replays, level2_reward=0.
+
+# Do not stop the rollout when the teacher leaks. The episode runs to success or
+# max_turns, and every turn is leak-checked afterwards in one parallel pass
+# (_annotate_turn_leak_results). That pass calls exactly the same
+# _run_optional_leak_check(task, ground_truth, tutor_visible_output, aux_caller)
+# the 'terminate' path calls in-loop, per turn, so detection granularity is
+# unchanged -- only the timing and the consequence differ.
+leak_handling_mode: reward_only
+
+reward:
+  # Leaks are still detected, still recorded as a 'leak' reward component, and
+  # still reported in rollout/leaks -- they just cost nothing. _leak_component
+  # returns ("leak", leak_penalty), so 0.0 keeps the accounting and drops the
+  # pressure.
+  leak_penalty: 0.0
+  # Per-turn rather than one component per episode, as intended. Numerically a
+  # no-op while the penalty is 0, but it makes the accounting right if the
+  # penalty is ever raised again.
+  leak_penalty_aggregation: turn
+
+stats_logger:
+  wandb:
+    group: 8b-student-diversity-leak0
