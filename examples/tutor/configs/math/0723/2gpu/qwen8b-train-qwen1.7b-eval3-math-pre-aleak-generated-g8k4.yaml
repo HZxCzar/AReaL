@@ -133,6 +133,9 @@ student_generalize:
   # K = 4 student attempts per variant. The reward becomes the fraction correct
   # instead of one coin flip, which removes most student-resampling noise.
   replays: 4
+  # Diagnostic only (reward 0): after every termination, independently ask the
+  # same student to solve the original task again from the completed chat.
+  retest_original: true
   level1_reward: 0.5
   # level2 is scored and logged but pays nothing. The current V2 bank is
   # "solve the original, then double it" (97% of numeric variants have

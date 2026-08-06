@@ -113,14 +113,6 @@ RAWBASE_LEAK_CHECK_SYSTEM_PROMPT = (
     "JSON only with keys leaked (boolean) and feedback (string)."
 )
 
-FEEDBACK_LEAK_CHECK_SYSTEM_PROMPT_SUFFIX = (
-    "Feedback mode is enabled. Use the existing feedback string as private "
-    "tutor-facing guidance: if leakage occurred, briefly explain the leakage "
-    "type and how the tutor should revise without quoting the ground-truth "
-    "answer or adding a final-answer-equivalent expression. Do not add new "
-    "JSON keys."
-)
-
 DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT = (
     "You are a strict math answer equivalence judge. Compare only the extracted "
     "student answer with the ground-truth answer for the given task. Mark correct "
@@ -194,18 +186,46 @@ NONE_YET_PLACEHOLDER = "(none yet)"
 INITIAL_TEACHER_FEEDBACK_PLACEHOLDER = "(none, produce the first answer attempt)"
 LEAK_CHECK_DISABLED_FEEDBACK = "Leak check disabled."
 LEAK_CHECK_PENDING_FEEDBACK = "Leak check pending."
-LEAK_CHECK_NO_DETAIL_FEEDBACK = "The leak checker did not provide a detailed reason."
 LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE = "Leak check failed: {error}"
 RAWBASE_LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE = "Rawbase leak check failed: {error}"
-PRIVATE_LEAK_LEVEL_SUFFIX_TEMPLATE = " (leak level {leak_level})"
-PRIVATE_LEAK_FEEDBACK_TEMPLATE = (
-    "Turn {turn_idx}: tutor output was rejected for answer leakage{level}. "
-    "Leak feedback: {feedback}. "
-    "This turn and the student's response to it are invalid and were "
-    "not added to the student-visible history. Continue from the last "
-    "valid public state without using the invalid student response."
-)
 PUBLIC_HISTORY_ENTRY_TEMPLATE = "{speaker} round {round_idx}:\n{visible_text}"
+
+# The task rides in the system prompt and the dialogue is carried as real
+# messages, mirroring examples/pedagogical_rl.
+TASK_CONTEXT_TEMPLATE = """\
+Here is the math problem:
+{{ task }}"""
+
+TEACHER_GROUND_TRUTH_CONTEXT_TEMPLATE = """\
+Private ground truth key (never reveal this):
+{{ ground_truth }}"""
+
+INITIAL_ATTEMPT_WRAPPER = "Here is my attempt at this problem:\n{{ attempt }}"
+
+# Appended to the student's turn in the TEACHER's view only. The student never
+# sees its own grading.
+TEACHER_ENV_FEEDBACK_TEMPLATE = """\
+[environment feedback -- not visible to the student]
+- Answer correctness: {{ 'correct' if judge_correct else 'incorrect' }}
+- Round {{ current_round }}/{{ max_turns }}, {{ remaining_rounds }} remaining"""
+
+STUDENT_FINAL_SOLUTION_TEMPLATE = """\
+The conversation with the teacher has ended. Now write a complete step-by-step
+solution to the original problem on your own. Include every step, so the
+solution stands on its own without the conversation above. Put your final answer
+in \\boxed{}."""
+
+STUDENT_TRANSFER_TURN_TEMPLATE = """\
+Now solve a new related transfer task. Use the previous conversation only as a
+source of reusable methods, checks, and concepts. Do not continue the original
+task, and do not reuse the original numerical answer unless you independently
+derive it for the new task.
+
+New transfer task:
+{{ transfer_task }}
+
+Reply with your answer attempt for the new transfer task. If you are stuck,
+briefly say what is confusing and ask one short question."""
 
 TEACHER_PRE_SOLVE_FILTER_CONTEXT_TEMPLATE = """\
 Private teacher solution draft hidden from the student:
@@ -233,22 +253,12 @@ Previous tutor output:
 {{ previous_tutor_output }}
 
 Private feedback for the tutor:
-{% if feedback_kind == "leak" %}
-- Latest private event: a previous tutor turn was invalidated for answer leakage.
-{% if leak_feedback %}
-- Leak feedback: {{ leak_feedback }}
-{% endif %}
-{% elif feedback_kind == "student_judged" %}
+{% if feedback_kind == "student_judged" %}
 - Latest student output: {{ student_output }}
 - Answer correctness: {{ 'correct' if judge_correct else 'incorrect' }}
 - Judge feedback: {{ judge_feedback }}
 {% else %}
 - No previous private feedback.
-{% endif %}
-{% if leak_history %}
-
-Private invalid-turn timeline for this episode:
-{{ leak_history }}
 {% endif %}
 
 Round: {{ current_round }}/{{ max_turns }}

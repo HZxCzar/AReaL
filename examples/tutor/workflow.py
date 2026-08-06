@@ -201,13 +201,11 @@ from examples.tutor.prompts import (
     DEFAULT_TEACHER_PROGRESS_JUDGE_SYSTEM_PROMPT,
     DEFAULT_WORLD_MODEL_SYSTEM_PROMPT,
     EMPTY_PLACEHOLDER,
-    FEEDBACK_LEAK_CHECK_SYSTEM_PROMPT_SUFFIX,
     FILTER_SOLVER_SYSTEM_PROMPT,
     FILTER_SOLVER_USER_TEMPLATE,
     INITIAL_TEACHER_FEEDBACK_PLACEHOLDER,
     LEAK_CHECK_DISABLED_FEEDBACK,
     LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE,
-    LEAK_CHECK_NO_DETAIL_FEEDBACK,
     LEAK_CHECK_PENDING_FEEDBACK,
     LEAK_CHECK_USER_TEMPLATE,
     NO_PREVIOUS_VISIBLE_TUTORING_HISTORY,
@@ -217,8 +215,6 @@ from examples.tutor.prompts import (
     NONE_YET_PLACEHOLDER,
     POLARIS_FILTER_SOLVER_USER_TEMPLATE,
     POLARIS_INSTRUCTION,
-    PRIVATE_LEAK_FEEDBACK_TEMPLATE,
-    PRIVATE_LEAK_LEVEL_SUFFIX_TEMPLATE,
     PUBLIC_HISTORY_ENTRY_TEMPLATE,
     RAWBASE_LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE,
     RAWBASE_LEAK_CHECK_SYSTEM_PROMPT,
@@ -227,8 +223,14 @@ from examples.tutor.prompts import (
     STUDENT_QUESTION_SYSTEM_PROMPT,
     STUDENT_QUESTION_USER_TEMPLATE,
     STUDENT_REQUEST_JUDGE_USER_TEMPLATE,
+    INITIAL_ATTEMPT_WRAPPER,
+    STUDENT_FINAL_SOLUTION_TEMPLATE,
     STUDENT_STATE_USER_TEMPLATE,
+    STUDENT_TRANSFER_TURN_TEMPLATE,
     STUDENT_TRANSFER_USER_TEMPLATE,
+    TASK_CONTEXT_TEMPLATE,
+    TEACHER_ENV_FEEDBACK_TEMPLATE,
+    TEACHER_GROUND_TRUTH_CONTEXT_TEMPLATE,
     TEACHER_ADAPTIVE_INSTRUCTION,
     TEACHER_ANTI_LEAK_INSTRUCTION,
     TEACHER_PRE_SOLVE_FILTER_CONTEXT_TEMPLATE,
@@ -250,7 +252,7 @@ _REWARD_COMPONENT_ALIASES = {
 
 LEAK_TERMINATION_REASON = "leak"
 TEACHER_PRE_SKIPPED_TERMINATION_REASON = "pre_solve_skipped"
-LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate", "feedback"}
+LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate"}
 
 
 def load_prompt_pool(path: str, *, role: str) -> tuple[str, ...]:
@@ -438,6 +440,9 @@ def _reward_component_key(name: str) -> str:
 
 
 _STUDENT_GENERALIZE_LEVELS = ("level1", "level2")
+# Re-test the ORIGINAL task as a full standalone solution. Off by default;
+# an independent branch of the same chat, exactly like the transfer probes.
+ORIGINAL_RETEST_LEVEL = "original"
 _STUDENT_GENERALIZE_MODES = {"only_success", "always"}
 
 
@@ -604,6 +609,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_generalize_source: str = "sidecar",
         student_generalize_path: str = "",
         student_generalize_replays: int = 1,
+        student_generalize_retest_original: bool = False,
         student_generalize_level1_reward: float = 0.2,
         student_generalize_level2_reward: float = 0.5,
         student_generalize_confidence_enabled: bool = False,
@@ -633,7 +639,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if leak_handling_mode not in LEAK_HANDLING_MODES:
             raise ValueError(
                 "leak_handling_mode must be one of: 'disabled', "
-                "'reward_only', 'terminate', or 'feedback'."
+                "'reward_only', or 'terminate'."
             )
         self.leak_handling_mode: LeakHandlingMode = leak_handling_mode
         self.gconfig = gconfig
@@ -1020,6 +1026,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.student_generalize_replays = max(
             1, int(student_generalize_replays)
         )
+        self.student_generalize_retest_original = bool(
+            student_generalize_retest_original
+        )
         self.student_generalize_level_rewards = {
             "level1": float(student_generalize_level1_reward),
             "level2": float(student_generalize_level2_reward),
@@ -1238,14 +1247,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if not prompt or prompt == DEFAULT_LEAK_CHECK_SYSTEM_PROMPT:
             return DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT
         return prompt
-
-    def _leak_check_system_prompt_for_current_mode(self, prompt: str) -> str:
-        prompt = (prompt or "").strip()
-        if getattr(self, "leak_handling_mode", "reward_only") != "feedback":
-            return prompt
-        if FEEDBACK_LEAK_CHECK_SYSTEM_PROMPT_SUFFIX in prompt:
-            return prompt
-        return f"{prompt}\n\n{FEEDBACK_LEAK_CHECK_SYSTEM_PROMPT_SUFFIX}".strip()
 
     def _resolve_teacher_system_prompt(self, prompt: str) -> str:
         prompt = (prompt or "").strip()
@@ -1787,9 +1788,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
             return None
 
+        initial_turns = self._initial_conversation(initial_student_answer)
+        initial_turns[-1]["env"] = self._teacher_env_feedback(
+            initial_judge_result, 0
+        )
         public_history = PublicHistoryState(
             summary=self._build_initial_public_summary(initial_student_answer),
             turn_count=0,
+            turns=initial_turns,
         )
         previous_tutor_visible_output = ""
         previous_student_output = initial_student_answer
@@ -1832,9 +1838,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             tutor_visible_output, tutor_format_error = self._parse_tutor_visible_output(
                 tutor_raw_output
             )
-            public_before = public_history.summary
+            public_before = list(public_history.turns)
             leak_result = self._pending_leak_check_result()
-            if self.leak_handling_mode in {"terminate", "feedback"}:
+            if self.leak_handling_mode == "terminate":
                 leak_result = await self._run_optional_leak_check(
                     task,
                     ground_truth,
@@ -1847,7 +1853,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                         TurnArtifact(
                             turn_idx=turn_idx,
                             tutor_state=tutor_state,
-                            tutor_prompt=self._build_tutor_prompt(tutor_state),
+                            tutor_messages=list(self._build_tutor_messages(tutor_state)),
                             tutor_response=response,
                             tutor_raw_output=tutor_raw_output,
                             tutor_visible_output=tutor_visible_output,
@@ -1882,9 +1888,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_answer_raw,
                 answer_judge_caller=answer_judge_caller,
             )
-            invalid_due_to_leak = (
-                self.leak_handling_mode == "feedback" and leak_result.leaked
-            )
             (
                 student_answer,
                 effective_student_turn_behavior,
@@ -1894,75 +1897,58 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_answer,
                 should_generate=(
                     not judge_result.correct
-                    and not invalid_due_to_leak
                     and not student_error
                     and turn_idx < self.max_turns
                 ),
                 aux_caller=student_caller,
             )
 
-            if judge_result.correct and not invalid_due_to_leak:
+            if judge_result.correct:
                 termination_reason = "success"
             else:
                 termination_reason = (
                     "max_turns" if turn_idx == self.max_turns else "continue"
                 )
 
-            if invalid_due_to_leak:
-                next_public_history = PublicHistoryState(
-                    summary=public_history.summary,
-                    turn_count=public_history.turn_count,
-                )
-            else:
-                next_public_history = await self._run_public_summary_update(
-                    old_public_history=public_history,
-                    previous_student_answer=previous_student_output,
-                    tutor_visible_output=tutor_visible_output,
-                    current_student_answer=student_answer,
-                )
+            next_public_history = await self._run_public_summary_update(
+                old_public_history=public_history,
+                previous_student_answer=previous_student_output,
+                tutor_visible_output=tutor_visible_output,
+                current_student_answer=student_answer,
+                env_feedback=self._teacher_env_feedback(judge_result, turn_idx),
+            )
             turn_artifacts.append(
                 TurnArtifact(
                     turn_idx=turn_idx,
                     tutor_state=tutor_state,
-                    tutor_prompt=self._build_tutor_prompt(tutor_state),
+                    tutor_messages=list(self._build_tutor_messages(tutor_state)),
                     tutor_response=response,
                     tutor_raw_output=tutor_raw_output,
                     tutor_visible_output=tutor_visible_output,
                     leak_result=leak_result,
                     public_history_before=public_before,
-                    public_history_after=next_public_history.summary,
+                    public_history_after=list(next_public_history.turns),
                     tutor_format_error=tutor_format_error,
                     student_state=student_state,
                     student_prompt=student_prompt,
                     student_output=student_answer,
                     student_error=student_error,
                     judge_result=judge_result,
-                    invalid_due_to_leak=invalid_due_to_leak,
                     student_question_generation=student_question_generation,
                 )
             )
 
-            if invalid_due_to_leak:
-                leak_feedback = self._private_leak_feedback(turn_idx, leak_result)
-                leak_history = self._private_leak_history(turn_artifacts)
-                previous_feedback = TutorPrivateFeedback(
-                    kind="leak",
-                    leak_feedback=leak_feedback,
-                    leak_history=leak_history,
-                )
-            else:
-                public_history = next_public_history
-                previous_tutor_visible_output = tutor_visible_output
-                previous_student_output = student_answer
-                preceding_student_turn_behavior = effective_student_turn_behavior
-                previous_feedback = TutorPrivateFeedback(
-                    kind="student_judged",
-                    student_output=student_answer,
-                    judge_correct=judge_result.correct,
-                    judge_feedback=judge_result.feedback,
-                    leak_history=self._private_leak_history(turn_artifacts),
-                )
-            if judge_result.correct and not invalid_due_to_leak:
+            public_history = next_public_history
+            previous_tutor_visible_output = tutor_visible_output
+            previous_student_output = student_answer
+            preceding_student_turn_behavior = effective_student_turn_behavior
+            previous_feedback = TutorPrivateFeedback(
+                kind="student_judged",
+                student_output=student_answer,
+                judge_correct=judge_result.correct,
+                judge_feedback=judge_result.feedback,
+            )
+            if judge_result.correct:
                 break
 
         if self.leak_handling_mode == "reward_only":
@@ -2491,10 +2477,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         *,
         aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
     ) -> tuple[str, str | None]:
-        prompt = self._build_student_prompt_from_state(state)
-        result = await self._call_auxiliary_prompt(
-            system_prompt=self._student_system_prompt_for_state(state),
-            user_prompt=prompt,
+        result = await self._call_auxiliary_messages(
+            self._build_student_messages(state),
             aux_caller=aux_caller,
             rid_prefix=f"student-{state.public_history.turn_count}",
         )
@@ -2665,9 +2649,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             _strip_reasoning_for_context(teacher_action),
         )
         result = await self._call_auxiliary_prompt(
-            system_prompt=self._leak_check_system_prompt_for_current_mode(
-                self.leak_check_system_prompt
-            ),
+            system_prompt=self.leak_check_system_prompt,
             user_prompt=prompt,
             aux_caller=aux_caller,
             rid_prefix="leak-check",
@@ -2707,9 +2689,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             teacher_action=teacher_message,
         )
         result = await self._call_auxiliary_prompt(
-            system_prompt=self._leak_check_system_prompt_for_current_mode(
-                RAWBASE_LEAK_CHECK_SYSTEM_PROMPT
-            ),
+            system_prompt=RAWBASE_LEAK_CHECK_SYSTEM_PROMPT,
             user_prompt=prompt,
             aux_caller=aux_caller,
             rid_prefix="rawbase-leak-check",
@@ -2728,62 +2708,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         leak_result.raw_result["method"] = "rawbase_llm"
         return leak_result
 
-    @staticmethod
-    def _compact_private_feedback(value: Any) -> str:
-        if isinstance(value, bool) or value is None:
-            return ""
-        if isinstance(value, str):
-            text = value
-        elif isinstance(value, (int, float)):
-            text = str(value)
-        elif isinstance(value, (list, tuple)):
-            parts = [
-                TutorAgentWorkflow._compact_private_feedback(item) for item in value
-            ]
-            text = ", ".join(part for part in parts if part)
-        elif isinstance(value, dict):
-            parts = [
-                TutorAgentWorkflow._compact_private_feedback(item)
-                for item in value.values()
-            ]
-            text = ", ".join(part for part in parts if part)
-        else:
-            return ""
-        text = re.sub(r"\s+", " ", text).strip()
-        if len(text) > 240:
-            return f"{text[:237].rstrip()}..."
-        return text
-
-    def _leak_feedback_text(self, leak_result: LeakCheckResult) -> str:
-        feedback = self._compact_private_feedback(leak_result.feedback)
-        feedback_lower = feedback.lower()
-        if feedback and "failed" not in feedback_lower:
-            return feedback
-        return LEAK_CHECK_NO_DETAIL_FEEDBACK
-
-    def _private_leak_feedback(
-        self, turn_idx: int, leak_result: LeakCheckResult
-    ) -> str:
-        level = (
-            PRIVATE_LEAK_LEVEL_SUFFIX_TEMPLATE.format(leak_level=leak_result.leak_level)
-            if leak_result.leak_level is not None
-            else ""
-        )
-        feedback = self._leak_feedback_text(leak_result)
-        return PRIVATE_LEAK_FEEDBACK_TEMPLATE.format(
-            turn_idx=turn_idx,
-            level=level,
-            feedback=feedback,
-        )
-
-    def _private_leak_history(self, turn_artifacts: list[TurnArtifact]) -> str:
-        entries = [
-            self._private_leak_feedback(artifact.turn_idx, artifact.leak_result)
-            for artifact in turn_artifacts
-            if artifact.invalid_due_to_leak
-        ]
-        return "\n".join(entries)
-
     async def _call_auxiliary_prompt(
         self,
         *,
@@ -2792,14 +2716,24 @@ class TutorAgentWorkflow(RolloutWorkflow):
         aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
         rid_prefix: str = "auxiliary",
     ) -> TextCallResult:
-        caller = aux_caller or self._make_auxiliary_caller(engine=None)
-        return await caller.call_text(
+        return await self._call_auxiliary_messages(
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            aux_caller=aux_caller,
             rid_prefix=rid_prefix,
         )
+
+    async def _call_auxiliary_messages(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
+        rid_prefix: str = "auxiliary",
+    ) -> TextCallResult:
+        caller = aux_caller or self._make_auxiliary_caller(engine=None)
+        return await caller.call_text(messages, rid_prefix=rid_prefix)
 
     async def _run_public_summary_update(
         self,
@@ -2808,6 +2742,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         previous_student_answer: str,
         tutor_visible_output: str,
         current_student_answer: str,
+        env_feedback: str = "",
     ) -> PublicHistoryState:
         entries = []
         existing_history = old_public_history.summary.strip()
@@ -2831,9 +2766,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 current_student_answer,
             )
         )
+        turns = list(old_public_history.turns) or self._initial_conversation(
+            previous_student_answer
+        )
+        turns.append({"role": "teacher", "content": tutor_visible_output})
+        student_turn = {"role": "student", "content": current_student_answer}
+        if env_feedback:
+            student_turn["env"] = env_feedback
+        turns.append(student_turn)
         return PublicHistoryState(
             summary="\n\n".join(entry for entry in entries if entry),
             turn_count=old_public_history.turn_count + 1,
+            turns=turns,
         )
 
     def _build_tutor_prompt(self, state: TutorTurnState) -> str:
@@ -2850,8 +2794,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             student_output=feedback.student_output or EMPTY_PLACEHOLDER,
             judge_correct=feedback.judge_correct,
             judge_feedback=feedback.judge_feedback or EMPTY_PLACEHOLDER,
-            leak_feedback=feedback.leak_feedback or "",
-            leak_history=feedback.leak_history or "",
             current_round=state.turn_idx,
             max_turns=state.max_turns,
             remaining_rounds=max(state.max_turns - state.turn_idx + 1, 0),
@@ -2920,6 +2862,39 @@ class TutorAgentWorkflow(RolloutWorkflow):
             transfer_task=transfer_task,
         )
 
+    def _build_student_probe_messages(
+        self,
+        *,
+        episode_artifact: EpisodeArtifact,
+        anchor: StudentGeneralizationAnchor,
+        level: str,
+        transfer_task: str,
+    ) -> list[dict[str, str]]:
+        """A probe continues the tutoring chat: same system prompt (carrying the
+        ORIGINAL task), the same dialogue, then one new user turn.
+
+        Each probe is built fresh from the anchor and never written back into
+        `turns`, so level1 / level2 / original are independent branches that do
+        not see each other's question or answer.
+        """
+        system = self._student_system_prompt_for_selection(
+            episode_artifact.student_prompt_selection
+        )
+        system = f"{system.rstrip()}\n\n{self._task_context(episode_artifact.task)}"
+        if level == ORIGINAL_RETEST_LEVEL:
+            final_turn = render_prompt(STUDENT_FINAL_SOLUTION_TEMPLATE)
+        else:
+            final_turn = render_prompt(
+                STUDENT_TRANSFER_TURN_TEMPLATE, transfer_task=transfer_task
+            )
+        return [
+            {"role": "system", "content": system},
+            *self._render_conversation(
+                anchor.public_history.turns, speaker="student"
+            ),
+            {"role": "user", "content": final_turn},
+        ]
+
     def _build_leak_check_prompt(
         self, task: str, ground_truth: str, teacher_action: str
     ) -> str:
@@ -2937,6 +2912,35 @@ class TutorAgentWorkflow(RolloutWorkflow):
 
     def _build_initial_public_summary(self, initial_student_answer: str) -> str:
         return self._format_public_history_entry("Student", 0, initial_student_answer)
+
+    def _probe_levels(self) -> tuple[str, ...]:
+        """Probe branches run after tutoring. The original re-test is opt-in."""
+        if getattr(self, "student_generalize_retest_original", False):
+            return (ORIGINAL_RETEST_LEVEL, *_STUDENT_GENERALIZE_LEVELS)
+        return _STUDENT_GENERALIZE_LEVELS
+
+    def _teacher_env_feedback(self, judge_result: Any, turn_idx: int) -> str:
+        """Grading + budget the teacher sees, as environment feedback."""
+        if judge_result is None:
+            return ""
+        return render_prompt(
+            TEACHER_ENV_FEEDBACK_TEMPLATE,
+            judge_correct=bool(judge_result.correct),
+            current_round=turn_idx,
+            max_turns=self.max_turns,
+            remaining_rounds=max(self.max_turns - turn_idx, 0),
+        )
+
+    @staticmethod
+    def _initial_conversation(initial_student_answer: str) -> list[dict[str, str]]:
+        return [
+            {
+                "role": "student",
+                "content": render_prompt(
+                    INITIAL_ATTEMPT_WRAPPER, attempt=initial_student_answer
+                ),
+            }
+        ]
 
     def _format_public_history_entry(
         self, speaker: str, round_idx: int, text: str
@@ -3397,6 +3401,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
     def _student_generalization_cases(
         self, data: dict[str, Any]
     ) -> dict[str, StudentGeneralizationCase]:
+        cases: dict[str, StudentGeneralizationCase] = {}
+        if getattr(self, "student_generalize_retest_original", False):
+            cases[ORIGINAL_RETEST_LEVEL] = StudentGeneralizationCase(
+                level=ORIGINAL_RETEST_LEVEL,
+                task=str(data.get("task", "")),
+                ground_truth=str(data.get("ground_truth", "")),
+                reward=0.0,
+            )
         payload: Any | None = None
         sample_id = data.get("id")
         bank = getattr(self, "student_generalize_bank", {}) or {}
@@ -3408,7 +3420,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 payload = metadata.get("student_generalize")
 
         if not isinstance(payload, dict):
-            return {}
+            return cases
 
         rewards = getattr(self, "student_generalize_level_rewards", {}) or {}
         if getattr(self, "student_generalize_source", "sidecar") == "train":
@@ -3417,7 +3429,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         else:
             items = [payload.get(level) for level in _STUDENT_GENERALIZE_LEVELS]
 
-        cases: dict[str, StudentGeneralizationCase] = {}
         for level, item in zip(_STUDENT_GENERALIZE_LEVELS, items, strict=False):
             if not isinstance(item, dict):
                 continue
@@ -3455,17 +3466,30 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 return artifact
         return None
 
-    @staticmethod
     def _turn_generalization_anchor(
-        artifact: TurnArtifact,
+        self, artifact: TurnArtifact
     ) -> StudentGeneralizationAnchor:
         turn_count = 0
+        summary = ""
         if artifact.student_state is not None:
             turn_count = artifact.student_state.public_history.turn_count + 1
+            entries = [artifact.student_state.public_history.summary]
+            entries.append(
+                self._format_public_history_entry(
+                    "Tutor", artifact.turn_idx, artifact.tutor_visible_output
+                )
+            )
+            entries.append(
+                self._format_public_history_entry(
+                    "Student", artifact.turn_idx, artifact.student_output
+                )
+            )
+            summary = "\n\n".join(entry for entry in entries if entry)
         return StudentGeneralizationAnchor(
             public_history=PublicHistoryState(
-                summary=artifact.public_history_after,
+                summary=summary,
                 turn_count=turn_count,
+                turns=list(artifact.public_history_after),
             ),
             previous_student_output=artifact.student_output,
             teacher_feedback=artifact.tutor_visible_output,
@@ -3477,17 +3501,23 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return (
             artifact.student_state is not None
             and not artifact.invalid_due_to_leak
-            and not artifact.leak_result.leaked
         )
 
     def _student_generalization_anchor(
-        self, episode_artifact: EpisodeArtifact
+        self,
+        episode_artifact: EpisodeArtifact,
+        *,
+        allow_unsuccessful: bool = False,
     ) -> StudentGeneralizationAnchor | None:
         success_turn = self._success_turn(episode_artifact)
         if success_turn is not None:
             return self._turn_generalization_anchor(success_turn)
 
-        if getattr(self, "student_generalize_mode", "only_success") == "only_success":
+        if (
+            not allow_unsuccessful
+            and getattr(self, "student_generalize_mode", "only_success")
+            == "only_success"
+        ):
             return None
 
         for artifact in reversed(episode_artifact.turns):
@@ -3500,6 +3530,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     episode_artifact.initial_student_answer
                 ),
                 turn_count=0,
+                turns=self._initial_conversation(
+                    episode_artifact.initial_student_answer
+                ),
             ),
             previous_student_output=episode_artifact.initial_student_answer,
             teacher_feedback="",
@@ -3517,13 +3550,30 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if not bool(getattr(self, "student_generalize_enabled", False)):
             return []
 
-        anchor = self._student_generalization_anchor(episode_artifact)
-        if anchor is None:
-            return []
+        transfer_anchor = self._student_generalization_anchor(episode_artifact)
+        original_anchor = (
+            self._student_generalization_anchor(
+                episode_artifact, allow_unsuccessful=True
+            )
+            if getattr(self, "student_generalize_retest_original", False)
+            else None
+        )
 
         cases = self._student_generalization_cases(data)
         results: list[StudentGeneralizationResult] = []
-        for level in _STUDENT_GENERALIZE_LEVELS:
+        for level in self._probe_levels():
+            anchor = (
+                original_anchor if level == ORIGINAL_RETEST_LEVEL else transfer_anchor
+            )
+            if anchor is None:
+                results.append(
+                    StudentGeneralizationResult(
+                        level=level,
+                        skipped=True,
+                        skip_reason="base_not_solved",
+                    )
+                )
+                continue
             case = cases.get(level)
             if case is None:
                 results.append(
@@ -3537,21 +3587,17 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
                 continue
 
-            transfer_prompt = self._build_student_transfer_prompt(
-                original_task=episode_artifact.task,
+            probe_messages = self._build_student_probe_messages(
+                episode_artifact=episode_artifact,
+                anchor=anchor,
+                level=level,
                 transfer_task=case.task,
-                public_history=anchor.public_history,
-                previous_student_output=anchor.previous_student_output,
-                teacher_feedback=anchor.teacher_feedback,
             )
             replays = max(1, int(getattr(self, "student_generalize_replays", 1)))
             replay_results = await asyncio.gather(
                 *[
-                    self._call_auxiliary_prompt(
-                        system_prompt=self._student_system_prompt_for_selection(
-                            episode_artifact.student_prompt_selection
-                        ),
-                        user_prompt=transfer_prompt,
+                    self._call_auxiliary_messages(
+                        probe_messages,
                         aux_caller=aux_caller,
                         rid_prefix=(
                             f"student-transfer-{level}-"
@@ -3770,7 +3816,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             metrics["teacher_success"] = float(solved)
 
         results = student_generalization_results or []
-        for level in _STUDENT_GENERALIZE_LEVELS:
+        for level in self._probe_levels():
             level_result = next(
                 (result for result in results if result.level == level), None
             )
@@ -3897,18 +3943,87 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ],
         }
 
+    def _task_context(self, task: str, ground_truth: str = "") -> str:
+        """Task block appended to a system prompt, ped-compare style."""
+        block = render_prompt(TASK_CONTEXT_TEMPLATE, task=task)
+        if ground_truth and self.teacher_show_ground_truth:
+            block += "\n\n" + render_prompt(
+                TEACHER_GROUND_TRUTH_CONTEXT_TEMPLATE, ground_truth=ground_truth
+            )
+        return block
+
+    @staticmethod
+    def _render_conversation(
+        turns: list[dict[str, str]], *, speaker: str
+    ) -> list[dict[str, str]]:
+        """Shared dialogue seen from one side: own turns assistant, other user."""
+        rendered = []
+        for turn in turns:
+            is_own = turn["role"] == speaker
+            content = turn["content"]
+            # Environment feedback rides on the other side's turn and is only
+            # ever shown to the teacher.
+            env = turn.get("env") if speaker == "teacher" and not is_own else None
+            if env:
+                content = f"{content}\n\n{env}"
+            rendered.append(
+                {"role": "assistant" if is_own else "user", "content": content}
+            )
+        return rendered
+
+    def _teacher_system_for_state(
+        self, tutor_state: TutorTurnState, *, clean: bool = False
+    ) -> str:
+        """Teacher system prompt. ``clean`` drops the prompt-pool suffix, which is
+        the only difference between the rollout prompt and the training prompt."""
+        base = (
+            self.teacher_system_prompt
+            if clean
+            else self._teacher_system_prompt_for_selection(
+                tutor_state.teacher_prompt_selection
+            )
+        )
+        system = (
+            f"{base.rstrip()}\n\n"
+            f"{self._task_context(tutor_state.task, tutor_state.ground_truth)}"
+        )
+        return self._append_teacher_pre_solve_context(
+            system, tutor_state.teacher_pre_solve_result
+        )
+
     def _build_tutor_messages(
         self, tutor_state: TutorTurnState
     ) -> list[dict[str, str]]:
         return [
-            {
-                "role": "system",
-                "content": self._teacher_system_prompt_for_selection(
-                    tutor_state.teacher_prompt_selection
-                ),
-            },
-            {"role": "user", "content": self._build_tutor_prompt(tutor_state)},
+            {"role": "system", "content": self._teacher_system_for_state(tutor_state)},
+            *self._render_conversation(
+                tutor_state.public_history.turns, speaker="teacher"
+            ),
         ]
+
+    def _build_student_messages(
+        self, state: StudentTurnState
+    ) -> list[dict[str, str]]:
+        system = self._student_system_prompt_for_state(state)
+        system = f"{system.rstrip()}\n\n{self._task_context(state.task)}"
+        turns = list(state.public_history.turns)
+        latest_teacher_output = state.latest_tutor_visible_output.strip()
+        if latest_teacher_output:
+            turns.append({"role": "teacher", "content": latest_teacher_output})
+        messages = [
+            {"role": "system", "content": system},
+            *self._render_conversation(turns, speaker="student"),
+        ]
+        behavior_prompt = self._student_turn_behavior_prompt(state)
+        if behavior_prompt:
+            if messages[-1]["role"] == "user":
+                messages[-1] = {
+                    **messages[-1],
+                    "content": f"{messages[-1]['content'].rstrip()}\n\n{behavior_prompt}",
+                }
+            else:
+                messages.append({"role": "user", "content": behavior_prompt})
+        return messages
 
     def _clean_tutor_input_tokens(self, artifact: TurnArtifact) -> list[int]:
         tokenizer = (
@@ -3916,12 +4031,23 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         return apply_chat_template(
             tokenizer,
-            [
-                {"role": "system", "content": self.teacher_system_prompt},
-                {"role": "user", "content": artifact.tutor_prompt},
-            ],
+            self._clean_tutor_messages(artifact),
             enable_thinking=self.enable_thinking,
         )
+
+    def _clean_tutor_messages(self, artifact: TurnArtifact) -> list[dict[str, str]]:
+        """Rollout messages with the prompt-pool suffix stripped from the system
+        turn. Everything after index 0 is reused verbatim so the training prefix
+        matches what the model actually generated from."""
+        return [
+            {
+                "role": "system",
+                "content": self._teacher_system_for_state(
+                    artifact.tutor_state, clean=True
+                ),
+            },
+            *artifact.tutor_messages[1:],
+        ]
 
     def _build_world_model_examples(
         self, turn_artifacts: list[TurnArtifact]
@@ -4042,7 +4168,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 self.tokenizer,
                 [
                     {"role": "system", "content": self.teacher_system_prompt},
-                    {"role": "user", "content": rollout_messages[1]["content"]},
+                    *rollout_messages[1:],
                 ],
                 enable_thinking=self.enable_thinking,
             )
@@ -4444,7 +4570,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             keys.append("length_penalty")
         if getattr(self, "student_generalize_enabled", False):
             rewards = getattr(self, "student_generalize_level_rewards", {}) or {}
-            for level in _STUDENT_GENERALIZE_LEVELS:
+            for level in self._probe_levels():
                 if rewards.get(level, 0.0):
                     keys.append(f"student_generalize_{level}")
                     if getattr(self, "student_generalize_confidence_enabled", False):

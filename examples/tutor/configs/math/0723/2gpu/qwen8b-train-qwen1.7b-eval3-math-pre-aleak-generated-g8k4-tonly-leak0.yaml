@@ -14,6 +14,13 @@ trial_name: qwen8b-train-qwen1.7b-eval3-math-pass@2-pre-aleak-generated-g8k4-ton
 reward:
   leak_penalty: 0.0
 
+student_generalize:
+  # Raised from 0.5 now that it is the only thing paying out, so the scale of a
+  # good episode stays comparable to the old success=1.0.
+  level1_reward: 1.0
+  level2_reward: 0.0
+  
+
 stats_logger:
   wandb:
     group: 8b-student-diversity-transfer-only

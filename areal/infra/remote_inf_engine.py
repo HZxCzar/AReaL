@@ -1460,7 +1460,11 @@ class RemoteInfEngine(InferenceEngine):
         update_name = names.update_weights_from_disk(
             experiment_name, trial_name, model_version
         )
-        save_timestamp = float(name_resolve.wait(update_name, timeout=120))
+        # Same budget as the load deadline below; a hardcoded 120s killed a
+        # run whose weight save happened to land just past it.
+        save_timestamp = float(
+            name_resolve.wait(update_name, timeout=self.config.request_timeout)
+        )
         load_timestamp = datetime.now().timestamp()
 
         deadline = time.monotonic() + self.config.request_timeout
@@ -1830,7 +1834,11 @@ def _update_weights_from_disk(
         update_name = names.update_weights_from_disk(
             experiment_name, trial_name, model_version
         )
-        save_timestamp = float(name_resolve.wait(update_name, timeout=120))
+        # Same budget as the load deadline below; a hardcoded 120s killed a
+        # run whose weight save happened to land just past it.
+        save_timestamp = float(
+            name_resolve.wait(update_name, timeout=self.config.request_timeout)
+        )
         load_timestamp = datetime.now().timestamp()
 
         # Get requests from backend with version for LoRA name

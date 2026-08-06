@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-FeedbackKind = Literal["none", "student_judged", "leak"]
-LeakHandlingMode = Literal["disabled", "reward_only", "terminate", "feedback"]
+FeedbackKind = Literal["none", "student_judged"]
+LeakHandlingMode = Literal["disabled", "reward_only", "terminate"]
 StudentGeneralizeMode = Literal["only_success", "always"]
 PromptSelectionSource = Literal[
     "pool",
@@ -82,6 +82,10 @@ class StudentQuestionGenerationResult:
 class PublicHistoryState:
     summary: str = ""
     turn_count: int = 0
+    # The dialogue as real messages: [{"role": "teacher"|"student", "content": ...}].
+    # `summary` is kept only for debug traces and logging; prompts are built from
+    # `turns` so the model sees an ordinary multi-turn chat.
+    turns: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -90,8 +94,6 @@ class TutorPrivateFeedback:
     student_output: str = ""
     judge_correct: bool = False
     judge_feedback: str = ""
-    leak_feedback: str = ""
-    leak_history: str = ""
 
 
 @dataclass(slots=True)
@@ -143,13 +145,15 @@ class StudentTurnState:
 class TurnArtifact:
     turn_idx: int
     tutor_state: TutorTurnState
-    tutor_prompt: str
+    # The exact messages sent to the teacher this turn. Training tokens are
+    # re-rendered from these, so they must be what generation actually saw.
+    tutor_messages: list[dict[str, str]]
     tutor_response: Any
     tutor_raw_output: str
     tutor_visible_output: str
     leak_result: LeakCheckResult
-    public_history_before: str
-    public_history_after: str
+    public_history_before: list[dict[str, str]]
+    public_history_after: list[dict[str, str]]
     tutor_format_error: str | None = None
     student_state: StudentTurnState | None = None
     student_prompt: str = ""
@@ -203,8 +207,8 @@ class TurnTrace:
     judge_feedback: str
     reward: float
     reward_components: dict[str, float]
-    public_history_before: str
-    public_history_after: str
+    public_history_before: list[dict[str, str]]
+    public_history_after: list[dict[str, str]]
     student_turn_behavior: StudentTurnBehavior | None = None
     leak_level: int | None = None
     invalid_due_to_leak: bool = False

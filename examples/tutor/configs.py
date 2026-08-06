@@ -13,7 +13,7 @@ from examples.tutor.prompts import (
 
 from areal.api.cli_args import MISSING, EvaluatorConfig, GRPOConfig
 
-_LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate", "feedback"}
+_LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate"}
 _DATASET_TYPES = {"aime", "math", "polaris"}
 _ANSWER_SCORERS = {"auto", "aime", "math", "polaris"}
 _STUDENT_GENERALIZE_MODES = {"only_success", "always"}
@@ -419,11 +419,22 @@ class TutorStudentGeneralizeConfig:
     )
     level1_reward: float = field(default=0.2)
     level2_reward: float = field(default=0.5)
+    retest_original: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Also re-test the ORIGINAL task after tutoring: the student is "
+                "asked to write a complete standalone solution. Scored and logged "
+                "only, never rewarded. An independent branch of the same chat, so "
+                "it cannot see the transfer probes."
+            )
+        },
+    )
     replays: int = field(
         default=1,
         metadata={
             "help": (
-                "Number of independent student attempts per transfer variant. "
+                "Number of independent student attempts per original/transfer probe. "
                 "The reward and the logged success become the fraction correct "
                 "over these attempts instead of a single binary outcome, which "
                 "removes most of the student-resampling noise from the signal. "
@@ -436,6 +447,7 @@ class TutorStudentGeneralizeConfig:
     )
 
     def __post_init__(self) -> None:
+        self.replays = int(self.replays)
         if self.mode not in _STUDENT_GENERALIZE_MODES:
             raise ValueError(
                 "student_generalize.mode must be one of: 'only_success', 'always'."
@@ -1214,11 +1226,9 @@ class TutorConfig(GRPOConfig):
             "help": (
                 "Leak handling mode: 'disabled' skips leak checks; "
                 "'reward_only' checks after rollout and applies reward penalties; "
-                "'terminate' stops before the student sees leaked tutor output; "
-                "'feedback' calls the student, invalidates leaked turns, and "
-                "feeds persistent private leak feedback to later tutor turns."
+                "'terminate' stops before the student sees leaked tutor output."
             ),
-            "choices": ["disabled", "reward_only", "terminate", "feedback"],
+            "choices": ["disabled", "reward_only", "terminate"],
         },
     )
     teacher_show_ground_truth: bool = field(
@@ -1358,10 +1368,16 @@ class TutorConfig(GRPOConfig):
                 f"got dataset_type={self.dataset_type!r}, "
                 f"answer_scorer={self.answer_scorer!r}."
             )
+        if self.teacher_user_prompt_template != TEACHER_STATE_USER_TEMPLATE:
+            raise ValueError(
+                "teacher_user_prompt_template is no longer used: the teacher "
+                "prompt is a real multi-turn message list and the task rides in "
+                "the system prompt. Customise the system prompt instead."
+            )
         if self.leak_handling_mode not in _LEAK_HANDLING_MODES:
             raise ValueError(
                 "leak_handling_mode must be one of: 'disabled', "
-                "'reward_only', 'terminate', or 'feedback'."
+                "'reward_only', or 'terminate'."
             )
         if self.dataset_type == "polaris":
             if self.leak_handling_mode != "disabled":

@@ -342,9 +342,12 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
         print("\nThe current student solved this row before tutoring.")
         return transcript
 
+    initial_turns = workflow._initial_conversation(initial_answer)
+    initial_turns[-1]["env"] = workflow._teacher_env_feedback(initial_judge, 0)
     public_history = PublicHistoryState(
         summary=workflow._build_initial_public_summary(initial_answer),
         turn_count=0,
+        turns=initial_turns,
     )
     termination_reason = "max_turns"
     latest_answer = initial_answer
@@ -356,7 +359,6 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
         judge_correct=False,
         judge_feedback=initial_judge.feedback,
     )
-    private_leak_history = ""
     for turn_idx in range(1, max_turns + 1):
         leak_result = None
         print_block("Student-Visible State", public_history.summary)
@@ -384,10 +386,7 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
             "public_history_before": public_history.summary,
         }
 
-        if (
-            config.leak_handling_mode in {"terminate", "feedback"}
-            and not args.skip_leak_check
-        ):
+        if config.leak_handling_mode == "terminate" and not args.skip_leak_check:
             print("\nRunning leak check before sending this message to the student...")
             leak_result = await workflow._run_optional_leak_check(
                 task, ground_truth, tutor_visible_message
@@ -407,12 +406,6 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
                 record["invalid_due_to_leak"] = False
                 record["public_history_after"] = public_history.summary
                 history.append(record)
-                previous_feedback = TutorPrivateFeedback(
-                    kind="leak",
-                    leak_feedback=workflow._private_leak_feedback(
-                        turn_idx, leak_result
-                    ),
-                )
                 termination_reason = "leak"
                 print("\nLeak check: LEAKED. Terminating before student call.")
                 print(f"Feedback: {leak_result.feedback}")
@@ -425,23 +418,12 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
             latest_tutor_visible_output=tutor_visible_message,
         )
         student_answer, student_error = await workflow._run_student(student_state)
-        invalid_due_to_leak = (
-            config.leak_handling_mode == "feedback"
-            and leak_result is not None
-            and leak_result.leaked
+        next_public_history = await workflow._run_public_summary_update(
+            old_public_history=public_history,
+            previous_student_answer=previous_student_answer,
+            tutor_visible_output=tutor_visible_message,
+            current_student_answer=student_answer,
         )
-        if invalid_due_to_leak:
-            next_public_history = PublicHistoryState(
-                summary=public_history.summary,
-                turn_count=public_history.turn_count,
-            )
-        else:
-            next_public_history = await workflow._run_public_summary_update(
-                old_public_history=public_history,
-                previous_student_answer=previous_student_answer,
-                tutor_visible_output=tutor_visible_message,
-                current_student_answer=student_answer,
-            )
         judge_result = await workflow._score_answer_async(
             task,
             ground_truth,
@@ -450,8 +432,8 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
         )
         record.update(
             {
-                "leak_detected": bool(invalid_due_to_leak),
-                "invalid_due_to_leak": bool(invalid_due_to_leak),
+                "leak_detected": False,
+                "invalid_due_to_leak": False,
                 "student_visible": True,
                 "student_answer": student_answer,
                 "student_error": student_error,
@@ -462,37 +444,23 @@ async def run_interactive(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
         history.append(record)
-        if invalid_due_to_leak:
-            leak_feedback = workflow._private_leak_feedback(turn_idx, leak_result)
-            private_leak_history = (
-                f"{private_leak_history}\n{leak_feedback}"
-                if private_leak_history
-                else leak_feedback
-            )
-            previous_feedback = TutorPrivateFeedback(
-                kind="leak",
-                leak_feedback=leak_feedback,
-                leak_history=private_leak_history,
-            )
-        else:
-            public_history = next_public_history
-            latest_answer = student_answer
-            previous_student_answer = student_answer
-            previous_tutor_visible_output = tutor_visible_message
-            previous_feedback = TutorPrivateFeedback(
-                kind="student_judged",
-                student_output=student_answer,
-                judge_correct=judge_result.correct,
-                judge_feedback=judge_result.feedback,
-                leak_history=private_leak_history,
-            )
+        public_history = next_public_history
+        latest_answer = student_answer
+        previous_student_answer = student_answer
+        previous_tutor_visible_output = tutor_visible_message
+        previous_feedback = TutorPrivateFeedback(
+            kind="student_judged",
+            student_output=student_answer,
+            judge_correct=judge_result.correct,
+            judge_feedback=judge_result.feedback,
+        )
 
         print_block(f"Student Answer After Turn {turn_idx}", student_answer)
         if student_error:
             print(f"\nStudent error: {student_error}")
         print_judge_result(judge_result)
 
-        if judge_result.correct and not invalid_due_to_leak:
+        if judge_result.correct:
             termination_reason = "success"
             break
 
