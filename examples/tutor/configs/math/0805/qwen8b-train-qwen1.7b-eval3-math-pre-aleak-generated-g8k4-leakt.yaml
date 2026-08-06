@@ -1,5 +1,5 @@
 defaults:
-  - qwen8b-train-qwen1.7b-eval3-math-pre-aleak-generated@_global_
+  - qwen8b-train-qwen1.7b-eval3-math-pre-aleak@_global_
   - _self_
 
 trial_name: qwen8b-train-qwen1.7b-eval3-math-pass@2-pre-aleak-generated-g8k4
