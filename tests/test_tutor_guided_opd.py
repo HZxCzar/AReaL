@@ -327,10 +327,10 @@ def test_opd_realignment() -> None:
     fake[0, start : start + len(output_tokens)] = signature
     fake[1, :] = 99.0  # the skipped row selects nothing and must stay at zero
 
+    # Passed exactly as _compute_advantages passes it: the plain rolled loss mask,
+    # with no row filtering. Pre-filtering it here is what made the original
+    # version of this test agree with a broken implementation.
     rolled_train_mask = torch.roll(traj["loss_mask"], shifts=-1, dims=-1)
-    # The skipped row is inert via its zero weight, so it must be excluded from
-    # the training selection exactly as the caller does.
-    rolled_train_mask = rolled_train_mask * (traj["opd_token_weight"] > 0)
     aligned = _realign_opd_teacher_logp(
         fake,
         traj["opd_loss_mask"],

@@ -645,6 +645,14 @@ def _realign_opd_teacher_logp(
     each layout's own mask and copying across is correct without either prompt
     length appearing anywhere.
 
+    Most rows of a real batch are NOT supervised -- a turn is skipped when it is
+    too early, guided, or leaked -- and those rows carry a one-token placeholder
+    in the teacher layout. Their real output tokens still exist on the training
+    side, so the training selection has to be restricted to the supervised rows
+    or the two counts differ by roughly an order of magnitude. Row activity is
+    derived from ``opd_loss_mask`` itself rather than taken as an argument, so a
+    caller cannot get this wrong.
+
     ``rolled_train_mask`` is already rolled by -1 by the caller;
     ``opd_loss_mask`` is the raw rollout column and is rolled here. The roll is
     what converts "these positions hold output tokens" into "these positions
@@ -653,18 +661,21 @@ def _realign_opd_teacher_logp(
     """
     teacher_logp = teacher_logp.to(template.dtype)
     width = min(teacher_logp.shape[-1], opd_loss_mask.shape[-1])
-    teacher_selection = torch.roll(
-        opd_loss_mask[..., :width], shifts=-1, dims=-1
-    ).bool()
+    opd_loss_mask = opd_loss_mask[..., :width].bool()
+    teacher_selection = torch.roll(opd_loss_mask, shifts=-1, dims=-1)
     selected = teacher_logp[..., :width][teacher_selection]
-    train_selection = rolled_train_mask.bool()
+
+    supervised_rows = opd_loss_mask.any(dim=-1, keepdim=True)
+    train_selection = rolled_train_mask.bool() & supervised_rows
     expected = int(train_selection.count_nonzero())
     if selected.numel() != expected:
         raise RuntimeError(
             "OPD token count mismatch between the teacher and training layouts: "
-            f"teacher={selected.numel()}, training={expected}. The teacher prompt "
-            "must end where generation began and both sides must cover the same "
-            "output tokens."
+            f"teacher={selected.numel()}, training={expected} over "
+            f"{int(supervised_rows.count_nonzero())}/{opd_loss_mask.shape[0]} "
+            f"supervised rows (teacher width {teacher_logp.shape[-1]}, mask width "
+            f"{opd_loss_mask.shape[-1]}). Both sides must cover the same output "
+            "tokens, and the teacher prompt must end where generation began."
         )
     aligned = torch.zeros_like(template)
     aligned[train_selection] = selected
