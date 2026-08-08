@@ -55,7 +55,8 @@ advantage; the instruction only moves where the samples come from.
 **OPD (point 2)** does not touch the rollout. The prompt the policy generates
 from is unmodified and on-policy; the instruction is given only to a teacher that
 scores those same tokens after the fact. Nothing about it is off-policy, and it
-does add a loss term. See §5.
+adds no loss term either — it adjusts the per-token advantage and the existing
+loss runs unchanged. See §5.
 
 Because the two differ in exactly this way, OPD skips any turn that carried a
 guided instruction (`opd.skip_guided_rows`): a row with both is a row where
@@ -121,11 +122,11 @@ guided_slots:
 
 opd:
   enabled: false
-  loss_weight: 0.05
+  loss_weight: 1.0                    # the reference's kl_penalty_coef
   instruction: ""                     # empty = the validated repair wording
   min_prior_failed_turns: 2           # i.e. turn 3 onward
   max_turns_per_episode: 0            # 0 = uncapped
-  reward_clip: 5.0                    # nats, per token
+  reward_clip: 0.0                    # 0 = off, matching the reference
   skip_guided_rows: true
   skip_leaked_rows: true
 ```
@@ -133,7 +134,8 @@ opd:
 Validation refuses, with a message explaining why rather than just what:
 `slots >= gconfig.n_samples` (no free rollout left to compare against), unknown
 move names, `n_samples < 2`, `guided_slots` without `actor.use_decoupled_loss`
-(nothing would correct the rewritten prompt), non-positive weights or clips.
+(nothing would correct the rewritten prompt), non-positive weights, negative
+clips.
 
 ### 4.4 `examples/tutor/workflow.py` — the injection
 
