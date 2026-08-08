@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging as py_logging
 import operator
@@ -184,6 +185,7 @@ from examples.tutor.core.types import (
     StudentRequestJudgeResult,
     StudentTurnBehavior,
     StudentTurnState,
+    TeacherGuidance,
     TeacherPreSolveAttempt,
     TeacherPreSolveResult,
     TeacherProgressJudgeResult,
@@ -233,7 +235,10 @@ from examples.tutor.prompts import (
     TEACHER_GROUND_TRUTH_CONTEXT_TEMPLATE,
     TEACHER_ADAPTIVE_INSTRUCTION,
     TEACHER_ANTI_LEAK_INSTRUCTION,
+    TEACHER_GUIDANCE_TAIL_TEMPLATE,
+    TEACHER_MOVE_INSTRUCTIONS,
     TEACHER_PRE_SOLVE_FILTER_CONTEXT_TEMPLATE,
+    TEACHER_REPAIR_INSTRUCTION,
     TEACHER_PROGRESS_JUDGE_USER_TEMPLATE,
     TEACHER_STATE_USER_TEMPLATE,
     WORLD_MODEL_USER_TEMPLATE,
@@ -569,6 +574,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_progress_judge: dict[str, Any] | None = None,
         student_request_judge: dict[str, Any] | None = None,
         world_model: dict[str, Any] | None = None,
+        guided_slots: dict[str, Any] | None = None,
+        opd: dict[str, Any] | None = None,
         local_advantage_turn_discount: float = 1.0,
         teacher_system_prompt: str = "",
         teacher_anti_leak_instruction_enabled: bool = False,
@@ -828,6 +835,48 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError("PaW confidence threshold must be in (0, 1).")
         if self.world_model_paw_config["max_episode_return"] <= 0.0:
             raise ValueError("PaW max episode return must be positive.")
+        guided_config = dict(guided_slots or {})
+        self.guided_slots_enabled = bool(guided_config.get("enabled", False))
+        self.guided_slots_count = int(guided_config.get("slots", 3))
+        guided_moves = tuple(
+            str(move).strip().upper()
+            for move in (guided_config.get("moves") or ())
+            if str(move).strip()
+        )
+        self.guided_slots_moves = guided_moves or ("DECOMPOSE", "REFRAME", "PROBE")
+        self.guided_slots_turns = frozenset(
+            int(turn) for turn in (guided_config.get("turns") or (1,))
+        )
+        self.guided_slots_rotate_by_task = bool(
+            guided_config.get("rotate_by_task", True)
+        )
+        unknown_moves = [
+            move
+            for move in self.guided_slots_moves
+            if move not in TEACHER_MOVE_INSTRUCTIONS
+        ]
+        if self.guided_slots_enabled and unknown_moves:
+            raise ValueError(f"unknown guided slot moves: {unknown_moves}")
+        if self.guided_slots_enabled and self.guided_slots_count < 1:
+            raise ValueError("guided slot count must be at least 1 when enabled.")
+        opd_config = dict(opd or {})
+        self.opd_enabled = bool(opd_config.get("enabled", False))
+        self.opd_loss_weight = float(opd_config.get("loss_weight", 0.05))
+        self.opd_reward_clip = float(opd_config.get("reward_clip", 5.0))
+        self.opd_instruction = (
+            str(opd_config.get("instruction") or "").strip()
+            or TEACHER_REPAIR_INSTRUCTION
+        )
+        self.opd_min_prior_failed_turns = int(
+            opd_config.get("min_prior_failed_turns", 2)
+        )
+        self.opd_max_turns_per_episode = int(opd_config.get("max_turns_per_episode", 0))
+        self.opd_skip_guided_rows = bool(opd_config.get("skip_guided_rows", True))
+        self.opd_skip_leaked_rows = bool(opd_config.get("skip_leaked_rows", True))
+        if self.opd_enabled and self.opd_loss_weight <= 0.0:
+            raise ValueError("opd loss weight must be positive when enabled.")
+        if self.opd_enabled and self.opd_reward_clip <= 0.0:
+            raise ValueError("opd reward clip must be positive when enabled.")
         progress_config = dict(teacher_progress_judge or {})
         self.teacher_progress_judge_enabled = bool(
             progress_config.get("enabled", False)
@@ -1425,6 +1474,60 @@ class TutorAgentWorkflow(RolloutWorkflow):
             warmup_probability=warmup_probability,
         )
 
+    @property
+    def wants_group_index(self) -> bool:
+        """Ask GroupedRolloutWorkflow to tell each episode its slot in the group.
+
+        Only guided slots need it, and only then, so every other configuration
+        keeps receiving the exact dict it received before.
+        """
+        return bool(getattr(self, "guided_slots_enabled", False))
+
+    def _is_guided_slot(self, group_index: int | None) -> bool:
+        if not getattr(self, "guided_slots_enabled", False):
+            return False
+        if group_index is None:
+            return False
+        return int(group_index) < int(self.guided_slots_count)
+
+    def _select_guidance(
+        self,
+        *,
+        group_index: int | None,
+        turn_idx: int,
+        task: str,
+    ) -> TeacherGuidance | None:
+        """Instruction to append to this turn's teacher prompt, if any.
+
+        Guided slots prescribe a teaching move so the group contains moves the
+        collapsed policy would never sample. Evaluation never receives guidance:
+        the whole point is that the deployed policy behaves this way unprompted.
+        """
+        if not self._is_guided_slot(group_index):
+            return None
+        if int(turn_idx) not in self.guided_slots_turns:
+            return None
+        try:
+            if bool(getattr(workflow_context.get(), "is_eval", False)):
+                return None
+        except Exception:  # noqa: BLE001 - no context outside a rollout worker
+            pass
+
+        moves = self.guided_slots_moves
+        offset = 0
+        if self.guided_slots_rotate_by_task and moves:
+            # With fewer slots than moves a fixed assignment would only ever
+            # explore the first few moves. Rotating by task keeps the assignment
+            # deterministic per task while covering every move across the dataset.
+            offset = int(hashlib.sha1(task.encode("utf-8")).hexdigest()[:8], 16)
+        name = moves[(int(group_index) + offset) % len(moves)]
+        return TeacherGuidance(
+            kind="move",
+            name=name,
+            instruction=TEACHER_MOVE_INSTRUCTIONS[name],
+            slot=int(group_index),
+        )
+
     def _select_teacher_prompt(
         self,
         pool: tuple[str, ...],
@@ -1590,6 +1693,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
 
         task = str(data["task"])
         ground_truth = str(data["ground_truth"])
+        # Attached by GroupedRolloutWorkflow only when wants_group_index is set.
+        group_index = data.get("group_index")
+        group_index = None if group_index is None else int(group_index)
         trajectory_id = uuid.uuid4().int & ((1 << 63) - 1)
         self.last_student_generalization_results = []
         turn_artifacts: list[TurnArtifact] = []
@@ -1820,6 +1926,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 teacher_prompt_selection=teacher_prompt_selection,
                 student_reply_before_teacher=previous_student_output,
                 preceding_student_turn_behavior=preceding_student_turn_behavior,
+                guidance=self._select_guidance(
+                    group_index=group_index,
+                    turn_idx=turn_idx,
+                    task=task,
+                ),
             )
             try:
                 response, tutor_raw_output = await self._generate_tutor_response(
@@ -2051,7 +2162,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
         clean_teacher_inputs = [
             (
                 self._clean_tutor_input_tokens(artifact)
+                # A guided turn MUST get the override: without it the appended
+                # instruction stays in the training prompt and the policy learns
+                # to obey an instruction it will never see at eval, silently and
+                # with no error.
                 if artifact.tutor_state.teacher_prompt_selection is not None
+                or artifact.tutor_state.guidance is not None
                 else None
             )
             for artifact in turn_artifacts
@@ -2070,6 +2186,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         world_model_examples = await self._build_world_model_examples_async(
             turn_artifacts
         )
+        opd_prompt_tokens = await self._build_opd_prompt_tokens_async(turn_artifacts)
         results = [
             response_to_tensordict(
                 artifact.tutor_response,
@@ -2130,13 +2247,30 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     if world_model_example is not None
                     else None
                 ),
+                # Present on every row once OPD is on, so the padded batch stays
+                # rectangular; rows that were not selected carry weight 0.
+                opd_input_tokens=opd_prompt,
+                opd_loss_weight=(
+                    self.opd_loss_weight
+                    if getattr(self, "opd_enabled", False)
+                    else None
+                ),
+                opd_reward_clip=getattr(self, "opd_reward_clip", 5.0),
             )
-            for artifact, assignment, clean_input, preceding_input, world_model_example in zip(
+            for (
+                artifact,
+                assignment,
+                clean_input,
+                preceding_input,
+                world_model_example,
+                opd_prompt,
+            ) in zip(
                 turn_artifacts,
                 assignments,
                 clean_teacher_inputs,
                 preceding_teacher_inputs,
                 world_model_examples,
+                opd_prompt_tokens,
                 strict=True,
             )
         ]
@@ -2459,7 +2593,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
     ) -> tuple[ModelResponse, str]:
         messages = self._build_tutor_messages(tutor_state)
         input_token_reserve = self._clean_teacher_input_token_reserve(
-            messages, tutor_state.teacher_prompt_selection
+            messages,
+            tutor_state.teacher_prompt_selection,
+            tutor_state.guidance,
         )
         if actor_caller is None:
             actor_caller = self._make_actor_caller(engine, external_client)
@@ -3991,15 +4127,46 @@ class TutorAgentWorkflow(RolloutWorkflow):
             system, tutor_state.teacher_pre_solve_result
         )
 
-    def _build_tutor_messages(
-        self, tutor_state: TutorTurnState
+    @staticmethod
+    def _append_guidance_tail(
+        messages: list[dict[str, str]], instruction: str
     ) -> list[dict[str, str]]:
-        return [
-            {"role": "system", "content": self._teacher_system_for_state(tutor_state)},
+        """Put the instruction at the very end of the prompt.
+
+        Placement is load-bearing, not cosmetic: the identical text in the system
+        prompt is followed far less often than when it sits immediately before
+        generation. Measured in analysis/hazard_20260806.
+        """
+        # str.format, not render_prompt: render_prompt is Jinja2, so a "{...}"
+        # placeholder would pass through untouched and the instruction would be
+        # silently dropped. Plain formatting also keeps the instruction text out
+        # of a template engine, where a stray "{{" would be interpreted.
+        tail = TEACHER_GUIDANCE_TAIL_TEMPLATE.format(instruction=instruction.strip())
+        if messages and messages[-1]["role"] == "user":
+            merged = f"{messages[-1]['content'].rstrip()}\n\n{tail}\n"
+            return [*messages[:-1], {**messages[-1], "content": merged}]
+        return [*messages, {"role": "user", "content": f"{tail}\n"}]
+
+    def _build_tutor_messages(
+        self,
+        tutor_state: TutorTurnState,
+        *,
+        clean: bool = False,
+        include_guidance: bool = True,
+    ) -> list[dict[str, str]]:
+        messages = [
+            {
+                "role": "system",
+                "content": self._teacher_system_for_state(tutor_state, clean=clean),
+            },
             *self._render_conversation(
                 tutor_state.public_history.turns, speaker="teacher"
             ),
         ]
+        guidance = tutor_state.guidance
+        if include_guidance and guidance is not None:
+            messages = self._append_guidance_tail(messages, guidance.instruction)
+        return messages
 
     def _build_student_messages(
         self, state: StudentTurnState
@@ -4036,18 +4203,125 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
 
     def _clean_tutor_messages(self, artifact: TurnArtifact) -> list[dict[str, str]]:
-        """Rollout messages with the prompt-pool suffix stripped from the system
-        turn. Everything after index 0 is reused verbatim so the training prefix
-        matches what the model actually generated from."""
-        return [
-            {
-                "role": "system",
-                "content": self._teacher_system_for_state(
-                    artifact.tutor_state, clean=True
-                ),
-            },
-            *artifact.tutor_messages[1:],
-        ]
+        """The prompt this turn is trained on: rollout messages with the
+        prompt-pool suffix stripped from the system turn and any guidance
+        instruction stripped from the tail.
+
+        Without guidance this rebuild is byte-identical to reusing
+        ``artifact.tutor_messages[1:]`` verbatim, because everything after the
+        system turn is a pure function of the state.
+        """
+        return self._build_tutor_messages(
+            artifact.tutor_state, clean=True, include_guidance=False
+        )
+
+    def _opd_skip_reason(self, artifact: TurnArtifact) -> str:
+        """Why this turn is not eligible for on-policy distillation, or ""."""
+        state = artifact.tutor_state
+        if self.opd_skip_guided_rows and state.guidance is not None:
+            # This row is already trained on a rewritten prompt. Stacking a second
+            # perturbation on it makes neither effect attributable.
+            return "guided"
+        if self.opd_skip_leaked_rows and (
+            artifact.leak_result.leaked or artifact.invalid_due_to_leak
+        ):
+            return "leak"
+        # Episodes terminate on success, so every turn the tutor produced was
+        # preceded by a wrong student answer: the number of tutor turns that have
+        # already failed is turn_idx - 1. The repair instruction asserts that the
+        # previous message did not get through, so it is only truthful once that
+        # count reaches the threshold.
+        if int(state.turn_idx) - 1 < self.opd_min_prior_failed_turns:
+            return "too_early"
+        if not list(getattr(artifact.tutor_response, "output_tokens", []) or []):
+            return "empty"
+        return ""
+
+    def _build_opd_prompt_tokens(
+        self, turn_artifacts: list[TurnArtifact]
+    ) -> list[list[int] | None]:
+        """Prompt tokens for the instructed teacher, one entry per turn.
+
+        The teacher sees exactly the training prompt plus the repair instruction.
+        The trainer then teacher-forces the policy's own output tokens under this
+        prompt and pulls the policy toward the resulting distribution, so the
+        instruction's effect ends up in the weights rather than in the prompt.
+        """
+        if not getattr(self, "opd_enabled", False):
+            return [None] * len(turn_artifacts)
+        try:
+            if bool(workflow_context.get().is_eval):
+                return [None] * len(turn_artifacts)
+        except Exception:  # noqa: BLE001 - no context outside a rollout worker
+            pass
+
+        prompts: list[list[int] | None] = []
+        skip_counts: dict[str, int] = {}
+        selected = 0
+        for artifact in turn_artifacts:
+            reason = self._opd_skip_reason(artifact)
+            if not reason and self.opd_max_turns_per_episode and (
+                selected >= self.opd_max_turns_per_episode
+            ):
+                reason = "episode_cap"
+            if not reason:
+                tokenizer = (
+                    getattr(artifact.tutor_response, "tokenizer", None) or self.tokenizer
+                )
+                try:
+                    messages = self._append_guidance_tail(
+                        self._clean_tutor_messages(artifact), self.opd_instruction
+                    )
+                    tokens = apply_chat_template(
+                        tokenizer, messages, enable_thinking=self.enable_thinking
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Skipping OPD sample at turn %s after tokenization error: %s",
+                        artifact.turn_idx,
+                        exc,
+                    )
+                    reason = "tokenization"
+                    tokens = []
+                if not reason:
+                    output_len = len(artifact.tutor_response.output_tokens)
+                    if (
+                        self.max_train_sample_tokens is not None
+                        and len(tokens) + output_len > self.max_train_sample_tokens
+                    ):
+                        reason = "overlength"
+            if reason:
+                artifact.opd_skip_reason = reason
+                skip_counts[reason] = skip_counts.get(reason, 0) + 1
+                prompts.append(None)
+                continue
+            artifact.opd_prompt_tokens = tokens
+            prompts.append(tokens)
+            selected += 1
+
+        metrics = {
+            "opd/selected_turns": float(selected),
+            "opd/selected_ratio": float(selected / max(1, len(turn_artifacts))),
+        }
+        for reason in (
+            "guided",
+            "leak",
+            "too_early",
+            "empty",
+            "episode_cap",
+            "tokenization",
+            "overlength",
+        ):
+            metrics[f"opd/skipped_{reason}"] = float(skip_counts.get(reason, 0))
+        _safe_scalar(**metrics)
+        return prompts
+
+    async def _build_opd_prompt_tokens_async(
+        self, turn_artifacts: list[TurnArtifact]
+    ) -> list[list[int] | None]:
+        if not getattr(self, "opd_enabled", False):
+            return [None] * len(turn_artifacts)
+        return await asyncio.to_thread(self._build_opd_prompt_tokens, turn_artifacts)
 
     def _build_world_model_examples(
         self, turn_artifacts: list[TurnArtifact]
@@ -4153,7 +4427,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self,
         rollout_messages: list[dict[str, str]],
         selection: PromptPoolSelection | None,
+        guidance: TeacherGuidance | None = None,
     ) -> int:
+        """Extra generation budget to hold back so the training sample still fits.
+
+        Only a training prompt that is *longer* than the rollout prompt needs a
+        reserve. Guidance only ever makes the training prompt shorter, so it
+        contributes nothing here and is accepted purely so the caller does not
+        have to special-case it.
+        """
+        del guidance
         if selection is None or getattr(self, "max_train_sample_tokens", None) is None:
             return 0
         rollout_input_len = len(
@@ -4253,6 +4536,26 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         if success_round > 0:
             metrics["solve_turn"] = int(success_round)
+
+        if getattr(self, "guided_slots_enabled", False):
+            guided = [
+                trace.tutor_state.guidance.name
+                for trace in traces
+                if trace.tutor_state.guidance is not None
+                and trace.tutor_state.guidance.kind == "move"
+            ]
+            metrics["guided/turns"] = float(len(guided))
+            metrics["guided/episode_guided"] = float(bool(guided))
+            for move in self.guided_slots_moves:
+                # A move is credited with the episode only when it was the move
+                # played on the guided turn, so these read as "when we forced this
+                # move here, how often did the episode end up solved".
+                played = move in guided
+                prefix = f"guided_move/{move}"
+                metrics[f"{prefix}/played"] = float(played)
+                metrics[f"{prefix}/solved"] = float(played and success_round > 0)
+                metrics[f"{prefix}/reward"] = float(total_reward) if played else 0.0
+                metrics[f"{prefix}/leaks"] = float(leak_count) if played else 0.0
 
         if teacher_prompt_selection is not None:
             selected_source = teacher_prompt_selection.source

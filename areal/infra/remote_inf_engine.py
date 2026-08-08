@@ -98,8 +98,23 @@ class GroupedRolloutWorkflow(RolloutWorkflow):
     ) -> dict[str, Any] | None:
         from areal.experimental.openai import InteractionWithTokenLogpReward
 
+        # A workflow that reserves rollout slots inside a group (e.g. to prescribe
+        # a different teaching move in a few of them) needs to know which member
+        # of the group it is. Opt-in so every other workflow keeps receiving the
+        # identical dict it received before.
+        if getattr(self.workflow, "wants_group_index", False):
+            episode_inputs = [
+                {**data, "group_index": index, "group_size": self.group_size}
+                for index in range(self.group_size)
+            ]
+        else:
+            episode_inputs = [data] * self.group_size
+
         results = await asyncio.gather(
-            *[self.workflow.arun_episode(engine, data) for _ in range(self.group_size)]
+            *[
+                self.workflow.arun_episode(engine, episode_input)
+                for episode_input in episode_inputs
+            ]
         )
 
         valid_results = [r for r in results if r is not None]

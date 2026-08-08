@@ -92,6 +92,15 @@ _WORLD_MODEL_ROLLOUT_KEYS = {
     "world_model_loss_weight",
 }
 
+# Inputs to the on-policy-distillation teacher forward pass. Consumed before the
+# update; only the resulting `opd_teacher_logp` and the per-row `opd_loss_weight`
+# reach the loss.
+_OPD_INPUT_KEYS = {
+    "opd_input_ids",
+    "opd_attention_mask",
+    "opd_loss_mask",
+}
+
 _WORLD_MODEL_PAW_CONFIG_KEY = "world_model_paw_config"
 
 
@@ -589,6 +598,98 @@ def _attach_teacher_context_logps(
         )
     for trajectory, moved_logp in zip(rollout_batch, moved_logps, strict=True):
         trajectory["teacher_context_logp"] = moved_logp
+
+
+def _has_opd(rollout_batch: list[dict[str, Any]]) -> bool:
+    return any("opd_input_ids" in trajectory for trajectory in rollout_batch)
+
+
+def _attach_opd_teacher_logps(
+    actor: Any, rollout_batch: list[dict[str, Any]]
+) -> None:
+    """Score the policy's own tokens under the instructed-teacher prompt.
+
+    On-policy distillation: the rollout is unchanged and fully on-policy, and the
+    teacher differs from the policy only by the instruction prepended to its
+    prompt. One teacher-forced forward pass with the *current* actor weights gives
+    log pi(a_t | s + instruction), which the loss pulls the policy toward. So the
+    instruction's effect is distilled into the weights and the KL naturally decays
+    to zero once the policy already behaves as if instructed.
+
+    The teacher prompt is longer than the training prompt, so the returned
+    log-probabilities live at a different offset and must be realigned onto the
+    training layout before they can be compared token by token. Both sides select
+    exactly the output tokens, in order, so selecting with the rolled masks is
+    correct without depending on either prompt length.
+    """
+
+    # Most episodes have at least one turn too early to supervise, and short ones
+    # have none at all. Skipping those trajectories keeps the extra forward pass
+    # proportional to the turns actually supervised.
+    active_indices = [
+        index
+        for index, trajectory in enumerate(rollout_batch)
+        if bool(trajectory["opd_valid"].any())
+    ]
+    active_lookup = set(active_indices)
+    for index, trajectory in enumerate(rollout_batch):
+        if index not in active_lookup:
+            # A zero target paired with a zero opd_token_weight makes the loss
+            # term identically absent for these rows.
+            trajectory["opd_teacher_logp"] = torch.zeros_like(trajectory["logprobs"])
+    if not active_indices:
+        for trajectory in rollout_batch:
+            for key in _OPD_INPUT_KEYS:
+                trajectory.pop(key, None)
+        return
+
+    teacher_batch = [
+        {
+            "input_ids": rollout_batch[index]["opd_input_ids"],
+            "attention_mask": rollout_batch[index]["opd_attention_mask"],
+        }
+        for index in active_indices
+    ]
+    teacher_logps = actor.compute_logp(teacher_batch)
+    if teacher_logps is None or len(teacher_logps) != len(active_indices):
+        raise RuntimeError(
+            "OPD teacher forward pass did not return one log-probability tensor "
+            "per trajectory."
+        )
+    for index, teacher_logp in zip(active_indices, teacher_logps, strict=True):
+        trajectory = rollout_batch[index]
+        # `compute_logp` returns index i = log p(token i+1), the same convention
+        # the training forward pass uses, so both masks are rolled by -1 to select
+        # the positions that predict the output tokens.
+        teacher_selection = torch.roll(
+            trajectory["opd_loss_mask"], shifts=-1, dims=-1
+        ).bool()
+        train_selection = torch.roll(
+            trajectory["loss_mask"], shifts=-1, dims=-1
+        ).bool()
+        teacher_logp = teacher_logp.to(torch.float32)
+        aligned = torch.zeros_like(
+            trajectory["logprobs"], dtype=torch.float32, device=teacher_logp.device
+        )
+        # Only rows the workflow selected carry targets; the rest were emitted as
+        # a one-token placeholder so the padded batch stays rectangular.
+        active = trajectory["opd_valid"].bool()
+        row_mask = active.view(-1, 1).expand_as(train_selection)
+        train_selection = train_selection & row_mask
+        selected = teacher_logp[teacher_selection]
+        expected = int(train_selection.count_nonzero())
+        if selected.numel() != expected:
+            raise RuntimeError(
+                "OPD token count mismatch between the teacher and training "
+                f"layouts: teacher={selected.numel()}, training={expected}. The "
+                "teacher prompt must end where generation began and the output "
+                "tokens must be identical."
+            )
+        aligned[train_selection] = selected
+        trajectory["opd_teacher_logp"] = aligned.to(trajectory["logprobs"].device)
+    for trajectory in rollout_batch:
+        for key in _OPD_INPUT_KEYS:
+            trajectory.pop(key, None)
 
 
 def _collect_turn_diagnostics(
@@ -1371,6 +1472,18 @@ class PPOTrainer:
                 ):
                     _attach_teacher_context_logps(self.actor, rollout_batch)
                     self.actor.get_device_stats().log("teacher context logp")
+
+            if _has_opd(rollout_batch):
+                with (
+                    stats_tracker.record_timing("opd_teacher_logp"),
+                    perf_tracer.trace_scope(
+                        "train.opd_teacher_logp",
+                        category=Category.COMPUTE,
+                        args={"global_step": global_step},
+                    ),
+                ):
+                    _attach_opd_teacher_logps(self.actor, rollout_batch)
+                    self.actor.get_device_stats().log("opd teacher logp")
 
             with (
                 stats_tracker.record_timing("compute_advantage"),

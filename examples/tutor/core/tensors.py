@@ -56,6 +56,9 @@ def response_to_tensordict(
     world_model_target_mask: list[int] | None = None,
     world_model_loss_weight: float | None = None,
     world_model_paw_config: dict[str, Any] | None = None,
+    opd_input_tokens: list[int] | None = None,
+    opd_loss_weight: float | None = None,
+    opd_reward_clip: float | None = None,
 ) -> dict[str, torch.Tensor]:
     input_tokens = (
         list(response.input_tokens)
@@ -184,4 +187,44 @@ def response_to_tensordict(
         )
         result["world_model_loss_weight"] = float(world_model_loss_weight)
         result["world_model_paw_config"] = dict(world_model_paw_config or {})
+    if opd_loss_weight is not None:
+        # On-policy distillation: the same output tokens re-prefixed with the
+        # instructed teacher prompt. The trainer teacher-forces this sequence to
+        # get per-token log-probabilities, then realigns them onto the training
+        # layout. A row with no target (weight 0) still carries a well-formed
+        # single-token sequence so the padded batch stays rectangular.
+        opd_tokens = list(opd_input_tokens or [])
+        opd_active = bool(opd_tokens) and output_len > 0
+        if not opd_active:
+            opd_tokens = [0]
+            opd_loss_mask = [0]
+        else:
+            opd_prompt_len = len(opd_tokens)
+            opd_tokens = opd_tokens + output_tokens
+            opd_loss_mask = [0] * opd_prompt_len + [1] * output_len
+        result["opd_input_ids"] = torch.tensor(
+            opd_tokens, dtype=torch.long
+        ).unsqueeze(0)
+        result["opd_attention_mask"] = torch.ones(
+            len(opd_tokens), dtype=torch.bool
+        ).unsqueeze(0)
+        result["opd_loss_mask"] = torch.tensor(
+            opd_loss_mask, dtype=torch.long
+        ).unsqueeze(0)
+        # Both scalars are broadcast across the full training row rather than
+        # stored per row. Per-token columns split with the sequence during
+        # micro-batching, and a value that is constant along the row cannot be
+        # knocked out of alignment by the -1 roll the loss applies to its masks.
+        # A weight of 0 on every position is also how an unselected row is marked.
+        result["opd_token_weight"] = torch.full(
+            (len(full_ids),),
+            float(opd_loss_weight) if opd_active else 0.0,
+            dtype=torch.float32,
+        ).unsqueeze(0)
+        result["opd_reward_clip"] = torch.full(
+            (len(full_ids),),
+            float(opd_reward_clip if opd_reward_clip is not None else 5.0),
+            dtype=torch.float32,
+        ).unsqueeze(0)
+        result["opd_valid"] = torch.tensor([opd_active], dtype=torch.bool)
     return result

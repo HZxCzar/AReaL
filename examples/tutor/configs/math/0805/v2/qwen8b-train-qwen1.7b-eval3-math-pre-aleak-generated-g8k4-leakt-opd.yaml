@@ -1,0 +1,52 @@
+defaults:
+  - qwen8b-train-qwen1.7b-eval3-math-pre-aleak-generated-g8k4-leakt@_global_
+  - _self_
+
+trial_name: qwen8b-qwen1.7b-opd
+
+# In-task adaptation by on-policy distillation from an instructed teacher.
+#
+# What the measurements say the problem is. The policy repeats itself: "same ask
+# as last turn" rises from 14% at turn 2 to 70% by turn 9, targeting decays from
+# 93% to 34%, and teaching stops working after turn 4 (student success 38% -> 3%,
+# flat). An immediately repeated ask costs 20.2% -> 8.4% student success.
+#
+# What it is NOT. Switching strategy mid-episode does not help: per-state move
+# choice adds nothing over per-task move choice even with an oracle over all six
+# moves (-1.4% [-5.0, +2.2]), and at a 3-turn horizon DECOMPOSE is best in every
+# diagnosis subgroup, so there is no state-conditional rule to learn. Adaptation
+# here is about message content, not move choice.
+#
+# What does help. Re-generating the same turn with one added sentence -- "your
+# last message did not get through, do not restate it, explain the next step at a
+# finer grain" -- is worth +7.3% [+3.7, +10.9], and +8.9% on repeat-heavy states.
+# The mechanism is better content plus an 11-point leak reduction; the move mix
+# barely moves (14.2% -> 13.6%).
+#
+# How it is trained. The rollout is untouched and fully on-policy. The same
+# weights are then run teacher-forced over the policy's own tokens with the
+# instruction appended, and a token-level KL pulls the policy toward that
+# distribution. So the instruction's effect is distilled into the weights and the
+# term decays to zero once the policy already behaves as if instructed. Nothing is
+# sampled from the teacher and no prompt mismatch touches the policy gradient, so
+# there is no importance weight here -- unlike guided slots. Cost is one extra
+# forward pass over the supervised turns.
+opd:
+  enabled: true
+  loss_weight: 0.05
+  # min_prior_failed_turns=2 means turn 3 and later. Episodes terminate on
+  # success, so by turn 3 the tutor has already failed twice and the
+  # instruction's premise ("your previous message did not get through") is
+  # literally true. The +7.3% was measured on states with at least 3 prior failed
+  # rounds.
+  min_prior_failed_turns: 2
+  max_turns_per_episode: 0
+  reward_clip: 5.0
+  # No effect while guided_slots is off; set so that turning both on does not
+  # stack two prompt perturbations on the same row.
+  skip_guided_rows: true
+  skip_leaked_rows: true
+
+stats_logger:
+  wandb:
+    group: 8b-opd-repair

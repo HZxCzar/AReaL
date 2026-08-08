@@ -1190,6 +1190,190 @@ class TutorWorldModelConfig:
 
 
 @dataclass
+class TutorGuidedSlotsConfig:
+    """Reserve rollout slots in each group for move-prescribed teacher turns.
+
+    The trained policy plays one move (PINPOINT 86% of turns), so a group of eight
+    free rollouts contains the state's best move only 37.7% of the time and GRPO
+    has nothing to compare against. Prescribing a move in a few slots lifts that
+    to 78%. The instruction is stripped from the prompt the sample is trained on,
+    so what the policy learns is "this move suited this task", not "obey
+    instructions".
+    """
+
+    enabled: bool = field(default=False)
+    slots: int = field(
+        default=3,
+        metadata={
+            "help": (
+                "Rollouts per group that receive a prescribed move. Must be less "
+                "than gconfig.n_samples so free rollouts remain the majority."
+            )
+        },
+    )
+    moves: tuple[str, ...] = field(
+        default=("DECOMPOSE", "REFRAME", "PROBE"),
+        metadata={
+            "help": (
+                "Moves eligible for the reserved slots, drawn from "
+                "prompts.TEACHER_MOVE_INSTRUCTIONS. Assigned to slots in order, "
+                "cycling if there are more slots than moves."
+            )
+        },
+    )
+    turns: tuple[int, ...] = field(
+        default=(1,),
+        metadata={
+            "help": (
+                "1-based turn indices that receive a prescribed move. Defaults to "
+                "the first turn only, which is where the group still shares a "
+                "state and where the measured task-level effect lives."
+            )
+        },
+    )
+    rotate_by_task: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Offset the move-to-slot assignment by a hash of the task so that "
+                "with fewer slots than moves, different tasks still cover "
+                "different moves across the dataset."
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        from examples.tutor.prompts import TEACHER_MOVE_INSTRUCTIONS
+
+        self.slots = int(self.slots)
+        self.moves = tuple(str(m).strip().upper() for m in self.moves if str(m).strip())
+        self.turns = tuple(sorted({int(t) for t in self.turns}))
+        if not self.enabled:
+            return
+        if self.slots < 1:
+            raise ValueError("guided_slots.slots must be at least 1 when enabled.")
+        if not self.moves:
+            raise ValueError("guided_slots.moves must be non-empty when enabled.")
+        unknown = [m for m in self.moves if m not in TEACHER_MOVE_INSTRUCTIONS]
+        if unknown:
+            raise ValueError(
+                "guided_slots.moves contains unknown moves: "
+                f"{unknown}; known moves are "
+                f"{sorted(TEACHER_MOVE_INSTRUCTIONS)}."
+            )
+        if any(t < 1 for t in self.turns):
+            raise ValueError("guided_slots.turns must be 1-based positive integers.")
+
+
+@dataclass
+class TutorOpdConfig:
+    """On-policy distillation from a teacher given a privileged instruction.
+
+    The policy rolls out normally -- no instruction, fully on-policy. The same
+    weights are then run teacher-forced over the policy's own tokens with the
+    repair instruction appended, and a token-level KL pulls the policy toward
+    that instructed distribution. This is context distillation: the effect of
+    the instruction is moved into the weights, so the deployed model behaves as
+    if it had been told, without being told.
+
+    Nothing is sampled from the teacher and no prompt mismatch enters the policy
+    gradient, so there is no importance weight and no off-policy correction.
+    Cost is one extra forward pass over the supervised turns.
+    """
+
+    enabled: bool = field(default=False)
+    loss_weight: float = field(
+        default=0.05,
+        metadata={
+            "help": (
+                "Weight of the token-level KL(policy || instructed teacher) term "
+                "added to the PPO actor loss."
+            )
+        },
+    )
+    instruction: str = field(
+        default="",
+        metadata={
+            "help": (
+                "Instruction the teacher is conditioned on. Empty uses "
+                "prompts.TEACHER_REPAIR_INSTRUCTION, the validated wording."
+            )
+        },
+    )
+    reward_clip: float = field(
+        default=5.0,
+        metadata={
+            "help": (
+                "Clamp on the per-token distillation signal "
+                "log pi_teacher(a_t) - log pi_behave(a_t), in nats. A single token "
+                "the instructed teacher finds far more likely can otherwise "
+                "dominate the whole term."
+            )
+        },
+    )
+    min_prior_failed_turns: int = field(
+        default=2,
+        metadata={
+            "help": (
+                "Supervise a turn only after the tutor has already failed this "
+                "many times in this episode. Episodes terminate on success, so "
+                "this is equivalent to turn_idx > min_prior_failed_turns. Default "
+                "2 matches the repair instruction's premise that the previous "
+                "message did not get through."
+            )
+        },
+    )
+    max_turns_per_episode: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Cap on supervised turns per episode, counted from the earliest "
+                "eligible turn. 0 means no cap."
+            )
+        },
+    )
+    skip_guided_rows: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Skip turns that were generated under a guided_slots move "
+                "instruction. Those rows are already trained on a rewritten "
+                "prompt; stacking a second perturbation on them muddies both."
+            )
+        },
+    )
+    skip_leaked_rows: bool = field(
+        default=True,
+        metadata={
+            "help": "Skip turns whose teacher output leaked the answer.",
+        },
+    )
+
+    def __post_init__(self) -> None:
+        self.loss_weight = float(self.loss_weight)
+        self.reward_clip = float(self.reward_clip)
+        self.instruction = str(self.instruction or "").strip()
+        self.min_prior_failed_turns = int(self.min_prior_failed_turns)
+        self.max_turns_per_episode = int(self.max_turns_per_episode)
+        if not self.enabled:
+            return
+        if self.loss_weight <= 0.0:
+            raise ValueError("opd.loss_weight must be positive when enabled.")
+        if self.reward_clip <= 0.0:
+            raise ValueError("opd.reward_clip must be positive when enabled.")
+        if self.min_prior_failed_turns < 0:
+            raise ValueError("opd.min_prior_failed_turns must be non-negative.")
+        if self.max_turns_per_episode < 0:
+            raise ValueError("opd.max_turns_per_episode must be non-negative.")
+
+    @property
+    def resolved_instruction(self) -> str:
+        from examples.tutor.prompts import TEACHER_REPAIR_INSTRUCTION
+
+        return self.instruction or TEACHER_REPAIR_INSTRUCTION
+
+
+@dataclass
 class TutorConfig(GRPOConfig):
     workflow: str = field(
         default="examples.tutor.workflow.TutorAgentWorkflow",
@@ -1258,6 +1442,10 @@ class TutorConfig(GRPOConfig):
     evaluator: TutorEvaluatorConfig = field(default_factory=TutorEvaluatorConfig)
     reward: TutorRewardConfig = field(default_factory=TutorRewardConfig)
     world_model: TutorWorldModelConfig = field(default_factory=TutorWorldModelConfig)
+    guided_slots: TutorGuidedSlotsConfig = field(
+        default_factory=TutorGuidedSlotsConfig
+    )
+    opd: TutorOpdConfig = field(default_factory=TutorOpdConfig)
     teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
     teacher_anti_leak_instruction_enabled: bool = field(
         default=False,
@@ -1332,6 +1520,31 @@ class TutorConfig(GRPOConfig):
                 "Tutor does not support actor.mask_no_eos_with_zero because its "
                 "turn-level tensors are dynamically padded. Use "
                 "reward.zero_reward_on_length_stop instead."
+            )
+        if self.guided_slots.enabled:
+            if self.gconfig.n_samples < 2:
+                raise ValueError(
+                    "guided_slots.enabled requires gconfig.n_samples >= 2 so a "
+                    "group contains both guided and free rollouts."
+                )
+            if self.guided_slots.slots >= self.gconfig.n_samples:
+                raise ValueError(
+                    "guided_slots.slots must be smaller than gconfig.n_samples "
+                    f"({self.guided_slots.slots} >= {self.gconfig.n_samples}); "
+                    "otherwise no free rollout is left to compare against."
+                )
+            if not self.actor.use_decoupled_loss:
+                raise ValueError(
+                    "guided_slots.enabled requires actor.use_decoupled_loss=true. "
+                    "Guided turns are trained on a prompt they were not generated "
+                    "from, and the decoupled loss is what recomputes the proximal "
+                    "log-probabilities on the training prompt and applies "
+                    "actor.behave_imp_weight_cap to the resulting weight."
+                )
+        if self.opd.enabled and self.actor.backend.startswith("megatron"):
+            raise ValueError(
+                "opd.enabled currently requires an FSDP actor backend; the "
+                "instructed-teacher forward pass reuses actor.compute_logp."
             )
         student_names = [student.name for student in self.student_models]
         if len(student_names) != len(set(student_names)):

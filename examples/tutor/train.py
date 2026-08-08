@@ -482,6 +482,8 @@ def main(args):
         teacher_progress_judge=asdict(reward.teacher_progress_judge),
         student_request_judge=asdict(reward.student_request_judge),
         world_model=asdict(config.world_model),
+        guided_slots=asdict(config.guided_slots),
+        opd=asdict(config.opd),
         local_advantage_turn_discount=config.actor.turn_discount,
         teacher_system_prompt=config.teacher_system_prompt,
         teacher_anti_leak_instruction_enabled=(

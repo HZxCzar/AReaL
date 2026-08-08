@@ -178,6 +178,58 @@ backslashes:
 {"score": 1, "reason": "brief explanation"}
 """
 
+# Guidance instructions appended to the END of the teacher prompt, immediately
+# before generation. Placement is load-bearing: the identical text placed in the
+# system prompt is followed far less often. See analysis/hazard_20260806.
+#
+# Do not paraphrase these strings. Every measured effect size attached to them
+# (per-move quality at the 1- and 3-turn horizon, the +7.3% repair result, the
+# instruction-compliance rates) was obtained against this exact wording, in
+# analysis/hazard_20260806/common.py and gate1_supervisor.py.
+
+TEACHER_GUIDANCE_TAIL_TEMPLATE = "Instruction for this reply:\n{instruction}"
+
+TEACHER_MOVE_INSTRUCTIONS: dict[str, str] = {
+    "PINPOINT": (
+        "For this reply, identify the specific step, line, or value where the "
+        "student went wrong and say exactly what is wrong with it. Do not "
+        "restructure the problem and do not introduce a different method."
+    ),
+    "DECOMPOSE": (
+        "For this reply, break the work into a smaller, more elementary sub-step "
+        "and ask the student only for that sub-step. Do not simply restate which "
+        "step was wrong."
+    ),
+    "REFRAME": (
+        "For this reply, switch to a structurally different method or "
+        "representation for this problem and carry out its first concrete step "
+        "yourself. A cosmetic rearrangement of the current method does not count."
+    ),
+    "HINT": (
+        "For this reply, supply one fact, formula, theorem, or observation that "
+        "the student is missing. Do not name their error and do not restructure "
+        "the work."
+    ),
+    "PROBE": (
+        "For this reply, ask the student exactly one diagnostic question about "
+        "their understanding or reasoning. Do not ask for more computation and "
+        "do not tell them what is wrong."
+    ),
+    "WORKED": (
+        "For this reply, carry out the next one or two steps of the derivation "
+        "yourself and show the result to the student."
+    ),
+}
+
+# The privileged-information instruction the OPD teacher is conditioned on. The
+# teacher sees this; the student being trained never does.
+TEACHER_REPAIR_INSTRUCTION = (
+    "Your previous message did not get through: the student is still answering "
+    "incorrectly. Do not restate what you have already said. Explain the next "
+    "step in more detail and at a finer grain than you did before, so the "
+    "student has a smaller and more concrete thing to do."
+)
+
 NO_VISIBLE_TUTORING_HISTORY = "No visible tutoring history yet."
 NO_PREVIOUS_VISIBLE_TUTORING_HISTORY = "No previous visible tutoring history."
 EMPTY_PLACEHOLDER = "(empty)"

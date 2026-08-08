@@ -116,6 +116,21 @@ class TeacherPreSolveResult:
     verification_enabled: bool = True
 
 
+@dataclass(slots=True, frozen=True)
+class TeacherGuidance:
+    """An instruction appended to the end of the teacher prompt for one turn.
+
+    ``kind`` is "move" for a prescribed teaching move (guided slots) and "repair"
+    for the on-policy-distillation teacher's privileged instruction. Guidance is
+    always stripped before the turn becomes a training sample.
+    """
+
+    kind: str
+    name: str
+    instruction: str
+    slot: int | None = None
+
+
 @dataclass(slots=True)
 class TutorTurnState:
     task: str
@@ -129,6 +144,7 @@ class TutorTurnState:
     teacher_prompt_selection: PromptPoolSelection | None = None
     student_reply_before_teacher: str = ""
     preceding_student_turn_behavior: StudentTurnBehavior | None = None
+    guidance: TeacherGuidance | None = None
 
 
 @dataclass(slots=True)
@@ -166,6 +182,11 @@ class TurnArtifact:
     teacher_progress_judge_result: TeacherProgressJudgeResult | None = None
     student_request_judge_result: StudentRequestJudgeResult | None = None
     student_question_generation: StudentQuestionGenerationResult | None = None
+    # Set when this turn was selected for on-policy distillation. Holds the
+    # instructed-teacher prompt tokens; the output tokens are appended by
+    # ``response_to_tensordict``.
+    opd_prompt_tokens: list[int] | None = None
+    opd_skip_reason: str = ""
 
 
 @dataclass(slots=True)

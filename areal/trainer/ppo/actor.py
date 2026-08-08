@@ -1031,6 +1031,15 @@ class PPOActor:
             raise ValueError(
                 "Batch-centered local penalties require advantage_estimator='rebn'."
             )
+        opd_keys = {"opd_teacher_logp", "opd_token_weight", "opd_reward_clip"}
+        present_opd_keys = opd_keys.intersection(data)
+        if present_opd_keys and present_opd_keys != opd_keys:
+            raise ValueError(
+                "Incomplete on-policy-distillation metadata; missing: "
+                + ", ".join(sorted(opd_keys - present_opd_keys))
+                + ". opd_teacher_logp is attached by the trainer's OPD forward "
+                "pass; the other two come from the rollout."
+            )
         teacher_context_keys = {
             "teacher_context_input_ids",
             "teacher_context_attention_mask",
@@ -1628,6 +1637,10 @@ class PPOActor:
             "group_id",
             "group_baseline",
             "episode_loss_weight",
+            # opd_teacher_logp / opd_token_weight / opd_reward_clip are read by
+            # the loss and must survive; opd_valid only exists so the workflow can
+            # be audited from a rollout dump.
+            "opd_valid",
         ]:
             data.pop(key, None)
         # NOTE: calling engine.train() is critical to enabling gradient checkpointing
@@ -1888,6 +1901,45 @@ def grpo_loss_fn(
 
             rkl_stat = rkl_penalty_per_token
 
+    # On-policy distillation from a teacher given a privileged instruction.
+    #
+    # The rollout is the policy's own, unmodified and on-policy. The teacher is
+    # the same weights conditioned on an extra instruction, scored teacher-forced
+    # over those same tokens, so the only difference between the two
+    # distributions is the instruction. Minimizing the KL moves the instruction's
+    # effect into the weights.
+    #
+    # The estimator matters. Only the sampled tokens have a teacher log-prob, so
+    # `mean(log pi - log pi_teacher)` is the right *value* but the wrong *loss*:
+    # the teacher term is a constant, so its gradient is just `grad log pi` on
+    # every sampled token, which pushes them all down uniformly and distils
+    # nothing. The policy-gradient form below is used instead -- a detached
+    # per-token reward times a differentiable ratio, whose gradient is
+    # `-w * reward * grad log pi`, raising exactly the tokens the instructed
+    # teacher preferred. Same algebra as the pure-KD branch above.
+    opd_teacher_logp = input_data.get("opd_teacher_logp")
+    opd_stat = None
+    if opd_teacher_logp is not None:
+        opd_token_weight = input_data["opd_token_weight"].to(logprobs.dtype)
+        opd_active = loss_mask & (opd_token_weight > 0)
+        if opd_active.any():
+            clip = input_data["opd_reward_clip"].to(logprobs.dtype)
+            # A single token the teacher finds far more likely would otherwise
+            # dominate the whole term.
+            opd_reward = torch.minimum(
+                torch.maximum(opd_teacher_logp.detach() - old_logp, -clip), clip
+            )
+            opd_ratio = torch.exp(logprobs - old_logp)
+            opd_token_loss = -(opd_ratio * opd_reward) * opd_active
+            opd_denominator = opd_active.count_nonzero().clamp(min=1)
+            loss = loss + (opd_token_weight * opd_token_loss).sum() / opd_denominator
+            opd_stat = {
+                "opd_reward": opd_reward.detach(),
+                "opd_ratio": opd_ratio.detach(),
+                "opd_token_loss": opd_token_loss.detach(),
+                "mask": opd_active,
+            }
+
     # Log training statistics
     stats_tracker.denominator(
         n_tokens=infer_token_denominator(input_data, loss_mask),
@@ -1900,6 +1952,19 @@ def grpo_loss_fn(
         stats_tracker.stat(
             rkl_loss=rkl_stat,
             denominator="n_valid_tokens",
+        )
+
+    if opd_stat is not None:
+        # Averaged over supervised tokens only, so the numbers do not get diluted
+        # by the turns OPD skipped. opd_reward is the per-token KL signal in nats:
+        # positive means the instructed teacher liked the token more than the
+        # policy did. It should shrink toward 0 as the instruction is absorbed.
+        stats_tracker.denominator(opd_tokens=opd_stat["mask"])
+        stats_tracker.stat(
+            opd_reward=opd_stat["opd_reward"],
+            opd_ratio=opd_stat["opd_ratio"],
+            opd_token_loss=opd_stat["opd_token_loss"],
+            denominator="opd_tokens",
         )
 
     stats_tracker.stat(
