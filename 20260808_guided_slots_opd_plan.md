@@ -222,16 +222,51 @@ The machinery was already present:
   is the same shape with the instructed prompt.
 - The KDRL branch at `actor.py:1859` already had a token-level KL term.
 
-**One thing there had to be written from scratch.** The existing KDRL branch uses
-`mean(log pi - log pi_teacher)` as the loss. That is the correct *value* of the KL
-but the wrong *gradient*: on a fixed batch the teacher term is a constant, so
-`grad = mean(grad log pi)` and it pushes every sampled token down uniformly,
-distilling nothing. The `rl_loss_weight == 0` branch right above it has the
-correct policy-gradient form. The OPD term uses that form -- a detached per-token
-reward times a differentiable ratio, gradient
-`-w * reward * grad log pi` -- which raises exactly the tokens the instructed
-teacher preferred. `tests/test_tutor_guided_opd.py` asserts the sign in both
-directions.
+**The estimator, stated exactly.** The objective at each supervised position is
+the reverse KL `D_KL(pi_theta(.|s_t) || pi_teacher(.|s_t))`, with `s_t` from the
+policy's own rollout. Two stop-gradients, for different reasons:
+
+1. *The trajectory distribution.* `theta` also decides which tokens were sampled,
+   and that dependence is deliberately not differentiated. This is the design
+   point of OPD: the signal is dense and per-token, so there is no credit
+   assignment to propagate — no advantage, no GAE, no discounting. The sampled
+   tokens enter as fixed data.
+2. *The teacher.* Mandatory here rather than merely conventional, because the
+   teacher shares weights with the policy: a live gradient would let the KL be
+   minimized by dragging the **teacher** toward the policy, which is backwards.
+   `compute_logp` is `@torch.no_grad()` at the engine level and the loss also
+   `.detach()`s at the point of use. A test asserts nothing reaches the teacher.
+
+After (1), what is left is the gradient of the explicit per-position KL. Only the
+sampled token's teacher log-prob is available — not the full vocabulary
+distribution — so that per-position KL is itself a one-draw estimate,
+`log pi_theta(a_t) - log pi_teacher(a_t)`. Its expectation is over `pi_theta`, so
+the unbiased gradient carries a score-function factor
+`grad log pi_theta(a_t) * sg[log pi_theta - log pi_teacher]`. **That
+`grad log pi` factor comes from the within-position vocabulary expectation, not
+from the trajectory** — (1) is untouched. A canonical OPD implementation avoids the
+factor entirely by computing the full-vocabulary KL analytically at each position,
+which is lower variance; that needs both models' logits fused inside one forward
+pass and is not reachable through `compute_logp`. Keeping full logits for two
+passes is ~1.2 GB per 4k-token sequence at this vocabulary size, so it would be
+real engine work. Noted as the available improvement, not done.
+
+**Two things the neighbouring code gets wrong and this does not.**
+
+- The KDRL branch (`actor.py`, `rl_loss_weight != 0`) uses
+  `mean(log pi - log pi_teacher)` directly as the loss. Right KL *value*, wrong
+  *gradient*: on a fixed batch the teacher term is constant, so
+  `grad = mean(grad log pi)` and it pushes every sampled token down uniformly,
+  distilling nothing. The `rl_loss_weight == 0` branch above it has the correct
+  form; this uses that.
+- The KL reference must be the **current** policy's log-prob, not the behaviour
+  log-prob. With `old_logp` the term stops only once the behaviour policy catches
+  up, not once the policy matches the teacher — which destroys the self-limiting
+  property the whole design rests on. This was wrong in the first commit and is
+  fixed. `tests/test_tutor_guided_opd.py` pins it with a pair of checks under a
+  fixture where `old_logp != logprobs`: zero gradient when the policy matches the
+  teacher, live gradient when it does not. Reverting the reference to `old_logp`
+  makes the first of those fail (verified), so the check is not vacuous.
 
 Per-token rewards are clamped by `opd.reward_clip` (default 5 nats): one token the
 teacher finds far more likely would otherwise dominate the whole term.

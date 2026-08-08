@@ -448,6 +448,97 @@ def test_opd_loss_term() -> None:
         f"{float(with_zero.detach())} vs {float(without.detach())}",
     )
 
+    # Self-limiting: when the CURRENT policy already matches the instructed
+    # teacher on its own samples there is nothing left to distil, so the term must
+    # contribute no gradient.
+    #
+    # The fixture deliberately sets old_logp != logprobs. With logprobs == teacher
+    # the correct reverse-KL reference gives exactly zero, while referencing the
+    # BEHAVIOUR log-prob instead would give teacher - old_logp = +1 nat and a live
+    # gradient. So this check separates the two; with old_logp == logprobs it would
+    # pass either way.
+    stale = dict(base, logprobs=torch.full((batch, length), -2.0),
+                 prox_logp=torch.full((batch, length), -2.0))
+    logprobs_eq = torch.full((batch, length), -1.0, requires_grad=True)
+    matched = grpo_loss_fn(
+        logprobs_eq,
+        torch.zeros_like(logprobs_eq),
+        dict(
+            stale,
+            opd_teacher_logp=torch.full((batch, length), -1.0),
+            opd_token_weight=torch.full((batch, length), 0.05),
+            opd_reward_clip=torch.full((batch, length), 5.0),
+        ),
+        **kwargs,
+    )
+    matched.backward()
+    logprobs_none = torch.full((batch, length), -1.0, requires_grad=True)
+    grpo_loss_fn(
+        logprobs_none, torch.zeros_like(logprobs_none), dict(stale), **kwargs
+    ).backward()
+    check(
+        "no gradient once the policy matches the teacher",
+        torch.allclose(logprobs_eq.grad, logprobs_none.grad, atol=1e-7),
+        f"delta {float((logprobs_eq.grad - logprobs_none.grad).abs().max())}",
+    )
+
+    # Same fixture, teacher now genuinely ahead of the policy: the term MUST be
+    # live. Together with the check above this pins the reference to the current
+    # policy rather than to old_logp.
+    logprobs_gap = torch.full((batch, length), -1.0, requires_grad=True)
+    grpo_loss_fn(
+        logprobs_gap,
+        torch.zeros_like(logprobs_gap),
+        dict(
+            stale,
+            opd_teacher_logp=torch.full((batch, length), -0.2),
+            opd_token_weight=torch.full((batch, length), 0.05),
+            opd_reward_clip=torch.full((batch, length), 5.0),
+        ),
+        **kwargs,
+    ).backward()
+    check(
+        "term is live when the teacher is ahead, under the same stale old_logp",
+        not torch.allclose(logprobs_gap.grad, logprobs_none.grad, atol=1e-7),
+        "otherwise the check above is vacuous",
+    )
+
+    # The teacher shares weights with the policy, so a live gradient here would
+    # let the KL be minimized by moving the TEACHER instead. Nothing may flow back
+    # into the teacher tensor.
+    teacher_live = torch.full((batch, length), 2.0, requires_grad=True)
+    logprobs_t = torch.full((batch, length), -1.0, requires_grad=True)
+    data = dict(
+        base,
+        opd_teacher_logp=teacher_live,
+        opd_token_weight=torch.full((batch, length), 0.05),
+        opd_reward_clip=torch.full((batch, length), 5.0),
+    )
+    grpo_loss_fn(logprobs_t, torch.zeros_like(logprobs_t), data, **kwargs).backward()
+    check(
+        "no gradient reaches the teacher",
+        teacher_live.grad is None or float(teacher_live.grad.abs().max()) == 0.0,
+        f"teacher grad {None if teacher_live.grad is None else float(teacher_live.grad.abs().max())}",
+    )
+
+    # The magnitude must track the gap, since that gap IS the objective.
+    grads = []
+    for teacher_value in (-1.5, -3.0, -6.0):
+        lp = torch.full((batch, length), -1.0, requires_grad=True)
+        data = dict(
+            base,
+            opd_teacher_logp=torch.full((batch, length), teacher_value),
+            opd_token_weight=torch.full((batch, length), 0.05),
+            opd_reward_clip=torch.full((batch, length), 100.0),
+        )
+        grpo_loss_fn(lp, torch.zeros_like(lp), data, **kwargs).backward()
+        grads.append(float(lp.grad[loss_mask].mean()))
+    check(
+        "gradient magnitude grows with the KL gap",
+        grads[0] < grads[1] < grads[2],
+        f"got {grads}",
+    )
+
     # The clip must bind.
     logprobs5 = torch.full((batch, length), -1.0, requires_grad=True)
     tight = dict(

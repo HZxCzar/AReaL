@@ -1903,20 +1903,54 @@ def grpo_loss_fn(
 
     # On-policy distillation from a teacher given a privileged instruction.
     #
-    # The rollout is the policy's own, unmodified and on-policy. The teacher is
-    # the same weights conditioned on an extra instruction, scored teacher-forced
-    # over those same tokens, so the only difference between the two
-    # distributions is the instruction. Minimizing the KL moves the instruction's
-    # effect into the weights.
+    # Objective, per supervised token position s_t:
     #
-    # The estimator matters. Only the sampled tokens have a teacher log-prob, so
-    # `mean(log pi - log pi_teacher)` is the right *value* but the wrong *loss*:
-    # the teacher term is a constant, so its gradient is just `grad log pi` on
-    # every sampled token, which pushes them all down uniformly and distils
-    # nothing. The policy-gradient form below is used instead -- a detached
-    # per-token reward times a differentiable ratio, whose gradient is
-    # `-w * reward * grad log pi`, raising exactly the tokens the instructed
-    # teacher preferred. Same algebra as the pure-KD branch above.
+    #     D_KL( pi_theta(. | s_t) || pi_teacher(. | s_t) )
+    #
+    # -- the REVERSE KL, with s_t drawn from the policy's own rollout. The teacher
+    # is the same weights conditioned on an extra instruction, so the only
+    # difference between the two distributions is that instruction, and minimizing
+    # this moves the instruction's effect into the weights.
+    #
+    # Two stop-gradients, for different reasons.
+    #
+    # 1. The trajectory distribution. theta also determines which tokens were
+    #    sampled in the first place, and that dependence is deliberately NOT
+    #    differentiated. This is the design point of on-policy distillation: the
+    #    signal is dense and per-token, so there is no credit assignment to
+    #    propagate -- no advantage, no GAE, no discounting. The sampled tokens
+    #    enter as fixed data.
+    #
+    # 2. The teacher. Mandatory here, not merely conventional: the teacher shares
+    #    weights with the policy, so a live gradient would let the KL be minimized
+    #    by dragging the TEACHER toward the policy, which is backwards.
+    #    `compute_logp` is already @torch.no_grad() at the engine level; the
+    #    .detach() below documents the requirement at the point of use.
+    #
+    # What remains after (1) is the gradient of the explicit per-position KL. Only
+    # the sampled token's teacher log-prob is available -- not the full vocabulary
+    # distribution -- so the per-position KL is itself estimated from one draw:
+    #
+    #     D_KL = E_{v ~ pi_theta} [ log pi_theta(v) - log pi_teacher(v) ]
+    #          ~ log pi_theta(a_t) - log pi_teacher(a_t)
+    #
+    # That expectation is over pi_theta, so its unbiased gradient carries a score
+    # function factor: grad log pi_theta(a_t) * sg[log pi_theta - log pi_teacher].
+    # The `grad log pi` factor therefore comes from the WITHIN-POSITION vocabulary
+    # expectation, not from the trajectory -- (1) is untouched. A canonical OPD
+    # implementation avoids this factor entirely by computing the full-vocabulary
+    # KL analytically at every position, which is lower variance; that needs both
+    # models' logits fused inside one forward pass and is not available through
+    # `compute_logp`.
+    #
+    # The surrogate below has exactly that gradient. `opd_kl` is the detached
+    # bracket, so the term is self-limiting: it vanishes precisely when the policy
+    # already matches the instructed teacher on its own samples. Note the bracket
+    # uses the CURRENT policy's log-prob, not the behaviour log-prob -- using
+    # old_logp would instead make the term vanish only once the behaviour policy
+    # caught up, destroying that property. `opd_ratio` is the importance
+    # correction for the samples having come from pi_old, and equals 1 on the
+    # first inner step.
     opd_teacher_logp = input_data.get("opd_teacher_logp")
     opd_stat = None
     if opd_teacher_logp is not None:
@@ -1924,17 +1958,20 @@ def grpo_loss_fn(
         opd_active = loss_mask & (opd_token_weight > 0)
         if opd_active.any():
             clip = input_data["opd_reward_clip"].to(logprobs.dtype)
-            # A single token the teacher finds far more likely would otherwise
-            # dominate the whole term.
-            opd_reward = torch.minimum(
-                torch.maximum(opd_teacher_logp.detach() - old_logp, -clip), clip
+            # One token the teacher finds far more likely would otherwise dominate
+            # the whole term.
+            opd_kl = torch.minimum(
+                torch.maximum(
+                    logprobs.detach() - opd_teacher_logp.detach(), -clip
+                ),
+                clip,
             )
             opd_ratio = torch.exp(logprobs - old_logp)
-            opd_token_loss = -(opd_ratio * opd_reward) * opd_active
+            opd_token_loss = (opd_ratio * opd_kl) * opd_active
             opd_denominator = opd_active.count_nonzero().clamp(min=1)
             loss = loss + (opd_token_weight * opd_token_loss).sum() / opd_denominator
             opd_stat = {
-                "opd_reward": opd_reward.detach(),
+                "opd_kl": opd_kl.detach(),
                 "opd_ratio": opd_ratio.detach(),
                 "opd_token_loss": opd_token_loss.detach(),
                 "mask": opd_active,
@@ -1955,13 +1992,15 @@ def grpo_loss_fn(
         )
 
     if opd_stat is not None:
-        # Averaged over supervised tokens only, so the numbers do not get diluted
-        # by the turns OPD skipped. opd_reward is the per-token KL signal in nats:
-        # positive means the instructed teacher liked the token more than the
-        # policy did. It should shrink toward 0 as the instruction is absorbed.
+        # Averaged over supervised tokens only, so the numbers are not diluted by
+        # the turns OPD skipped. opd_kl is the per-token reverse KL in nats:
+        # NEGATIVE means the instructed teacher likes the token more than the
+        # policy does, i.e. there is something left to distil. It should rise
+        # toward 0 as the instruction is absorbed; if it sits flat and far from 0
+        # the policy is not absorbing it and loss_weight is the knob.
         stats_tracker.denominator(opd_tokens=opd_stat["mask"])
         stats_tracker.stat(
-            opd_reward=opd_stat["opd_reward"],
+            opd_kl=opd_stat["opd_kl"],
             opd_ratio=opd_stat["opd_ratio"],
             opd_token_loss=opd_stat["opd_token_loss"],
             denominator="opd_tokens",
