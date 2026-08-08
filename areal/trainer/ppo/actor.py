@@ -630,6 +630,47 @@ def _compute_episode_group_baseline(
     return baseline
 
 
+def _realign_opd_teacher_logp(
+    teacher_logp: torch.Tensor,
+    opd_loss_mask: torch.Tensor,
+    rolled_train_mask: torch.Tensor,
+    template: torch.Tensor,
+) -> torch.Tensor:
+    """Move teacher log-probs from the instructed-teacher layout onto the
+    training layout.
+
+    The teacher prompt carries an extra instruction, so it is longer than the
+    training prompt and the same output tokens sit at a different offset. Both
+    sides cover exactly those output tokens in the same order, so selecting with
+    each layout's own mask and copying across is correct without either prompt
+    length appearing anywhere.
+
+    ``rolled_train_mask`` is already rolled by -1 by the caller;
+    ``opd_loss_mask`` is the raw rollout column and is rolled here. The roll is
+    what converts "these positions hold output tokens" into "these positions
+    predict output tokens", which is the convention `compute_logp` returns
+    (labels = roll(input_ids, -1)).
+    """
+    teacher_logp = teacher_logp.to(template.dtype)
+    width = min(teacher_logp.shape[-1], opd_loss_mask.shape[-1])
+    teacher_selection = torch.roll(
+        opd_loss_mask[..., :width], shifts=-1, dims=-1
+    ).bool()
+    selected = teacher_logp[..., :width][teacher_selection]
+    train_selection = rolled_train_mask.bool()
+    expected = int(train_selection.count_nonzero())
+    if selected.numel() != expected:
+        raise RuntimeError(
+            "OPD token count mismatch between the teacher and training layouts: "
+            f"teacher={selected.numel()}, training={expected}. The teacher prompt "
+            "must end where generation began and both sides must cover the same "
+            "output tokens."
+        )
+    aligned = torch.zeros_like(template)
+    aligned[train_selection] = selected
+    return aligned
+
+
 def _compute_opd_advantages(
     behaviour_logp: torch.Tensor,
     teacher_logp: torch.Tensor,
@@ -1079,7 +1120,12 @@ class PPOActor:
             raise ValueError(
                 "Batch-centered local penalties require advantage_estimator='rebn'."
             )
-        opd_keys = {"opd_teacher_logp", "opd_token_weight", "opd_reward_clip"}
+        opd_keys = {
+            "opd_teacher_logp",
+            "opd_loss_mask",
+            "opd_token_weight",
+            "opd_reward_clip",
+        }
         present_opd_keys = opd_keys.intersection(data)
         if present_opd_keys and present_opd_keys != opd_keys:
             raise ValueError(
@@ -1351,9 +1397,18 @@ class PPOActor:
         # the task signal.
         opd_teacher_logp = data.get("opd_teacher_logp")
         if opd_teacher_logp is not None:
+            # Realigned here rather than in the trainer: compute_logp may hand
+            # back RTensor handles, which only become real tensors once the batch
+            # reaches this side.
+            opd_teacher_logp = _realign_opd_teacher_logp(
+                opd_teacher_logp,
+                data["opd_loss_mask"],
+                loss_mask,
+                old_logp,
+            )
             opd_advantages, opd_reverse_kl, opd_active = _compute_opd_advantages(
                 old_logp,
-                opd_teacher_logp.to(old_logp.dtype),
+                opd_teacher_logp,
                 data["opd_token_weight"].to(old_logp.dtype),
                 data["opd_reward_clip"].to(old_logp.dtype),
                 loss_mask,
@@ -1722,6 +1777,7 @@ class PPOActor:
             # Every OPD column is consumed while computing advantages; none of it
             # reaches the loss, which sees only the adjusted advantage.
             "opd_teacher_logp",
+            "opd_loss_mask",
             "opd_token_weight",
             "opd_reward_clip",
             "opd_valid",

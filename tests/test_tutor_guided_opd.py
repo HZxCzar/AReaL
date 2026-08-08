@@ -18,7 +18,6 @@ import sys
 
 import torch
 
-from areal.trainer.rl_trainer import _attach_opd_teacher_logps
 from examples.tutor.core.tensors import response_to_tensordict
 from examples.tutor.core.types import (
     PublicHistoryState,
@@ -273,7 +272,13 @@ def test_opd_eligibility() -> None:
 
 
 def test_opd_realignment() -> None:
+    """The teacher prompt is longer, so its log-probs sit at a different offset.
+
+    An off-by-one here attaches every distillation target to the wrong token and
+    nothing raises.
+    """
     print("\n[4] OPD log-prob realignment across differing prompt lengths")
+    from areal.trainer.ppo.actor import _realign_opd_teacher_logp
 
     output_tokens = [500, 501, 502, 503]
     clean_prompt = list(range(1, 8))  # 7 tokens
@@ -284,16 +289,16 @@ def test_opd_realignment() -> None:
         reward=1.0,
         input_tokens_override=clean_prompt,
         opd_input_tokens=opd_prompt,
-        opd_loss_weight=0.05,
-        opd_reward_clip=5.0,
+        opd_loss_weight=1.0,
+        opd_reward_clip=0.0,
     )
     skipped = response_to_tensordict(
         FakeResponse(clean_prompt, output_tokens),
         reward=0.0,
         input_tokens_override=clean_prompt,
         opd_input_tokens=None,
-        opd_loss_weight=0.05,
-        opd_reward_clip=5.0,
+        opd_loss_weight=1.0,
+        opd_reward_clip=0.0,
     )
     check(
         "selected and skipped rows carry the same keys",
@@ -316,31 +321,22 @@ def test_opd_realignment() -> None:
     # output tokens are predicted from positions [P-1, P+L-2]. Plant a signature
     # there and require it to land on the matching training positions.
     signature = torch.tensor([-1.0, -2.0, -3.0, -4.0])
-    opd_len = traj["opd_input_ids"].shape[1]
+    opd_len = traj["opd_loss_mask"].shape[1]
     fake = torch.zeros((2, opd_len), dtype=torch.float32)
     start = len(opd_prompt) - 1
     fake[0, start : start + len(output_tokens)] = signature
-    fake[1, :] = 99.0  # the skipped row must be ignored entirely
+    fake[1, :] = 99.0  # the skipped row selects nothing and must stay at zero
 
-    class StubActor:
-        def __init__(self):
-            self.calls = 0
-
-        def compute_logp(self, batch):
-            self.calls += 1
-            # Only the active trajectory should be forwarded.
-            assert len(batch) == 1, f"forwarded {len(batch)} trajectories, expected 1"
-            return [fake]
-
-    actor = StubActor()
-    _attach_opd_teacher_logps(actor, [traj])
-    check("teacher forward ran once", actor.calls == 1)
-    check(
-        "OPD inputs consumed",
-        not any(k in traj for k in ("opd_input_ids", "opd_attention_mask", "opd_loss_mask")),
+    rolled_train_mask = torch.roll(traj["loss_mask"], shifts=-1, dims=-1)
+    # The skipped row is inert via its zero weight, so it must be excluded from
+    # the training selection exactly as the caller does.
+    rolled_train_mask = rolled_train_mask * (traj["opd_token_weight"] > 0)
+    aligned = _realign_opd_teacher_logp(
+        fake,
+        traj["opd_loss_mask"],
+        rolled_train_mask,
+        torch.zeros_like(traj["logprobs"]),
     )
-
-    aligned = traj["opd_teacher_logp"]
     check("aligned tensor matches the training layout", aligned.shape == traj["logprobs"].shape)
     train_start = len(clean_prompt) - 1
     got = aligned[0, train_start : train_start + len(output_tokens)]
@@ -356,16 +352,50 @@ def test_opd_realignment() -> None:
     )
     check("skipped row left at zero", float(aligned[1].abs().sum()) == 0.0)
 
-    # An off-by-one would be caught here: shifting the plant by one position must
-    # produce a different aligned result.
-    shifted = torch.zeros_like(fake)
-    shifted[0, start + 1 : start + 1 + len(output_tokens)] = signature
+    # A count mismatch means the two layouts do not cover the same tokens; that
+    # must be an error rather than a silent partial copy.
+    try:
+        _realign_opd_teacher_logp(
+            fake,
+            traj["opd_loss_mask"],
+            torch.ones_like(rolled_train_mask),
+            torch.zeros_like(traj["logprobs"]),
+        )
+    except RuntimeError:
+        check("a token-count mismatch raises", True)
+    else:
+        check("a token-count mismatch raises", False, "silently copied a partial set")
+
+
+def test_trainer_defers_tensor_ops() -> None:
+    """compute_logp can return RTensor handles rather than local tensors.
+
+    The data lives on the worker that produced it and is materialized only once
+    the batch reaches the actor, so any tensor method called on it in the trainer
+    raises -- which is exactly how the first real run died. The trainer must store
+    what compute_logp returned and nothing more; `_attach_teacher_context_logps`
+    already works this way.
+    """
+    print("\n[4b] the trainer does not touch the returned log-probs")
+    import inspect
+
+    from areal.trainer import rl_trainer
+
+    src = inspect.getsource(rl_trainer._attach_opd_teacher_logps)
+    body = src[src.index('"""', src.index('"""') + 3) + 3 :]
+    for forbidden in (".to(", "torch.roll", "torch.zeros_like", "[teacher_sel", ".bool()"):
+        check(
+            f"no {forbidden} on the returned handle",
+            forbidden not in body,
+            "RTensor supports none of these until it reaches the actor",
+        )
     check(
-        "the check is sensitive to a one-token shift",
-        not torch.allclose(
-            fake[0, start : start + len(output_tokens)],
-            shifted[0, start : start + len(output_tokens)],
-        ),
+        "stores the handle verbatim",
+        'trajectory["opd_teacher_logp"] = teacher_logp' in body,
+    )
+    check(
+        "keeps opd_loss_mask for the actor to realign with",
+        'trajectory.pop("opd_loss_mask"' not in body,
     )
 
 
@@ -488,6 +518,7 @@ def main() -> int:
     test_slot_assignment()
     test_opd_eligibility()
     test_opd_realignment()
+    test_trainer_defers_tensor_ops()
     test_opd_advantage()
     test_opd_absent_from_loss()
     print()
