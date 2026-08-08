@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the three 0808 arms differ in exactly one thing each.
+"""Check the four 0808 arms differ in exactly one thing each.
 
 A control arm that quietly differs from the treatment in a second way is worse
 than no control, so this asserts the shared settings really are shared and that
@@ -35,8 +35,11 @@ def load(name: str) -> TutorConfig:
 
 
 def main() -> int:
-    print("\n[1] all three inherit the 0805/v2 baseline across directories")
-    arms = {name: load(name) for name in ("baseline", "prompt", "opd")}
+    print("\n[1] all four inherit the 0805/v2 baseline across directories")
+    arms = {
+        name: load(name)
+        for name in ("baseline", "prompt", "opd", "opd-handback")
+    }
     for name, cfg in arms.items():
         check(f"{name}: inherited n_samples=8", cfg.gconfig.n_samples == 8,
               str(cfg.gconfig.n_samples))
@@ -82,6 +85,11 @@ def main() -> int:
     check("opd: prompt instruction off", arms["opd"].prompt_instruction.enabled is False)
     check("opd: guided slots off", arms["opd"].guided_slots.enabled is False)
 
+    hb = arms["opd-handback"]
+    check("opd-handback: opd on", hb.opd.enabled is True)
+    check("opd-handback: prompt instruction off", hb.prompt_instruction.enabled is False)
+    check("opd-handback: guided slots off", hb.guided_slots.enabled is False)
+
     print("\n[4] the two treatment arms are told the same thing at the same time")
     p, o = arms["prompt"].prompt_instruction, arms["opd"].opd
     check(
@@ -99,6 +107,74 @@ def main() -> int:
         p.resolved_instruction.startswith("Your previous message did not get through"),
         p.resolved_instruction[:60],
     )
+
+    print("\n[4b] the handback arm differs from opd in the two intended ways only")
+    from examples.tutor.prompts import (
+        TEACHER_HANDBACK_INSTRUCTION,
+        TEACHER_REPAIR_INSTRUCTION,
+        resolve_teacher_instruction,
+    )
+
+    o, h = arms["opd"].opd, arms["opd-handback"].opd
+    check(
+        "different wording",
+        h.resolved_instruction == TEACHER_HANDBACK_INSTRUCTION
+        and o.resolved_instruction == TEACHER_REPAIR_INSTRUCTION,
+        h.resolved_instruction[:50],
+    )
+    check("named, not copied", h.instruction == "@handback", repr(h.instruction))
+    check("label follows the name", h.instruction_name == "handback", h.instruction_name)
+    check(
+        "no turn gate: the gap it targets is in the first message",
+        h.min_prior_failed_turns == 0,
+        str(h.min_prior_failed_turns),
+    )
+    check(
+        "it does not assert anything about the history",
+        "previous" not in h.resolved_instruction.lower(),
+        "an ungated instruction fires at turn 1, where there is no history to "
+        "make a claim about",
+    )
+    for label, get in {
+        "loss_weight": lambda c: c.loss_weight,
+        "reward_clip": lambda c: c.reward_clip,
+        "max_turns_per_episode": lambda c: c.max_turns_per_episode,
+        "skip_guided_rows": lambda c: c.skip_guided_rows,
+        "skip_leaked_rows": lambda c: c.skip_leaked_rows,
+    }.items():
+        check(
+            f"opd/opd-handback share {label}",
+            get(o) == get(h),
+            f"{get(o)!r} vs {get(h)!r}",
+        )
+
+    print("\n[4c] a mistyped instruction name fails loudly")
+    check(
+        "@handback resolves",
+        resolve_teacher_instruction("@handback") == (TEACHER_HANDBACK_INSTRUCTION, "handback"),
+    )
+    check(
+        "empty keeps the historical default",
+        resolve_teacher_instruction("") == (TEACHER_REPAIR_INSTRUCTION, "repair"),
+    )
+    check(
+        "a literal sentence is used verbatim",
+        resolve_teacher_instruction("Say hello.") == ("Say hello.", "custom"),
+    )
+    try:
+        resolve_teacher_instruction("@handbak")
+    except ValueError as exc:
+        check("a typo raises", "unknown named" in str(exc), str(exc)[:80])
+    else:
+        check("a typo raises", False, "trained on the literal string instead")
+    cfg = load("opd-handback")
+    cfg.opd.instruction = "@nope"
+    try:
+        cfg.opd.__post_init__()
+    except ValueError:
+        check("and it raises at config load, before any GPU time", True)
+    else:
+        check("and it raises at config load, before any GPU time", False)
 
     print("\n[5] the arms cannot be accidentally combined")
     cfg = load("opd")
@@ -145,7 +221,7 @@ def main() -> int:
     if FAILURES:
         print(f"{len(FAILURES)} FAILED: {FAILURES}")
         return 1
-    print("all three arms check out")
+    print("all four arms check out")
     return 0
 
 

@@ -1313,12 +1313,20 @@ class TutorInstructionPromptConfig:
             raise ValueError(
                 "prompt_instruction.min_prior_failed_turns must be non-negative."
             )
+        self.resolved_instruction  # raises on an unknown "@name"
 
     @property
     def resolved_instruction(self) -> str:
-        from examples.tutor.prompts import TEACHER_REPAIR_INSTRUCTION
+        from examples.tutor.prompts import resolve_teacher_instruction
 
-        return self.instruction or TEACHER_REPAIR_INSTRUCTION
+        return resolve_teacher_instruction(self.instruction)[0]
+
+    @property
+    def instruction_name(self) -> str:
+        """Short label for logging, so a run says which sentence it was given."""
+        from examples.tutor.prompts import resolve_teacher_instruction
+
+        return resolve_teacher_instruction(self.instruction)[1]
 
 
 @dataclass
@@ -1355,7 +1363,9 @@ class TutorOpdConfig:
         metadata={
             "help": (
                 "Instruction the teacher is conditioned on. Empty uses "
-                "prompts.TEACHER_REPAIR_INSTRUCTION, the validated wording."
+                "prompts.TEACHER_REPAIR_INSTRUCTION. A leading @ names one of "
+                "prompts.TEACHER_NAMED_INSTRUCTIONS, e.g. \"@handback\"; "
+                "anything else is used verbatim."
             )
         },
     )
@@ -1425,12 +1435,20 @@ class TutorOpdConfig:
             raise ValueError("opd.min_prior_failed_turns must be non-negative.")
         if self.max_turns_per_episode < 0:
             raise ValueError("opd.max_turns_per_episode must be non-negative.")
+        self.resolved_instruction  # raises on an unknown "@name"
 
     @property
     def resolved_instruction(self) -> str:
-        from examples.tutor.prompts import TEACHER_REPAIR_INSTRUCTION
+        from examples.tutor.prompts import resolve_teacher_instruction
 
-        return self.instruction or TEACHER_REPAIR_INSTRUCTION
+        return resolve_teacher_instruction(self.instruction)[0]
+
+    @property
+    def instruction_name(self) -> str:
+        """Short label for logging, so a run says which sentence it was given."""
+        from examples.tutor.prompts import resolve_teacher_instruction
+
+        return resolve_teacher_instruction(self.instruction)[1]
 
 
 @dataclass

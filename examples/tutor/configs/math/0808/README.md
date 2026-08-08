@@ -1,14 +1,20 @@
-# 0808 — does the repair instruction survive training, and where does it live?
+# 0808 — what should the teacher be told, and does it survive training?
 
-Three arms, run together, differing in exactly one thing each.
+Four arms, run together, differing in exactly one thing each.
 
-| config | training | deployment | one-line question |
-| --- | --- | --- | --- |
-| `baseline.yaml` | — | — | control |
-| `prompt.yaml` | instruction in the prompt | instruction in the prompt | what is a sentence in the prompt worth *after* training? |
-| `opd.yaml` | distilled into the weights | nothing in the prompt | can the same effect be moved into the weights? |
+| config | told | training | deployment | one-line question |
+| --- | --- | --- | --- | --- |
+| `baseline.yaml` | — | — | — | control |
+| `prompt.yaml` | repair | in the prompt | in the prompt | what is a sentence in the prompt worth *after* training? |
+| `opd.yaml` | repair | distilled | nothing in the prompt | can the same effect be moved into the weights? |
+| `opd-handback.yaml` | handback | distilled | nothing in the prompt | was repair the wrong thing to say? |
 
-All three inherit `math/0805/v2/…-g8k4-leakt` unchanged. Cross-directory
+The first three are one experiment about *placement*, holding the sentence fixed.
+The fourth changes the sentence, holding placement fixed. Read `opd-handback`
+against `baseline` for "did it help" and against `opd` for "was repair the wrong
+target".
+
+All four inherit `math/0805/v2/…-g8k4-leakt` unchanged. Cross-directory
 inheritance works via `hydra.searchpath`, which the loader honours; without it
 Hydra's search path is the config file's own directory.
 
@@ -31,6 +37,47 @@ Two things that measurement cannot say, and that these runs are for:
    same thing keeps failing looks like a capability, and a sentence in the prompt
    does not install a capability. If that is right, `prompt` lands near
    `baseline` while `opd` does not.
+
+## The fourth arm, and why the sentence might be wrong
+
+Everything above targets one failure: the tutor repeating itself while the student
+stays stuck. The 30-task collection dump says the expensive failure is a different
+one.
+
+Same 30 tasks, same 1.7b student, five teachers, counting a task as won only if
+the student got it *and* the teacher never stated the answer:
+
+| | success | leaked | **clean win** | turns |
+| --- | --- | --- | --- | --- |
+| gemini | 100% | 17% | **83%** | 1.93 |
+| qwen_untrained | 93% | 47% | 50% | 2.30 |
+| trained_leak1 | 100% | 57% | 43% | 2.30 |
+| leakt | 57% | 23% | 47% | 5.43 |
+| trained_leak0 | 100% | 73% | **27%** | 2.30 |
+
+Paired on the same tasks, gemini is +33.3% [+13.3, +53.3] over `qwen_untrained`,
++40.0% [+20.0, +60.0] over `trained_leak1`, +36.7% [+16.7, +56.7] over `leakt` and
++56.7% [+40.0, +73.3] over `trained_leak0`. The three qwen arms at 100% success
+are buying it by leaking. (`Leak count` is in the header of the trained dumps;
+gemini and `qwen_untrained` have no such field, so the column is recomputed the
+same way for all five — every numeric atom of the ground truth appearing in one
+teacher message — and agrees with the header on 24-27 of 30 where a header
+exists.)
+
+`leakt` shows the reward can already suppress leaking: terminating the episode on
+a leak takes the rate to 23%. It also takes success to 57%. What the reward cannot
+supply is the thing gemini puts in the leak's place. On first messages gemini
+hands the work back on 93% of tasks against 33-47%, asserts the fix on 30% against
+80-83%, brings in 6.2 distinct mathematical objects against 2.9-3.5 of which only
+44% were already in the student's own work against 53-62%, and ends on a question
+57% of the time against 3-17%. `TEACHER_HANDBACK_INSTRUCTION` is those three
+numbers written as a sentence.
+
+Note what this is *not* evidence for. At the level of coarse move category gemini
+is more uniform than the qwen teachers, not more varied — shape entropy 2.05
+against 2.33-2.73. It plays one move almost everywhere. What varies per task is
+which idea it drags in, which is a level below any label we have. That is the same
+conclusion as "Not here" below, reached from the other direction.
 
 ## Reading the result
 
@@ -76,6 +123,13 @@ the chat format is the first thing to check, not the last.
   the comparison is not clean.
 - The usual: `final_correct`, `leaks`, grad norm, entropy.
 
+For `opd-handback` specifically, `opd/selected_ratio` should be much *higher* than
+in `opd`: the turn gate is off, so it is bounded by `max_turns_per_episode: 2` and
+by the leak skip rather than by turn 3 being reached at all. If it comes back
+starved, `skip_leaked_rows` is the knob — leaked rows are exactly the ones this
+instruction disagrees with most, and they are excluded only to avoid stacking an
+unclipped KL on tokens that already carry a terminal penalty.
+
 ## Not here
 
 `guided_slots` exists in the code but no arm uses it. Its premise was that which
@@ -91,3 +145,9 @@ That result is scoped to a six-label move taxonomy. It says the *category* of mo
 carries no conditional information — not that adaptation is worthless. Whether to
 go finer, and how much finer, lives inside a category, and that is what OPD acts
 on.
+
+The collection dump agrees independently. The best teacher on that set plays the
+same coarse move nearly everywhere (handback on 93% of tasks, category entropy
+2.05 against 2.33-2.73 for the qwen teachers) and varies underneath it. A
+slot mechanism that prescribes a category is the wrong instrument for that, and a
+token-level one is the right shape.

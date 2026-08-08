@@ -230,6 +230,52 @@ TEACHER_REPAIR_INSTRUCTION = (
     "student has a smaller and more concrete thing to do."
 )
 
+# Measured against gemini on the 30-task collection dump, where gemini taught the
+# same student successfully without ever stating the answer on 83% of tasks
+# against 27-50% for every qwen arm (paired difference +33 to +57 points, all
+# intervals clear of zero). The three clauses below are the three places the gap
+# actually showed up, in order: gemini asserted the fix on 30% of first messages
+# against 80-83%; it brought in 6.2 distinct mathematical objects against 2.9-3.5,
+# only 44% of which were already in the student's own work against 53-62%; and it
+# ended on a question 57% of the time against 3-17%.
+TEACHER_HANDBACK_INSTRUCTION = (
+    "Do not state the answer, the corrected step, or the value the student is "
+    "looking for. Instead, name one idea, fact, or relationship that this "
+    "problem turns on and that the student has not used yet, introduce it on "
+    "its own, and end with a single concrete question the student can act on "
+    "immediately."
+)
+
+# Configs name an instruction instead of copying its wording, so the two arms of
+# a comparison cannot drift apart and a measurement stays attached to the exact
+# string it was taken against.
+TEACHER_NAMED_INSTRUCTIONS: dict[str, str] = {
+    "repair": TEACHER_REPAIR_INSTRUCTION,
+    "handback": TEACHER_HANDBACK_INSTRUCTION,
+}
+
+
+def resolve_teacher_instruction(text: str | None) -> tuple[str, str]:
+    """Return ``(wording, name)`` for a configured instruction string.
+
+    Empty keeps the historical default, so configs written before this existed
+    are unchanged. A leading ``@`` selects a named instruction. A typo then
+    raises here, at config load, instead of quietly training the teacher on the
+    literal string ``"@handbak"`` for a week.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return TEACHER_REPAIR_INSTRUCTION, "repair"
+    if raw.startswith("@"):
+        key = raw[1:]
+        if key not in TEACHER_NAMED_INSTRUCTIONS:
+            raise ValueError(
+                f"unknown named teacher instruction {raw!r}; known names: "
+                f"{sorted(TEACHER_NAMED_INSTRUCTIONS)}"
+            )
+        return TEACHER_NAMED_INSTRUCTIONS[key], key
+    return raw, "custom"
+
 NO_VISIBLE_TUTORING_HISTORY = "No visible tutoring history yet."
 NO_PREVIOUS_VISIBLE_TUTORING_HISTORY = "No previous visible tutoring history."
 EMPTY_PLACEHOLDER = "(empty)"

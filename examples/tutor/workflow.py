@@ -239,6 +239,7 @@ from examples.tutor.prompts import (
     TEACHER_MOVE_INSTRUCTIONS,
     TEACHER_PRE_SOLVE_FILTER_CONTEXT_TEMPLATE,
     TEACHER_REPAIR_INSTRUCTION,
+    resolve_teacher_instruction,
     TEACHER_PROGRESS_JUDGE_USER_TEMPLATE,
     TEACHER_STATE_USER_TEMPLATE,
     WORLD_MODEL_USER_TEMPLATE,
@@ -864,9 +865,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.opd_enabled = bool(opd_config.get("enabled", False))
         self.opd_loss_weight = float(opd_config.get("loss_weight", 1.0))
         self.opd_reward_clip = float(opd_config.get("reward_clip", 0.0))
-        self.opd_instruction = (
-            str(opd_config.get("instruction") or "").strip()
-            or TEACHER_REPAIR_INSTRUCTION
+        self.opd_instruction, self.opd_instruction_name = (
+            resolve_teacher_instruction(opd_config.get("instruction"))
         )
         self.opd_min_prior_failed_turns = int(
             opd_config.get("min_prior_failed_turns", 2)
@@ -880,9 +880,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError("opd reward clip must be non-negative (0 disables).")
         prompt_instr = dict(prompt_instruction or {})
         self.prompt_instruction_enabled = bool(prompt_instr.get("enabled", False))
-        self.prompt_instruction_text = (
-            str(prompt_instr.get("instruction") or "").strip()
-            or TEACHER_REPAIR_INSTRUCTION
+        self.prompt_instruction_text, self.prompt_instruction_name = (
+            resolve_teacher_instruction(prompt_instr.get("instruction"))
         )
         self.prompt_instruction_min_prior_failed_turns = int(
             prompt_instr.get("min_prior_failed_turns", 2)
@@ -1531,7 +1530,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 return None
             return TeacherGuidance(
                 kind="prompt",
-                name="repair",
+                name=self.prompt_instruction_name,
                 instruction=self.prompt_instruction_text,
             )
 
@@ -4278,9 +4277,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             return "leak"
         # Episodes terminate on success, so every turn the tutor produced was
         # preceded by a wrong student answer: the number of tutor turns that have
-        # already failed is turn_idx - 1. The repair instruction asserts that the
-        # previous message did not get through, so it is only truthful once that
-        # count reaches the threshold.
+        # already failed is turn_idx - 1. The gate exists because the repair
+        # instruction asserts that the previous message did not get through, and
+        # that is only true once the count reaches the threshold. An instruction
+        # that makes no claim about the history sets this to 0 and supervises from
+        # turn 1, which is where most episodes actually end.
         if int(state.turn_idx) - 1 < self.opd_min_prior_failed_turns:
             return "too_early"
         if not list(getattr(artifact.tutor_response, "output_tokens", []) or []):
@@ -4326,7 +4327,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                         clean=True,
                         guidance_override=TeacherGuidance(
                             kind="opd",
-                            name="repair",
+                            name=self.opd_instruction_name,
                             instruction=self.opd_instruction,
                         ),
                     )
