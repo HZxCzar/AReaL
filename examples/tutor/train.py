@@ -484,6 +484,7 @@ def main(args):
         world_model=asdict(config.world_model),
         guided_slots=asdict(config.guided_slots),
         opd=asdict(config.opd),
+        prompt_instruction=asdict(config.prompt_instruction),
         local_advantage_turn_discount=config.actor.turn_discount,
         teacher_system_prompt=config.teacher_system_prompt,
         teacher_anti_leak_instruction_enabled=(

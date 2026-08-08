@@ -1,0 +1,19 @@
+# Control arm. Byte-for-byte the 0805/v2 setup; nothing from the guided_slots or
+# OPD work is enabled. It exists because there is no usable historical run of this
+# exact config: output/tutor has two attempts at it (20260806 18:43 and 21:34),
+# both of which produced two files and no checkpoint.
+defaults:
+  - /math/0805/v2/qwen8b-train-qwen1.7b-eval3-math-pre-aleak-generated-g8k4-leakt@_global_
+  - _self_
+
+# Hydra resolves config groups relative to the primary config's own directory, so
+# without this a sibling directory cannot be inherited from at all.
+hydra:
+  searchpath:
+    - file://examples/tutor/configs
+
+trial_name: 0808-baseline
+
+stats_logger:
+  wandb:
+    group: 0808-repair-instruction

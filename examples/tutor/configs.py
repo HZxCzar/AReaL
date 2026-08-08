@@ -1266,6 +1266,62 @@ class TutorGuidedSlotsConfig:
 
 
 @dataclass
+class TutorInstructionPromptConfig:
+    """Control arm: leave the instruction in the prompt instead of distilling it.
+
+    This exists so that "OPD worked" is a defensible claim. Appending a sentence
+    to the prompt is free, so OPD has to beat that, not beat nothing. The arm is
+    identical to OPD in what the teacher is told and when -- same wording, same
+    turn gate -- and differs only in where it ends up: here it stays in the
+    prompt at training and at evaluation, nothing is stripped, nothing is
+    distilled, and no part of the turn is off-policy.
+
+    Reading the three arms together:
+      opd ~ baseline                     the distillation did nothing
+      prompt_instruction ~ baseline      the sentence stops paying once the
+                                         policy is trained, i.e. it only ever
+                                         raised the starting point
+      opd ~ prompt_instruction > baseline the effect of the prompt is now in the
+                                         weights, which is the whole point
+      prompt_instruction > opd > baseline only partly transferred
+    """
+
+    enabled: bool = field(default=False)
+    instruction: str = field(
+        default="",
+        metadata={
+            "help": (
+                "Empty uses prompts.TEACHER_REPAIR_INSTRUCTION, so this arm and "
+                "opd are told the same thing."
+            )
+        },
+    )
+    min_prior_failed_turns: int = field(
+        default=2,
+        metadata={
+            "help": (
+                "Same gate as opd.min_prior_failed_turns, so the two arms differ "
+                "only in where the instruction ends up."
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        self.instruction = str(self.instruction or "").strip()
+        self.min_prior_failed_turns = int(self.min_prior_failed_turns)
+        if self.enabled and self.min_prior_failed_turns < 0:
+            raise ValueError(
+                "prompt_instruction.min_prior_failed_turns must be non-negative."
+            )
+
+    @property
+    def resolved_instruction(self) -> str:
+        from examples.tutor.prompts import TEACHER_REPAIR_INSTRUCTION
+
+        return self.instruction or TEACHER_REPAIR_INSTRUCTION
+
+
+@dataclass
 class TutorOpdConfig:
     """On-policy distillation from a teacher given a privileged instruction.
 
@@ -1450,6 +1506,9 @@ class TutorConfig(GRPOConfig):
         default_factory=TutorGuidedSlotsConfig
     )
     opd: TutorOpdConfig = field(default_factory=TutorOpdConfig)
+    prompt_instruction: TutorInstructionPromptConfig = field(
+        default_factory=TutorInstructionPromptConfig
+    )
     teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
     teacher_anti_leak_instruction_enabled: bool = field(
         default=False,
@@ -1545,6 +1604,18 @@ class TutorConfig(GRPOConfig):
                     "log-probabilities on the training prompt and applies "
                     "actor.behave_imp_weight_cap to the resulting weight."
                 )
+        if self.prompt_instruction.enabled and self.opd.enabled:
+            raise ValueError(
+                "prompt_instruction and opd are the two arms of the same "
+                "comparison -- the first keeps the instruction in the prompt, the "
+                "second distils it into the weights. Enabling both tells the "
+                "teacher the same thing twice and makes neither attributable."
+            )
+        if self.prompt_instruction.enabled and self.guided_slots.enabled:
+            raise ValueError(
+                "prompt_instruction is a control arm and must differ from the "
+                "baseline in exactly one way; guided_slots adds a second change."
+            )
         if self.opd.enabled and self.actor.backend.startswith("megatron"):
             raise ValueError(
                 "opd.enabled currently requires an FSDP actor backend; the "

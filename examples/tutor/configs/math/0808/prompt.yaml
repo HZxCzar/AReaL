@@ -1,0 +1,41 @@
+# Control arm for OPD: the instruction stays in the prompt.
+#
+# Same wording as the OPD arm, same turn gate, applied to every rollout. It is
+# present when the turn is generated, present in the prompt the turn is trained
+# on, and present at evaluation. Nothing is stripped, nothing is distilled, and no
+# part of the turn is off-policy -- the only difference from baseline is that the
+# teacher is told this at turn 3 onward.
+#
+# Its job is to make "OPD worked" mean something. Appending a sentence to a prompt
+# is free, so OPD has to beat that rather than beat nothing. If this arm lands on
+# baseline, the +7.9% measured on the untrained policy was only ever a better
+# starting point and the whole line of work stops here.
+#
+# Placement is inside the mechanism, not this file: the instruction goes at the
+# very end of the prompt, immediately before generation. The identical text in the
+# system prompt is followed far less often, which is why it is not simply appended
+# to teacher_system_prompt.
+defaults:
+  - /math/0805/v2/qwen8b-train-qwen1.7b-eval3-math-pre-aleak-generated-g8k4-leakt@_global_
+  - _self_
+
+hydra:
+  searchpath:
+    - file://examples/tutor/configs
+
+trial_name: 0808-prompt
+
+prompt_instruction:
+  enabled: true
+  # Empty uses prompts.TEACHER_REPAIR_INSTRUCTION, the exact wording every
+  # measurement was taken against. Do not paraphrase it here.
+  instruction: ""
+  # Must match opd.min_prior_failed_turns in the opd arm, or the two arms see the
+  # instruction at different rates and the comparison is not clean. 2 means turn 3
+  # onward: episodes terminate on success, so by then the tutor has already failed
+  # twice and the sentence is literally true.
+  min_prior_failed_turns: 2
+
+stats_logger:
+  wandb:
+    group: 0808-repair-instruction

@@ -130,6 +130,19 @@ class TeacherGuidance:
     instruction: str
     slot: int | None = None
 
+    @property
+    def strip_from_training(self) -> bool:
+        """Whether the instruction must be removed from the prompt this turn is
+        trained on.
+
+        "move" guidance is an exploration device: the policy must not learn to
+        depend on being told, so the instruction is stripped and the turn becomes
+        off-policy. "prompt" guidance is the opposite -- it is a deployment
+        choice being measured, so it stays in the prompt at training and at
+        evaluation, and nothing about the turn is off-policy.
+        """
+        return self.kind != "prompt"
+
 
 @dataclass(slots=True)
 class TutorTurnState:

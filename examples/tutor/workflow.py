@@ -576,6 +576,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         world_model: dict[str, Any] | None = None,
         guided_slots: dict[str, Any] | None = None,
         opd: dict[str, Any] | None = None,
+        prompt_instruction: dict[str, Any] | None = None,
         local_advantage_turn_discount: float = 1.0,
         teacher_system_prompt: str = "",
         teacher_anti_leak_instruction_enabled: bool = False,
@@ -877,6 +878,20 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError("opd loss weight must be positive when enabled.")
         if self.opd_enabled and self.opd_reward_clip < 0.0:
             raise ValueError("opd reward clip must be non-negative (0 disables).")
+        prompt_instr = dict(prompt_instruction or {})
+        self.prompt_instruction_enabled = bool(prompt_instr.get("enabled", False))
+        self.prompt_instruction_text = (
+            str(prompt_instr.get("instruction") or "").strip()
+            or TEACHER_REPAIR_INSTRUCTION
+        )
+        self.prompt_instruction_min_prior_failed_turns = int(
+            prompt_instr.get("min_prior_failed_turns", 2)
+        )
+        if self.prompt_instruction_enabled and self.opd_enabled:
+            raise ValueError(
+                "prompt_instruction and opd are the two arms of one comparison; "
+                "enabling both makes neither attributable."
+            )
         progress_config = dict(teacher_progress_judge or {})
         self.teacher_progress_judge_enabled = bool(
             progress_config.get("enabled", False)
@@ -1503,6 +1518,23 @@ class TutorAgentWorkflow(RolloutWorkflow):
         collapsed policy would never sample. Evaluation never receives guidance:
         the whole point is that the deployed policy behaves this way unprompted.
         """
+        # Control arm. Unlike a guided slot this is a deployment choice being
+        # measured, so it applies to every rollout, is kept in the prompt the turn
+        # is trained on, and stays on at evaluation. The turn gate matches
+        # opd.min_prior_failed_turns so the two arms differ only in where the
+        # instruction ends up.
+        if getattr(self, "prompt_instruction_enabled", False):
+            if (
+                int(turn_idx) - 1
+                < self.prompt_instruction_min_prior_failed_turns
+            ):
+                return None
+            return TeacherGuidance(
+                kind="prompt",
+                name="repair",
+                instruction=self.prompt_instruction_text,
+            )
+
         if not self._is_guided_slot(group_index):
             return None
         if int(turn_idx) not in self.guided_slots_turns:
@@ -2165,9 +2197,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 # A guided turn MUST get the override: without it the appended
                 # instruction stays in the training prompt and the policy learns
                 # to obey an instruction it will never see at eval, silently and
-                # with no error.
+                # with no error. Control-arm ("prompt") guidance is the exact
+                # opposite -- it is meant to stay -- so it asks not to be stripped.
                 if artifact.tutor_state.teacher_prompt_selection is not None
-                or artifact.tutor_state.guidance is not None
+                or (
+                    artifact.tutor_state.guidance is not None
+                    and artifact.tutor_state.guidance.strip_from_training
+                )
                 else None
             )
             for artifact in turn_artifacts
@@ -4218,6 +4254,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
     def _opd_skip_reason(self, artifact: TurnArtifact) -> str:
         """Why this turn is not eligible for on-policy distillation, or ""."""
         state = artifact.tutor_state
+        if state.guidance is not None and state.guidance.kind == "prompt":
+            # Defensive: the configs forbid running both arms at once, and the
+            # teacher would otherwise be handed the instruction twice.
+            return "prompt_arm"
         if self.opd_skip_guided_rows and state.guidance is not None:
             # This row is already trained on a rewritten prompt. Stacking a second
             # perturbation on it makes neither effect attributable.
@@ -4305,6 +4345,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         }
         for reason in (
             "guided",
+            "prompt_arm",
             "leak",
             "too_early",
             "empty",
@@ -4536,6 +4577,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         if success_round > 0:
             metrics["solve_turn"] = int(success_round)
+
+        if getattr(self, "prompt_instruction_enabled", False):
+            n = sum(
+                1
+                for trace in traces
+                if trace.tutor_state.guidance is not None
+                and trace.tutor_state.guidance.kind == "prompt"
+            )
+            metrics["prompt_instruction/turns"] = float(n)
+            metrics["prompt_instruction/share_of_turns"] = float(
+                n / max(1, len(traces))
+            )
 
         if getattr(self, "guided_slots_enabled", False):
             guided = [
