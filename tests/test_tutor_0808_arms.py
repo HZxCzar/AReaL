@@ -133,6 +133,14 @@ def main() -> int:
         "it is a deployment choice being measured, so it must survive evaluation",
     )
 
+    build_src = inspect.getsource(TutorAgentWorkflow._build_tutor_messages)
+    check(
+        "guidance goes into the system turn, not the conversation",
+        "_append_guidance_to_system" in build_src,
+        "appending to the last user message would put a directive in the "
+        "student's mouth",
+    )
+
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILED: {FAILURES}")

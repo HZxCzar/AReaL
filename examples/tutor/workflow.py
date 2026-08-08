@@ -4164,24 +4164,28 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
 
     @staticmethod
-    def _append_guidance_tail(
-        messages: list[dict[str, str]], instruction: str
-    ) -> list[dict[str, str]]:
-        """Put the instruction at the very end of the prompt.
+    def _append_guidance_to_system(system: str, instruction: str) -> str:
+        """Put a per-reply instruction at the end of the system prompt.
 
-        Placement is load-bearing, not cosmetic: the identical text in the system
-        prompt is followed far less often than when it sits immediately before
-        generation. Measured in analysis/hazard_20260806.
+        It cannot go at the end of the message list. The teacher's prompt is a
+        real conversation -- its own turns are assistant, the student's are user
+        -- so appending a directive there puts words in the student's mouth, and
+        from turn 3 on some student turns would carry an instruction while
+        earlier ones did not. The system turn is where a directive belongs.
+
+        An earlier measurement found tail placement followed more reliably than
+        the system prompt, but that was taken against the single-user-message
+        state template, where the "tail" is the end of a state description rather
+        than someone's utterance. Generation here uses the chat format, so that
+        result does not transfer and the effect size measured under it is not
+        guaranteed to carry over.
         """
         # str.format, not render_prompt: render_prompt is Jinja2, so a "{...}"
         # placeholder would pass through untouched and the instruction would be
         # silently dropped. Plain formatting also keeps the instruction text out
         # of a template engine, where a stray "{{" would be interpreted.
-        tail = TEACHER_GUIDANCE_TAIL_TEMPLATE.format(instruction=instruction.strip())
-        if messages and messages[-1]["role"] == "user":
-            merged = f"{messages[-1]['content'].rstrip()}\n\n{tail}\n"
-            return [*messages[:-1], {**messages[-1], "content": merged}]
-        return [*messages, {"role": "user", "content": f"{tail}\n"}]
+        block = TEACHER_GUIDANCE_TAIL_TEMPLATE.format(instruction=instruction.strip())
+        return f"{system.rstrip()}\n\n{block}"
 
     def _build_tutor_messages(
         self,
@@ -4189,20 +4193,26 @@ class TutorAgentWorkflow(RolloutWorkflow):
         *,
         clean: bool = False,
         include_guidance: bool = True,
+        guidance_override: TeacherGuidance | None = None,
     ) -> list[dict[str, str]]:
-        messages = [
-            {
-                "role": "system",
-                "content": self._teacher_system_for_state(tutor_state, clean=clean),
-            },
+        """Messages for one teacher turn.
+
+        ``guidance_override`` lets a caller ask for an instruction the rollout did
+        not carry, which is how the OPD teacher is built: the row is unguided, and
+        the teacher differs from it only by this instruction.
+        """
+        system = self._teacher_system_for_state(tutor_state, clean=clean)
+        guidance = (
+            guidance_override if guidance_override is not None else tutor_state.guidance
+        )
+        if include_guidance and guidance is not None:
+            system = self._append_guidance_to_system(system, guidance.instruction)
+        return [
+            {"role": "system", "content": system},
             *self._render_conversation(
                 tutor_state.public_history.turns, speaker="teacher"
             ),
         ]
-        guidance = tutor_state.guidance
-        if include_guidance and guidance is not None:
-            messages = self._append_guidance_tail(messages, guidance.instruction)
-        return messages
 
     def _build_student_messages(
         self, state: StudentTurnState
@@ -4309,8 +4319,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     getattr(artifact.tutor_response, "tokenizer", None) or self.tokenizer
                 )
                 try:
-                    messages = self._append_guidance_tail(
-                        self._clean_tutor_messages(artifact), self.opd_instruction
+                    # Exactly the training prompt plus the instruction, so the
+                    # teacher and the policy differ by nothing else.
+                    messages = self._build_tutor_messages(
+                        artifact.tutor_state,
+                        clean=True,
+                        guidance_override=TeacherGuidance(
+                            kind="opd",
+                            name="repair",
+                            instruction=self.opd_instruction,
+                        ),
                     )
                     tokens = apply_chat_template(
                         tokenizer, messages, enable_thinking=self.enable_thinking

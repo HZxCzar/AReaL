@@ -121,7 +121,7 @@ def make_workflow_stub(**attrs):
         "_render_conversation",
         "_task_context",
         "_append_teacher_pre_solve_context",
-        "_append_guidance_tail",
+        "_append_guidance_to_system",
         "_resolve_teacher_system_prompt",
         "_teacher_system_prompt_for_selection",
         "_select_guidance",
@@ -163,11 +163,22 @@ def test_guidance_stripped() -> None:
         any(marker in m["content"] for m in rollout),
     )
     check(
-        "instruction is in the LAST message, not the system prompt",
-        marker in rollout[-1]["content"] and marker not in rollout[0]["content"],
-        "placement is load-bearing; a system-prompt instruction is followed far less",
+        "instruction is in the SYSTEM prompt",
+        marker in rollout[0]["content"],
+        "a directive belongs in the system turn",
     )
-    check("last message is a user turn", rollout[-1]["role"] == "user")
+    check(
+        "no student turn was made to carry it",
+        not any(marker in m["content"] for m in rollout[1:]),
+        "the teacher's prompt is a real conversation; appending to the last user "
+        "message puts words in the student's mouth",
+    )
+    check(
+        "the conversation itself is untouched",
+        [m["role"] for m in rollout]
+        == ["system"] + ["assistant", "user"] * (len(rollout) // 2),
+        str([m["role"] for m in rollout]),
+    )
 
     artifact = TurnArtifact(
         turn_idx=2,
@@ -185,6 +196,12 @@ def test_guidance_stripped() -> None:
         "instruction absent from the training prompt",
         not any(marker in m["content"] for m in clean),
         "this is the failure that trains instruction-following silently",
+    )
+
+    check(
+        "exactly one copy, however long the history",
+        sum(m["content"].count("Instruction for this reply:") for m in rollout) == 1,
+        "it is added at render time and never enters the stored history",
     )
 
     unguided = make_state(2, None)

@@ -14,8 +14,8 @@ Hydra's search path is the config file's own directory.
 
 ## What is being tested
 
-Measured on the current policy, appending one sentence to the end of the teacher
-prompt — *"your previous message did not get through: the student is still
+Measured on the current policy, adding one sentence to the teacher's system
+prompt from turn 3 onward — *"your previous message did not get through: the student is still
 answering incorrectly. Do not restate what you have already said. Explain the next
 step in more detail and at a finer grain than you did before"* — is worth
 **+7.9% [+4.3, +11.5]** on stuck states, via better message content plus an
@@ -45,6 +45,22 @@ opd > prompt > baseline               distilling beats prompting outright
 
 `prompt` is the arm that makes any of this a claim rather than an anecdote.
 Appending a sentence costs nothing, so OPD has to beat *that*, not beat nothing.
+
+## Where the sentence goes
+
+At the end of the **system prompt**, added per turn once the gate fires, on top of
+an otherwise identical `teacher_system_prompt`. Not at the end of the message
+list: the teacher's prompt is a real conversation -- its own turns assistant, the
+student's user -- so a directive appended there is attributed to the student, and
+from turn 3 on some student turns would carry one while earlier ones do not.
+
+This differs from where the +7.9% was measured. That harness rendered the whole
+state as a single user message, where the tail is the end of a state description
+rather than someone's utterance, and tail placement was followed more reliably
+than the system prompt there. Generation here uses the chat format, so that
+comparison does not transfer and the effect size measured under it is not
+guaranteed to carry. If the run comes back flat, re-measuring the instruction in
+the chat format is the first thing to check, not the last.
 
 ## Metrics that decide whether the run is even valid
 

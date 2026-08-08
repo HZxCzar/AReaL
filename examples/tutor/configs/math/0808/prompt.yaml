@@ -12,9 +12,12 @@
 # starting point and the whole line of work stops here.
 #
 # Placement is inside the mechanism, not this file: the instruction goes at the
-# very end of the prompt, immediately before generation. The identical text in the
-# system prompt is followed far less often, which is why it is not simply appended
-# to teacher_system_prompt.
+# end of the SYSTEM prompt. It cannot go at the end of the message list -- the
+# teacher's prompt is a real conversation, its own turns assistant and the
+# student's user, so appending a directive there would put words in the student's
+# mouth and leave some student turns carrying an instruction while earlier ones do
+# not. teacher_system_prompt itself is untouched and stays identical across all
+# three arms; the instruction is added per turn on top of it.
 defaults:
   - /math/0805/v2/qwen8b-train-qwen1.7b-eval3-math-pre-aleak-generated-g8k4-leakt@_global_
   - _self_
