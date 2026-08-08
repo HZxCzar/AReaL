@@ -32,7 +32,7 @@ teacher_pre:
 auxiliary_model:
   mode: api
   enable_thinking: false
-  base_url: https://gedpdkbcbkgjc9qehbbh95j9ao8coqc9.openapi-qb-nat.sii.edu.cn/v1
+  base_url: ${oc.env:TUTOR_QWEN3_8B_BASE_URL}
   model: qwen3-8b
   api_key: ${oc.env:INF_API_KEY}
   timeout: 120

@@ -1,0 +1,34 @@
+defaults:
+  - qwen8b-train-qwen1.7b-eval3-math-pre-aleak-generated-g8k4-leakt@_global_
+  - _self_
+
+trial_name: qwen8b-train-qwen1.7b-eval3-math-hard250-pre-aleak-generated-g8k4-tonly-term
+
+# Inherits g8k4: G=8, bs=16, group_baseline=episode, episode_loss_weighting=false,
+# shuffle=true, max_concurrent_rollouts=16, K=4 replays, single-student eval.
+
+# Restated for clarity even though it is inherited: the rollout STOPS the moment
+# the teacher leaks, before the student sees it. This is the pairing the
+# -tonly-leak1 / -tonly-leak0 configs do not have.
+leak_handling_mode: terminate
+
+reward:
+  # Transfer is the only positive signal. Solving the base task pays nothing by
+  # itself; student_generalize.mode=only_success gates the transfer probe behind
+  # a solved base task, so "solve AND transfer" is the only way to earn anything.
+  success: 0.0
+  # leak_penalty stays at the inherited -1.0. Under terminate, a leak is far more
+  # expensive than that number suggests: the episode ends with no solved turn, so
+  # the only_success gate never opens and the transfer probe never runs. Leaking
+  # forfeits the entire upside on top of paying the penalty -- which is exactly
+  # what -tonly-leak1 could not do, and why its leak rate only fell to ~0.27.
+
+student_generalize:
+  # V1 and V2 both passed the same 8B-solvable/1.7B-unsolved gate. Split one
+  # unit of total transfer reward across them to preserve the old reward scale.
+  level1_reward: 0.5
+  level2_reward: 0.5
+
+stats_logger:
+  wandb:
+    group: 8b-student-diversity-transfer-only-hard250
