@@ -630,6 +630,54 @@ def _compute_episode_group_baseline(
     return baseline
 
 
+def _compute_opd_advantages(
+    behaviour_logp: torch.Tensor,
+    teacher_logp: torch.Tensor,
+    token_weight: torch.Tensor,
+    reward_clip: torch.Tensor,
+    valid_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """On-policy distillation as a per-token advantage penalty.
+
+    Follows the reference formulation (Thinking Machines, on-policy distillation;
+    ``tinker_cookbook/distillation/train_on_policy.py``):
+
+        reverse_kl = log pi_sampled(a_t) - log pi_teacher(a_t)
+        advantages = advantages - coef * reverse_kl
+
+    and then the ordinary importance-sampling/PPO loss runs unchanged, so the
+    distillation signal inherits the same ratio, clipping and behaviour-importance
+    weighting as the task advantage.
+
+    Three details that are easy to get wrong, all matching the reference:
+
+    * The KL is evaluated **only on the sampled token**, not over the full
+      vocabulary. Both sides are scored on the tokens the student actually
+      produced.
+    * The student side is the **sampling-time** log-prob, not a recomputed
+      current-policy one. It is data, fixed for the whole update.
+    * Discount factor zero: the penalty lands on the token that produced it and is
+      not accumulated forward, so it never enters GAE. That is why this is added
+      after the task advantage is complete.
+
+    Returning it as an advantage rather than a loss term is also what makes the
+    gradient treatment right for free. Nothing here differentiates through the
+    sampling distribution -- `behaviour_logp` and `teacher_logp` are both plain
+    data at this point -- so the only gradient path is the policy-gradient one the
+    PPO surrogate already provides.
+
+    ``reward_clip`` is a local addition, not part of the reference: a single
+    outlier token would otherwise pass straight into the advantage. Set it to 0 to
+    disable and match the reference exactly.
+    """
+    active = valid_mask.bool() & (token_weight > 0)
+    reverse_kl = behaviour_logp - teacher_logp
+    clipped = torch.minimum(torch.maximum(reverse_kl, -reward_clip), reward_clip)
+    reverse_kl = torch.where(reward_clip > 0, clipped, reverse_kl)
+    reverse_kl = reverse_kl * active
+    return -token_weight * reverse_kl, reverse_kl, active
+
+
 def _compute_episode_loss_weights(
     trajectory_ids: torch.Tensor,
     valid_mask: torch.Tensor,
@@ -1296,6 +1344,25 @@ class PPOActor:
             if self.adv_norm is not None:
                 advantages = self.adv_norm(advantages, loss_mask)
 
+        # On-policy distillation, added after the task advantage is complete and
+        # after normalization -- the reference adds it to already-computed
+        # advantages, and keeping it out of adv_norm is what preserves its scale
+        # as a KL in nats. It is deliberately not added to `returns`, which stays
+        # the task signal.
+        opd_teacher_logp = data.get("opd_teacher_logp")
+        if opd_teacher_logp is not None:
+            opd_advantages, opd_reverse_kl, opd_active = _compute_opd_advantages(
+                old_logp,
+                opd_teacher_logp.to(old_logp.dtype),
+                data["opd_token_weight"].to(old_logp.dtype),
+                data["opd_reward_clip"].to(old_logp.dtype),
+                loss_mask,
+            )
+            advantages = advantages + opd_advantages
+            data["opd_reverse_kl"] = opd_reverse_kl
+            data["opd_advantage"] = opd_advantages
+            data["opd_active"] = opd_active
+
         # Store data in the dict.
         data["advantages"] = advantages
         data["kl_rewards"] = kl_rewards
@@ -1546,6 +1613,21 @@ class PPOActor:
                 episode_loss_weight=data["episode_loss_weight"].float(),
                 denominator="n_seqs",
             )
+        if "opd_reverse_kl" in data:
+            # Averaged over supervised tokens only, so the numbers are not diluted
+            # by the turns OPD skipped. opd_reverse_kl is the per-token reverse KL
+            # in nats, defined as log pi_sampled - log pi_teacher. It goes
+            # NEGATIVE when the instructed teacher assigns the token more mass
+            # than the sampler did, i.e. when there is something left to distil,
+            # and the advantage is its negation. It should rise toward 0 as the
+            # instruction is absorbed; sitting flat and far from 0 means it is not
+            # being absorbed and loss_weight is the knob.
+            stats_tracker.denominator(opd_tokens=data["opd_active"].bool())
+            stats_tracker.stat(
+                opd_reverse_kl=data["opd_reverse_kl"].float(),
+                opd_advantage=data["opd_advantage"].float(),
+                denominator="opd_tokens",
+            )
         if "batch_centered_penalty_advantage" in data:
             stats_tracker.stat(
                 batch_centered_penalty_score=torch.nan_to_num(
@@ -1637,10 +1719,15 @@ class PPOActor:
             "group_id",
             "group_baseline",
             "episode_loss_weight",
-            # opd_teacher_logp / opd_token_weight / opd_reward_clip are read by
-            # the loss and must survive; opd_valid only exists so the workflow can
-            # be audited from a rollout dump.
+            # Every OPD column is consumed while computing advantages; none of it
+            # reaches the loss, which sees only the adjusted advantage.
+            "opd_teacher_logp",
+            "opd_token_weight",
+            "opd_reward_clip",
             "opd_valid",
+            "opd_reverse_kl",
+            "opd_advantage",
+            "opd_active",
         ]:
             data.pop(key, None)
         # NOTE: calling engine.train() is critical to enabling gradient checkpointing
@@ -1901,82 +1988,6 @@ def grpo_loss_fn(
 
             rkl_stat = rkl_penalty_per_token
 
-    # On-policy distillation from a teacher given a privileged instruction.
-    #
-    # Objective, per supervised token position s_t:
-    #
-    #     D_KL( pi_theta(. | s_t) || pi_teacher(. | s_t) )
-    #
-    # -- the REVERSE KL, with s_t drawn from the policy's own rollout. The teacher
-    # is the same weights conditioned on an extra instruction, so the only
-    # difference between the two distributions is that instruction, and minimizing
-    # this moves the instruction's effect into the weights.
-    #
-    # Two stop-gradients, for different reasons.
-    #
-    # 1. The trajectory distribution. theta also determines which tokens were
-    #    sampled in the first place, and that dependence is deliberately NOT
-    #    differentiated. This is the design point of on-policy distillation: the
-    #    signal is dense and per-token, so there is no credit assignment to
-    #    propagate -- no advantage, no GAE, no discounting. The sampled tokens
-    #    enter as fixed data.
-    #
-    # 2. The teacher. Mandatory here, not merely conventional: the teacher shares
-    #    weights with the policy, so a live gradient would let the KL be minimized
-    #    by dragging the TEACHER toward the policy, which is backwards.
-    #    `compute_logp` is already @torch.no_grad() at the engine level; the
-    #    .detach() below documents the requirement at the point of use.
-    #
-    # What remains after (1) is the gradient of the explicit per-position KL. Only
-    # the sampled token's teacher log-prob is available -- not the full vocabulary
-    # distribution -- so the per-position KL is itself estimated from one draw:
-    #
-    #     D_KL = E_{v ~ pi_theta} [ log pi_theta(v) - log pi_teacher(v) ]
-    #          ~ log pi_theta(a_t) - log pi_teacher(a_t)
-    #
-    # That expectation is over pi_theta, so its unbiased gradient carries a score
-    # function factor: grad log pi_theta(a_t) * sg[log pi_theta - log pi_teacher].
-    # The `grad log pi` factor therefore comes from the WITHIN-POSITION vocabulary
-    # expectation, not from the trajectory -- (1) is untouched. A canonical OPD
-    # implementation avoids this factor entirely by computing the full-vocabulary
-    # KL analytically at every position, which is lower variance; that needs both
-    # models' logits fused inside one forward pass and is not available through
-    # `compute_logp`.
-    #
-    # The surrogate below has exactly that gradient. `opd_kl` is the detached
-    # bracket, so the term is self-limiting: it vanishes precisely when the policy
-    # already matches the instructed teacher on its own samples. Note the bracket
-    # uses the CURRENT policy's log-prob, not the behaviour log-prob -- using
-    # old_logp would instead make the term vanish only once the behaviour policy
-    # caught up, destroying that property. `opd_ratio` is the importance
-    # correction for the samples having come from pi_old, and equals 1 on the
-    # first inner step.
-    opd_teacher_logp = input_data.get("opd_teacher_logp")
-    opd_stat = None
-    if opd_teacher_logp is not None:
-        opd_token_weight = input_data["opd_token_weight"].to(logprobs.dtype)
-        opd_active = loss_mask & (opd_token_weight > 0)
-        if opd_active.any():
-            clip = input_data["opd_reward_clip"].to(logprobs.dtype)
-            # One token the teacher finds far more likely would otherwise dominate
-            # the whole term.
-            opd_kl = torch.minimum(
-                torch.maximum(
-                    logprobs.detach() - opd_teacher_logp.detach(), -clip
-                ),
-                clip,
-            )
-            opd_ratio = torch.exp(logprobs - old_logp)
-            opd_token_loss = (opd_ratio * opd_kl) * opd_active
-            opd_denominator = opd_active.count_nonzero().clamp(min=1)
-            loss = loss + (opd_token_weight * opd_token_loss).sum() / opd_denominator
-            opd_stat = {
-                "opd_kl": opd_kl.detach(),
-                "opd_ratio": opd_ratio.detach(),
-                "opd_token_loss": opd_token_loss.detach(),
-                "mask": opd_active,
-            }
-
     # Log training statistics
     stats_tracker.denominator(
         n_tokens=infer_token_denominator(input_data, loss_mask),
@@ -1989,21 +2000,6 @@ def grpo_loss_fn(
         stats_tracker.stat(
             rkl_loss=rkl_stat,
             denominator="n_valid_tokens",
-        )
-
-    if opd_stat is not None:
-        # Averaged over supervised tokens only, so the numbers are not diluted by
-        # the turns OPD skipped. opd_kl is the per-token reverse KL in nats:
-        # NEGATIVE means the instructed teacher likes the token more than the
-        # policy does, i.e. there is something left to distil. It should rise
-        # toward 0 as the instruction is absorbed; if it sits flat and far from 0
-        # the policy is not absorbing it and loss_weight is the knob.
-        stats_tracker.denominator(opd_tokens=opd_stat["mask"])
-        stats_tracker.stat(
-            opd_kl=opd_stat["opd_kl"],
-            opd_ratio=opd_stat["opd_ratio"],
-            opd_token_loss=opd_stat["opd_token_loss"],
-            denominator="opd_tokens",
         )
 
     stats_tracker.stat(

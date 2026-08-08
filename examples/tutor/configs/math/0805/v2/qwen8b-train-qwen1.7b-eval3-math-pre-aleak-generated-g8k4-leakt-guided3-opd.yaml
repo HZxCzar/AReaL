@@ -14,10 +14,15 @@ trial_name: qwen8b-qwen1.7b-guided3-opd
 # See the -guided3 and -opd siblings for the evidence behind each block.
 opd:
   enabled: true
-  loss_weight: 0.05
+  # kl_penalty_coef in the reference implementation, whose default is also 1.0.
+  # The scale comes from the KL being in nats, not from the task reward, so this
+  # is not comparable to a loss weight.
+  loss_weight: 1.0
   min_prior_failed_turns: 2
   max_turns_per_episode: 0
-  reward_clip: 5.0
+  # Not in the reference, which does not clip. 0 keeps the standard behaviour;
+  # raise it only if opd_advantage turns out to be dominated by outlier tokens.
+  reward_clip: 0.0
   # Guided turns are already trained on a rewritten prompt. Supervising them too
   # would stack two perturbations on one row and make neither attributable.
   skip_guided_rows: true

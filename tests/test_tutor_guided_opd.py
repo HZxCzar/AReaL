@@ -369,197 +369,118 @@ def test_opd_realignment() -> None:
     )
 
 
-def test_opd_loss_term() -> None:
-    print("\n[5] OPD loss term sign and inertness")
-    from areal.trainer.ppo.actor import grpo_loss_fn
+def test_opd_advantage() -> None:
+    """OPD enters as a per-token advantage penalty, per the reference.
+
+        reverse_kl = log pi_sampled(a_t) - log pi_teacher(a_t)
+        advantages = advantages - coef * reverse_kl
+
+    with the ordinary importance-sampling loss run unchanged afterwards. Both
+    sides are scored only on the sampled token, and the student side is the
+    sampling-time log-prob, so nothing here differentiates through the sampling
+    distribution -- it is all data by this point.
+    """
+    print("\n[5] OPD advantage penalty")
+    from areal.trainer.ppo.actor import _compute_opd_advantages
 
     batch, length = 2, 6
-    loss_mask = torch.zeros((batch, length), dtype=torch.bool)
-    loss_mask[:, 2:5] = True
-    old_logp = torch.full((batch, length), -1.0)
-    logprobs = torch.full((batch, length), -1.0, requires_grad=True)
+    mask = torch.zeros((batch, length), dtype=torch.bool)
+    mask[:, 2:5] = True
+    weight = torch.full((batch, length), 1.0)
+    no_clip = torch.zeros((batch, length))
 
-    base = {
-        "logprobs": old_logp,
-        "advantages": torch.zeros((batch, length)),
-        "loss_mask": loss_mask,
-        "prox_logp": old_logp,
-        "attention_mask": torch.ones((batch, length), dtype=torch.bool),
-    }
-    kwargs = dict(
-        eps_clip=0.4,
-        eps_clip_higher=None,
-        c_clip=None,
-        behave_imp_weight_cap=5.0,
-        use_decoupled_loss=True,
-    )
+    behaviour = torch.full((batch, length), -2.0)
 
-    # Teacher strongly prefers these tokens -> the term must push their log-prob
-    # UP, i.e. d(loss)/d(logprob) must be negative.
-    teacher = torch.full((batch, length), 2.0)
-    data = dict(
-        base,
-        opd_teacher_logp=teacher,
-        opd_token_weight=torch.full((batch, length), 0.05),
-        opd_reward_clip=torch.full((batch, length), 5.0),
+    # Teacher assigns more mass than the sampler did -> reverse KL positive ->
+    # advantage positive -> PPO raises the token.
+    adv, kl, active = _compute_opd_advantages(
+        behaviour, torch.full((batch, length), -0.5), weight, no_clip, mask
     )
-    logprobs.grad = None
-    loss = grpo_loss_fn(logprobs, torch.zeros_like(logprobs), data, **kwargs)
-    loss.backward()
-    grad = logprobs.grad[loss_mask]
-    check(
-        "a preferred token's log-prob is pushed up",
-        bool((grad < 0).all()),
-        f"grad {grad.tolist()[:3]}",
-    )
+    # Sign convention, stated because it is easy to invert: reverse_kl is
+    # log pi_sampled - log pi_teacher, so it goes NEGATIVE when the teacher
+    # assigns the token more mass than the sampler did. The advantage is its
+    # negation, hence positive, and PPO raises the token.
+    check("reverse KL negative when the teacher prefers the token",
+          bool((kl[mask] < 0).all()), f"{kl[mask][:3].tolist()}")
+    check("advantage raises a teacher-preferred token",
+          bool((adv[mask] > 0).all()), f"{adv[mask][:3].tolist()}")
+    check("magnitude equals the KL in nats",
+          torch.allclose(adv[mask], torch.full((int(mask.sum()),), 1.5)),
+          f"{adv[mask][:3].tolist()}")
 
-    # Same, teacher dislikes them -> pushed down.
-    logprobs2 = torch.full((batch, length), -1.0, requires_grad=True)
-    data = dict(
-        base,
-        opd_teacher_logp=torch.full((batch, length), -4.0),
-        opd_token_weight=torch.full((batch, length), 0.05),
-        opd_reward_clip=torch.full((batch, length), 5.0),
+    adv, kl, _ = _compute_opd_advantages(
+        behaviour, torch.full((batch, length), -4.0), weight, no_clip, mask
     )
-    loss = grpo_loss_fn(logprobs2, torch.zeros_like(logprobs2), data, **kwargs)
-    loss.backward()
-    grad2 = logprobs2.grad[loss_mask]
-    check(
-        "a disliked token's log-prob is pushed down",
-        bool((grad2 > 0).all()),
-        f"grad {grad2.tolist()[:3]}",
-    )
+    check("advantage lowers a teacher-disfavoured token",
+          bool((adv[mask] < 0).all()), f"{adv[mask][:3].tolist()}")
 
-    # Weight 0 everywhere must be exactly inert, so a run with OPD enabled but no
-    # eligible turns is identical to a run without it.
-    logprobs3 = torch.full((batch, length), -1.0, requires_grad=True)
-    data = dict(
-        base,
-        opd_teacher_logp=torch.full((batch, length), 2.0),
-        opd_token_weight=torch.zeros((batch, length)),
-        opd_reward_clip=torch.full((batch, length), 5.0),
+    # Self-limiting: identical distributions leave the advantage untouched.
+    adv, kl, _ = _compute_opd_advantages(
+        behaviour, behaviour.clone(), weight, no_clip, mask
     )
-    with_zero = grpo_loss_fn(logprobs3, torch.zeros_like(logprobs3), data, **kwargs)
-    logprobs4 = torch.full((batch, length), -1.0, requires_grad=True)
-    without = grpo_loss_fn(logprobs4, torch.zeros_like(logprobs4), dict(base), **kwargs)
-    check(
-        "zero weight is exactly inert",
-        torch.allclose(with_zero, without),
-        f"{float(with_zero.detach())} vs {float(without.detach())}",
-    )
+    check("no advantage once the policy matches the teacher",
+          float(adv.abs().max()) == 0.0, f"max {float(adv.abs().max())}")
 
-    # Self-limiting: when the CURRENT policy already matches the instructed
-    # teacher on its own samples there is nothing left to distil, so the term must
-    # contribute no gradient.
-    #
-    # The fixture deliberately sets old_logp != logprobs. With logprobs == teacher
-    # the correct reverse-KL reference gives exactly zero, while referencing the
-    # BEHAVIOUR log-prob instead would give teacher - old_logp = +1 nat and a live
-    # gradient. So this check separates the two; with old_logp == logprobs it would
-    # pass either way.
-    stale = dict(base, logprobs=torch.full((batch, length), -2.0),
-                 prox_logp=torch.full((batch, length), -2.0))
-    logprobs_eq = torch.full((batch, length), -1.0, requires_grad=True)
-    matched = grpo_loss_fn(
-        logprobs_eq,
-        torch.zeros_like(logprobs_eq),
-        dict(
-            stale,
-            opd_teacher_logp=torch.full((batch, length), -1.0),
-            opd_token_weight=torch.full((batch, length), 0.05),
-            opd_reward_clip=torch.full((batch, length), 5.0),
-        ),
-        **kwargs,
+    # Unselected rows and unsupervised positions contribute nothing.
+    half = torch.zeros((batch, length))
+    half[0] = 1.0
+    adv, _, active = _compute_opd_advantages(
+        behaviour, torch.full((batch, length), 5.0), half, no_clip, mask
     )
-    matched.backward()
-    logprobs_none = torch.full((batch, length), -1.0, requires_grad=True)
-    grpo_loss_fn(
-        logprobs_none, torch.zeros_like(logprobs_none), dict(stale), **kwargs
-    ).backward()
-    check(
-        "no gradient once the policy matches the teacher",
-        torch.allclose(logprobs_eq.grad, logprobs_none.grad, atol=1e-7),
-        f"delta {float((logprobs_eq.grad - logprobs_none.grad).abs().max())}",
-    )
+    check("zero weight is exactly inert", float(adv[1].abs().max()) == 0.0)
+    check("prompt positions untouched", float(adv[0, :2].abs().max()) == 0.0)
+    check("active mask is mask AND weight", bool((active == (mask & (half > 0))).all()))
 
-    # Same fixture, teacher now genuinely ahead of the policy: the term MUST be
-    # live. Together with the check above this pins the reference to the current
-    # policy rather than to old_logp.
-    logprobs_gap = torch.full((batch, length), -1.0, requires_grad=True)
-    grpo_loss_fn(
-        logprobs_gap,
-        torch.zeros_like(logprobs_gap),
-        dict(
-            stale,
-            opd_teacher_logp=torch.full((batch, length), -0.2),
-            opd_token_weight=torch.full((batch, length), 0.05),
-            opd_reward_clip=torch.full((batch, length), 5.0),
-        ),
-        **kwargs,
-    ).backward()
-    check(
-        "term is live when the teacher is ahead, under the same stale old_logp",
-        not torch.allclose(logprobs_gap.grad, logprobs_none.grad, atol=1e-7),
-        "otherwise the check above is vacuous",
+    # coef scales linearly, as a coefficient on a KL in nats.
+    adv_a, _, _ = _compute_opd_advantages(
+        behaviour, torch.full((batch, length), -1.0), weight, no_clip, mask
     )
+    adv_b, _, _ = _compute_opd_advantages(
+        behaviour, torch.full((batch, length), -1.0), weight * 3.0, no_clip, mask
+    )
+    check("coef scales the penalty linearly",
+          torch.allclose(adv_b, adv_a * 3.0))
 
-    # The teacher shares weights with the policy, so a live gradient here would
-    # let the KL be minimized by moving the TEACHER instead. Nothing may flow back
-    # into the teacher tensor.
-    teacher_live = torch.full((batch, length), 2.0, requires_grad=True)
-    logprobs_t = torch.full((batch, length), -1.0, requires_grad=True)
-    data = dict(
-        base,
-        opd_teacher_logp=teacher_live,
-        opd_token_weight=torch.full((batch, length), 0.05),
-        opd_reward_clip=torch.full((batch, length), 5.0),
+    # The clip is a local addition; 0 must reproduce the reference exactly.
+    unclipped, _, _ = _compute_opd_advantages(
+        behaviour, torch.full((batch, length), -50.0), weight, no_clip, mask
     )
-    grpo_loss_fn(logprobs_t, torch.zeros_like(logprobs_t), data, **kwargs).backward()
-    check(
-        "no gradient reaches the teacher",
-        teacher_live.grad is None or float(teacher_live.grad.abs().max()) == 0.0,
-        f"teacher grad {None if teacher_live.grad is None else float(teacher_live.grad.abs().max())}",
+    clipped, _, _ = _compute_opd_advantages(
+        behaviour,
+        torch.full((batch, length), -50.0),
+        weight,
+        torch.full((batch, length), 2.0),
+        mask,
     )
+    check("clip=0 leaves the KL untouched",
+          torch.allclose(unclipped[mask], torch.full((int(mask.sum()),), -48.0)),
+          f"{unclipped[mask][:2].tolist()}")
+    check("clip bounds the penalty when set",
+          torch.allclose(clipped[mask], torch.full((int(mask.sum()),), -2.0)),
+          f"{clipped[mask][:2].tolist()}")
 
-    # The magnitude must track the gap, since that gap IS the objective.
-    grads = []
-    for teacher_value in (-1.5, -3.0, -6.0):
-        lp = torch.full((batch, length), -1.0, requires_grad=True)
-        data = dict(
-            base,
-            opd_teacher_logp=torch.full((batch, length), teacher_value),
-            opd_token_weight=torch.full((batch, length), 0.05),
-            opd_reward_clip=torch.full((batch, length), 100.0),
-        )
-        grpo_loss_fn(lp, torch.zeros_like(lp), data, **kwargs).backward()
-        grads.append(float(lp.grad[loss_mask].mean()))
-    check(
-        "gradient magnitude grows with the KL gap",
-        grads[0] < grads[1] < grads[2],
-        f"got {grads}",
-    )
 
-    # The clip must bind.
-    logprobs5 = torch.full((batch, length), -1.0, requires_grad=True)
-    tight = dict(
-        base,
-        opd_teacher_logp=torch.full((batch, length), 50.0),
-        opd_token_weight=torch.full((batch, length), 0.05),
-        opd_reward_clip=torch.full((batch, length), 0.5),
-    )
-    loose = dict(tight, opd_reward_clip=torch.full((batch, length), 5.0))
-    tight_loss = float(
-        grpo_loss_fn(logprobs5, torch.zeros_like(logprobs5), tight, **kwargs).detach()
-    )
-    logprobs6 = torch.full((batch, length), -1.0, requires_grad=True)
-    loose_loss = float(
-        grpo_loss_fn(logprobs6, torch.zeros_like(logprobs6), loose, **kwargs).detach()
-    )
-    check(
-        "reward_clip bounds the term",
-        abs(tight_loss) < abs(loose_loss),
-        f"tight {tight_loss}, loose {loose_loss}",
-    )
+def test_opd_absent_from_loss() -> None:
+    """The loss must know nothing about OPD -- it sees only the adjusted
+    advantage, which is what lets the distillation signal inherit the PPO ratio,
+    clipping and behaviour-importance weighting for free."""
+    print("\n[6] OPD does not leak into the loss")
+    import inspect
+
+    from areal.trainer.ppo import actor as actor_mod
+
+    source = inspect.getsource(actor_mod.grpo_loss_fn)
+    check("grpo_loss_fn contains no OPD term", "opd" not in source.lower())
+
+    advantage_src = inspect.getsource(actor_mod.PPOActor._compute_advantages)
+    check("_compute_advantages applies it",
+          "_compute_opd_advantages" in advantage_src)
+    check("added after the task advantage, so it never enters GAE",
+          advantage_src.index("_compute_opd_advantages")
+          > advantage_src.index("_compute_token_gae"))
+    check("not folded into returns",
+          advantage_src.index("_compute_opd_advantages")
+          > advantage_src.rindex('data["returns"]'))
 
 
 def main() -> int:
@@ -567,7 +488,8 @@ def main() -> int:
     test_slot_assignment()
     test_opd_eligibility()
     test_opd_realignment()
-    test_opd_loss_term()
+    test_opd_advantage()
+    test_opd_absent_from_loss()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILED: {FAILURES}")

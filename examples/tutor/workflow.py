@@ -861,8 +861,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError("guided slot count must be at least 1 when enabled.")
         opd_config = dict(opd or {})
         self.opd_enabled = bool(opd_config.get("enabled", False))
-        self.opd_loss_weight = float(opd_config.get("loss_weight", 0.05))
-        self.opd_reward_clip = float(opd_config.get("reward_clip", 5.0))
+        self.opd_loss_weight = float(opd_config.get("loss_weight", 1.0))
+        self.opd_reward_clip = float(opd_config.get("reward_clip", 0.0))
         self.opd_instruction = (
             str(opd_config.get("instruction") or "").strip()
             or TEACHER_REPAIR_INSTRUCTION
@@ -875,8 +875,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.opd_skip_leaked_rows = bool(opd_config.get("skip_leaked_rows", True))
         if self.opd_enabled and self.opd_loss_weight <= 0.0:
             raise ValueError("opd loss weight must be positive when enabled.")
-        if self.opd_enabled and self.opd_reward_clip <= 0.0:
-            raise ValueError("opd reward clip must be positive when enabled.")
+        if self.opd_enabled and self.opd_reward_clip < 0.0:
+            raise ValueError("opd reward clip must be non-negative (0 disables).")
         progress_config = dict(teacher_progress_judge or {})
         self.teacher_progress_judge_enabled = bool(
             progress_config.get("enabled", False)
@@ -2255,7 +2255,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     if getattr(self, "opd_enabled", False)
                     else None
                 ),
-                opd_reward_clip=getattr(self, "opd_reward_clip", 5.0),
+                opd_reward_clip=getattr(self, "opd_reward_clip", 0.0),
             )
             for (
                 artifact,

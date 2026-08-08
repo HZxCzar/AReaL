@@ -223,7 +223,7 @@ def response_to_tensordict(
         ).unsqueeze(0)
         result["opd_reward_clip"] = torch.full(
             (len(full_ids),),
-            float(opd_reward_clip if opd_reward_clip is not None else 5.0),
+            float(opd_reward_clip if opd_reward_clip is not None else 0.0),
             dtype=torch.float32,
         ).unsqueeze(0)
         result["opd_valid"] = torch.tensor([opd_active], dtype=torch.bool)

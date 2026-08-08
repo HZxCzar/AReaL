@@ -23,17 +23,26 @@ trial_name: qwen8b-qwen1.7b-opd
 # The mechanism is better content plus an 11-point leak reduction; the move mix
 # barely moves (14.2% -> 13.6%).
 #
-# How it is trained. The rollout is untouched and fully on-policy. The same
-# weights are then run teacher-forced over the policy's own tokens with the
-# instruction appended, and a token-level KL pulls the policy toward that
-# distribution. So the instruction's effect is distilled into the weights and the
-# term decays to zero once the policy already behaves as if instructed. Nothing is
-# sampled from the teacher and no prompt mismatch touches the policy gradient, so
-# there is no importance weight here -- unlike guided slots. Cost is one extra
-# forward pass over the supervised turns.
+# How it is trained. Standard on-policy distillation (Thinking Machines;
+# tinker_cookbook/distillation/train_on_policy.py). The rollout is untouched and
+# fully on-policy. The same weights are then run teacher-forced over the policy's
+# own tokens with the instruction appended, giving a per-token reverse KL on the
+# sampled tokens, log pi_sampled - log pi_teacher. That is subtracted from the
+# per-token advantage with coefficient loss_weight, and the ordinary
+# importance-sampling loss runs unchanged, so the distillation signal inherits the
+# PPO ratio and clipping. Discount factor zero: the penalty lands on the token
+# that produced it and never enters GAE.
+#
+# The teacher differs from the student only by the instruction, which makes this
+# on-policy context distillation: what ends up in the weights is the effect of the
+# instruction, and the term decays to zero once the policy behaves that way
+# unprompted. Cost is one extra forward pass over the supervised turns.
 opd:
   enabled: true
-  loss_weight: 0.05
+  # kl_penalty_coef in the reference implementation, whose default is also 1.0.
+  # The scale comes from the KL being in nats, not from the task reward, so this
+  # is not comparable to a loss weight.
+  loss_weight: 1.0
   # min_prior_failed_turns=2 means turn 3 and later. Episodes terminate on
   # success, so by turn 3 the tutor has already failed twice and the
   # instruction's premise ("your previous message did not get through") is
@@ -41,7 +50,9 @@ opd:
   # rounds.
   min_prior_failed_turns: 2
   max_turns_per_episode: 0
-  reward_clip: 5.0
+  # Not in the reference, which does not clip. 0 keeps the standard behaviour;
+  # raise it only if opd_advantage turns out to be dominated by outlier tokens.
+  reward_clip: 0.0
   # No effect while guided_slots is off; set so that turning both on does not
   # stack two prompt perturbations on the same row.
   skip_guided_rows: true

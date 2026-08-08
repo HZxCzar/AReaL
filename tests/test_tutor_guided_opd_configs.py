@@ -58,8 +58,8 @@ def main() -> int:
     cfg = load(f"{base}/{stem}-opd.yaml")
     o = cfg.opd
     check("enabled", o.enabled is True)
-    check("loss weight positive", o.loss_weight == 0.05, str(o.loss_weight))
-    check("reward clip set", o.reward_clip == 5.0, str(o.reward_clip))
+    check("coef matches the reference default", o.loss_weight == 1.0, str(o.loss_weight))
+    check("clip disabled, matching the reference", o.reward_clip == 0.0, str(o.reward_clip))
     check("supervises turn 3 onward", o.min_prior_failed_turns == 2,
           str(o.min_prior_failed_turns))
     check("uses the validated repair wording",

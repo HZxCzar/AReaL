@@ -1283,11 +1283,14 @@ class TutorOpdConfig:
 
     enabled: bool = field(default=False)
     loss_weight: float = field(
-        default=0.05,
+        default=1.0,
         metadata={
             "help": (
-                "Weight of the token-level KL(policy || instructed teacher) term "
-                "added to the PPO actor loss."
+                "Coefficient on the per-token reverse KL, subtracted from the "
+                "advantage. This is the reference implementation's "
+                "kl_penalty_coef, whose default is also 1.0. Note the scale is "
+                "set by the KL being in nats, not by the task reward, so it is "
+                "not comparable to a loss weight."
             )
         },
     )
@@ -1301,13 +1304,14 @@ class TutorOpdConfig:
         },
     )
     reward_clip: float = field(
-        default=5.0,
+        default=0.0,
         metadata={
             "help": (
-                "Clamp on the per-token distillation signal "
-                "log pi_teacher(a_t) - log pi_behave(a_t), in nats. A single token "
-                "the instructed teacher finds far more likely can otherwise "
-                "dominate the whole term."
+                "Clamp on the per-token reverse KL in nats, 0 to disable. Not part "
+                "of the reference implementation, which does not clip; 0 is the "
+                "default so the standard behaviour is what runs unless asked for. "
+                "Raise it above 0 only if a single outlier token is observed "
+                "dominating opd_advantage."
             )
         },
     )
@@ -1359,8 +1363,8 @@ class TutorOpdConfig:
             return
         if self.loss_weight <= 0.0:
             raise ValueError("opd.loss_weight must be positive when enabled.")
-        if self.reward_clip <= 0.0:
-            raise ValueError("opd.reward_clip must be positive when enabled.")
+        if self.reward_clip < 0.0:
+            raise ValueError("opd.reward_clip must be non-negative (0 disables).")
         if self.min_prior_failed_turns < 0:
             raise ValueError("opd.min_prior_failed_turns must be non-negative.")
         if self.max_turns_per_episode < 0:
