@@ -146,6 +146,7 @@ from examples.tutor.core.callers import (
 )
 from examples.tutor.core.confidence import compute_answer_token_confidence
 from examples.tutor.core.generalization import load_student_generalize_bank
+from examples.tutor.core.repetition import depth_metrics
 from examples.tutor.core.generation_budget import (
     CONTEXT_BUDGET_TERMINATION_REASON,
     ContextBudgetLimitExceeded,
@@ -619,6 +620,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_generalize_path: str = "",
         student_generalize_replays: int = 1,
         student_generalize_retest_original: bool = False,
+        student_generalize_level1_enabled: bool = True,
+        student_generalize_level2_enabled: bool = True,
         student_generalize_level1_reward: float = 0.2,
         student_generalize_level2_reward: float = 0.5,
         student_generalize_confidence_enabled: bool = False,
@@ -1092,6 +1095,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.student_generalize_retest_original = bool(
             student_generalize_retest_original
         )
+        self.student_generalize_level1_enabled = bool(student_generalize_level1_enabled)
+        self.student_generalize_level2_enabled = bool(student_generalize_level2_enabled)
         self.student_generalize_level_rewards = {
             "level1": float(student_generalize_level1_reward),
             "level2": float(student_generalize_level2_reward),
@@ -3084,11 +3089,33 @@ class TutorAgentWorkflow(RolloutWorkflow):
     def _build_initial_public_summary(self, initial_student_answer: str) -> str:
         return self._format_public_history_entry("Student", 0, initial_student_answer)
 
+    def _transfer_probe_levels(self) -> tuple[str, ...]:
+        """The transfer levels that are switched on, in their fixed order.
+
+        Order matters: a 'train' sidecar stores cases positionally and
+        _student_generalization_cases zips them against _STUDENT_GENERALIZE_LEVELS.
+        """
+        return tuple(
+            level
+            for level, on in (
+                ("level1", getattr(self, "student_generalize_level1_enabled", True)),
+                ("level2", getattr(self, "student_generalize_level2_enabled", True)),
+            )
+            if on
+        )
+
     def _probe_levels(self) -> tuple[str, ...]:
-        """Probe branches run after tutoring. The original re-test is opt-in."""
+        """Probe branches run after tutoring, each switched on separately.
+
+        The re-test costs one student call and needs nothing from the bank;
+        level1 and level2 each cost a call and each need a variant. They are
+        independent because the common case is wanting the re-test without
+        paying for variants nobody is measuring.
+        """
+        levels = self._transfer_probe_levels()
         if getattr(self, "student_generalize_retest_original", False):
-            return (ORIGINAL_RETEST_LEVEL, *_STUDENT_GENERALIZE_LEVELS)
-        return _STUDENT_GENERALIZE_LEVELS
+            return (ORIGINAL_RETEST_LEVEL, *levels)
+        return levels
 
     def _teacher_env_feedback(self, judge_result: Any, turn_idx: int) -> str:
         """Grading + budget the teacher sees, as environment feedback."""
@@ -3600,7 +3627,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         else:
             items = [payload.get(level) for level in _STUDENT_GENERALIZE_LEVELS]
 
+        active_levels = self._transfer_probe_levels()
         for level, item in zip(_STUDENT_GENERALIZE_LEVELS, items, strict=False):
+            if level not in active_levels:
+                continue
             if not isinstance(item, dict):
                 continue
             task = item.get("task")
@@ -3622,6 +3652,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if not bool(getattr(self, "student_generalize_enabled", False)):
             return False
         if getattr(self, "student_generalize_source", "sidecar") != "generated":
+            return False
+        if not self._transfer_probe_levels():
+            # Nothing reads the variants, so a row without them is not defective
+            # and the rollout should not be thrown away.
             return False
         sample_id = data.get("id")
         bank = getattr(self, "student_generalize_bank", {}) or {}
@@ -4596,6 +4630,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         if success_round > 0:
             metrics["solve_turn"] = int(success_round)
+
+        # Depth counters. The objective is that episodes where the student is
+        # still wrong after two explanations still end solved -- depth/stuck_*
+        # is that number, and the per-bucket hazard says where it is lost.
+        # All COUNTS: divide the batch means, never average the per-episode
+        # rate. See core/repetition.py.
+        metrics.update(
+            depth_metrics(
+                [trace.tutor_visible_output for trace in traces],
+                [bool(trace.judge_correct) for trace in traces],
+            )
+        )
 
         if getattr(self, "prompt_instruction_enabled", False):
             n = sum(

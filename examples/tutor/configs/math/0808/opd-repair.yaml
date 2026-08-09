@@ -1,33 +1,21 @@
-# Fourth arm: distil the handback instruction instead of the repair instruction.
+# On-policy distillation of the repair instruction into the weights.
 #
-# Same machinery as opd.yaml -- rollout untouched and on-policy, the same weights
-# re-run teacher-forced with the instruction, per-token reverse KL subtracted from
-# the advantage. Two things differ, both because the instruction is about a
-# different failure.
+# The rollout is untouched and fully on-policy -- no instruction anywhere. The
+# same weights are then run teacher-forced over the policy's own tokens with the
+# instruction appended, giving a per-token reverse KL on the sampled tokens,
+# log pi_sampled - log pi_teacher. That is subtracted from the per-token advantage
+# with coefficient loss_weight and the ordinary importance-sampling loss runs
+# unchanged, so the signal inherits the PPO ratio and clipping. Discount factor
+# zero: the penalty lands on the token that produced it and never enters GAE.
+# This follows tinker_cookbook/distillation/train_on_policy.py.
 #
-# What it targets. On the 30-task collection dump, gemini taught the same 1.7b
-# student successfully WITHOUT ever stating the answer on 83% of tasks; every qwen
-# arm managed 27-50%. Paired on the same tasks that is +33 to +57 points with
-# every interval clear of zero. The three qwen arms that reach 100% "success" buy
-# it by leaking: trained_leak0 leaks on 73% of episodes, trained_leak1 on 57%.
-# leakt already terminates the episode on a leak, which drops its leak rate to
-# 23% -- and its success rate to 57%. So the reward can already make the policy
-# stop leaking; what it cannot do is supply the thing gemini replaces the leak
-# with. That is what this arm tries to move into the weights.
+# Teacher and policy are the same weights and differ only by the instruction, so
+# what ends up in the parameters is the effect of the instruction. The term is
+# self-limiting: it goes to zero once the policy already behaves that way
+# unprompted. Cost is one extra forward pass over the supervised turns; nothing is
+# sampled from the teacher and the 1.7b student is not called again.
 #
-# Difference 1: no turn gate. The repair instruction claims the previous message
-# failed, so it can only be applied once that is true. This one claims nothing
-# about the history, and the gap it targets is in the FIRST message: 80% of
-# gemini's episodes end within two turns. Gating at turn 3 would apply it almost
-# nowhere. max_turns_per_episode stays at 2, so this supervises turns 1 and 2.
-#
-# Difference 2: none. Everything else is copied from opd.yaml deliberately, so
-# opd vs opd-handback isolates the wording and opd-handback vs baseline measures
-# the arm.
-#
-# Read it against baseline.yaml for "did it help" and against opd.yaml for "was
-# the repair wording the wrong target". There is no prompt-handback control here;
-# add one before claiming distillation specifically was necessary.
+# Compare against prompt.yaml, not against baseline.yaml.
 defaults:
   - /math/0805/v2/qwen8b-train-qwen1.7b-eval3-math-pre-aleak-generated-g8k4-leakt@_global_
   - _self_
@@ -36,7 +24,7 @@ hydra:
   searchpath:
     - file://examples/tutor/configs
 
-trial_name: 0808-opd-handback
+trial_name: 0808-opd-repair
 
 # Stop after 100 optimizer steps, whatever the epoch count works out to.
 #
@@ -74,28 +62,25 @@ opd:
   # inside +-0.2, rollout/format_errors must stay at 0, and opd_reverse_kl/avg
   # should still trend toward 0 or the term is too weak to distil anything.
   loss_weight: 0.1
-  # Named, not copied: prompts.TEACHER_HANDBACK_INSTRUCTION. An unknown name
-  # raises at config load rather than training on the literal string.
-  instruction: "@handback"
+  # "@repair" and "" resolve to the identical string via
+  # prompts.resolve_teacher_instruction; the named form says which one without
+  # the reader having to know that empty means repair.
+  instruction: "@repair"
   # Every arm carries its instruction from turn 1. The repair wording opens with
   # "Your previous message did not get through", which is false on turn 1 -- kept
   # anyway, because every offline measurement was taken against that exact string
   # and the effect did not need the premise to be true (+7.5% on states where the
   # student was improving rather than stuck).
   min_prior_failed_turns: 0
-  # Turns 1 and 2, which is where 70-83% of episodes end across all five models.
+  # Every measurement applied the instruction ONCE at ONE state. Nothing says what
+  # repeated application does, and there is a floor to how fine a step can get.
+  # Two per episode keeps the signal while bounding that risk; raise it once
+  # opd_reverse_kl is seen converging.
   max_turns_per_episode: 2
   # The reference does not clip, but the reference is not competing with a task
   # advantage either. Without this a single token reached -17 nats.
   reward_clip: 2.0
   skip_guided_rows: true
-  # Kept true even though the leaked rows are the ones this instruction most
-  # obviously disagrees with. Under leakt a leak already ends the episode with a
-  # terminal penalty, and stacking an unclipped reverse KL on those same tokens is
-  # the cheapest way to get a collapse. Suppressing leaks does not require
-  # supervising the leaks themselves: the instructed teacher assigns low
-  # probability to "the correct value is X" on every turn, not just that one.
-  # This is the first knob to flip if opd/selected_ratio comes out starved.
   skip_leaked_rows: true
 
 stats_logger:

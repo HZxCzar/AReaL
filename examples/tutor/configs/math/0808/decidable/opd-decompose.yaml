@@ -1,0 +1,66 @@
+# 0808d-opd-decompose -- decompose clause only, distilled.
+defaults:
+  - /math/0805/v2/qwen8b-train-qwen1.7b-eval3-math-pre-aleak-generated-g8k4-leakt@_global_
+  - _self_
+
+# This must be the PRIMARY config's own searchpath. Inheriting ../opd.yaml
+# instead would be less duplication but hydra refuses it: that file declares a
+# searchpath too, and "Overriding hydra.searchpath is only supported from the
+# primary config" aborts composition. So each arm's settings are repeated here
+# and the parent chain goes straight to 0805/v2, which declares none.
+hydra:
+  searchpath:
+    - file://examples/tutor/configs
+
+trial_name: 0808d-opd-decompose
+
+# Stop after 100 optimizer steps, whatever the epoch count works out to.
+#
+# total_train_epochs stays at the inherited 150 and only sizes the loop;
+# rl_trainer.py:1236 breaks on global_step >= total_train_steps first, so the
+# loop runs global_step 0..99 -- exactly 100 steps -- and saver and evaluator
+# fire on their usual cadence inside that.
+#
+# This does not distort the learning rate. lr_scheduler_type is constant, so
+# total_train_steps only scales num_warmup_steps, which at
+# warmup_steps_proportion 0.001 rounds to under one step either way. Setting it
+# under a cosine or linear schedule would NOT be safe: the schedule length comes
+# from ft_spec, not from this, and the run would stop partway down the curve.
+total_train_steps: 100
+
+
+# The only intended difference from ../opd.yaml: a smaller dataset.
+# student_generalize is deliberately NOT touched -- it is the transfer bank, and
+# narrowing it to filter training rows would silently narrow the transfer probe
+# too. Its 250-entry filter still runs on load and passes all 66/36 through.
+train_dataset:
+  path: examples/tutor/data/math_1.7b_8b/math_decidable
+valid_dataset:
+  path: examples/tutor/data/math_1.7b_8b/math_decidable
+
+opd:
+  enabled: true
+  # 0.1 with reward_clip 2.0 bounds one token's contribution to +-0.2. The
+  # reference default of 1.0 collapsed the format tags within ~30 steps.
+  loss_weight: 0.1
+  # Only the decompose clause of the repair instruction. Measured apart from the
+  # other two clauses over 264 states: decompose alone +2.4% [+0.3, +4.5] and
+  # +4.3% [+1.3, +7.5] where the tutor had just repeated itself, while the
+  # anti-repeat clause added +0.5% [-1.9, +2.9] on top and did not lower the
+  # repeat rate of the turn it produced. Also cleaner: unparsable 9.8% against
+  # 17.6% with anti-repeat.
+  instruction: "@decompose"
+  # Every arm carries its instruction from turn 1. The repair wording opens with
+  # "Your previous message did not get through", which is false on turn 1 -- kept
+  # anyway, because every offline measurement was taken against that exact string
+  # and the effect did not need the premise to be true (+7.5% on states where the
+  # student was improving rather than stuck).
+  min_prior_failed_turns: 0
+  max_turns_per_episode: 2
+  reward_clip: 2.0
+  skip_guided_rows: true
+  skip_leaked_rows: true
+
+stats_logger:
+  wandb:
+    group: 0808-instruction-2x2

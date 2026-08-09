@@ -26,19 +26,35 @@ hydra:
   searchpath:
     - file://examples/tutor/configs
 
-trial_name: 0808-prompt
+trial_name: 0808-repair
+
+# Stop after 100 optimizer steps, whatever the epoch count works out to.
+#
+# total_train_epochs stays at the inherited 150 and only sizes the loop;
+# rl_trainer.py:1236 breaks on global_step >= total_train_steps first, so the
+# loop runs global_step 0..99 -- exactly 100 steps -- and saver and evaluator
+# fire on their usual cadence inside that.
+#
+# This does not distort the learning rate. lr_scheduler_type is constant, so
+# total_train_steps only scales num_warmup_steps, which at
+# warmup_steps_proportion 0.001 rounds to under one step either way. Setting it
+# under a cosine or linear schedule would NOT be safe: the schedule length comes
+# from ft_spec, not from this, and the run would stop partway down the curve.
+total_train_steps: 100
+
 
 prompt_instruction:
   enabled: true
   # Empty uses prompts.TEACHER_REPAIR_INSTRUCTION, the exact wording every
   # measurement was taken against. Do not paraphrase it here.
-  instruction: ""
-  # Must match opd.min_prior_failed_turns in the opd arm, or the two arms see the
-  # instruction at different rates and the comparison is not clean. 2 means turn 3
-  # onward: episodes terminate on success, so by then the tutor has already failed
-  # twice and the sentence is literally true.
-  min_prior_failed_turns: 2
+  instruction: "@repair"
+  # Every arm carries its instruction from turn 1. The repair wording opens with
+  # "Your previous message did not get through", which is false on turn 1 -- kept
+  # anyway, because every offline measurement was taken against that exact string
+  # and the effect did not need the premise to be true (+7.5% on states where the
+  # student was improving rather than stuck).
+  min_prior_failed_turns: 0
 
 stats_logger:
   wandb:
-    group: 0808-repair-instruction
+    group: 0808-instruction-2x2

@@ -246,12 +246,30 @@ TEACHER_HANDBACK_INSTRUCTION = (
     "immediately."
 )
 
+# The decompose clause of TEACHER_REPAIR_INSTRUCTION, on its own.
+#
+# Split out after a four-arm comparison over 264 states showed it carries the
+# whole effect. Against a shared-preamble control: decompose alone +2.4%
+# [+0.3, +4.5], and +4.3% [+1.3, +7.5] on the states where the tutor had just
+# repeated itself. The anti-repeat clause added +0.5% [-1.9, +2.9] on top of it,
+# and on its own was +0.9% [-1.0, +2.7] -- it did not even lower the repeat rate
+# of the turn it produced.
+#
+# Deliberately carries no premise about the history. The repair wording opens
+# with "Your previous message did not get through", which is false on turn 1,
+# and every gate now fires from turn 1.
+TEACHER_DECOMPOSE_INSTRUCTION = (
+    "Explain the next step in more detail and at a finer grain than you did "
+    "before, so the student has a smaller and more concrete thing to do."
+)
+
 # Configs name an instruction instead of copying its wording, so the two arms of
 # a comparison cannot drift apart and a measurement stays attached to the exact
 # string it was taken against.
 TEACHER_NAMED_INSTRUCTIONS: dict[str, str] = {
     "repair": TEACHER_REPAIR_INSTRUCTION,
     "handback": TEACHER_HANDBACK_INSTRUCTION,
+    "decompose": TEACHER_DECOMPOSE_INSTRUCTION,
 }
 
 

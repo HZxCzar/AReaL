@@ -430,6 +430,28 @@ class TutorStudentGeneralizeConfig:
             )
         },
     )
+    level1_enabled: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Run the level1 transfer probe (variant1 in a generated bank). "
+                "Turn it off to keep the original re-test without paying for a "
+                "variant that is not being measured: the probe is skipped, its "
+                "student calls are not made, and the startup validator stops "
+                "requiring a level1 case on every row."
+            )
+        },
+    )
+    level2_enabled: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Run the level2 transfer probe (variant2 in a generated bank). "
+                "Same semantics as level1_enabled. With both off and "
+                "retest_original on, student_generalize needs no bank at all."
+            )
+        },
+    )
     replays: int = field(
         default=1,
         metadata={
@@ -446,6 +468,26 @@ class TutorStudentGeneralizeConfig:
         default_factory=TutorStudentGeneralizeConfidenceConfig
     )
 
+    def transfer_levels(self) -> tuple[str, ...]:
+        """The transfer probes that are switched on, in their fixed order.
+
+        Order matters: a 'train' sidecar stores cases as a positional list and
+        the probe builder zips it against ("level1", "level2").
+        """
+        return tuple(
+            level
+            for level, on in (
+                ("level1", self.level1_enabled),
+                ("level2", self.level2_enabled),
+            )
+            if on
+        )
+
+    def probe_levels(self) -> tuple[str, ...]:
+        """Every probe that will run, re-test included."""
+        levels = self.transfer_levels()
+        return ("original", *levels) if self.retest_original else levels
+
     def __post_init__(self) -> None:
         self.replays = int(self.replays)
         if self.mode not in _STUDENT_GENERALIZE_MODES:
@@ -461,18 +503,39 @@ class TutorStudentGeneralizeConfig:
             raise ValueError(
                 f"student_generalize.replays must be >= 1, got {self.replays}."
             )
-        if self.enabled and self.source == "generated" and not self.path.strip():
+        if (
+            self.enabled
+            and self.source == "generated"
+            and self.transfer_levels()
+            and not self.path.strip()
+        ):
             raise ValueError(
                 "student_generalize.source='generated' requires "
                 "student_generalize.path."
+            )
+        if self.enabled and not self.probe_levels():
+            raise ValueError(
+                "student_generalize.enabled=true with every probe switched off. "
+                "Set at least one of retest_original, level1_enabled or "
+                "level2_enabled, or set student_generalize.enabled=false."
             )
         if self.confidence.enabled and not self.enabled:
             raise ValueError(
                 "student_generalize.confidence.enabled=true requires "
                 "student_generalize.enabled=true."
             )
-        if self.confidence.enabled and (
-            float(self.level1_reward) <= 0.0 or float(self.level2_reward) <= 0.0
+        if self.confidence.enabled and not self.transfer_levels():
+            raise ValueError(
+                "student_generalize.confidence.enabled=true scores the transfer "
+                "probes, so it requires level1_enabled or level2_enabled."
+            )
+        if self.confidence.enabled and any(
+            reward <= 0.0
+            for level, reward in (
+                ("level1", float(self.level1_reward)),
+                ("level2", float(self.level2_reward)),
+            )
+            if level in self.transfer_levels()
         ):
             raise ValueError(
                 "student_generalize rewards must be positive when confidence reward "

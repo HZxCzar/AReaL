@@ -1,0 +1,26 @@
+# 0808f-baseline -- control for the full-split arms.
+#
+# Nothing enabled. Exists so opd-decompose-deep has something to be read
+# against on the same 759/528 split. Do NOT compare it to 0808-baseline: that
+# one runs on the filtered 132/118 and its success rate is not on the same
+# scale.
+defaults:
+  - /math/0805/v2/qwen8b-train-qwen1.7b-eval3-math-pre-aleak-g8k4-leakt-full@_global_
+  - _self_
+
+hydra:
+  searchpath:
+    - file://examples/tutor/configs
+
+trial_name: 0808f-baseline
+
+# 100 steps is about 2.1 epochs here, against about 12 on the filtered split.
+# Each train problem is seen roughly twice instead of twelve times. That is the
+# intended direction -- less repetition, more coverage -- but it does mean 100
+# steps is a shorter exposure per problem than any earlier run. If the curves
+# are still climbing at 100, raise this rather than shrinking the dataset.
+total_train_steps: 100
+
+stats_logger:
+  wandb:
+    group: 0808-full-split

@@ -15,8 +15,8 @@ from configs import (
     TutorEvaluatorConfig,
 )
 from core.generalization import (
+    has_complete_generalize_case,
     load_student_generalize_bank,
-    validate_student_generalize_dataset,
 )
 from core.math_generalization import (
     MATH_GENERALIZATION_SAMPLE_COUNT,
@@ -50,93 +50,66 @@ def _without_remote_dataset_loading(dataset_config: Any) -> Any:
     return local_config
 
 
-def _filter_generated_generalization_dataset(
+def _filter_student_generalize_dataset(
     dataset: Any,
     *,
     bank: dict[str, Any],
     split_name: str,
+    required_levels: tuple[str, ...],
+    sample_count: int | None = None,
 ) -> Any:
+    """Keep the rows that can serve every transfer level that is switched on.
+
+    level1 alone keeps the rows that have variant1, level2 alone the rows that
+    have variant2, both keeps the intersection. With only the original re-test
+    on, required_levels is empty and nothing is filtered -- the re-test is built
+    from the row's own task and needs no bank.
+
+    A row without the variant is dropped rather than raising: it is not a broken
+    row, it is a row this probe cannot run on. Losing EVERY row is still an
+    error, because that is what a bank pointed at the wrong split looks like.
+    """
+    if not required_levels:
+        return dataset
     if isinstance(dataset, RDataset) and not dataset.connected:
         logger.info(
-            "Generated generalization %s split uses an unconnected RDataset; "
-            "deferring missing-variant skips to the tutor workflow.",
+            "student_generalize %s split uses an unconnected RDataset; deferring "
+            "missing-variant skips to the tutor workflow.",
             split_name,
         )
         return dataset
 
     original_count = len(dataset)
-    kept_indices = []
-    for index in range(original_count):
-        row = dataset[index]
-        sample_id = row.get("id") if hasattr(row, "get") else None
-        if sample_id is not None and str(sample_id) in bank:
-            kept_indices.append(index)
+    kept_indices = [
+        index
+        for index in range(original_count)
+        if has_complete_generalize_case(
+            dataset[index],
+            bank,
+            sample_count=sample_count,
+            required_levels=required_levels,
+        )
+    ]
 
     if original_count > 0 and not kept_indices:
         raise ValueError(
-            "student_generalize.source='generated' found no complete generated "
-            f"variants matching the {split_name} split."
+            f"student_generalize: no row in the {split_name} split has a complete "
+            f"case for every enabled level ({'+'.join(required_levels)}). Switch a "
+            "level off, or point student_generalize.path at a bank covering this "
+            "split."
         )
 
-    skipped_count = original_count - len(kept_indices)
     logger.info(
-        "Generated generalization %s split: kept %d/%d samples; skipped %d "
-        "without complete V1/V2.",
+        "student_generalize %s split: kept %d/%d rows carrying %s; dropped %d.",
         split_name,
         len(kept_indices),
         original_count,
-        skipped_count,
+        "+".join(required_levels),
+        original_count - len(kept_indices),
     )
     if hasattr(dataset, "select"):
         return dataset.select(kept_indices)
     return [dataset[index] for index in kept_indices]
-
-
-def _validate_student_generalize_datasets(config: TutorConfig, tokenizer: Any) -> None:
-    student_generalize = config.student_generalize
-    if not student_generalize.enabled:
-        return
-
-    bank = load_student_generalize_bank(
-        student_generalize.path,
-        source=student_generalize.source,
-    )
-    if student_generalize.source == "generated":
-        return
-
-    train_dataset = get_custom_dataset(
-        split="train",
-        dataset_config=_without_remote_dataset_loading(config.train_dataset),
-        tokenizer=tokenizer,
-    )
-    validate_student_generalize_dataset(
-        train_dataset,
-        split_name="train",
-        bank=bank,
-        sample_count=(
-            MATH_GENERALIZATION_SAMPLE_COUNT
-            if student_generalize.source == "train"
-            else None
-        ),
-    )
-
-    if config.valid_dataset is None:
-        return
-    valid_dataset = get_custom_dataset(
-        split="test",
-        dataset_config=_without_remote_dataset_loading(config.valid_dataset),
-        tokenizer=tokenizer,
-    )
-    validate_student_generalize_dataset(
-        valid_dataset,
-        split_name="test",
-        bank=bank,
-        sample_count=(
-            MATH_GENERALIZATION_SAMPLE_COUNT
-            if student_generalize.source == "train"
-            else None
-        ),
-    )
 
 
 def _prepare_math_generalization_data(config: TutorConfig) -> None:
@@ -379,13 +352,23 @@ def main(args):
     _prepare_polaris_generalization_data(config)
     _prepare_math_generalization_data(config)
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
-    _validate_student_generalize_datasets(config, tokenizer)
-    generated_generalize_bank = (
+    # Which transfer levels are switched on decides both which rows survive and
+    # whether a bank is needed at all. Retest-only leaves this empty, and then
+    # nothing below filters or loads a bank.
+    generalize_required_levels = (
+        student_generalize.transfer_levels() if student_generalize.enabled else ()
+    )
+    generalize_sample_count = (
+        MATH_GENERALIZATION_SAMPLE_COUNT
+        if student_generalize.source == "train"
+        else None
+    )
+    student_generalize_bank = (
         load_student_generalize_bank(
             student_generalize.path,
-            source="generated",
+            source=student_generalize.source,
         )
-        if student_generalize.enabled and student_generalize.source == "generated"
+        if generalize_required_levels
         else {}
     )
 
@@ -394,12 +377,13 @@ def main(args):
         dataset_config=config.train_dataset,
         tokenizer=tokenizer,
     )
-    if student_generalize.enabled and student_generalize.source == "generated":
-        train_dataset = _filter_generated_generalization_dataset(
-            train_dataset,
-            bank=generated_generalize_bank,
-            split_name="train",
-        )
+    train_dataset = _filter_student_generalize_dataset(
+        train_dataset,
+        bank=student_generalize_bank,
+        split_name="train",
+        required_levels=generalize_required_levels,
+        sample_count=generalize_sample_count,
+    )
     valid_dataset_config = config.valid_dataset
     eval_max_samples = config.evaluator.max_samples
     if eval_max_samples is not None:
@@ -417,12 +401,13 @@ def main(args):
         dataset_config=valid_dataset_config,
         tokenizer=tokenizer,
     )
-    if student_generalize.enabled and student_generalize.source == "generated":
-        valid_dataset = _filter_generated_generalization_dataset(
-            valid_dataset,
-            bank=generated_generalize_bank,
-            split_name="test",
-        )
+    valid_dataset = _filter_student_generalize_dataset(
+        valid_dataset,
+        bank=student_generalize_bank,
+        split_name="test",
+        required_levels=generalize_required_levels,
+        sample_count=generalize_sample_count,
+    )
     if eval_max_samples is not None and eval_max_samples < len(valid_dataset):
         rng = random.Random(config.seed)
         eval_indices = sorted(rng.sample(range(len(valid_dataset)), k=eval_max_samples))
@@ -531,6 +516,8 @@ def main(args):
         student_generalize_path=student_generalize.path,
         student_generalize_replays=student_generalize.replays,
         student_generalize_retest_original=student_generalize.retest_original,
+        student_generalize_level1_enabled=student_generalize.level1_enabled,
+        student_generalize_level2_enabled=student_generalize.level2_enabled,
         student_generalize_level1_reward=student_generalize.level1_reward,
         student_generalize_level2_reward=student_generalize.level2_reward,
         student_generalize_confidence_enabled=student_generalize.confidence.enabled,

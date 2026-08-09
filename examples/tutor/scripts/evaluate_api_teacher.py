@@ -526,19 +526,26 @@ def prepare_test_dataset(
         tokenizer=tokenizer,
     )
     student_generalize = getattr(config, "student_generalize", None)
-    if (
-        student_generalize is not None
-        and student_generalize.enabled
-        and student_generalize.source == "generated"
-    ):
+    required_levels = (
+        student_generalize.transfer_levels()
+        if student_generalize is not None and student_generalize.enabled
+        else ()
+    )
+    if required_levels:
         bank = tutor_train.load_student_generalize_bank(
             student_generalize.path,
-            source="generated",
+            source=student_generalize.source,
         )
-        dataset = tutor_train._filter_generated_generalization_dataset(
+        dataset = tutor_train._filter_student_generalize_dataset(
             dataset,
             bank=bank,
             split_name="test",
+            required_levels=required_levels,
+            sample_count=(
+                tutor_train.MATH_GENERALIZATION_SAMPLE_COUNT
+                if student_generalize.source == "train"
+                else None
+            ),
         )
     eval_max_samples = config.evaluator.max_samples
     if eval_max_samples is not None:
@@ -1780,8 +1787,9 @@ async def main_async(args: argparse.Namespace) -> None:
         tutor_train._prepare_math_generalization_data(config)
 
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
-    if config.student_generalize.enabled:
-        tutor_train._validate_student_generalize_datasets(config, tokenizer)
+    # No pre-flight validation any more. prepare_test_dataset below filters the
+    # split to the rows carrying every enabled transfer level, and raises only if
+    # that leaves nothing.
 
     student_prompts = tutor_train._load_eval_student_prompts(config)
     dataset = prepare_test_dataset(

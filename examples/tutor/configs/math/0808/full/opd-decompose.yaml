@@ -1,0 +1,150 @@
+# 0808f-opd-decompose -- decompose clause distilled over the whole stuck tail.
+#
+# The rollout is untouched and fully on-policy: no instruction anywhere. The
+# same weights are then run teacher-forced over the policy's own tokens with the
+# instruction appended, giving a per-token reverse KL on the sampled tokens,
+# log pi_sampled - log pi_teacher. That is subtracted from the per-token
+# advantage with coefficient loss_weight and the ordinary importance-sampling
+# loss runs unchanged, so the signal inherits the PPO ratio and clipping.
+# Discount factor zero: the penalty lands on the token that produced it and
+# never enters GAE. Teacher and policy are the same weights and differ only by
+# the instruction, so what ends up in the parameters is the effect of the
+# instruction, and the term self-limits once the policy behaves that way
+# unprompted.
+#
+# Read against decompose.yaml, not against baseline.yaml.
+#
+# WHY ORDERS 3-10
+#
+# A census of on-policy rollouts, counting tutor turns by how many times the
+# student had already failed when the turn was generated -- order 1 is the reply
+# to the student's first wrong attempt, order k the reply to the k-th
+# (20260808_090053_0808-baseline, 1520 episodes, the 1-in-10 debug dump):
+#
+#   order    n   resolve   repeats the previous turn
+#       1  1107    38.2%        --
+#       2   614    28.0%       8.4%
+#       3   374    22.7%      23.7%
+#       4   254    12.2%      24.9%
+#       5   201    15.4%      31.0%
+#       6   153    10.5%      39.2%
+#       7   125     0.8%      52.6%
+#       8   117     6.0%      60.0%
+#       9   105     0.0%      60.9%
+#      10   101     2.0%      63.6%
+#
+# ("repeats" = at least half of this turn's word bigrams already appeared in the
+# previous turn, stopwords removed.) The two columns are monotone and opposite,
+# and the shape reproduces on three other runs including 8385- and 9096-turn
+# July baselines. The policy has about two distinct things to say; from order 4
+# on it is largely restating itself and the student stops moving.
+#
+# That the repetition costs the resolution, rather than being a symptom of the
+# residual problem being hard, is a within-(task_id, order) comparison: with G=8
+# the same problem at the same depth often has both repeating and non-repeating
+# turns, and inside those cells the non-repeating turn resolves 10.5% more often
+# (229 cells, 322 repeat turns against 544 non-repeat).
+#
+# WHY THE CAP IS 0
+#
+# workflow.py:4314 walks turns in order with a running counter, so a cap takes
+# the FIRST n eligible turns rather than a sample:
+#
+#   gate 0 + cap 2  -> orders 1-2      1721 turns   54.6% of all tutor turns
+#   gate 2 + cap 2  -> orders 3-4       628 turns   19.9%
+#   gate 2 + cap 0  -> orders 3-10     1430 turns   45.4%   <- this file
+#
+# Orders 1-2 are the healthy end -- 8.4% repeat, 28-38% resolve -- so a gate-0
+# arm spends its whole budget where nothing is wrong. Gate 2 with a cap reaches
+# orders 3-4 but stops before orders 5-10, which are 802 turns running 31-64%
+# repeat. opd-decompose-cap2.yaml is that arm, kept as an ablation.
+#
+# Uncapping also makes the placement comparison clean for the first time.
+# prompt_instruction has no per-episode cap, so at gate 2 it covers orders 3-10
+# -- exactly this arm's 45.4%. prompt_instruction/share_of_turns and
+# opd/selected_ratio should agree within a point or two.
+#
+# SCALE
+#
+# This does not raise the KL mass above what has already run without collapsing:
+# 1430 supervised turns against 1721 for a gate-0 arm, 17% fewer. loss_weight
+# 0.1 and reward_clip 2.0 carry over unchanged, and the same watch applies --
+# opd_advantage/min and /max inside +-0.2, rollout/format_errors at 0.
+#
+# The spread across episodes does change. Without a cap a 10-turn episode
+# contributes 8 supervised turns and a 2-turn episode contributes 0, so the term
+# is carried by the long episodes. Two consequences to watch rather than
+# pre-empt:
+#
+#   - About half the supervised turns (720 of 1430) come from episodes that end
+#     at max_turns and never succeed. For a reward that would be contamination;
+#     for OPD it is not, since the target is what the instructed policy would
+#     have said at that state and does not depend on the outcome. Those are the
+#     loop states this arm exists to break.
+#   - Those turns also carry a task advantage near max_turn_penalty -1.0, and
+#     the KL rides on top of it in the same importance-sampling loss. They point
+#     the same way, but if opd_advantage drifts outside +-0.2, look here first.
+#     The fallback is opd-decompose-cap2.yaml, not a return to gate 0.
+#
+# HOW TO READ THE RESULT
+#
+# Not on final_correct. The whole repeat collapse is worth about +4 pp of
+# episode success and about +2.9 pp on the all-episode denominator, from a
+# survival simulation of the competing-risks chain with the leak hazard held
+# fixed. Even on 528 test problems the 95% interval is about +-4.3 pp, so the
+# effect sits at roughly one standard error and a flat score means nothing
+# either way.
+#
+# Judge it on the mechanism: the repeat rate at orders 3-10, ~1430 observations
+# per run, which would have to fall from 24-64% toward the 8.4% seen at order 2;
+# and opd_reverse_kl trending to 0. The repeat rate is not currently logged --
+# see the README.
+defaults:
+  - /math/0805/v2/qwen8b-train-qwen1.7b-eval3-math-pre-aleak-g8k4-leakt-full@_global_
+  - _self_
+
+hydra:
+  searchpath:
+    - file://examples/tutor/configs
+
+trial_name: 0808f-opd-decompose
+
+total_train_steps: 100
+
+opd:
+  enabled: true
+  # 1.0 is the reference default, but the reference runs OPD standalone where
+  # the KL is the whole objective. Joint with GRPO that is a scale error: the
+  # task advantage is normalised to about unit scale by actor.adv_norm and this
+  # term is added afterwards in raw nats. The first attempt reached
+  # opd_advantage -17, lost the output-format tags within ~30 steps and fell to
+  # reward -3.2. None of the existing clips reach it -- actor.reward_clip acts
+  # on the task reward before rebn, eps_clip bounds the ratio, and
+  # gradient_clipping rescales the whole gradient instead of trimming outliers.
+  loss_weight: 0.1
+  # Decompose clause only. Measured apart from the other two clauses over 264
+  # states: decompose alone +2.4% [+0.3, +4.5], and +4.3% [+1.3, +7.5] where the
+  # tutor had just repeated itself. The anti-repeat clause added +0.5%
+  # [-1.9, +2.9] on top, did not lower the repeat rate of the turn it produced,
+  # and made output unparsable 17.6% of the time against 9.8%.
+  instruction: "@decompose"
+  # turn_idx is 1-based and _opd_skip_reason gates on turn_idx - 1 >= this, so 2
+  # makes order 3 and up eligible. Matches prompt_instruction in decompose.yaml.
+  min_prior_failed_turns: 2
+  # 0 disables the cap: workflow.py:4314 tests
+  # `self.opd_max_turns_per_episode and selected >= ...` and 0 is falsy, so every
+  # eligible turn is supervised. The one line that differs from
+  # opd-decompose-cap2.yaml.
+  max_turns_per_episode: 0
+  # Bounds one token's contribution to +-0.2 at loss_weight 0.1, about a fifth
+  # of the task advantage.
+  reward_clip: 2.0
+  skip_guided_rows: true
+  # Excluded to avoid stacking an unclipped KL on tokens that already carry a
+  # terminal penalty. On this policy that removes 7.9% of turns overall and 111
+  # of the 1430 at order >= 3.
+  skip_leaked_rows: true
+
+stats_logger:
+  wandb:
+    group: 0808-full-split

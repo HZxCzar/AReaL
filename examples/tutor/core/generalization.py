@@ -81,40 +81,34 @@ def _load_generated_variant_bank(
     return bank
 
 
-def validate_student_generalize_dataset(
-    dataset: Iterable[Mapping[str, Any]],
-    *,
-    split_name: str,
+def has_complete_generalize_case(
+    sample: Mapping[str, Any],
     bank: Mapping[str, Any],
+    *,
     sample_count: int | None = None,
-) -> None:
-    missing: list[str] = []
-    total = 0
-    for index, sample in enumerate(dataset):
-        total += 1
-        sample_missing = _missing_generalize_fields(
-            sample,
-            bank,
-            sample_count=sample_count,
-        )
-        if sample_missing:
-            sample_id = sample.get("id")
-            label = str(sample_id) if sample_id is not None else f"index {index}"
-            missing.append(f"{label}: {', '.join(sample_missing)}")
+    required_levels: Iterable[str] = REQUIRED_STUDENT_GENERALIZE_LEVELS,
+) -> bool:
+    """Can this row serve every transfer level that is switched on?
 
-    if not missing:
-        return
+    required_levels is the caller's set of enabled transfer levels. Empty means
+    no probe reads the bank -- the original re-test is built from the row's own
+    task -- so every row qualifies.
 
-    preview = "; ".join(missing[:10])
-    if len(missing) > 10:
-        preview += f"; ... and {len(missing) - 10} more"
-    raise ValueError(
-        "student_generalize.enabled=true but "
-        f"{split_name} split has {len(missing)}/{total} samples without complete "
-        "student generalization cases. Each sample must provide either level1 and "
-        "level2 or the configured number of samples with task and ground_truth, "
-        "either in the sidecar keyed by id or in "
-        f"metadata.student_generalize. Missing: {preview}"
+    The case may come from the sidecar keyed by id or from
+    metadata.student_generalize; both forms are accepted, and for the
+    positional 'samples' form a level maps to its index in
+    REQUIRED_STUDENT_GENERALIZE_LEVELS.
+    """
+    required_levels = tuple(required_levels)
+    if not required_levels:
+        return True
+    if not isinstance(sample, Mapping):
+        return False
+    return not _missing_generalize_fields(
+        sample,
+        bank,
+        sample_count=sample_count,
+        required_levels=required_levels,
     )
 
 
@@ -123,6 +117,7 @@ def _missing_generalize_fields(
     bank: Mapping[str, Any],
     *,
     sample_count: int | None = None,
+    required_levels: tuple[str, ...] = REQUIRED_STUDENT_GENERALIZE_LEVELS,
 ) -> list[str]:
     payload: Any | None = None
     sample_id = sample.get("id")
@@ -138,11 +133,26 @@ def _missing_generalize_fields(
 
     samples = payload.get("samples")
     if isinstance(samples, list):
-        expected_count = sample_count if sample_count is not None else len(samples)
         missing: list[str] = []
-        if len(samples) != expected_count:
-            missing.append(f"samples(count={len(samples)}, expected={expected_count})")
-        for index, item in enumerate(samples):
+        if required_levels == REQUIRED_STUDENT_GENERALIZE_LEVELS:
+            # Unchanged path. Every level is in use, so the sidecar must hold
+            # exactly the expected number of cases and all of them complete.
+            expected_count = sample_count if sample_count is not None else len(samples)
+            if len(samples) != expected_count:
+                missing.append(
+                    f"samples(count={len(samples)}, expected={expected_count})"
+                )
+            wanted: Iterable[int] = range(len(samples))
+        else:
+            # A subset of levels reads a subset of positions -- the case builder
+            # zips levels against this list positionally -- so only those
+            # positions have to be there and the total stops mattering.
+            wanted = [
+                REQUIRED_STUDENT_GENERALIZE_LEVELS.index(level)
+                for level in required_levels
+            ]
+        for index in wanted:
+            item = samples[index] if index < len(samples) else None
             if not isinstance(item, Mapping):
                 missing.append(f"samples[{index}]")
                 continue
@@ -152,7 +162,7 @@ def _missing_generalize_fields(
         return missing
 
     missing: list[str] = []
-    for level in REQUIRED_STUDENT_GENERALIZE_LEVELS:
+    for level in required_levels:
         item = payload.get(level)
         if not isinstance(item, Mapping):
             missing.append(level)

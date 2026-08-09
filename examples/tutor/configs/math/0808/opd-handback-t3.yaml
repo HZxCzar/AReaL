@@ -1,4 +1,4 @@
-# Fourth arm: distil the handback instruction instead of the repair instruction.
+# 0808-opd-handback-t3 -- opd-handback distillation, but only from turn 3.
 #
 # Same machinery as opd.yaml -- rollout untouched and on-policy, the same weights
 # re-run teacher-forced with the instruction, per-token reverse KL subtracted from
@@ -36,7 +36,7 @@ hydra:
   searchpath:
     - file://examples/tutor/configs
 
-trial_name: 0808-opd-handback
+trial_name: 0808-opd-handback-t3
 
 # Stop after 100 optimizer steps, whatever the epoch count works out to.
 #
@@ -77,12 +77,17 @@ opd:
   # Named, not copied: prompts.TEACHER_HANDBACK_INSTRUCTION. An unknown name
   # raises at config load rather than training on the literal string.
   instruction: "@handback"
-  # Every arm carries its instruction from turn 1. The repair wording opens with
-  # "Your previous message did not get through", which is false on turn 1 -- kept
-  # anyway, because every offline measurement was taken against that exact string
-  # and the effect did not need the premise to be true (+7.5% on states where the
-  # student was improving rather than stuck).
-  min_prior_failed_turns: 0
+  # Supervise from turn 3 instead of turn 1. With max_turns_per_episode 2 that
+  # is turns 3-4: min_prior_failed_turns decides which turns are ELIGIBLE
+  # (turn_idx - 1 >= threshold) and the cap then takes the first two of them.
+  #
+  # Paired against opd-handback.yaml, which differs in this one value, so the two
+  # ask whether it is worth more to distil the turns where most episodes end or
+  # the turns where the tutor is already stuck. On the late-window traces that
+  # is 290 supervised turns per 600 episodes here against 664 at gate 0, and
+  # roughly a third of these 290 sit in episodes that run to the turn cap and
+  # never succeed whatever is said in them.
+  min_prior_failed_turns: 2
   # Turns 1 and 2, which is where 70-83% of episodes end across all five models.
   max_turns_per_episode: 2
   # The reference does not clip, but the reference is not competing with a task
