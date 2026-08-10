@@ -1627,20 +1627,6 @@ class TutorConfig(GRPOConfig):
     prompt_instruction: TutorInstructionPromptConfig = field(
         default_factory=TutorInstructionPromptConfig
     )
-    teacher_history_tags: str = field(
-        default="stripped",
-        metadata={
-            "help": (
-                "How the teacher sees its own earlier turns. 'stripped' is the "
-                "historical behaviour: the visible text with the output tags "
-                "removed, which the model imitates -- malformed turns run 2.1% "
-                "at depth 1 and 73.4% at depth 10 on an untrained teacher. "
-                "'masked' restores the tag skeleton with the reasoning content "
-                "replaced by a placeholder. Observation side only; reward and "
-                "sampling are untouched."
-            )
-        },
-    )
     teacher_system_prompt: str = field(default=DEFAULT_TEACHER_SYSTEM_PROMPT)
     teacher_anti_leak_instruction_enabled: bool = field(
         default=False,

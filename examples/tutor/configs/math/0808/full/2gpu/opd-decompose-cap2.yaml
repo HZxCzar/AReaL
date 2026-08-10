@@ -1,0 +1,34 @@
+# 0808f-opd-decompose-cap2 -- the cap control.
+#
+# Identical to opd-decompose.yaml except max_turns_per_episode is 2, so OPD
+# supervises depth 3-4 only: 628 turns, 19.9% of tutor turns, against 1430 and
+# 45.4% uncapped.
+#
+# Not optional. The 0808d runs already showed gate 2 beating gate 0 across three
+# separate instructions (14/15 shared eval steps, repair +0.329, decompose
+# +0.234, handback +0.133), so the only untested increment in opd-decompose is
+# removing the cap -- and this is its control. It is also the arm that did NOT
+# collapse at 2 GPUs.
+#
+# It breaks coverage parity with decompose.yaml on purpose (19.9% against
+# 45.4%), so read it against opd-decompose, not against the prompt arm.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0808f2-opd-decompose-cap2
+
+opd:
+  enabled: true
+  loss_weight: 0.1
+  instruction: "@decompose"
+  min_prior_failed_turns: 2
+  # The one line that differs from opd-decompose.yaml.
+  max_turns_per_episode: 2
+  reward_clip: 2.0
+  skip_guided_rows: true
+  skip_leaked_rows: true
+
+stats_logger:
+  wandb:
+    group: 0808-full-2gpu

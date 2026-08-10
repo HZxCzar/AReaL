@@ -1,0 +1,395 @@
+# 0808 / full -- self-contained base, 2 GPUs.
+#
+# The flattened composition of what used to be
+# math/0805/v2/...-g8k4-leakt-full, with nothing inherited from another
+# directory. 4gpu/base.yaml is the only thing that builds on this, and it
+# changes the allocation and nothing else.
+#
+# WHAT THIS GROUP CHANGES against the 0808 arms
+#
+# 1. The whole 759/528 split, not 132/118.
+#
+#    student_generalize.source was doing two jobs: selecting the transfer bank,
+#    and filtering BOTH splits to the ids with verified variants. Transfer is
+#    not measured and its rewards were already 0.0, so the filter bought
+#    nothing and cost 4.5x the test set. source "sidecar" with an empty path
+#    leaves the split alone.
+#
+# 2. The original re-test is the only student probe.
+#
+#    level1_enabled / level2_enabled false. Probe cost per completed episode
+#    drops from 12 student calls (3 probes x replays 4) to 4, and nothing
+#    filters the dataset.
+#
+# 3. Unparseable teacher turns: the ORIGINAL handling, after two failed attempts.
+#
+#    The problem is real. A malformed turn writes a blank assistant message into
+#    the tutor's OWN history, and P(next malformed | this malformed) is 87.8%
+#    healthy / 98.1% drifted -- every episode starts well-formed and none is
+#    malformed throughout, so the failure is absorbing. The student solves 0.3%
+#    of the time after a malformed turn against 18.3% after a well-formed one.
+#
+#    Two attempts to fix it by changing termination and scoring, both measured on
+#    the baseline arm (no OPD) on this same split. Format errors per episode:
+#
+#      continue, -0.5   (original)          0.034, and it decayed to 0.000
+#      terminate, -1.0                      0.196
+#      terminate, dropped from loss, 0.0    0.455-0.589 and still climbing at
+#                                           step 23; incorrect_n_seqs collapsed
+#                                           65 -> 5, turns fell to 1.1,
+#                                           opd_reverse_kl vanished entirely --
+#                                           the arm was void
+#
+#    Monotone in how cheap a format error is. Why the reference systems can
+#    terminate and we cannot: there a schema violation lets the agent dodge
+#    nothing, because the trajectory still fails and is still scored as a
+#    failure. Here max_turn_penalty is -1.0, so an early format exit avoids it,
+#    and dropping the row removes even the gradient against it. That asymmetry is
+#    ours, not theirs.
+#
+#    The original penalty is doing real work -- the error rate decays to zero
+#    under it. If the absorbing behaviour is worth attacking later, do it on the
+#    OBSERVATION side only: put the tutor's own raw output into its own history
+#    instead of a blank. That changes neither the reward nor the sampling
+#    distribution and cannot create an escape hatch.
+#
+# 4. Evaluation runs the teacher pre-solve unverified.
+#
+#    Training still requires the teacher to solve the problem itself before it
+#    may teach it. Evaluation no longer does, because nothing checks that at
+#    deployment. NOTE this makes eval numbers incomparable with every earlier
+#    run: the teacher_pre_skipped bucket (2.6-4.4% of eval episodes, the ones
+#    the teacher could not solve) disappears and those episodes now count.
+#    Expect a downward level shift that is not a regression. Compare within this
+#    group only.
+#
+# 5. Eval is 528x1 every 25 steps, not 118x3 every 10.
+#
+#    528x1 is both cheaper than 118x3 would scale to and a better estimator:
+#    problems differ from each other far more than repeat rollouts of one
+#    problem do. SE goes from about 4.6 pp to about 2.2 pp. Wall-clock is set by
+#    WAVES, not episodes -- max_concurrent_rollouts is 16 and counts groups, an
+#    eval group is one problem, so a pass is ceil(problems/16) waves: 7.4 for
+#    118, 33 for 528, measured at ~85-90 min. freq_steps 25 makes that 5 passes
+#    (~7 h) instead of 11 (~16 h).
+#
+# GPU BUDGET -- read this before launching
+#
+# CUDA_VISIBLE_DEVICES is 0..7, so eight GPUs total. Four arms at 2 GPUs fit
+# exactly and that combination has run. Three arms at 4 GPUs each asks for 12
+# and all three died at startup on 20260809_1920 (0 metrics rows), with
+# eval-rollout workers failing to bind their forked ports. Use 4gpu/ for at most
+# TWO arms at a time, and stagger the launches -- forked-worker ports are
+# allocated per run with no coordination between runs, and d2 doubles the number
+# of forks each run needs.
+
+experiment_name: tutor-math-baseline
+trial_name: 0808f-base-2gpu
+seed: 42
+enable_offload: false
+total_train_epochs: 150
+tokenizer_path: ${actor.path}
+workflow: examples.tutor.workflow.TutorAgentWorkflow
+eval_workflow: ${workflow}
+dataset_type: math
+answer_scorer: math
+max_turns: 10
+enable_thinking: false
+leak_handling_mode: terminate
+teacher_show_ground_truth: false
+teacher_anti_leak_instruction_enabled: true
+student_generalize:
+  enabled: true
+  source: sidecar
+  level1_reward: 0.0
+  level2_reward: 0.0
+  mode: only_success
+  path: ''
+  replays: 4
+  retest_original: true
+  level1_enabled: false
+  level2_enabled: false
+teacher_pre:
+  enabled: true
+  mode: filter_solver
+  attempts: 3
+  max_tokens: 0
+  verify: true
+auxiliary_model:
+  mode: api
+  enable_thinking: false
+  base_url: ${oc.env:TUTOR_QWEN3_8B_BASE_URL}
+  model: qwen3-8b
+  api_key: ${oc.env:INF_API_KEY}
+  timeout: 120
+  max_tokens: 1024
+  temperature: 0.0
+  top_p: 1.0
+  max_concurrent_calls: 16
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen8b-auxiliary
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+  answer_judge_enabled: true
+  answer_judge_max_tokens: 256
+student_models:
+- name: qwen3-1.7b
+  weight: 1.0
+  base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+  model: qwen3-1.7b
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 16
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+- name: llama-3.1-8b-instruct
+  weight: 0.0
+  base_url: ${oc.env:TUTOR_LLAMA31_8B_BASE_URL}
+  model: llama-3.1-8b-instruct
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.6
+  top_p: 0.9
+  max_concurrent_calls: 16
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-llama31-8b-student
+- name: gemma-3-1b-it
+  weight: 0.0
+  base_url: ${oc.env:TUTOR_GEMMA3_1B_BASE_URL}
+  model: gemma-3-1b-it
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.0
+  top_p: null
+  max_concurrent_calls: 16
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-gemma3-1b-student
+    extra_body:
+      repetition_penalty: 1.05
+reward:
+  # The original value, restored. See note 3 -- both attempts at changing the
+  # handling measured worse, and this penalty is what makes the error rate decay.
+  format_error_penalty: -0.5
+  success: 1.0
+  leak_penalty_mode: rawbase
+  assign_success_reward: false
+  leak_penalty: -1.0
+  leak_penalty_aggregation: episode
+  outcome_prior_turn_weight: 0.5
+  outcome_credit_gamma: 0.9
+  early_success_bonus: 0.0
+  max_turn_penalty: -1.0
+  enable_turn_penalty: false
+  turn_penalty: -0.01
+  length_penalty_threshold_chars: 0
+  length_penalty_per_100_chars: 0.0
+  length_penalty_min: 0.0
+debug_trace_dir: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/debug_traces/${experiment_name}/${trial_name}
+debug_trace_every_n_rollouts: 10
+cluster:
+  n_nodes: 1
+  n_gpus_per_node: 2
+  fileroot: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor
+  name_resolve:
+    type: nfs
+    nfs_record_root: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/name_resolve
+scheduler:
+  type: local
+rollout:
+  backend: sglang:d1p1t1
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  tokenizer_path: ${tokenizer_path}
+  max_concurrent_rollouts: 16
+  queue_size: null
+  consumer_batch_size: ${train_dataset.batch_size}
+  max_head_offpolicyness: 2
+  pause_grace_period: 10
+  enable_rollout_tracing: false
+  scheduling_spec: ${actor.scheduling_spec}
+  use_lora: true
+  dump_to_file: true
+  openai:
+    mode: inline
+    tool_call_parser: qwen25
+    reasoning_parser: qwen3
+    chat_template_type: concat
+    export_style: concat
+    turn_discount: 1.0
+gconfig:
+  n_samples: 8
+  min_new_tokens: 0
+  max_new_tokens: 4096
+  max_tokens: 24576
+  greedy: false
+  temperature: 0.7
+  top_p: 1.0
+  lora_name: default_lora
+eval_gconfig:
+  n_samples: 1
+  min_new_tokens: 0
+  max_new_tokens: 4096
+  max_tokens: 24576
+  greedy: false
+  temperature: 0.7
+  top_p: 1.0
+  lora_name: default_lora
+actor:
+  backend: fsdp:d1p1t1
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+  init_from_scratch: false
+  disable_dropout: true
+  gradient_checkpointing: true
+  dtype: bfloat16
+  mb_spec:
+    n_mbs: 1
+    max_tokens_per_mb: 40960
+  optimizer:
+    type: adam
+    lr: 5.0e-05
+    weight_decay: 0.0
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1.0e-08
+    lr_scheduler_type: constant
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.001
+  eps_clip: 0.4
+  use_ppo_clip: true
+  advantage_estimator: rebn
+  turn_discount: 1.0
+  temperature: ${gconfig.temperature}
+  reward_scaling: 1.0
+  reward_bias: 0.0
+  kl_ctl: 0.0
+  ppo_n_minibatches: 4
+  recompute_logprob: true
+  use_decoupled_loss: true
+  behave_imp_weight_cap: 5.0
+  reward_norm: null
+  adv_norm:
+    mean_level: batch
+    std_level: batch
+  weight_update_mode: disk
+  use_lora: ${rollout.use_lora}
+  peft_type: lora
+  lora_rank: 16
+  lora_alpha: 16
+  target_modules:
+  - all-linear
+  max_new_tokens: ${gconfig.max_new_tokens}
+  scheduling_spec:
+  - task_type: worker
+    port_count: 2
+    gpu: 1
+    cmd: python3 -m areal.infra.rpc.rpc_server
+    env_vars: {}
+  group_baseline: episode
+  group_baseline_leave1out: true
+  episode_loss_weighting: false
+ref:
+  backend: ${actor.backend}
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${actor.path}
+  init_from_scratch: false
+  disable_dropout: true
+  dtype: ${actor.dtype}
+  mb_spec:
+    n_mbs: 1
+    max_tokens_per_mb: 40960
+  optimizer: null
+  scheduling_strategy:
+    type: colocation
+    target: actor
+  scheduling_spec: ${actor.scheduling_spec}
+sglang:
+  model_path: ${actor.path}
+  random_seed: ${seed}
+  skip_tokenizer_init: true
+  dtype: ${actor.dtype}
+  max_running_requests: 32
+  context_length: 40960
+  mem_fraction_static: 0.75
+  enable_lora: ${actor.use_lora}
+  max_lora_rank: ${actor.lora_rank}
+  max_loaded_loras: 16
+train_dataset:
+  batch_size: 16
+  shuffle: true
+  pin_memory: false
+  num_workers: 0
+  path: examples/tutor/data/math_1.7b_8b/math_pass@2
+  type: rl
+  max_length: 16384
+valid_dataset:
+  batch_size: ${train_dataset.batch_size}
+  pin_memory: false
+  num_workers: 0
+  path: examples/tutor/data/math_1.7b_8b/math_pass@2
+  type: rl
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 50
+  freq_secs: null
+recover:
+  mode: auto
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 10
+  freq_steps: null
+  freq_secs: 3600
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 25
+  freq_secs: null
+  max_samples: null
+  average_rollouts: 1
+  student_model_names:
+  - qwen3-1.7b
+  teacher_pre_verify: false
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: offline
+    entity: hz-czar-stanford
+    project: TAgent
+    name: ${trial_name}
+    group: 0808-full-split
+# The original handling: penalise the turn, hand the student an empty message,
+# keep going. See note 3 -- terminating was tried twice, both worse.
+format_handling_mode: continue
+total_train_steps: 100

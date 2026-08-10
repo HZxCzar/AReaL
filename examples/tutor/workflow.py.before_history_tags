@@ -237,7 +237,6 @@ from examples.tutor.prompts import (
     TEACHER_ADAPTIVE_INSTRUCTION,
     TEACHER_ANTI_LEAK_INSTRUCTION,
     TEACHER_GUIDANCE_TAIL_TEMPLATE,
-    TEACHER_HISTORY_MASKED_TEMPLATE,
     TEACHER_MOVE_INSTRUCTIONS,
     TEACHER_PRE_SOLVE_FILTER_CONTEXT_TEMPLATE,
     TEACHER_REPAIR_INSTRUCTION,
@@ -581,7 +580,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         guided_slots: dict[str, Any] | None = None,
         opd: dict[str, Any] | None = None,
         prompt_instruction: dict[str, Any] | None = None,
-        teacher_history_tags: str = "stripped",
         local_advantage_turn_discount: float = 1.0,
         teacher_system_prompt: str = "",
         teacher_anti_leak_instruction_enabled: bool = False,
@@ -885,11 +883,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError("opd loss weight must be positive when enabled.")
         if self.opd_enabled and self.opd_reward_clip < 0.0:
             raise ValueError("opd reward clip must be non-negative (0 disables).")
-        if teacher_history_tags not in {"stripped", "masked"}:
-            raise ValueError(
-                "teacher_history_tags must be 'stripped' or 'masked'."
-            )
-        self.teacher_history_tags = teacher_history_tags
         prompt_instr = dict(prompt_instruction or {})
         self.prompt_instruction_enabled = bool(prompt_instr.get("enabled", False))
         self.prompt_instruction_text, self.prompt_instruction_name = (
@@ -4215,25 +4208,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
 
     @staticmethod
     def _render_conversation(
-        turns: list[dict[str, str]],
-        *,
-        speaker: str,
-        own_turn_template: str | None = None,
+        turns: list[dict[str, str]], *, speaker: str
     ) -> list[dict[str, str]]:
-        """Shared dialogue seen from one side: own turns assistant, other user.
-
-        ``own_turn_template`` re-wraps the speaker's OWN turns, and is how the
-        teacher gets the shape of its replies back after `public_history`
-        stripped the tags off them. It takes a single ``{visible}`` field. Only
-        the teacher passes it; the student's view must stay plain text, because
-        the student is never shown the tag protocol.
-        """
+        """Shared dialogue seen from one side: own turns assistant, other user."""
         rendered = []
         for turn in turns:
             is_own = turn["role"] == speaker
             content = turn["content"]
-            if is_own and own_turn_template is not None:
-                content = own_turn_template.format(visible=content)
             # Environment feedback rides on the other side's turn and is only
             # ever shown to the teacher.
             env = turn.get("env") if speaker == "teacher" and not is_own else None
@@ -4311,13 +4292,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return [
             {"role": "system", "content": system},
             *self._render_conversation(
-                tutor_state.public_history.turns,
-                speaker="teacher",
-                own_turn_template=(
-                    TEACHER_HISTORY_MASKED_TEMPLATE
-                    if getattr(self, "teacher_history_tags", "stripped") == "masked"
-                    else None
-                ),
+                tutor_state.public_history.turns, speaker="teacher"
             ),
         ]
 

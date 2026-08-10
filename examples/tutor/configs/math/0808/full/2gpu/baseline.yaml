@@ -1,0 +1,15 @@
+# 0808f-baseline -- control.
+#
+# Nothing enabled. Exists so the other three have something to be read against
+# on the same split. Do NOT compare it to 0808-baseline: that runs on 132/118
+# and verifies the teacher pre-solve at eval, so its success rate is not on this
+# scale.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0808f2-baseline
+
+stats_logger:
+  wandb:
+    group: 0808-full-2gpu

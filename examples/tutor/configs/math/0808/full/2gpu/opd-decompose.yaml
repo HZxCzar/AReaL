@@ -1,0 +1,67 @@
+# 0808f-opd-decompose -- decompose clause distilled over the whole stuck tail.
+#
+# The rollout is untouched and fully on-policy. The same weights are then run
+# teacher-forced over the policy's own tokens with the instruction appended,
+# giving a per-token reverse KL that is subtracted from the advantage. Read it
+# against decompose.yaml, not baseline.yaml.
+#
+# WHY DEPTH 3-10. Counting tutor turns by how many times the student had
+# already failed when the turn was generated (1520 baseline episodes):
+#
+#   depth      1      2      3      4      5      6      7      8      9     10
+#   resolve  38.2%  28.0%  22.7%  12.2%  15.4%  10.5%   0.8%   6.0%   0.0%   2.0%
+#   repeat     --    8.4%  23.7%  24.9%  31.0%  39.2%  52.6%  60.0%  60.9%  63.6%
+#
+# Monotone and opposite, reproduced on three other runs. The policy has about
+# two distinct things to say. Within-(task_id, depth) -- same problem, same
+# depth, some rollouts repeat and some do not -- the non-repeating turn resolves
+# 10.5% more often.
+#
+# WHY CAP 0. workflow.py:4314 walks turns in order with a running counter, so a
+# cap takes the FIRST n eligible turns rather than a sample:
+#
+#   gate 0 + cap 2  -> depth 1-2     1721 turns   54.6%   the healthy end
+#   gate 2 + cap 2  -> depth 3-4      628 turns   19.9%   opd-decompose-cap2
+#   gate 2 + cap 0  -> depth 3-10    1430 turns   45.4%   this file
+#
+# KNOWN RISK. The 2-GPU version of this arm collapsed at step 44 on
+# 20260809_051324: opd_reverse_kl/avg ran from 0.005 to 0.133 without ever
+# plateauing while cap2 settled at 0.018, clipped_tokens drifted 337 -> 955 ->
+# 2460 while cap2 stayed at 87-241, and the output format broke. Teaching
+# quality on the well-formed turns was unchanged throughout (17.7% -> 18.3%), so
+# it was a structural failure, not a capability one. format_handling_mode now
+# bounds the damage per episode; it does not stop the drift. Watch
+# opd_reverse_kl/avg -- above 0.05 and still climbing, expect a break within
+# ~10 steps. Fall back to opd-decompose-cap2, not to gate 0.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0808f2-opd-decompose
+
+opd:
+  enabled: true
+  # 1.0 is the reference default, but the reference runs OPD standalone where
+  # the KL is the whole objective. Joint with GRPO that is a scale error: the
+  # task advantage is normalised to about unit scale by actor.adv_norm and this
+  # term is added afterwards in raw nats. The first attempt reached
+  # opd_advantage -17 and lost the output-format tags within ~30 steps.
+  loss_weight: 0.1
+  instruction: "@decompose"
+  # Matches prompt_instruction.min_prior_failed_turns in decompose.yaml, so the
+  # two arms see the instruction on the same turns.
+  min_prior_failed_turns: 2
+  # 0 disables the cap: workflow.py:4314 tests
+  # `self.opd_max_turns_per_episode and selected >= ...` and 0 is falsy. The one
+  # line that differs from opd-decompose-cap2.yaml.
+  max_turns_per_episode: 0
+  # Bounds one token's contribution to +-0.2 at loss_weight 0.1.
+  reward_clip: 2.0
+  skip_guided_rows: true
+  # Leaked rows are excluded to avoid stacking an unclipped KL on tokens that
+  # already carry a terminal penalty. That removes 7.9% of turns overall.
+  skip_leaked_rows: true
+
+stats_logger:
+  wandb:
+    group: 0808-full-2gpu
