@@ -1,0 +1,75 @@
+# 0808f-baseline-masked -- baseline with the teacher's own turns tagged again.
+#
+# One line differs from baseline.yaml: teacher_history_tags: masked.
+#
+# THE BUG IT FIXES
+#
+# public_history stores the teacher's visible text with the <reasoning>/<output>
+# tags already stripped, and _render_conversation feeds that back as the
+# teacher's OWN assistant turns. By depth 3 the model has two of its own untagged
+# messages in context and copies them. Measured over 3933 episodes of the
+# deployed base Qwen3-8B in analysis/context_instruction_20260809 -- malformed
+# turn rate against depth, pooled over arms:
+#
+#   depth      1     2     3     4     5     6     7     8     9    10
+#   malformed 2.1   7.8  16.2  23.2  27.8  30.1  46.6  44.8  71.3  73.4
+#
+# Confirmed from captured raw output rather than inferred: 432 of 685 malformed
+# turns carry NO tags at all, at a median raw length of 445 characters against
+# 1114 for a well-formed turn. Shorter, so not truncation -- imitation.
+#
+# masked restores the tag skeleton in the teacher's view of its own turns and
+# replaces what was inside <reasoning> with a self-describing placeholder. Not
+# the raw reasoning: that would replay private deliberation into a transcript
+# that is supposed to be the public one, and grow the context by the length of
+# every previous one. The format signal was what went missing, not the content.
+#
+# SCOPE. Observation side only. Reward, scoring and the sampling procedure are
+# untouched, so this cannot become a cheap exit from a losing episode the way
+# the two format-penalty attempts in ../2gpu/base.yaml could. The student's view
+# is unchanged and must stay that way -- it is never shown the tag protocol.
+# Rollout, training and OPD teacher prompts all go through
+# _build_tutor_messages, so the three stay consistent.
+#
+# WHAT THE CONTROL IS. 4gpu/baseline.yaml. Read it against a baseline run of the
+# same shape; the 2-GPU 0808f2 numbers are a fallback, not the control.
+#
+# DO NOT EXPECT THE PROBE'S EFFECT SIZE. That measurement is on an untrained
+# policy whose depth-3+ resolve rate is 1.6-3.0% against the trained teacher's
+# 18.5%; reward drives the trained teacher's format errors to ~0.03 per episode.
+# The deep regime the probe measured is one the real system rarely occupies.
+# The gain should show up early in training, before the -0.5 penalty has done
+# its work, and in the depth 5-10 tail.
+#
+# WHAT TO WATCH
+#
+#   stop/format_error                        the direct target
+#   depth/d5_7/turns, depth/d8_10/turns      episodes should reach deeper once
+#                                            malformed output stops being an
+#                                            absorbing state
+#   depth/stuck_episode_solved / depth/stuck_episode    the 0808 objective
+#
+# And one new failure mode, which stop/format_error will NOT show: the model may
+# imitate the placeholder and emit a stub reasoning of its own, trading private
+# deliberation for format compliance. Watch the LENGTH of the <reasoning>
+# section, not just whether it parses.
+#
+# Second-order, worth knowing: format_handling_mode is continue, so a malformed
+# turn still writes an empty visible message into public_history. Under masked
+# the teacher then sees a well-formed skeleton with an empty <output>. That
+# trades "no tags at all" (432 of 685 cases) for "an empty output is
+# acceptable". Net positive on the counts, but if empty outputs climb, the fix
+# is to fall back to the raw text when the visible message is empty.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0808f-baseline-masked
+
+# The one line that differs from baseline.yaml. "stripped" is the historical
+# behaviour and is still the default everywhere else.
+teacher_history_tags: masked
+
+stats_logger:
+  wandb:
+    group: 0808-full-4gpu
