@@ -11,7 +11,12 @@ from examples.tutor.prompts import (
     TEACHER_STATE_USER_TEMPLATE,
 )
 
-from areal.api.cli_args import MISSING, EvaluatorConfig, GRPOConfig
+from areal.api.cli_args import (
+    MISSING,
+    EvaluatorConfig,
+    GRPOConfig,
+    PPOActorConfig,
+)
 
 _LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate"}
 _FORMAT_HANDLING_MODES = {"continue", "terminate"}
@@ -683,6 +688,23 @@ class TutorEvaluatorConfig(EvaluatorConfig):
             "help": (
                 "Maximum number of validation samples to evaluate. "
                 "None or non-positive values evaluate the full validation set."
+            )
+        },
+    )
+    leak_terminate: bool | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Whether a leak ends the conversation during EVALUATION. None "
+                "follows leak_handling_mode, which is the historical behaviour. "
+                "False evaluates in the wild: the conversation runs the full "
+                "budget however much the teacher gives away, the leak judge still "
+                "runs so the leak rate is known, and the re-test sees the whole "
+                "transcript. Terminating is a training policy -- nothing "
+                "truncates a real conversation -- so it should not decide what "
+                "gets measured. With False the train-consistent number is still "
+                "reported, as student_original_preleak_success, computed on the "
+                "same rollout."
             )
         },
     )
@@ -1543,6 +1565,33 @@ class TutorOpdConfig:
 
 
 @dataclass
+class TutorActorConfig(PPOActorConfig):
+    """PPO actor with a configurable number of passes over each rollout batch."""
+
+    num_iterations: int = field(
+        default=1,
+        metadata={
+            "help": (
+                "How many times to run the whole PPO update over one collected "
+                "batch. 1 is the historical behaviour: ppo_n_minibatches splits "
+                "the batch and takes one step per chunk, which is several "
+                "optimizer steps but a single pass over the data. 2 takes two "
+                "passes. Rollout dominates the cost here, so this buys "
+                "optimization without buying generation. The extra passes are "
+                "off-policy against the updated parameters and the PPO clip is "
+                "what bounds them, which is why this is safer than the "
+                "equivalent increase in learning rate."
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.num_iterations < 1:
+            raise ValueError("actor.num_iterations must be at least 1.")
+
+
+@dataclass
 class TutorFreeChatConfig:
     """Teacher-first free conversation scored only by a delayed solo re-test.
 
@@ -1680,6 +1729,7 @@ class TutorConfig(GRPOConfig):
         default_factory=TutorInstructionPromptConfig
     )
     free_chat: TutorFreeChatConfig = field(default_factory=TutorFreeChatConfig)
+    actor: TutorActorConfig = field(default_factory=TutorActorConfig)
     teacher_history_tags: str = field(
         default="stripped",
         metadata={

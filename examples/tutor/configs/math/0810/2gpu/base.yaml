@@ -121,3 +121,23 @@ format_handling_mode: continue
 stats_logger:
   wandb:
     group: 0810-freechat-2gpu
+
+# Two passes over each collected batch instead of one. ppo_n_minibatches 4 already
+# takes four optimizer steps per batch, but they are four chunks of ONE pass; this
+# makes it two passes, eight steps. Rollout is what costs here -- about 24 external
+# calls an episode -- so this is the only lever that buys more optimization without
+# buying more generation. The extra pass is off-policy against the parameters the
+# first one produced and the PPO clip is what bounds it, which is why it is safer
+# than the equivalent bump in lr. Room to do it: clip_ratio ran 0.0017 and
+# grad_norm 0.079 against gradient_clipping 1.0.
+# 200, not the inherited 100. The measured effect on the objective in the closest
+# reference run is about +0.7pp per 10 steps, and a slope standard error falls as
+# n^-1.5, so 100 steps cannot separate that from zero while 200 clears it with
+# room. 200 x 16 problems is 4.2 epochs over the 759-row split, against 2.1.
+total_train_steps: 200
+
+actor:
+  num_iterations: 2
+
+evaluator:
+  leak_terminate: false

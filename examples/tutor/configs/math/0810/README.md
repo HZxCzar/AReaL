@@ -121,12 +121,34 @@ the penalty alone.
 
 ## What to watch
 
-**The objective.**
+**The objective.** Two numbers, off the same eval rollout.
 
-    generalize/test/student_original_success     eval:  the re-test fraction
-    generalize/train/student_original_success    train: the same thing per step
+    generalize/test/student_original_success          IN THE WILD  <- headline
+    generalize/test/student_original_preleak_success  train-consistent
 
-Both are already per-episode means over the 4 replays.
+`evaluator.leak_terminate: false` makes the eval conversation run the full budget
+however much the teacher gives away. Terminating on a leak is a *training policy*:
+it is there to make leaking expensive while learning, and nothing truncates a real
+conversation, so it must not decide what gets measured. The leak judge still runs,
+so `rollout/leaks` tells you whether it leaked -- you get the leak rate and the
+untruncated outcome, instead of one number that confounds them.
+
+The second is what the terminate arm would have scored: the same re-test on the
+transcript through the last completed round before the first leak. It is derivable
+from the untruncated rollout because that prefix is identical either way, so the
+two numbers are paired on one sample rather than on two eval passes -- much less
+noise between them. It is never rewarded, and it only appears at eval on an arm
+whose training mode is `terminate`. A leak on round 1 leaves no prefix, and that
+episode scores 0 for the train-consistent number.
+
+Both are already per-episode means over the 4 replays. `solved`, `final_correct`
+and `student/*/solved` all report the in-the-wild number too, so nothing reads as a
+flat zero any more.
+
+NOTE this changes what `student_original_success` means for the terminate arm at
+eval: it used to be the truncated transcript, it is now the whole conversation.
+Eval rows logged before this are not comparable with the ones after. leak-reward is
+unaffected, since it never truncated.
 
 A version-0 pass on 20260810_2341 measured 0.620 for leak-reward and 0.518 for
 leak-terminate, but that run used `teacher_history_tags: stripped` and is

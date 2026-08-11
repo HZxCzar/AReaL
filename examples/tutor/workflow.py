@@ -12,7 +12,7 @@ import socket
 import time
 import uuid
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from itertools import combinations
 from pathlib import Path
 from typing import Any
@@ -456,6 +456,12 @@ _STUDENT_GENERALIZE_LEVELS = ("level1", "level2")
 # Re-test the ORIGINAL task as a full standalone solution. Off by default;
 # an independent branch of the same chat, exactly like the transfer probes.
 ORIGINAL_RETEST_LEVEL = "original"
+# The same re-test run on the transcript as leak-terminate training would have
+# left it: everything up to the last completed round before the first leak. Only
+# ever produced at evaluation, only when the training arm terminates, and never
+# rewarded -- it exists so the in-the-wild number and the train-consistent number
+# come off one rollout instead of two eval passes.
+PRELEAK_RETEST_LEVEL = "original_preleak"
 _STUDENT_GENERALIZE_MODES = {"only_success", "always"}
 
 
@@ -634,6 +640,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_generalize_level1_reward: float = 0.2,
         student_generalize_level2_reward: float = 0.5,
         student_generalize_retest_reward: float = 0.0,
+        eval_preleak_retest: bool = False,
         student_generalize_confidence_enabled: bool = False,
         student_generalize_confidence_reward_scale: float = 0.25,
         eval_repeat_count: int = 1,
@@ -1132,6 +1139,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.student_generalize_retest_reward = float(
             student_generalize_retest_reward
         )
+        self.eval_preleak_retest = bool(eval_preleak_retest)
         if self.free_chat_enabled:
             # Nothing inside a free-chat episode is scored, so without the
             # re-test the episode carries no reward at all and every rollout
@@ -3207,7 +3215,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 f"{system.rstrip()}\n\n"
                 f"{self._task_context(episode_artifact.task)}"
             )
-        if level == ORIGINAL_RETEST_LEVEL:
+        if level in (ORIGINAL_RETEST_LEVEL, PRELEAK_RETEST_LEVEL):
             final_turn = (
                 render_prompt(
                     FREE_CHAT_STUDENT_RETEST_TEMPLATE,
@@ -3270,9 +3278,24 @@ class TutorAgentWorkflow(RolloutWorkflow):
         paying for variants nobody is measuring.
         """
         levels = self._transfer_probe_levels()
-        if getattr(self, "student_generalize_retest_original", False):
-            return (ORIGINAL_RETEST_LEVEL, *levels)
-        return levels
+        if not getattr(self, "student_generalize_retest_original", False):
+            return levels
+        if self._preleak_retest_active():
+            return (ORIGINAL_RETEST_LEVEL, PRELEAK_RETEST_LEVEL, *levels)
+        return (ORIGINAL_RETEST_LEVEL, *levels)
+
+    def _preleak_retest_active(self) -> bool:
+        """Whether to also re-test the pre-leak prefix. Evaluation only.
+
+        Training already re-tests the truncated transcript, because it really did
+        terminate. This is for the eval pass that deliberately did not.
+        """
+        if not getattr(self, "eval_preleak_retest", False):
+            return False
+        try:
+            return bool(getattr(workflow_context.get(), "is_eval", False))
+        except Exception:  # noqa: BLE001 - no context outside a rollout worker
+            return False
 
     @staticmethod
     def _unscored_judge_result() -> JudgeResult:
@@ -3788,6 +3811,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 # the entire episode reward.
                 reward=float(getattr(self, "student_generalize_retest_reward", 0.0)),
             )
+            if self._preleak_retest_active():
+                # reward 0.0, always: this is a diagnostic on an eval rollout and
+                # must not move any advantage.
+                cases[PRELEAK_RETEST_LEVEL] = StudentGeneralizationCase(
+                    level=PRELEAK_RETEST_LEVEL,
+                    task=str(data.get("task", "")),
+                    ground_truth=str(data.get("ground_truth", "")),
+                    reward=0.0,
+                )
         payload: Any | None = None
         sample_id = data.get("id")
         bank = getattr(self, "student_generalize_bank", {}) or {}
@@ -3889,6 +3921,54 @@ class TutorAgentWorkflow(RolloutWorkflow):
             and not artifact.invalid_due_to_leak
         )
 
+    def _preleak_generalization_anchor(
+        self, episode_artifact: EpisodeArtifact
+    ) -> StudentGeneralizationAnchor | None:
+        """The transcript as leak-terminate training would have left it.
+
+        Terminate mode stops at the leaking turn and stores that turn with
+        ``public_history_after = public_history_before``, so its re-test anchor is
+        the last COMPLETED round before the leak. Here the episode ran on past the
+        leak, so the same prefix is recovered by walking to the round before the
+        first leaked one.
+
+        None when the first round already leaked: terminate mode would have had no
+        completed round to re-test, and the metric records that as a zero rather
+        than inventing a transcript.
+        """
+        completed: TurnArtifact | None = None
+        for artifact in episode_artifact.turns:
+            if artifact.leak_result.leaked:
+                break
+            if self._is_student_generalization_reward_turn(artifact):
+                completed = artifact
+        if completed is None:
+            # The first round leaked, so terminate mode would have left the
+            # student with nothing. That is the empty transcript, not a zero.
+            return self._empty_generalization_anchor(episode_artifact)
+        return self._turn_generalization_anchor(completed)
+
+    def _empty_generalization_anchor(
+        self, episode_artifact: EpisodeArtifact
+    ) -> StudentGeneralizationAnchor | None:
+        """Re-test with no conversation at all: the student solves it alone.
+
+        None only when the episode produced no turn whatsoever -- there is then
+        nothing to attach a reward to and nothing that happened to measure.
+
+        Worth knowing: on these episodes the score is the student's unaided
+        ability on that problem, so they double as the no-teaching baseline for
+        whichever problems they land on.
+        """
+        if not episode_artifact.turns:
+            return None
+        return StudentGeneralizationAnchor(
+            public_history=PublicHistoryState(summary="", turn_count=0, turns=[]),
+            previous_student_output="",
+            teacher_feedback="",
+            reward_turn_idx=int(episode_artifact.turns[-1].turn_idx),
+        )
+
     def _student_generalization_anchor(
         self,
         episode_artifact: EpisodeArtifact,
@@ -3911,11 +3991,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 return self._turn_generalization_anchor(artifact)
 
         if getattr(self, "free_chat_enabled", False):
-            # No completed round, so there is no conversation to re-test on and
-            # no initial attempt to fall back to. Returning None skips the probe
-            # instead of spending four student calls on an empty transcript.
-            # Reachable when a leak terminates the very first turn.
-            return None
+            # No completed round -- a leak terminated the very first turn. Re-test
+            # on the empty transcript rather than scoring 0: "the student got no
+            # help" is measurable, and assuming it is worth zero charges the
+            # episode by the problem's difficulty instead of by the teacher's
+            # behaviour. reward_turn_idx points at the one turn that exists, or
+            # the attachment loop drops the result and the re-test contributes
+            # nothing at all.
+            return self._empty_generalization_anchor(episode_artifact)
 
         return StudentGeneralizationAnchor(
             public_history=PublicHistoryState(
@@ -3951,13 +4034,43 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if getattr(self, "student_generalize_retest_original", False)
             else None
         )
+        preleak_anchor = (
+            self._preleak_generalization_anchor(episode_artifact)
+            if self._preleak_retest_active()
+            else None
+        )
 
         cases = self._student_generalization_cases(data)
         results: list[StudentGeneralizationResult] = []
+        # No leak means terminate mode would have run the identical conversation,
+        # so its score is the in-the-wild score and re-running the probe would
+        # only resample it. Reuse instead; only leaked episodes pay twice.
+        episode_leaked = any(
+            artifact.leak_result.leaked for artifact in episode_artifact.turns
+        )
         for level in self._probe_levels():
-            anchor = (
-                original_anchor if level == ORIGINAL_RETEST_LEVEL else transfer_anchor
-            )
+            if level == PRELEAK_RETEST_LEVEL and not episode_leaked:
+                original_result = next(
+                    (r for r in results if r.level == ORIGINAL_RETEST_LEVEL), None
+                )
+                if original_result is not None:
+                    results.append(
+                        replace(
+                            original_result,
+                            level=PRELEAK_RETEST_LEVEL,
+                            reward=0.0,
+                            correctness_reward=0.0,
+                            confidence_reward=0.0,
+                            reward_turn_idx=None,
+                        )
+                    )
+                    continue
+            if level == ORIGINAL_RETEST_LEVEL:
+                anchor = original_anchor
+            elif level == PRELEAK_RETEST_LEVEL:
+                anchor = preleak_anchor
+            else:
+                anchor = transfer_anchor
             if anchor is None:
                 results.append(
                     StudentGeneralizationResult(
@@ -4826,6 +4939,28 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return self.gconfig
 
     @staticmethod
+    def _level_retest_score(
+        results: list[StudentGeneralizationResult] | None, level: str
+    ) -> float | None:
+        """Fraction of re-test replays correct for one probe level.
+
+        None when that level was not run at all, which is how the caller knows to
+        leave the metric out rather than log a misleading zero.
+        """
+        for result in results or []:
+            if result.level != level:
+                continue
+            if result.skipped or not result.attempted:
+                return 0.0
+            replay_count = int(getattr(result, "replay_count", 0) or 0)
+            if replay_count > 0:
+                replay_correct = int(getattr(result, "replay_correct", 0) or 0)
+                return replay_correct / replay_count
+            judge = result.judge_result
+            return float(bool(judge is not None and judge.correct))
+        return None
+
+    @staticmethod
     def _free_chat_outcome_score(
         results: list[StudentGeneralizationResult] | None,
     ) -> float:
@@ -4914,6 +5049,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "pre_solved": float(pre_success),
             "solved": outcome_score,
             "final_correct": final_correct_score,
+            # Whatever the teacher gave away, the episode still counts here. The
+            # two punished readings are added below.
+            "final_correct_leak_gated": (
+                0.0 if leak_count else final_correct_score
+            ),
             "stop/max_turns": float(termination_reason == "max_turns"),
             "stop/context_limit": float(
                 termination_reason == CONTEXT_BUDGET_TERMINATION_REASON
@@ -4936,6 +5076,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         if success_round > 0:
             metrics["solve_turn"] = int(success_round)
+
+        # What leak-terminate training would have scored on this same rollout.
+        # Only present on an eval pass of a terminate arm, where the conversation
+        # deliberately ran past the leak; absent otherwise, so the series is never
+        # padded with zeros that mean "not measured".
+        preleak_score = self._level_retest_score(
+            student_generalization_results, PRELEAK_RETEST_LEVEL
+        )
+        if preleak_score is not None:
+            metrics["final_correct_preleak"] = preleak_score
+            metrics["final_correct_preleak_delta"] = (
+                final_correct_score - preleak_score
+            )
 
         # Depth counters. The objective is that episodes where the student is
         # still wrong after two explanations still end solved -- depth/stuck_*

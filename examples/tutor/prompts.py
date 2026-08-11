@@ -356,7 +356,7 @@ the student:
 # Appended to a replay of the conversation, on an independent branch. This is
 # the first and only time the student is shown the task.
 FREE_CHAT_STUDENT_RETEST_TEMPLATE = """\
-After these conversations, try to solve the problem from scratch:
+Now try to solve the problem from scratch:
 {{ task }}
 
 Put your final answer in \\boxed{}."""

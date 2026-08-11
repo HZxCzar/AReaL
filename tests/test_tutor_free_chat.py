@@ -22,6 +22,7 @@ import sys
 from dataclasses import asdict
 
 from areal.api.cli_args import load_expr_config
+import examples.tutor.train  # noqa: F401  (imported so [16] can read its source)
 from examples.tutor.configs import TutorConfig
 from examples.tutor.core.types import (
     PublicHistoryState,
@@ -31,6 +32,7 @@ from examples.tutor.core.types import (
     TutorTurnState,
 )
 from examples.tutor.prompts import FREE_CHAT_STUDENT_SYSTEM_PROMPT
+from areal.infra.workflow_context import _current_context
 from examples.tutor.workflow import TutorAgentWorkflow
 
 FAILURES: list[str] = []
@@ -61,6 +63,15 @@ def load(allocation: str, name: str) -> TutorConfig:
         ["--config", f"{BASE}/{allocation}/{name}.yaml"], TutorConfig
     )
     return config
+
+
+class _FakeContext:
+    """The minimum a rollout context needs for the eval-only code paths."""
+
+    def __init__(self, *, is_eval: bool = False, task_id: int = 0):
+        self.is_eval = is_eval
+        self.task_id = task_id
+        self.lora_version = None
 
 
 def _normalize(value, trial_name: str):
@@ -147,6 +158,12 @@ def main() -> int:
         # past turns with the tags removed, imitates them, and the malformed rate
         # climbs with depth -- 6.3% to 41.7% over depths 1-5 measured on this
         # rollout. A fixed budget puts every episode in that tail.
+        check(f"{prefix} 200 steps, not the inherited 100",
+              config.total_train_steps == 200,
+              f"got {config.total_train_steps}")
+        check(f"{prefix} the epoch cap does not bind first",
+              config.total_train_epochs * 1.0 > 200 * 16 / 759,
+              f"epochs_cap={config.total_train_epochs}")
         check(f"{prefix} teacher history keeps its tag skeleton",
               config.teacher_history_tags == "masked",
               f"got {config.teacher_history_tags!r}")
@@ -332,7 +349,7 @@ def main() -> int:
           f"got {[m['role'] for m in probe]}")
     final = probe[-1]["content"]
     check("final turn asks for a solution from scratch",
-          "After these conversations, try to solve the problem from scratch:" in final)
+          "Now try to solve the problem from scratch:" in final)
     check("final turn is where the task first appears", TASK in final)
     check("final turn asks for a boxed answer", "\\boxed{}" in final)
 
@@ -459,13 +476,26 @@ def main() -> int:
           "LEAKED" not in replayed, replayed[:120])
     check("the completed rounds are present",
           "Complete the square." in replayed)
+    # A leak on turn 1 leaves the student with no conversation. That gets
+    # re-tested on the empty transcript, not scored 0 -- a forced zero would cost
+    # the episode an amount set by the problem's difficulty rather than by the
+    # teacher, and the leak penalty is already the punishment for leaking.
     leak_on_turn_one = workflow._student_generalization_anchor(
         _episode_with([_turn(1, [], completed=False, leaked=True)]),
         allow_unsuccessful=True,
     )
-    check("a leak on turn 1 skips the re-test instead of running it on nothing",
-          leak_on_turn_one is None,
+    check("a leak on turn 1 re-tests on an empty transcript",
+          leak_on_turn_one is not None
+          and leak_on_turn_one.public_history.turns == [],
           f"got {leak_on_turn_one}")
+    check("and it still attaches to a turn, or the reward is silently dropped",
+          leak_on_turn_one is not None
+          and leak_on_turn_one.reward_turn_idx == 1,
+          f"got {None if leak_on_turn_one is None else leak_on_turn_one.reward_turn_idx}")
+    check("an episode with no turns at all has nothing to measure",
+          workflow._student_generalization_anchor(
+              _episode_with([]), allow_unsuccessful=True
+          ) is None)
 
     print("\n[13] the configured retest_reward actually reaches the case")
     # retest_reward is read from config into an attribute AND used where the
@@ -519,6 +549,169 @@ def main() -> int:
     check("legacy student prompt still carries the task",
           TASK in legacy_student
           and legacy_student.startswith("You are a real student solving the task."))
+
+    print("\n[15] terminate is a training policy, not an evaluation condition")
+    from examples.tutor.train import _build_eval_workflow_kwargs
+    from examples.tutor.workflow import PRELEAK_RETEST_LEVEL
+
+    config = loaded[("4gpu", "leak-terminate")]
+    check("the config asks for in-the-wild evaluation",
+          config.evaluator.leak_terminate is False,
+          f"got {config.evaluator.leak_terminate}")
+    terminate_eval = _build_eval_workflow_kwargs(
+        {"leak_handling_mode": "terminate"}, config
+    )
+    check("eval stops terminating on a leak",
+          terminate_eval["leak_handling_mode"] == "reward_only",
+          f"got {terminate_eval['leak_handling_mode']}")
+    check("eval asks for the train-consistent re-test too",
+          terminate_eval["eval_preleak_retest"] is True)
+    reward_eval = _build_eval_workflow_kwargs(
+        {"leak_handling_mode": "reward_only"}, loaded[("4gpu", "leak-reward")]
+    )
+    check("the reward_only arm needs no second re-test (nothing was truncated)",
+          reward_eval["eval_preleak_retest"] is False)
+
+    probe = make_workflow(
+        student_generalize_retest_original=True,
+        student_generalize_retest_reward=1.0,
+        student_generalize_level1_enabled=False,
+        student_generalize_level2_enabled=False,
+        eval_preleak_retest=True,
+        student_generalize_bank={},
+    )
+    check("the extra level is absent during training",
+          probe._probe_levels() == ("original",),
+          f"got {probe._probe_levels()}")
+    # workflow_context exposes set()/get() but no reset(), so the ContextVar
+    # itself is used to restore the previous context afterwards.
+    token = _current_context.set(_FakeContext(is_eval=True))
+    try:
+        check("the extra level appears at eval",
+              probe._probe_levels() == ("original", PRELEAK_RETEST_LEVEL),
+              f"got {probe._probe_levels()}")
+        cases = probe._student_generalization_cases(
+            {"id": "x", "task": TASK, "ground_truth": GROUND_TRUTH}
+        )
+        check("the train-consistent re-test is never rewarded",
+              cases[PRELEAK_RETEST_LEVEL].reward == 0.0,
+              f"got {cases[PRELEAK_RETEST_LEVEL].reward}")
+        check("the in-the-wild re-test keeps the configured reward",
+              cases["original"].reward == 1.0)
+
+        r1 = _turn(1, [{"role": "teacher", "content": "a"},
+                       {"role": "student", "content": "b"}], completed=True)
+        r2 = _turn(2, [{"role": "teacher", "content": "a"},
+                       {"role": "student", "content": "b"},
+                       {"role": "teacher", "content": "c"},
+                       {"role": "student", "content": "d"}], completed=True)
+        leaked3 = _turn(3, [{"role": "teacher", "content": "leaky"},
+                            {"role": "student", "content": "oh"}],
+                        completed=True, leaked=True)
+        r4 = _turn(4, [{"role": "teacher", "content": "e"}], completed=True)
+        anchor = probe._preleak_generalization_anchor(
+            _episode_with([r1, r2, leaked3, r4])
+        )
+        check("the prefix stops at the round before the first leak",
+              anchor is not None and anchor.reward_turn_idx == 2,
+              f"got {None if anchor is None else anchor.reward_turn_idx}")
+        check("rounds after the leak are excluded from the prefix",
+              anchor is not None
+              and all("e" != t["content"] for t in anchor.public_history.turns))
+        first_turn_leak = probe._preleak_generalization_anchor(
+            _episode_with([_turn(1, [{"role": "teacher", "content": "leaky"},
+                                     {"role": "student", "content": "oh"}],
+                                 completed=True, leaked=True), r2])
+        )
+        check("a leak on round 1 leaves an empty prefix, not a skipped probe",
+              first_turn_leak is not None
+              and first_turn_leak.public_history.turns == [],
+              f"got {first_turn_leak}")
+    finally:
+        _current_context.reset(token)
+    check("the extra level is gone again outside eval",
+          probe._probe_levels() == ("original",))
+
+    score_for = TutorAgentWorkflow._level_retest_score
+    check("the preleak score reads its own level, not the in-the-wild one",
+          score_for([_retest(level="original", replay_correct=4, replay_count=4),
+                     _retest(level=PRELEAK_RETEST_LEVEL, replay_correct=1,
+                             replay_count=4)], PRELEAK_RETEST_LEVEL) == 0.25)
+    check("a level that never ran reads None, so the metric is omitted",
+          score_for([_retest(level="original", replay_correct=4, replay_count=4)],
+                    PRELEAK_RETEST_LEVEL) is None)
+    check("a skipped preleak reads 0.0, not None",
+          score_for([_retest(level=PRELEAK_RETEST_LEVEL, skipped=True)],
+                    PRELEAK_RETEST_LEVEL) == 0.0)
+
+    print("\n[16] the second re-test is only paid for when the episode leaked")
+    import inspect as _inspect
+    from dataclasses import replace as _replace
+
+    workflow_source = _inspect.getsource(sys.modules["examples.tutor.workflow"])
+    check("a no-leak episode reuses the first result instead of resampling",
+          "episode_leaked = any(" in workflow_source
+          and "if level == PRELEAK_RETEST_LEVEL and not episode_leaked:"
+          in workflow_source)
+    original = _retest(level="original", replay_correct=3, replay_count=4)
+    original.correctness_reward = 1.0
+    original.reward = 1.0
+    original.reward_turn_idx = 5
+    copied = _replace(
+        original, level=PRELEAK_RETEST_LEVEL, reward=0.0, correctness_reward=0.0,
+        confidence_reward=0.0, reward_turn_idx=None,
+    )
+    check("the reused copy carries the same score",
+          copied.replay_correct == 3 and copied.replay_count == 4)
+    check("the reused copy cannot move any advantage",
+          copied.reward == 0.0 and copied.correctness_reward == 0.0
+          and copied.reward_turn_idx is None)
+    check("and the original keeps its reward",
+          original.reward == 1.0 and original.reward_turn_idx == 5)
+
+    print("\n[17] num_iterations actually reaches the update loop")
+    # AReaL has no num_iterations of its own -- pedagogical_rl carries it in a
+    # config subclass and an actor subclass. Setting it in yaml without both would
+    # load fine and train exactly as before, so both halves are checked.
+    import inspect
+
+    from examples.tutor.configs import TutorActorConfig
+
+    check("every 0810 arm asks for two passes",
+          all(loaded[(a, n)].actor.num_iterations == 2
+              for a in ALLOCATIONS for n in ARMS),
+          str({f"{a}/{n}": loaded[(a, n)].actor.num_iterations
+               for a in ALLOCATIONS for n in ARMS}))
+    legacy, _ = load_expr_config(
+        ["--config", "examples/tutor/configs/math/0808/full/4gpu/baseline.yaml"],
+        TutorConfig,
+    )
+    check("0808 still takes one pass, so it trains exactly as before",
+          legacy.actor.num_iterations == 1,
+          f"got {legacy.actor.num_iterations}")
+    check("the actor config keeps everything PPOActorConfig had",
+          legacy.actor.ppo_n_minibatches == 4
+          and legacy.actor.group_baseline == "episode"
+          and legacy.actor.lora_rank == 16)
+    try:
+        TutorActorConfig(num_iterations=0)
+    except ValueError:
+        check("rejected: num_iterations below 1", True)
+    else:
+        check("rejected: num_iterations below 1", False, "constructed")
+
+    source = inspect.getsource(sys.modules["examples.tutor.train"])
+    check("an actor subclass loops over the passes",
+          "class TutorFSDPPPOActor" in source
+          and 'getattr(self.config, "num_iterations", 1)' in source
+          and "for iteration in range(iterations)" in source)
+    check("the trainer hands that subclass to the fsdp path",
+          "def _create_train_engine" in source
+          and "TutorFSDPPPOActor(config=actor_config)" in source)
+    check("the scheduler is stepped between passes, not only after",
+          "self.lr_scheduler_step()" in source)
+    check("num_iterations 1 falls back to the stock engine",
+          'int(getattr(actor_config, "num_iterations", 1)) <= 1' in source)
 
     print()
     if FAILURES:

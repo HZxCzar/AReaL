@@ -292,6 +292,19 @@ def _build_eval_workflow_kwargs(
         eval_workflow_kwargs["teacher_pre_verify"] = bool(
             config.evaluator.teacher_pre_verify
         )
+    # Terminating on a leak is a training policy. Evaluating under it measures a
+    # truncation that does not exist at deployment, so unless asked otherwise the
+    # eval conversation runs to the budget and the train-consistent number is
+    # recovered from the same rollout as a second re-test.
+    if config.evaluator.leak_terminate is False:
+        eval_workflow_kwargs["leak_handling_mode"] = (
+            "reward_only"
+            if workflow_kwargs.get("leak_handling_mode") != "disabled"
+            else "disabled"
+        )
+        eval_workflow_kwargs["eval_preleak_retest"] = (
+            workflow_kwargs.get("leak_handling_mode") == "terminate"
+        )
     eval_workflow_kwargs["teacher_diversity_reward"] = {"enabled": False}
     eval_workflow_kwargs["teacher_context_reward"] = {"enabled": False}
     eval_workflow_kwargs["teacher_progress_judge"] = {"enabled": False}
@@ -337,9 +350,43 @@ class _TutorEvalRepeatTrainerMixin:
 
 def main(args):
     from areal import PPOTrainer
+    from areal.engine import FSDPPPOActor
+    from areal.utils.environ import is_single_controller
+
+    class TutorFSDPPPOActor(FSDPPPOActor):
+        """FSDP actor that runs actor.num_iterations passes over each batch.
+
+        The outer trainer steps the scheduler once after this returns, so the
+        scheduler is stepped between internal passes too and every pass
+        corresponds to one scheduler step, as it would if they were separate
+        updates.
+        """
+
+        def ppo_update(self, data, world_model_batch=None):
+            iterations = max(1, int(getattr(self.config, "num_iterations", 1)))
+            for iteration in range(iterations):
+                if world_model_batch is None:
+                    super().ppo_update(data)
+                else:
+                    super().ppo_update(data, world_model_batch)
+                if iteration + 1 < iterations:
+                    self.lr_scheduler_step()
 
     class TutorPPOTrainer(_TutorEvalRepeatTrainerMixin, PPOTrainer):
-        pass
+        def _create_train_engine(self, actor_config, alloc):
+            # Only the fsdp path is overridden: num_iterations is a tutor-local
+            # addition and the other backends have no subclass carrying it.
+            if (
+                alloc.backend != "fsdp"
+                or int(getattr(actor_config, "num_iterations", 1)) <= 1
+            ):
+                return super()._create_train_engine(actor_config, alloc)
+            if is_single_controller():
+                actor = TutorFSDPPPOActor.as_controller(actor_config, self.scheduler)
+            else:
+                actor = TutorFSDPPPOActor(config=actor_config)
+            actor.create_process_group(parallel_strategy=alloc.parallel)
+            return actor
 
     config_path = pathlib.Path(args[args.index("--config") + 1])
     has_trial_name_override = any(arg.startswith("trial_name=") for arg in args)
