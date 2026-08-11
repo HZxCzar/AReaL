@@ -1,0 +1,34 @@
+# 0810 / freechat -- 4 GPUs. Allocation only; everything else comes from
+# ../2gpu/base.yaml, the same way math/0808/full/4gpu builds on its 2gpu.
+#
+# Two GPUs for generation, two for the actor.
+#
+# BUDGET. CUDA_VISIBLE_DEVICES is 0..7. At 4 GPUs an arm takes half the node, so
+# the two leak arms are exactly the whole node and nothing else fits alongside
+# them. Stagger the two launches by a minute: forked-worker ports are allocated
+# per run with no coordination between runs, and d2 doubles the forks each run
+# needs. Three concurrent 4-GPU arms is what killed 20260809_1920 -- 12 GPUs
+# requested against 8, all three arms produced 0 metric rows.
+#
+# rollout.max_concurrent_rollouts stays at the inherited 16. Here it is bounded
+# by the student endpoint rather than by GPUs: see the re-test cost note in
+# ../README.md, which is the thing most likely to set the step time in this
+# rollout.
+defaults:
+  - ../2gpu/base@_global_
+  - _self_
+
+trial_name: 0810fc-base
+
+cluster:
+  n_gpus_per_node: 4
+
+rollout:
+  backend: "sglang:d2p1t1"
+
+actor:
+  backend: "fsdp:d2p1t1"
+
+stats_logger:
+  wandb:
+    group: 0810-freechat-4gpu

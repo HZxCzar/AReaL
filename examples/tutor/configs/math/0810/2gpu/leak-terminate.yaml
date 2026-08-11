@@ -1,0 +1,23 @@
+# 0810fc-leak-terminate -- a leak ends the conversation, and the re-test runs on
+# the transcript WITHOUT the leaking turn.
+#
+# The leaking turn is never written into the public history (the terminate branch
+# stores `public_history_after = public_before`), and the re-test anchor is the
+# last completed round, so the student is re-tested on the conversation as it
+# stood before the leak. Two things follow, both intended:
+#
+#   * The teacher still eats leak_penalty -1.0.
+#   * It also loses whatever the remaining rounds would have taught, and the
+#     leaked answer itself buys nothing, because the student never sees it.
+#
+# So leaking is strictly worse here than in leak-reward, which is the comparison.
+# A leak on turn 1 leaves no completed round at all: the anchor is then None, the
+# re-test is skipped rather than run on an empty transcript, and the episode's
+# reward is the -1.0 alone.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0810fc2-leak-terminate
+
+leak_handling_mode: terminate

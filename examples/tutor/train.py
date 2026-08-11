@@ -478,6 +478,7 @@ def main(args):
         guided_slots=asdict(config.guided_slots),
         opd=asdict(config.opd),
         prompt_instruction=asdict(config.prompt_instruction),
+        free_chat=asdict(config.free_chat),
         teacher_history_tags=config.teacher_history_tags,
         local_advantage_turn_discount=config.actor.turn_discount,
         teacher_system_prompt=config.teacher_system_prompt,
@@ -530,6 +531,7 @@ def main(args):
         student_generalize_level2_enabled=student_generalize.level2_enabled,
         student_generalize_level1_reward=student_generalize.level1_reward,
         student_generalize_level2_reward=student_generalize.level2_reward,
+        student_generalize_retest_reward=student_generalize.retest_reward,
         student_generalize_confidence_enabled=student_generalize.confidence.enabled,
         student_generalize_confidence_reward_scale=(
             student_generalize.confidence.reward_scale

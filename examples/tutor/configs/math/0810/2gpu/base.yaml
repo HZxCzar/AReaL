@@ -1,0 +1,123 @@
+# 0810 / freechat -- teacher-first free conversation, scored only by a delayed
+# solo re-test.
+#
+# Everything not named below is inherited from math/0808/full/2gpu/base.yaml:
+# the endpoints, the model, the split, the allocation, the optimiser.
+#
+# WHAT THIS CHANGES, AND WHY
+#
+# The answer-attempt loop told the student on every turn to solve the task and to
+# box an answer, judged every reply, and stopped the episode the moment one was
+# correct. Three consequences: every student reply is an answer attempt, the
+# episode length is set by the student's luck rather than by the teaching, and the
+# reward is one binary outcome per episode. Here:
+#
+#   * The teacher speaks first. No student pre-attempt, and no pre-solved short
+#     circuit -- the student is never asked to solve anything during the
+#     conversation, so there is nothing to be already-correct about.
+#   * The pair talks for exactly free_chat.budget rounds. Nothing is judged in
+#     between, so nothing ends the episode early except a leak (in terminate
+#     mode), an unparsable turn (in terminate mode), or the context limit.
+#   * The student is given no task, no subject and no instruction about what to
+#     do. Its entire system prompt is "You are a student talking with a teacher."
+#     What the conversation is about is the teacher's decision, and the student
+#     first sees the problem statement at the re-test.
+#   * The reward is that re-test: the conversation is replayed on an independent
+#     branch and the student writes a solution from scratch. replays=4, so an
+#     episode is worth 0, .25, .5, .75 or 1 -- five levels instead of two.
+#
+# g8k4 = gconfig.n_samples 8 rollouts per problem, 4 re-test attempts per rollout.
+#
+# NOTHING HERE IS COMPARABLE WITH AN EARLIER RUN. The reward is a different
+# quantity, the episode length is fixed, and the student is answering a question
+# it was not shown during the conversation. The headline series is
+# `student_original_success` (the fraction of 4, already averaged per episode);
+# `solved`, `solve_turn` and every `depth/*/resolved` series are identically zero
+# by construction because there is no per-turn judge. The `depth/*/repeats` and
+# `depth/*/containment_sum` halves still work -- they only read the teacher's own
+# text -- so tutor repetition remains measurable.
+#
+# COST. Every episode now runs the full budget instead of the measured 2.1 turns,
+# so this is roughly 2x the calls of an 0808/full episode: 5 teacher generations,
+# 5 student calls, 4 re-test calls, 4 re-test judge calls, and up to 5 leak
+# checks. Watch the student endpoint: a training step is 16 problems x 8 rollouts
+# = 128 episodes x 4 re-tests = 512 student calls that all arrive at the end of
+# the rollout wave, against student_models[0].max_concurrent_calls of 16.
+defaults:
+  - ../../0808/full/2gpu/base@_global_
+  - _self_
+
+trial_name: 0810fc2-base
+
+# The budget. free_chat.budget overwrites max_turns at startup so the two cannot
+# disagree; both are written out because max_turns is what the rest of the code
+# reads and budget is what the teacher is told.
+max_turns: 5
+free_chat:
+  enabled: true
+  budget: 5
+
+student_generalize:
+  enabled: true
+  source: sidecar
+  path: ''
+  # A no-op with both transfer levels off: the re-test uses an anchor that does
+  # not require a solved episode. Set to 'always' anyway so this does not read as
+  # if the re-test were gated on success.
+  mode: always
+  # The fine-grained signal: 4 independent solo attempts per rollout.
+  replays: 4
+  retest_original: true
+  # The entire episode reward. 1.0 against leak_penalty -1.0 puts a teacher that
+  # leaks and scores 4/4 at 0.0, behind an honest teacher who scores 2/4.
+  retest_reward: 1.0
+  level1_enabled: false
+  level2_enabled: false
+  level1_reward: 0.0
+  level2_reward: 0.0
+
+reward:
+  # REQUIRED, and the workflow refuses to start otherwise. Reaching the budget is
+  # the normal ending now, so the inherited -1.0 would charge every episode.
+  max_turn_penalty: 0.0
+  # Dead in this rollout: there is no per-turn success left to reward.
+  success: 0.0
+  assign_success_reward: false
+  early_success_bonus: 0.0
+  # Unchanged from 0808/full.
+  format_error_penalty: -0.5
+  leak_penalty: -1.0
+  leak_penalty_mode: rawbase
+  leak_penalty_aggregation: episode
+
+# Overridden by the two leak arms.
+leak_handling_mode: reward_only
+
+# The teacher's own past turns keep their tag skeleton instead of being handed
+# back as bare text. Observation side only -- reward and sampling are untouched.
+#
+# WHY THIS IS NOT OPTIONAL HERE. Under the inherited 'stripped' the teacher sees
+# one instruction saying "always use <reasoning>/<output>" and then, by turn 4,
+# three examples of itself not using them. The few-shot wins. Measured on
+# 20260810_234129 (143 episodes, stripped), malformed turns by depth:
+#
+#   depth      1      2      3      4      5
+#   malformed  6.3%   8.0%  23.9%  34.1%  41.7%
+#
+# configs.py records the same curve running to 73.4% at depth 10. A fixed budget
+# makes this far worse than it was in the answer-attempt loop, because every
+# episode now reaches the depths where the rate is high instead of stopping at an
+# average of 2.1 turns: rollout/format_errors starts at 0.62 per episode here
+# against 0.26 for 0808 stripped and 0.15 for 0808 masked, same model.
+teacher_history_tags: masked
+
+# Inherited as 'continue'. Note that 'terminate' is now SAFE here in a way it was
+# not in 0808/full: there, an early format exit dodged max_turn_penalty -1.0, so
+# terminating was a cheap way out of a losing episode. With max_turn_penalty 0.0
+# a format-terminated episode collects format_error_penalty -0.5 and loses its
+# re-test, which is strictly worse than the worst honest outcome of 0.0.
+format_handling_mode: continue
+
+stats_logger:
+  wandb:
+    group: 0810-freechat-2gpu

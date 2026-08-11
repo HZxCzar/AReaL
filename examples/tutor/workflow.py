@@ -206,6 +206,10 @@ from examples.tutor.prompts import (
     EMPTY_PLACEHOLDER,
     FILTER_SOLVER_SYSTEM_PROMPT,
     FILTER_SOLVER_USER_TEMPLATE,
+    FREE_CHAT_STUDENT_RETEST_TEMPLATE,
+    FREE_CHAT_STUDENT_SYSTEM_PROMPT,
+    FREE_CHAT_TEACHER_PRE_SOLVE_CONTEXT_TEMPLATE,
+    FREE_CHAT_TEACHER_SYSTEM_PROMPT,
     INITIAL_TEACHER_FEEDBACK_PLACEHOLDER,
     LEAK_CHECK_DISABLED_FEEDBACK,
     LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE,
@@ -580,6 +584,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         world_model: dict[str, Any] | None = None,
         guided_slots: dict[str, Any] | None = None,
         opd: dict[str, Any] | None = None,
+        free_chat: dict[str, Any] | None = None,
         prompt_instruction: dict[str, Any] | None = None,
         teacher_history_tags: str = "stripped",
         local_advantage_turn_discount: float = 1.0,
@@ -628,6 +633,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_generalize_level2_enabled: bool = True,
         student_generalize_level1_reward: float = 0.2,
         student_generalize_level2_reward: float = 0.5,
+        student_generalize_retest_reward: float = 0.0,
         student_generalize_confidence_enabled: bool = False,
         student_generalize_confidence_reward_scale: float = 0.25,
         eval_repeat_count: int = 1,
@@ -637,6 +643,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError("eval_repeat_count must be >= 1.")
         self._eval_repeat_outcomes: dict[int, list[float]] = {}
         self.max_turns = max_turns
+        # Resolved here rather than with the other reward settings because the
+        # budget overwrites max_turns, and max_turns is read by everything below.
+        free_chat_config = dict(free_chat or {})
+        self.free_chat_enabled = bool(free_chat_config.get("enabled", False))
+        self.free_chat_budget = 0
+        if self.free_chat_enabled:
+            budget = int(free_chat_config.get("budget", 0) or 0)
+            if budget > 0:
+                self.max_turns = budget
+            if int(self.max_turns) < 1:
+                raise ValueError("free_chat needs a budget of at least 1 round.")
+            self.free_chat_budget = int(self.max_turns)
         self.dataset_type = (dataset_type or "").strip().lower()
         if self.dataset_type not in {"aime", "math", "polaris"}:
             raise ValueError("dataset_type must be one of: 'aime', 'math', 'polaris'.")
@@ -1111,6 +1129,33 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "level1": float(student_generalize_level1_reward),
             "level2": float(student_generalize_level2_reward),
         }
+        self.student_generalize_retest_reward = float(
+            student_generalize_retest_reward
+        )
+        if self.free_chat_enabled:
+            # Nothing inside a free-chat episode is scored, so without the
+            # re-test the episode carries no reward at all and every rollout
+            # group would sit at zero advantage.
+            if not self.student_generalize_enabled:
+                raise ValueError(
+                    "free_chat requires student_generalize.enabled=true: the "
+                    "re-test is the only reward in the episode."
+                )
+            if not self.student_generalize_retest_original:
+                raise ValueError(
+                    "free_chat requires student_generalize.retest_original=true."
+                )
+            if self.student_generalize_retest_reward <= 0.0:
+                raise ValueError(
+                    "free_chat requires student_generalize.retest_reward > 0."
+                )
+            # Reaching the budget is the normal ending here, not a failure, so a
+            # non-zero max_turn_penalty would charge every single episode.
+            if self.max_turn_penalty:
+                raise ValueError(
+                    "free_chat requires reward.max_turn_penalty=0.0; every "
+                    "episode now ends by reaching the budget."
+                )
         self.student_generalize_confidence_enabled = bool(
             student_generalize_confidence_enabled
         )
@@ -1853,18 +1898,32 @@ class TutorAgentWorkflow(RolloutWorkflow):
             student_prompt_selection=student_prompt_selection,
             student_turn_behavior=initial_student_turn_behavior,
         )
-        initial_student_answer_raw, initial_student_error = await self._run_student(
-            initial_student_state,
-            aux_caller=student_caller,
-        )
+        free_chat = bool(getattr(self, "free_chat_enabled", False))
+        if free_chat:
+            # The teacher opens, so there is no pre-attempt to open with and no
+            # pre-solve check either: nothing is judged until the re-test.
+            initial_student_answer_raw = ""
+            initial_student_error = None
+        else:
+            (
+                initial_student_answer_raw,
+                initial_student_error,
+            ) = await self._run_student(
+                initial_student_state,
+                aux_caller=student_caller,
+            )
         initial_student_answer = _strip_reasoning_for_context(
             initial_student_answer_raw
         )
-        initial_judge_result = await self._score_answer_async(
-            task,
-            ground_truth,
-            initial_student_answer_raw,
-            answer_judge_caller=answer_judge_caller,
+        initial_judge_result = (
+            self._unscored_judge_result()
+            if free_chat
+            else await self._score_answer_async(
+                task,
+                ground_truth,
+                initial_student_answer_raw,
+                answer_judge_caller=answer_judge_caller,
+            )
         )
         (
             initial_student_answer,
@@ -1874,7 +1933,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             initial_student_state,
             initial_student_answer,
             should_generate=(
-                not initial_judge_result.correct and not initial_student_error
+                not free_chat
+                and not initial_judge_result.correct
+                and not initial_student_error
             ),
             aux_caller=student_caller,
         )
@@ -1940,12 +2001,21 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
             return None
 
-        initial_turns = self._initial_conversation(initial_student_answer)
-        initial_turns[-1]["env"] = self._teacher_env_feedback(
-            initial_judge_result, 0
-        )
+        if free_chat:
+            # Empty history: the teacher's first turn is generated from its
+            # system prompt alone.
+            initial_turns = []
+            initial_summary = ""
+        else:
+            initial_turns = self._initial_conversation(initial_student_answer)
+            initial_turns[-1]["env"] = self._teacher_env_feedback(
+                initial_judge_result, 0
+            )
+            initial_summary = self._build_initial_public_summary(
+                initial_student_answer
+            )
         public_history = PublicHistoryState(
-            summary=self._build_initial_public_summary(initial_student_answer),
+            summary=initial_summary,
             turn_count=0,
             turns=initial_turns,
         )
@@ -2066,11 +2136,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 aux_caller=student_caller,
             )
             student_answer = _strip_reasoning_for_context(student_answer_raw)
-            judge_result = await self._score_answer_async(
-                task,
-                ground_truth,
-                student_answer_raw,
-                answer_judge_caller=answer_judge_caller,
+            # Free chat scores nothing mid-episode. A per-turn judge would buy
+            # only metrics here, and it is also the thing that ends the episode
+            # early, which is exactly what this rollout removes.
+            judge_result = (
+                self._unscored_judge_result()
+                if free_chat
+                else await self._score_answer_async(
+                    task,
+                    ground_truth,
+                    student_answer_raw,
+                    answer_judge_caller=answer_judge_caller,
+                )
             )
             (
                 student_answer,
@@ -2080,7 +2157,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_state,
                 student_answer,
                 should_generate=(
-                    not judge_result.correct
+                    not free_chat
+                    and not judge_result.correct
                     and not student_error
                     and turn_idx < self.max_turns
                 ),
@@ -2978,9 +3056,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
     ) -> PublicHistoryState:
         entries = []
         existing_history = old_public_history.summary.strip()
+        free_chat = bool(getattr(self, "free_chat_enabled", False))
         if existing_history:
             entries.append(existing_history)
-        else:
+        elif not free_chat:
+            # Both this and the turns fallback below reconstruct the student's
+            # opening attempt when the history is empty. Free chat has no opening
+            # attempt -- the teacher speaks first into an empty history -- so
+            # synthesising one writes a student turn that never happened into the
+            # teacher's own context and into the re-test transcript.
             entries.append(self._build_initial_public_summary(previous_student_answer))
 
         turn_idx = old_public_history.turn_count + 1
@@ -2998,9 +3082,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 current_student_answer,
             )
         )
-        turns = list(old_public_history.turns) or self._initial_conversation(
-            previous_student_answer
-        )
+        turns = list(old_public_history.turns)
+        if not turns and not free_chat:
+            turns = self._initial_conversation(previous_student_answer)
         turns.append({"role": "teacher", "content": tutor_visible_output})
         student_turn = {"role": "student", "content": current_student_answer}
         if env_feedback:
@@ -3109,12 +3193,29 @@ class TutorAgentWorkflow(RolloutWorkflow):
         `turns`, so level1 / level2 / original are independent branches that do
         not see each other's question or answer.
         """
-        system = self._student_system_prompt_for_selection(
-            episode_artifact.student_prompt_selection
-        )
-        system = f"{system.rstrip()}\n\n{self._task_context(episode_artifact.task)}"
+        free_chat = bool(getattr(self, "free_chat_enabled", False))
+        if free_chat:
+            # The same one-line system prompt the conversation used, so the
+            # re-test is the same student. The task appears for the first time in
+            # the final user turn below.
+            system = FREE_CHAT_STUDENT_SYSTEM_PROMPT
+        else:
+            system = self._student_system_prompt_for_selection(
+                episode_artifact.student_prompt_selection
+            )
+            system = (
+                f"{system.rstrip()}\n\n"
+                f"{self._task_context(episode_artifact.task)}"
+            )
         if level == ORIGINAL_RETEST_LEVEL:
-            final_turn = render_prompt(STUDENT_FINAL_SOLUTION_TEMPLATE)
+            final_turn = (
+                render_prompt(
+                    FREE_CHAT_STUDENT_RETEST_TEMPLATE,
+                    task=episode_artifact.task,
+                )
+                if free_chat
+                else render_prompt(STUDENT_FINAL_SOLUTION_TEMPLATE)
+            )
         else:
             final_turn = render_prompt(
                 STUDENT_TRANSFER_TURN_TEMPLATE, transfer_task=transfer_task
@@ -3173,8 +3274,29 @@ class TutorAgentWorkflow(RolloutWorkflow):
             return (ORIGINAL_RETEST_LEVEL, *levels)
         return levels
 
+    @staticmethod
+    def _unscored_judge_result() -> JudgeResult:
+        """Placeholder for a student reply free chat deliberately does not judge.
+
+        `correct=False` is what keeps the rest of the loop on its normal path:
+        the success branch, the early break and the pre-solved short circuit are
+        all driven by this flag, so none of them fire and the episode runs the
+        full budget.
+        """
+        return JudgeResult(
+            raw_output="",
+            correct=False,
+            feedback="",
+            parse_error=None,
+            raw_result={},
+        )
+
     def _teacher_env_feedback(self, judge_result: Any, turn_idx: int) -> str:
         """Grading + budget the teacher sees, as environment feedback."""
+        # Free chat judges nothing mid-episode, so there is no correctness to
+        # report, and the budget is already in the teacher's system prompt.
+        if getattr(self, "free_chat_enabled", False):
+            return ""
         if judge_result is None:
             return ""
         return render_prompt(
@@ -3661,7 +3783,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 level=ORIGINAL_RETEST_LEVEL,
                 task=str(data.get("task", "")),
                 ground_truth=str(data.get("ground_truth", "")),
-                reward=0.0,
+                # 0.0 keeps the historical behaviour where the re-test is scored
+                # and logged but never rewarded. free_chat sets it and makes this
+                # the entire episode reward.
+                reward=float(getattr(self, "student_generalize_retest_reward", 0.0)),
             )
         payload: Any | None = None
         sample_id = data.get("id")
@@ -3784,6 +3909,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
         for artifact in reversed(episode_artifact.turns):
             if self._is_student_generalization_reward_turn(artifact):
                 return self._turn_generalization_anchor(artifact)
+
+        if getattr(self, "free_chat_enabled", False):
+            # No completed round, so there is no conversation to re-test on and
+            # no initial attempt to fall back to. Returning None skips the probe
+            # instead of spending four student calls on an empty transcript.
+            # Reachable when a leak terminates the very first turn.
+            return None
 
         return StudentGeneralizationAnchor(
             public_history=PublicHistoryState(
@@ -4061,9 +4193,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
     def _log_generalize_stats(
         self,
         *,
-        solved: bool,
+        solved: float,
         student_generalization_results: list[StudentGeneralizationResult] | None,
     ) -> None:
+        """``solved`` is the episode outcome score, not a flag: 0/1 in the
+        answer-attempt loop, and the re-test fraction under free chat."""
         if not bool(getattr(self, "student_generalize_enabled", False)):
             return
 
@@ -4244,11 +4378,59 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         return rendered
 
+    def _free_chat_teacher_system(self, tutor_state: TutorTurnState) -> str:
+        """Teacher system prompt for the free-chat rollout.
+
+        Four blocks in a fixed order, three of them switchable and each stored as
+        its own constant in prompts.py: the setting (budget, task, and what the
+        student will be tested on), the output-format contract, the anti-leak
+        clause, and the teacher's own pre-solve draft. The task rides inside the
+        first block instead of being appended by `_task_context`, because this is
+        the only copy of it in the episode -- the student is not given the task
+        until the re-test.
+
+        There is no prompt-pool suffix, so the rollout prompt and the training
+        prompt are the same string and `clean` has nothing to drop.
+        """
+        system = render_prompt(
+            FREE_CHAT_TEACHER_SYSTEM_PROMPT,
+            budget=int(getattr(self, "free_chat_budget", 0) or self.max_turns),
+            task=tutor_state.task,
+        )
+        if tutor_state.ground_truth and self.teacher_show_ground_truth:
+            system = f"{system}\n\n" + render_prompt(
+                TEACHER_GROUND_TRUTH_CONTEXT_TEMPLATE,
+                ground_truth=tutor_state.ground_truth,
+            )
+        if not self.enable_thinking:
+            system = f"{system}\n\n{NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT}"
+        if getattr(self, "teacher_anti_leak_instruction_enabled", False):
+            system = f"{system}\n\n{TEACHER_ANTI_LEAK_INSTRUCTION}"
+        if getattr(self, "teacher_adaptive_instruction_enabled", False):
+            system = f"{system}\n\n{TEACHER_ADAPTIVE_INSTRUCTION}"
+        pre_solve = tutor_state.teacher_pre_solve_result
+        if (
+            getattr(self, "teacher_pre_enabled", False)
+            and pre_solve is not None
+            and pre_solve.accepted
+        ):
+            raw_output = _strip_reasoning_for_context(
+                str(pre_solve.raw_output or "")
+            ).strip()
+            if raw_output:
+                system = f"{system}\n\n" + render_prompt(
+                    FREE_CHAT_TEACHER_PRE_SOLVE_CONTEXT_TEMPLATE,
+                    raw_output=raw_output,
+                )
+        return system
+
     def _teacher_system_for_state(
         self, tutor_state: TutorTurnState, *, clean: bool = False
     ) -> str:
         """Teacher system prompt. ``clean`` drops the prompt-pool suffix, which is
         the only difference between the rollout prompt and the training prompt."""
+        if getattr(self, "free_chat_enabled", False):
+            return self._free_chat_teacher_system(tutor_state)
         base = (
             self.teacher_system_prompt
             if clean
@@ -4324,8 +4506,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
     def _build_student_messages(
         self, state: StudentTurnState
     ) -> list[dict[str, str]]:
-        system = self._student_system_prompt_for_state(state)
-        system = f"{system.rstrip()}\n\n{self._task_context(state.task)}"
+        if getattr(self, "free_chat_enabled", False):
+            # No task, no subject, no instruction about what to do. The student
+            # only ever learns what this is about from what the teacher says,
+            # which is the point: telling it to solve the task on every turn is
+            # what made every reply an answer attempt.
+            system = FREE_CHAT_STUDENT_SYSTEM_PROMPT
+        else:
+            system = self._student_system_prompt_for_state(state)
+            system = f"{system.rstrip()}\n\n{self._task_context(state.task)}"
         turns = list(state.public_history.turns)
         latest_teacher_output = state.latest_tutor_visible_output.strip()
         if latest_teacher_output:
@@ -4636,6 +4825,35 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         return self.gconfig
 
+    @staticmethod
+    def _free_chat_outcome_score(
+        results: list[StudentGeneralizationResult] | None,
+    ) -> float:
+        """The episode's outcome in free chat: the solo re-test score.
+
+        Nothing inside the conversation is judged, so `success_round` is always 0
+        and every in-chat success series would read as a flat zero. The quantity
+        that decides a free-chat episode is the same one evaluation reports -- the
+        fraction of re-test replays the student got right -- so the batch mean of
+        this is the re-test success rate.
+
+        A skipped re-test scores 0. That happens when a leak terminated the very
+        first turn, leaving no conversation that could have taught anything, so 0
+        is the honest reading rather than a missing value.
+        """
+        for result in results or []:
+            if result.level != ORIGINAL_RETEST_LEVEL:
+                continue
+            if result.skipped or not result.attempted:
+                return 0.0
+            replay_count = int(getattr(result, "replay_count", 0) or 0)
+            if replay_count > 0:
+                replay_correct = int(getattr(result, "replay_correct", 0) or 0)
+                return replay_correct / replay_count
+            judge = result.judge_result
+            return float(bool(judge is not None and judge.correct))
+        return 0.0
+
     def _log_rollout_stats(
         self,
         *,
@@ -4666,12 +4884,23 @@ class TutorAgentWorkflow(RolloutWorkflow):
             1 for trace in traces if trace.invalid_due_to_leak and trace.judge_correct
         )
         solved = success_round > 0
+        # What "this episode ended up solved" means. Identical to float(solved)
+        # unless free chat is on, where nothing in the conversation is judged and
+        # the re-test is the outcome. Every success series below uses this, so the
+        # in-chat and re-test regimes cannot report different things under the same
+        # metric name.
+        outcome_score = float(solved)
+        if getattr(self, "free_chat_enabled", False):
+            outcome_score = self._free_chat_outcome_score(
+                student_generalization_results
+            )
+        final_correct_score = max(float(pre_success), outcome_score)
         is_eval = bool(workflow_context.get().is_eval)
         is_forced_persona_eval = bool(is_eval and student_prompt_selection is not None)
         completed_repeat_outcome = None
         if is_eval and not is_forced_persona_eval:
             completed_repeat_outcome = self._record_eval_repeat_outcomes(
-                final_correct=pre_success or solved,
+                final_correct=final_correct_score,
             )
         metrics = {
             "reward": float(total_reward),
@@ -4683,8 +4912,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
             "invalid_success_due_to_leak": int(invalid_success_due_to_leak),
             "pre_solved": float(pre_success),
-            "solved": float(solved),
-            "final_correct": float(pre_success or solved),
+            "solved": outcome_score,
+            "final_correct": final_correct_score,
             "stop/max_turns": float(termination_reason == "max_turns"),
             "stop/context_limit": float(
                 termination_reason == CONTEXT_BUDGET_TERMINATION_REASON
@@ -4748,7 +4977,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 played = move in guided
                 prefix = f"guided_move/{move}"
                 metrics[f"{prefix}/played"] = float(played)
-                metrics[f"{prefix}/solved"] = float(played and success_round > 0)
+                metrics[f"{prefix}/solved"] = outcome_score if played else 0.0
                 metrics[f"{prefix}/reward"] = float(total_reward) if played else 0.0
                 metrics[f"{prefix}/leaks"] = float(leak_count) if played else 0.0
 
@@ -4779,8 +5008,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 source_selected = source == selected_source
                 prefix = f"prompt_source/{source}"
                 metrics[f"{prefix}/selected"] = float(source_selected)
-                metrics[f"{prefix}/solved"] = float(
-                    source_selected and success_round > 0
+                metrics[f"{prefix}/solved"] = (
+                    outcome_score if source_selected else 0.0
                 )
                 metrics[f"{prefix}/reward"] = (
                     float(total_reward) if source_selected else 0.0
@@ -4809,9 +5038,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if student_name:
                 metric_name = self._student_metric_name(student_name)
                 prefix = f"student/{metric_name}"
-                metrics[f"{prefix}/solved"] = float(success_round > 0)
+                metrics[f"{prefix}/solved"] = outcome_score
                 metrics[f"{prefix}/pre_solved"] = float(pre_success)
-                metrics[f"{prefix}/final_correct"] = float(pre_success or solved)
+                metrics[f"{prefix}/final_correct"] = final_correct_score
                 metrics[f"{prefix}/reward"] = float(total_reward)
                 metrics[f"{prefix}/turns"] = float(len(traces))
                 metrics[f"{prefix}/call_failed"] = float(student_call_failed)
@@ -4845,7 +5074,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 prefixes = [f"student_prompt/{selected_pool}"]
                 prefixes.append(f"student_prompt/{selected_pool}/{selected_index}")
                 for prefix in prefixes:
-                    metrics[f"{prefix}/solved"] = float(success_round > 0)
+                    metrics[f"{prefix}/solved"] = outcome_score
                     metrics[f"{prefix}/pre_solved"] = float(pre_success)
                     metrics[f"{prefix}/reward"] = float(total_reward)
                     metrics[f"{prefix}/turns"] = float(len(traces))
@@ -4959,7 +5188,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     )
             metrics.update(self._reward_component_metrics(traces))
             self._log_generalize_stats(
-                solved=success_round > 0,
+                solved=outcome_score,
                 student_generalization_results=student_generalization_results,
             )
         _safe_scalar(**metrics)

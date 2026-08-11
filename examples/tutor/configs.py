@@ -420,6 +420,19 @@ class TutorStudentGeneralizeConfig:
     )
     level1_reward: float = field(default=0.2)
     level2_reward: float = field(default=0.5)
+    retest_reward: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Reward for the ORIGINAL re-test. 0.0 is the historical "
+                "behaviour, where the re-test is scored and logged but never "
+                "rewarded. The free-chat rollout sets this and makes it the "
+                "entire episode reward: with replays=4 an episode is worth the "
+                "fraction of 4 independent solo attempts the student gets "
+                "right, so the signal has five levels instead of two."
+            )
+        },
+    )
     retest_original: bool = field(
         default=False,
         metadata={
@@ -1530,6 +1543,45 @@ class TutorOpdConfig:
 
 
 @dataclass
+class TutorFreeChatConfig:
+    """Teacher-first free conversation scored only by a delayed solo re-test.
+
+    The answer-attempt loop tells the student to solve the task on every turn,
+    judges every reply, and stops the moment one is correct. That makes every
+    student turn an answer attempt and every episode as short as the student's
+    luck allows. Here the teacher opens with no student input, the pair talks for
+    exactly ``budget`` rounds with nothing judged in between, and the reward is
+    the student's solo re-test afterwards.
+    """
+
+    enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Run the free-chat rollout instead of the answer-attempt loop: "
+                "no student pre-attempt, the teacher speaks first, no per-turn "
+                "answer judge, no early termination on a correct answer, and "
+                "the reward comes from student_generalize's original re-test. "
+                "Requires student_generalize.enabled, retest_original and "
+                "retest_reward > 0; reward.max_turn_penalty must be 0 because "
+                "reaching the budget is now the normal ending."
+            )
+        },
+    )
+    budget: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Number of (teacher, student) rounds. 0 means use max_turns. "
+                "Whatever it resolves to also overwrites max_turns, so every "
+                "downstream turn count and the budget the teacher is told in "
+                "its system prompt cannot disagree."
+            )
+        },
+    )
+
+
+@dataclass
 class TutorConfig(GRPOConfig):
     workflow: str = field(
         default="examples.tutor.workflow.TutorAgentWorkflow",
@@ -1627,6 +1679,7 @@ class TutorConfig(GRPOConfig):
     prompt_instruction: TutorInstructionPromptConfig = field(
         default_factory=TutorInstructionPromptConfig
     )
+    free_chat: TutorFreeChatConfig = field(default_factory=TutorFreeChatConfig)
     teacher_history_tags: str = field(
         default="stripped",
         metadata={

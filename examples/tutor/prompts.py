@@ -312,6 +312,56 @@ def resolve_teacher_instruction(text: str | None) -> tuple[str, str]:
         return TEACHER_NAMED_INSTRUCTIONS[key], key
     return raw, "custom"
 
+
+# ---------------------------------------------------------------------------
+# Free-chat rollout.
+#
+# The teacher opens, the pair talks for a fixed budget of rounds with nothing
+# judged in between, and the student is then tested alone on a fresh branch. That
+# test is the whole reward, which is what lets the conversation carry no per-turn
+# objective: the student is given no task, no subject and no instruction about
+# what to do, so what the conversation is about is the teacher's decision.
+#
+# Each block is a separate constant because each is independently switchable.
+# Only FREE_CHAT_TEACHER_SYSTEM_PROMPT is unconditional; the output-format
+# contract, the anti-leak clause and the pre-solve draft are appended in that
+# order by `_free_chat_teacher_system`.
+# ---------------------------------------------------------------------------
+
+# Deliberately one line. Anything more is a prior on how a student behaves, and
+# a self-description is measured not to change this student's behaviour anyway.
+FREE_CHAT_STUDENT_SYSTEM_PROMPT = "You are a student talking with a teacher."
+
+# The task lives here rather than being appended by `_task_context`, because the
+# teacher's copy is the only one in the episode -- the student is never given it
+# until the re-test.
+FREE_CHAT_TEACHER_SYSTEM_PROMPT = """\
+You are a teacher. You have {{ budget }} turn budgets to talk with a student. \
+Your goal is to teach the student.
+
+The math problem is:
+{{ task }}
+
+After the conversation, we will ask the student to solve the problem from \
+scratch to see whether the student understands."""
+
+# Switchable with teacher_pre.enabled, and only added once the pre-solve was
+# accepted.
+FREE_CHAT_TEACHER_PRE_SOLVE_CONTEXT_TEMPLATE = """\
+You've solved this problem and here is your solution draft to help you teach \
+the student:
+
+{{ raw_output }}"""
+
+# Appended to a replay of the conversation, on an independent branch. This is
+# the first and only time the student is shown the task.
+FREE_CHAT_STUDENT_RETEST_TEMPLATE = """\
+After these conversations, try to solve the problem from scratch:
+{{ task }}
+
+Put your final answer in \\boxed{}."""
+
+
 NO_VISIBLE_TUTORING_HISTORY = "No visible tutoring history yet."
 NO_PREVIOUS_VISIBLE_TUTORING_HISTORY = "No previous visible tutoring history."
 EMPTY_PLACEHOLDER = "(empty)"

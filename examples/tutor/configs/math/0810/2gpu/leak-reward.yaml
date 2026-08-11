@@ -1,0 +1,17 @@
+# 0810fc-leak-reward -- a leak costs the penalty and nothing else.
+#
+# The conversation runs the full budget whatever the teacher says. The leaking
+# turn stays in the transcript, so the re-test student sees the answer and will
+# very likely score 4/4, and the episode lands at 1.0 - 1.0 = 0.0. An honest
+# teacher only has to get 1 of 4 to beat that.
+#
+# This is the arm where the leak signal has to be learned from the reward, so it
+# is also the arm that says how expensive leaking actually is: watch
+# rollout/leaks and stop/leak against leak-terminate.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0810fc2-leak-reward
+
+leak_handling_mode: reward_only
