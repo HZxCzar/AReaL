@@ -323,9 +323,16 @@ def resolve_teacher_instruction(text: str | None) -> tuple[str, str]:
 # what to do, so what the conversation is about is the teacher's decision.
 #
 # Each block is a separate constant because each is independently switchable.
-# Only FREE_CHAT_TEACHER_SYSTEM_PROMPT is unconditional; the output-format
-# contract, the anti-leak clause and the pre-solve draft are appended in that
-# order by `_free_chat_teacher_system`.
+# The teacher's context is a conversation, not one string:
+#
+#   system     FREE_CHAT_TEACHER_SYSTEM_PROMPT  (+ the ground-truth key, if on)
+#   user       FREE_CHAT_TEACHER_SOLVE_PROMPT   ) both only when teacher_pre is
+#   assistant  the accepted pre-solve draft     ) on and a draft was accepted
+#   user       FREE_CHAT_TEACHER_OPEN_PROMPT    (+ output format, + anti-leak)
+#   ...        the conversation itself
+#
+# `_build_tutor_messages` assembles it. The two pre-solve messages are the only
+# difference between an arm with the pre-solve and one without.
 # ---------------------------------------------------------------------------
 
 # Deliberately one line. Anything more is a prior on how a student behaves, and
@@ -335,23 +342,84 @@ FREE_CHAT_STUDENT_SYSTEM_PROMPT = "You are a student talking with a teacher."
 # The task lives here rather than being appended by `_task_context`, because the
 # teacher's copy is the only one in the episode -- the student is never given it
 # until the re-test.
+#
+# THE TASK GOES LAST. It used to sit in the middle, with the re-test note after
+# it, and everything the teacher reads before it writes -- the pre-solve request,
+# the ~2500-character draft, the turn that opens the conversation -- is appended
+# after this whole block, so the problem statement ended up thousands of
+# characters from the point of generation. Measured over ~1500 episodes a window
+# at steps 36-48, the fraction of the task's content words appearing in the
+# teacher's OPENING message:
+#
+#     draft in the system prompt (old layout)    0.340
+#     draft as a conversation turn, no draft     0.348
+#     draft as a conversation turn, with draft   0.205
+#
+# and the first turn that quotes a number from the task moved from 1.86 to 2.57
+# out of a five-turn budget. The arm with the draft is the only one that opens
+# vague, and it is also the only one whose teaching got worse: the pre-solve was
+# worth +12.3 +-2.5 pp in the old layout against +3.1 +-3.1 pp in the new one
+# over the same steps. Moving the task to the end of this block is the cheapest
+# thing that shortens that distance.
+#
+# The goal sentence also moved to the end of the first paragraph and now says
+# what "teach" has to achieve, because the re-test is the only thing scored.
+# "a problem" rather than "the problem": the task has not been named yet at that
+# point in the text.
 FREE_CHAT_TEACHER_SYSTEM_PROMPT = """\
 You are a teacher. You have {{ budget }} turn budgets to talk with a student. \
-Your goal is to teach the student.
+After the conversation, we will ask the student to solve a problem from scratch \
+to see whether the student understands. Your goal is to teach the student so \
+that they can solve it on their own.
 
 The math problem is:
-{{ task }}
+{{ task }}"""
 
-After the conversation, we will ask the student to solve the problem from \
-scratch to see whether the student understands."""
+# The pre-solve is a turn of the conversation, not a block of the system prompt.
+# This is the request; the accepted draft is the assistant turn that answers it.
+#
+# WHY IT MOVED. The draft used to be appended to the END of the system prompt,
+# immediately before generation, introduced as "here is your solution draft to
+# help you teach the student". Two things were wrong with that.
+#
+# It is untagged prose sitting under a system turn that demands
+# <reasoning>/<output>, which is the same shape as the `stripped` history
+# failure -- there the teacher saw its own untagged replies and stopped tagging,
+# 6.3% malformed at depth 1 rising to 41.7% at depth 5 on 20260810_234129.
+#
+# And the teacher read the draft as work already done, often by the student.
+# Over 1647 episodes of 20260811_092902 and 20260811_092825 the teacher's
+# OPENING message shared 0.527 of its content words with the draft (0.464 with
+# the draft's first third) against 0.214 with the task statement; 2.6% of
+# openings explicitly credited the student with work it had never done, and
+# 20.6% opened as if continuing a conversation that had not happened. The
+# student is not shown the task, so it back-fills a problem the opening would
+# fit -- see the a^3b^5 trace, where the pair spent five rounds on an invented
+# problem and the teacher asserted a wrong answer without tripping the leak
+# judge.
+#
+# Ordering is what fixes both. The solve happens before the format contract
+# exists, so plain prose there violates nothing, and the draft arrives as the
+# answer to an explicit request rather than as reference material glued to the
+# end of the instructions. Nothing here says the student cannot see it: "before
+# interacting with the student" and "ourselves" already place it, and an extra
+# sentence would be a new instruction rather than a re-arrangement.
+FREE_CHAT_TEACHER_SOLVE_PROMPT = """\
+Before interacting with the student, let us solve the problem ourselves first. \
+Put your final answer in \\boxed{}."""
 
-# Switchable with teacher_pre.enabled, and only added once the pre-solve was
-# accepted.
-FREE_CHAT_TEACHER_PRE_SOLVE_CONTEXT_TEMPLATE = """\
-You've solved this problem and here is your solution draft to help you teach \
-the student:
-
-{{ raw_output }}"""
+# Opens the conversation, and carries the per-reply directives -- the
+# output-format contract and the anti-leak clause -- because neither applies
+# until the conversation starts. Appended in that order by
+# `_build_tutor_messages`, the same order they had in the system prompt.
+#
+# NOTE this reverses the placement argued for in
+# `_free_chat_teacher_system`: those two blocks used to be system-turn text.
+# Putting them here is what makes the pre-solve reply legal, and it is the one
+# thing in this change with something to lose -- rollout/format_errors is
+# currently 0.000 under teacher_history_tags=masked. Watch it at depth 1.
+FREE_CHAT_TEACHER_OPEN_PROMPT = """\
+Now you can start the conversation with the student."""
 
 # Appended to a replay of the conversation, on an independent branch. This is
 # the first and only time the student is shown the task.

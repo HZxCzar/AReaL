@@ -1,0 +1,96 @@
+# 0810fc-leak-terminate-baseline-nopre -- 4 GPUs. -- the same arm without the
+# teacher's private solution draft.
+#
+# One key differs from leak-terminate-baseline.yaml: teacher_pre.enabled. Read
+# the two against each other; everything else, including the no-teaching
+# baseline, is identical.
+#
+# WHY. Measured on the train debug traces of 20260811_092902 (leak-reward) and
+# 20260811_092825 (leak-terminate-baseline), 1647 episodes that had an accepted
+# draft and a turn 1. Content-word overlap of the teacher's OPENING message
+# with:
+#
+#     the pre-solve draft, whole        0.527
+#         the draft's first third       0.464
+#         the draft's last third        0.188
+#     the task statement                0.214
+#
+# Over half of what the teacher opens with is its own solution draft, and it is
+# the front of the draft. The task itself is barely in there. The student is
+# never shown the problem -- its whole system prompt is 'You are a student
+# talking with a teacher' and it first sees the task at the re-test -- so it
+# receives a next-step hint about a problem that was never named, and back-fills
+# a problem the hint would fit. Turn 1 introduces or names the problem 9.5% of
+# the time, opens as if continuing a conversation that never happened 20.6% of
+# the time, and explicitly credits the student with work it never did 2.6% of
+# the time.
+#
+# Nothing in the reward objects. Within a task group, at late steps, on episodes
+# with no leak and no format error, a turn 1 that states MORE of the problem is
+# worth +0.019 +-0.037 (leak-reward) and +0.053 +-0.039 (leak-terminate). Both
+# straddle zero. Over the same episodes more praise is worth +0.052 +-0.040 and
+# more questions -0.105 +-0.040, so the reward has an opinion about tone and
+# none about whether the student was told what they are working on.
+#
+# WHAT THIS ARM DOES NOT ISOLATE. teacher_pre.enabled is one flag over two
+# mechanisms, and there is no knob that separates them:
+#
+#   * the draft in the system prompt          workflow.py:4549-4563
+#   * the filter: three attempts, and the episode is skipped outright if none
+#     is judged correct                        workflow.py:1860-1877
+#
+# So this arm also stops filtering. Currently stop/teacher_pre_skipped runs
+# 5.9% (leak-reward) and 3.8% (leak-terminate-baseline) over the last ten steps,
+# so about one rollout in twenty is dropped today and will be trained on here.
+# Those rollouts also come back into their GRPO groups, which are correspondingly
+# short today -- an 8-rollout group with two skips currently contributes six
+# episodes to the leave-one-out baseline.
+#
+# And the teacher now has to solve while it teaches. If this arm loses, that is
+# consistent with either 'the draft was load-bearing for the teacher's own
+# competence' or 'the draft was not the problem'; only a win is a clean read.
+# teacher_pre.verify: false is not the missing control -- it keeps the draft and
+# drops the filter, which is the other diagonal.
+#
+# HOW TO READ IT. Against leak-terminate-baseline.yaml, on the leak-corrected
+# series, never on student_original_success -- that one moved 0.635 -> 0.664
+# while the episode leak rate fell 0.36 -> ~0.15, so it confounds the two:
+#
+#     final_correct_leak_gated                          the honest headline
+#     generalize/test/student_original_preleak_success  exact, paired
+#     retest/improvement                                gain over no teaching
+#
+# and on the behaviour this is aimed at: the opening message's overlap with the
+# task, and whether the conversation is about the actual problem at all.
+#
+# WATCH. stop/teacher_pre_skipped must be identically 0 and the whole
+# teacher_pre/* family must be absent; if either appears the flag did not take.
+# Expect turns to reach the budget slightly more often for the same reason.
+#
+# COST. Removes 1.33 teacher generations and the matching judge calls per
+# episode, against roughly 24 external calls an episode. Slightly cheaper, not
+# meaningfully so.
+#
+# GPU BUDGET. Unchanged and still binding: at 4 GPUs an arm is half the node, so
+# at most TWO of these run at once, launched a minute apart. See ../README.md.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0810fc-leak-terminate-baseline-nopre
+
+leak_handling_mode: terminate
+
+free_chat:
+  no_teaching_baseline: true
+
+# The one key that differs from leak-terminate-baseline.yaml.
+#
+# This turns the pre-solve OFF ENTIRELY -- not "solve and skip but hide the
+# draft". workflow.py:1860 gates the whole block on this flag, so
+# _run_teacher_pre_solve is never called: no draft, no judge, no skip, and
+# teacher_pre_solve_result stays None. mode / attempts / verify are dead once
+# this is false and are deliberately not written out below: leaving a line
+# saying verify: true in the file reads as if the filter were still running.
+teacher_pre:
+  enabled: false

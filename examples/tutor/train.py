@@ -350,27 +350,9 @@ class _TutorEvalRepeatTrainerMixin:
 
 def main(args):
     from areal import PPOTrainer
-    from areal.engine import FSDPPPOActor
     from areal.utils.environ import is_single_controller
 
-    class TutorFSDPPPOActor(FSDPPPOActor):
-        """FSDP actor that runs actor.num_iterations passes over each batch.
-
-        The outer trainer steps the scheduler once after this returns, so the
-        scheduler is stepped between internal passes too and every pass
-        corresponds to one scheduler step, as it would if they were separate
-        updates.
-        """
-
-        def ppo_update(self, data, world_model_batch=None):
-            iterations = max(1, int(getattr(self.config, "num_iterations", 1)))
-            for iteration in range(iterations):
-                if world_model_batch is None:
-                    super().ppo_update(data)
-                else:
-                    super().ppo_update(data, world_model_batch)
-                if iteration + 1 < iterations:
-                    self.lr_scheduler_step()
+    from examples.tutor.algorithm import TutorFSDPPPOActor
 
     class TutorPPOTrainer(_TutorEvalRepeatTrainerMixin, PPOTrainer):
         def _create_train_engine(self, actor_config, alloc):

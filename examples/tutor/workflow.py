@@ -208,7 +208,8 @@ from examples.tutor.prompts import (
     FILTER_SOLVER_USER_TEMPLATE,
     FREE_CHAT_STUDENT_RETEST_TEMPLATE,
     FREE_CHAT_STUDENT_SYSTEM_PROMPT,
-    FREE_CHAT_TEACHER_PRE_SOLVE_CONTEXT_TEMPLATE,
+    FREE_CHAT_TEACHER_OPEN_PROMPT,
+    FREE_CHAT_TEACHER_SOLVE_PROMPT,
     FREE_CHAT_TEACHER_SYSTEM_PROMPT,
     INITIAL_TEACHER_FEEDBACK_PLACEHOLDER,
     LEAK_CHECK_DISABLED_FEEDBACK,
@@ -662,6 +663,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if int(self.max_turns) < 1:
                 raise ValueError("free_chat needs a budget of at least 1 round.")
             self.free_chat_budget = int(self.max_turns)
+        self.free_chat_no_teaching_baseline = bool(
+            free_chat_config.get("no_teaching_baseline", False)
+        )
+        # task_id -> fraction the student solves unaided. The student never
+        # changes, so this is estimated once and reused; re-estimating per group
+        # would put sampling noise straight into the reward.
+        self._no_teaching_baselines: dict[str, float] = {}
+        self._no_teaching_baseline_lock = asyncio.Lock()
         self.dataset_type = (dataset_type or "").strip().lower()
         if self.dataset_type not in {"aime", "math", "polaris"}:
             raise ValueError("dataset_type must be one of: 'aime', 'math', 'polaris'.")
@@ -2261,11 +2270,20 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 initial_student_question_generation
             ),
         )
+        # Computed here rather than inside the probe runner so it never travels
+        # through instance state: one workflow serves every concurrent episode.
+        # Cached per problem, so the other seven rollouts of this group get it free.
+        episode_no_teaching_baseline = await self._no_teaching_baseline(
+            data,
+            aux_caller=student_generalize_caller,
+            answer_judge_caller=answer_judge_caller,
+        )
         student_generalization_results = await self._run_student_generalization(
             data,
             episode_artifact,
             aux_caller=student_generalize_caller,
             answer_judge_caller=answer_judge_caller,
+            no_teaching_baseline=episode_no_teaching_baseline,
         )
         await self._annotate_teacher_diversity(turn_artifacts)
         reward_computer = EpisodeRewardComputer(
@@ -2461,6 +2479,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             inference_prompt_tokens=sum(
                 artifact.tutor_response.input_len for artifact in turn_artifacts
             ),
+            no_teaching_baseline=episode_no_teaching_baseline,
             training_prompt_tokens=sum(
                 len(clean_input)
                 if clean_input is not None
@@ -2659,7 +2678,29 @@ class TutorAgentWorkflow(RolloutWorkflow):
             return POLARIS_FILTER_SOLVER_USER_TEMPLATE.format(task=task)
         return FILTER_SOLVER_USER_TEMPLATE.format(task=task)
 
-    def _build_teacher_pre_solve_messages(self, *, task: str) -> list[dict[str, str]]:
+    def _build_teacher_pre_solve_messages(
+        self, *, task: str, ground_truth: str | None = None
+    ) -> list[dict[str, str]]:
+        """Context the pre-solve is generated in.
+
+        Under free chat these are exactly the first two messages of the context
+        the draft will then sit in, so the draft is generated where it lives
+        instead of being written somewhere else and pasted in. NOTE this is a
+        different context from the dataset filter's, which is what
+        `teacher_pre.mode='filter_solver'` used to mean and no longer does here:
+        the accept rate and stop/teacher_pre_skipped are not comparable with runs
+        before this change.
+
+        Outside free chat the clean solver context is unchanged.
+        """
+        if getattr(self, "free_chat_enabled", False):
+            return [
+                {
+                    "role": "system",
+                    "content": self._free_chat_teacher_system(task, ground_truth),
+                },
+                {"role": "user", "content": FREE_CHAT_TEACHER_SOLVE_PROMPT},
+            ]
         return [
             {"role": "system", "content": FILTER_SOLVER_SYSTEM_PROMPT},
             {
@@ -2678,7 +2719,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         lora_version: int | None,
     ) -> TeacherPreSolveResult:
         attempts: list[TeacherPreSolveAttempt] = []
-        messages = self._build_teacher_pre_solve_messages(task=task)
+        messages = self._build_teacher_pre_solve_messages(
+            task=task, ground_truth=ground_truth
+        )
         max_completion_tokens = self._teacher_pre_solve_tokens()
         verification_enabled = bool(getattr(self, "teacher_pre_verify", True))
         attempt_count = self.teacher_pre_attempts if verification_enabled else 1
@@ -4022,6 +4065,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         *,
         aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller,
         answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
+        no_teaching_baseline: float | None = None,
     ) -> list[StudentGeneralizationResult]:
         if not bool(getattr(self, "student_generalize_enabled", False)):
             return []
@@ -4164,9 +4208,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
                 # Fraction correct, so a variant the student gets right 3 times
                 # out of 4 is worth more than one it gets right once.
-                correctness_reward = case.reward * (
-                    replay_correct / max(replay_scored, 1)
-                )
+                replay_fraction = replay_correct / max(replay_scored, 1)
+                scored_fraction = replay_fraction
+                if no_teaching_baseline is not None:
+                    # The gain over no teaching, which is what the episode is
+                    # being asked to produce. Can go negative: a conversation
+                    # that leaves the student worse off than the bare problem
+                    # statement should cost something.
+                    scored_fraction = replay_fraction - no_teaching_baseline
+                correctness_reward = case.reward * scored_fraction
                 if getattr(self, "student_generalize_confidence_enabled", False):
                     if not student_result.token_logprobs:
                         raise RuntimeError(
@@ -4491,16 +4541,27 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         return rendered
 
-    def _free_chat_teacher_system(self, tutor_state: TutorTurnState) -> str:
-        """Teacher system prompt for the free-chat rollout.
+    def _free_chat_teacher_system(
+        self, task: str, ground_truth: str | None = None
+    ) -> str:
+        """Teacher system prompt for the free-chat rollout: the setting only.
 
-        Four blocks in a fixed order, three of them switchable and each stored as
-        its own constant in prompts.py: the setting (budget, task, and what the
-        student will be tested on), the output-format contract, the anti-leak
-        clause, and the teacher's own pre-solve draft. The task rides inside the
-        first block instead of being appended by `_task_context`, because this is
-        the only copy of it in the episode -- the student is not given the task
-        until the re-test.
+        Budget, task, and what the student will be tested on, plus the
+        ground-truth key when `teacher_show_ground_truth` is on. The task rides
+        inside the first block instead of being appended by `_task_context`,
+        because this is the only copy of it in the episode -- the student is not
+        given the task until the re-test.
+
+        Everything about how to REPLY has moved out of here and into
+        FREE_CHAT_TEACHER_OPEN_PROMPT, one turn later: the format contract, the
+        anti-leak clause and the adaptive clause are all directives about a
+        message to the student, and the pre-solve reply is not one. See the
+        prompts.py note on FREE_CHAT_TEACHER_SOLVE_PROMPT for why the ordering is
+        the whole point. What is left here is state, not instruction, so it is
+        also what the pre-solve call is conditioned on.
+
+        Takes the task rather than a TutorTurnState because the pre-solve runs
+        before any turn state exists.
 
         There is no prompt-pool suffix, so the rollout prompt and the training
         prompt are the same string and `clean` has nothing to drop.
@@ -4508,19 +4569,40 @@ class TutorAgentWorkflow(RolloutWorkflow):
         system = render_prompt(
             FREE_CHAT_TEACHER_SYSTEM_PROMPT,
             budget=int(getattr(self, "free_chat_budget", 0) or self.max_turns),
-            task=tutor_state.task,
+            task=task,
         )
-        if tutor_state.ground_truth and self.teacher_show_ground_truth:
+        if ground_truth and self.teacher_show_ground_truth:
             system = f"{system}\n\n" + render_prompt(
                 TEACHER_GROUND_TRUTH_CONTEXT_TEMPLATE,
-                ground_truth=tutor_state.ground_truth,
+                ground_truth=ground_truth,
             )
+        return system
+
+    def _free_chat_open_prompt(self) -> str:
+        """The user turn that starts the conversation and carries its directives.
+
+        Same blocks in the same order they had at the end of the system prompt,
+        so the only thing that changed is which turn they are in.
+        """
+        parts = [FREE_CHAT_TEACHER_OPEN_PROMPT]
         if not self.enable_thinking:
-            system = f"{system}\n\n{NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT}"
+            parts.append(NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT)
         if getattr(self, "teacher_anti_leak_instruction_enabled", False):
-            system = f"{system}\n\n{TEACHER_ANTI_LEAK_INSTRUCTION}"
+            parts.append(TEACHER_ANTI_LEAK_INSTRUCTION)
         if getattr(self, "teacher_adaptive_instruction_enabled", False):
-            system = f"{system}\n\n{TEACHER_ADAPTIVE_INSTRUCTION}"
+            parts.append(TEACHER_ADAPTIVE_INSTRUCTION)
+        return "\n\n".join(parts)
+
+    def _free_chat_preamble(self, tutor_state: TutorTurnState) -> list[dict[str, str]]:
+        """Everything before the first teacher reply, after the system turn.
+
+        Two messages when the pre-solve ran and was accepted -- the request and
+        the draft that answered it -- then the turn that opens the conversation.
+        With `teacher_pre.enabled` off the first two are simply absent and
+        nothing else moves, which is what makes the no-pre-solve arm a control
+        rather than a different prompt.
+        """
+        messages: list[dict[str, str]] = []
         pre_solve = tutor_state.teacher_pre_solve_result
         if (
             getattr(self, "teacher_pre_enabled", False)
@@ -4531,11 +4613,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 str(pre_solve.raw_output or "")
             ).strip()
             if raw_output:
-                system = f"{system}\n\n" + render_prompt(
-                    FREE_CHAT_TEACHER_PRE_SOLVE_CONTEXT_TEMPLATE,
-                    raw_output=raw_output,
+                messages.append(
+                    {"role": "user", "content": FREE_CHAT_TEACHER_SOLVE_PROMPT}
                 )
-        return system
+                messages.append({"role": "assistant", "content": raw_output})
+        messages.append({"role": "user", "content": self._free_chat_open_prompt()})
+        return messages
 
     def _teacher_system_for_state(
         self, tutor_state: TutorTurnState, *, clean: bool = False
@@ -4543,7 +4626,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         """Teacher system prompt. ``clean`` drops the prompt-pool suffix, which is
         the only difference between the rollout prompt and the training prompt."""
         if getattr(self, "free_chat_enabled", False):
-            return self._free_chat_teacher_system(tutor_state)
+            return self._free_chat_teacher_system(
+                tutor_state.task, tutor_state.ground_truth
+            )
         base = (
             self.teacher_system_prompt
             if clean
@@ -4596,6 +4681,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
         ``guidance_override`` lets a caller ask for an instruction the rollout did
         not carry, which is how the OPD teacher is built: the row is unguided, and
         the teacher differs from it only by this instruction.
+
+        Under free chat a preamble sits between the system turn and the
+        conversation: the pre-solve exchange when there is one, then the turn that
+        opens the conversation. It is a pure function of the state, so it is
+        identical in the rollout prompt and in the training prompt, and it lands
+        entirely on the prompt side of the split -- the draft is never trained on.
         """
         system = self._teacher_system_for_state(tutor_state, clean=clean)
         guidance = (
@@ -4603,8 +4694,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         if include_guidance and guidance is not None:
             system = self._append_guidance_to_system(system, guidance.instruction)
+        preamble = (
+            self._free_chat_preamble(tutor_state)
+            if getattr(self, "free_chat_enabled", False)
+            else []
+        )
         return [
             {"role": "system", "content": system},
+            *preamble,
             *self._render_conversation(
                 tutor_state.public_history.turns,
                 speaker="teacher",
@@ -4938,6 +5035,80 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         return self.gconfig
 
+    async def _no_teaching_baseline(
+        self,
+        data: dict[str, Any],
+        *,
+        aux_caller: Any,
+        answer_judge_caller: Any,
+    ) -> float | None:
+        """What this problem is worth with no teaching, cached per problem.
+
+        The same messages the re-test uses, with an empty transcript: the student
+        gets the task and nothing else. None when the setting is off or every
+        student call failed, and the caller then leaves the reward alone rather
+        than subtracting a fabricated zero.
+        """
+        if not getattr(self, "free_chat_no_teaching_baseline", False):
+            return None
+        task = str(data.get("task", ""))
+        ground_truth = str(data.get("ground_truth", ""))
+        key = str(data.get("id", task))
+        cached = self._no_teaching_baselines.get(key)
+        if cached is not None:
+            return cached
+        async with self._no_teaching_baseline_lock:
+            # Re-check: another episode of the same group may have filled it in
+            # while this one waited.
+            cached = self._no_teaching_baselines.get(key)
+            if cached is not None:
+                return cached
+            # The same two messages _build_student_probe_messages produces for an
+            # empty transcript. It has to be the same prompt: the baseline is
+            # subtracted from that probe's score, so any difference here would be
+            # measured as teaching.
+            if getattr(self, "free_chat_enabled", False):
+                system = FREE_CHAT_STUDENT_SYSTEM_PROMPT
+                final_turn = render_prompt(
+                    FREE_CHAT_STUDENT_RETEST_TEMPLATE, task=task
+                )
+            else:
+                system = self._student_system_prompt_for_selection(None)
+                system = f"{system.rstrip()}\n\n{self._task_context(task)}"
+                final_turn = render_prompt(STUDENT_FINAL_SOLUTION_TEMPLATE)
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": final_turn},
+            ]
+            replays = max(1, int(getattr(self, "student_generalize_replays", 1)))
+            attempts = await asyncio.gather(
+                *[
+                    self._call_auxiliary_messages(
+                        messages,
+                        aux_caller=aux_caller,
+                        rid_prefix=f"no-teaching-baseline-r{index}",
+                    )
+                    for index in range(replays)
+                ]
+            )
+            usable = [attempt for attempt in attempts if not attempt.error]
+            if not usable:
+                return None
+            judged = await asyncio.gather(
+                *[
+                    self._score_answer_async(
+                        task,
+                        ground_truth,
+                        attempt.text,
+                        answer_judge_caller=answer_judge_caller,
+                    )
+                    for attempt in usable
+                ]
+            )
+            baseline = sum(1 for item in judged if item.correct) / len(judged)
+            self._no_teaching_baselines[key] = baseline
+            return baseline
+
     @staticmethod
     def _level_retest_score(
         results: list[StudentGeneralizationResult] | None, level: str
@@ -5006,6 +5177,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         initial_student_turn_behavior: StudentTurnBehavior | None = None,
         inference_prompt_tokens: int = 0,
         training_prompt_tokens: int = 0,
+        no_teaching_baseline: float | None = None,
     ) -> tuple[int, list[float]] | None:
         success_round = next(
             (
@@ -5081,6 +5253,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
         # Only present on an eval pass of a terminate arm, where the conversation
         # deliberately ran past the leak; absent otherwise, so the series is never
         # padded with zeros that mean "not measured".
+        baseline = no_teaching_baseline
+        if baseline is not None:
+            in_the_wild = self._level_retest_score(
+                student_generalization_results, ORIGINAL_RETEST_LEVEL
+            )
+            metrics["retest/no_teaching_baseline"] = float(baseline)
+            if in_the_wild is not None:
+                # The headline stays the raw fraction; this is the gain over a
+                # student that was handed the problem and no conversation.
+                metrics["retest/improvement"] = float(in_the_wild - baseline)
+                metrics["retest/improved"] = float(in_the_wild > baseline)
+                metrics["retest/made_it_worse"] = float(in_the_wild < baseline)
+
         preleak_score = self._level_retest_score(
             student_generalization_results, PRELEAK_RETEST_LEVEL
         )

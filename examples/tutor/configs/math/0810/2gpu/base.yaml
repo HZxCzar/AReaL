@@ -118,6 +118,102 @@ teacher_history_tags: masked
 # re-test, which is strictly worse than the worst honest outcome of 0.0.
 format_handling_mode: continue
 
+# ENDPOINT CONCURRENCY. Doubled from the inherited 16 to 32 on all four external
+# callers -- the auxiliary model (answer judge and leak judge) and all three
+# student slots.
+#
+# WHY. The external calls, not the GPUs, set the wall clock. An eval pass is
+# 1650-1840 s and is almost entirely these calls: 528 problems x (5 student
+# replies + 4 re-tests + 4 answer judges + up to 5 leak checks). GPU count does
+# not touch that number, and at 4 GPUs timeperf/rollout is already 0.0, meaning
+# generation keeps up and the trainer never waits for data. The queue in front of
+# these 16 slots is what is left.
+#
+# WHY IT IS RESTATED IN FULL. student_models is a list, and omegaconf replaces a
+# list on merge rather than merging element-wise, so there is no way to override
+# max_concurrent_calls on one entry without writing all three. Everything below
+# is copied verbatim from ../../0808/full/2gpu/base.yaml except the four
+# max_concurrent_calls values. THAT MEANS IT CAN DRIFT: if the endpoints, keys or
+# sampling parameters change in the 0808 base, they will not follow here.
+#
+# NOTE this is a property of the remote services, not of this run. If they start
+# refusing or timing out, this is the first thing to put back to 16 --
+# student_models[*].timeout is 120 s and a saturated endpoint shows up as
+# student/<name>/call_failed rather than as a slowdown.
+auxiliary_model:
+  mode: api
+  enable_thinking: false
+  base_url: ${oc.env:TUTOR_QWEN3_8B_BASE_URL}
+  model: qwen3-8b
+  api_key: ${oc.env:INF_API_KEY}
+  timeout: 120
+  max_tokens: 1024
+  temperature: 0.0
+  top_p: 1.0
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen8b-auxiliary
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+  answer_judge_enabled: true
+  answer_judge_max_tokens: 256
+
+student_models:
+- name: qwen3-1.7b
+  weight: 1.0
+  base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+  model: qwen3-1.7b
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+- name: llama-3.1-8b-instruct
+  weight: 0.0
+  base_url: ${oc.env:TUTOR_LLAMA31_8B_BASE_URL}
+  model: llama-3.1-8b-instruct
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.6
+  top_p: 0.9
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-llama31-8b-student
+- name: gemma-3-1b-it
+  weight: 0.0
+  base_url: ${oc.env:TUTOR_GEMMA3_1B_BASE_URL}
+  model: gemma-3-1b-it
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.0
+  top_p: null
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-gemma3-1b-student
+    extra_body:
+      repetition_penalty: 1.05
+
 stats_logger:
   wandb:
     group: 0810-freechat-2gpu
@@ -130,11 +226,27 @@ stats_logger:
 # first one produced and the PPO clip is what bounds it, which is why it is safer
 # than the equivalent bump in lr. Room to do it: clip_ratio ran 0.0017 and
 # grad_norm 0.079 against gradient_clipping 1.0.
-# 200, not the inherited 100. The measured effect on the objective in the closest
+# 500, not the inherited 100. The measured effect on the objective in the closest
 # reference run is about +0.7pp per 10 steps, and a slope standard error falls as
-# n^-1.5, so 100 steps cannot separate that from zero while 200 clears it with
-# room. 200 x 16 problems is 4.2 epochs over the 759-row split, against 2.1.
-total_train_steps: 200
+# n^-1.5, so 100 steps cannot separate that from zero.
+#
+# COST, measured on 20260811_2341: a train step is 235-246 s and an eval pass is
+# 1650-1840 s, so at evaluator.freq_steps 25 the arithmetic is
+#
+#     500 x 240 s                     = 33 h of training
+#     20 eval passes x 1750 s         =  10 h of evaluation
+#                                       ---
+#                                       43 h per arm
+#
+# against about 17 h at 200 steps. Two arms fit the node at 4 GPUs, so a paired
+# comparison is about two days. Raise evaluator.freq_steps to 50 if that is too
+# long: it halves the eval bill for 10 points on the curve instead of 20, and the
+# training-side re-test series is denser than the eval one anyway.
+#
+# 500 x 16 problems is 10.5 epochs over the 759-row split, against 4.2 at 200 and
+# 2.1 at 100. That is more repetition per problem than any run in this group has
+# had; watch for the train-side re-test climbing while the eval one does not.
+total_train_steps: 500
 
 actor:
   num_iterations: 2

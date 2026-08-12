@@ -1,0 +1,23 @@
+# 0810fc8-leak-terminate -- 8 GPUs. A leak ends the conversation, and the re-test
+# runs on the transcript WITHOUT the leaking turn.
+#
+# The leaking turn is never written into the public history (the terminate branch
+# stores public_history_after = public_before) and the re-test anchor is the last
+# completed round, so the student is re-tested on the conversation as it stood
+# before the leak. The teacher eats leak_penalty -1.0 AND loses whatever the
+# remaining rounds would have taught, and the leaked answer buys nothing because
+# the student never sees it.
+#
+# A leak on turn 1 leaves no completed round: the anchor is None, the re-test is
+# skipped rather than run on an empty transcript, and the episode is worth the
+# penalty alone.
+#
+# Paired against leak-reward. The two files differ in exactly one key -- but at
+# 8 GPUs the pair cannot run concurrently. See base.yaml.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0810fc8-leak-terminate
+
+leak_handling_mode: terminate

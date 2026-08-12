@@ -1,0 +1,56 @@
+# 0810 / freechat -- 8 GPUs. Allocation only; everything else comes from
+# ../2gpu/base.yaml, the same way 4gpu/base.yaml does.
+#
+# Four GPUs for generation, four for the actor.
+#
+# BUDGET -- READ THIS FIRST. CUDA_VISIBLE_DEVICES is 0..7, so this is the WHOLE
+# NODE and exactly ONE arm runs at a time. Every comparison in this group is
+# paired -- leak-reward against leak-terminate, with-pre-solve against without --
+# and an 8-GPU arm cannot be half of a pair that runs concurrently. The two
+# halves would run in sequence, so the second is read against a first that
+# finished a day and a half earlier. Use 4gpu/ for anything paired. This
+# directory is for a single arm that has to finish as fast as possible.
+#
+# WHAT IT BUYS. Measured on 20260811_2341 at 4 GPUs, a step is 235-246 s and
+# timeperf/train_step is the whole blocking term (recompute_logp 31-35 s and
+# update_weights 11 s sit inside it, compute_advantage 2 s). timeperf/rollout is
+# 0.0: generation is fully overlapped and the trainer never waits for data, so the
+# step is actor-bound and d2 -> d4 should take most of it out. Expect roughly
+# 140-160 s a step, not 120 -- the gradient work halves, the rest does not.
+#
+# WHAT IT DOES NOT BUY. Evaluation. A pass is 1650-1840 s and is set by WAVES of
+# external calls, not by GPUs: max_concurrent_rollouts is 16 and counts groups, so
+# 528 eval problems are 33 waves at any allocation. At freq_steps 25 over 500
+# steps that is a fixed ~10 h per arm. If the eval bill is what hurts, raise
+# evaluator.freq_steps; more GPUs will not touch it.
+#
+# CONCURRENCY. max_concurrent_rollouts 64, against 32 at 4 GPUs and the 16 that is
+# exactly one batch (a group is one problem's 8 rollouts, batch_size 16). Four
+# batches in flight. Deeper prefetch is worth having here precisely because the
+# actor is what the step waits on, and d2 -> d4 halves it. max_head_offpolicyness
+# is still 2, so this buys overlap, not staleness.
+#
+# The external callers are at 32, set in ../2gpu/base.yaml, and that is the
+# ceiling this runs into next: 128 episodes x (5 replies + 4 re-tests) of student
+# calls per step against 32 slots, plus the judges against their own 32. If step
+# time stalls well short of 160 s, look there rather than at the allocation --
+# more GPUs cannot move it.
+defaults:
+  - ../2gpu/base@_global_
+  - _self_
+
+trial_name: 0810fc8-base
+
+cluster:
+  n_gpus_per_node: 8
+
+rollout:
+  backend: "sglang:d4p1t1"
+  max_concurrent_rollouts: 64
+
+actor:
+  backend: "fsdp:d4p1t1"
+
+stats_logger:
+  wandb:
+    group: 0810-freechat-8gpu

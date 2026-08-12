@@ -1,0 +1,36 @@
+# 0810fc8-leak-terminate-baseline-nopre -- 8 GPUs. The same arm without the
+# teacher solving the problem first.
+#
+# One key differs from leak-terminate-baseline.yaml: teacher_pre.enabled.
+#
+# This turns the pre-solve OFF ENTIRELY -- not "solve and skip but hide the
+# draft". workflow.py:1860 gates the whole block on this flag, so
+# _run_teacher_pre_solve is never called: no draft, no judge, no skip, and
+# teacher_pre_solve_result stays None. mode / attempts / verify are dead once this
+# is false and are deliberately not written out below: leaving a line saying
+# verify: true in the file reads as if the filter were still running.
+#
+# WHAT IT IS FOR. It is the floor. Measured paired step-by-step against the
+# pre-solve arm over steps 0-48, the pre-solve is worth +11.3 +-2.6 pp on the
+# training-side re-test, and this arm is what that is measured against. It is also
+# insensitive to the prompt layout: moving the draft out of the system turn and
+# into the conversation shifted this arm by +0.6 +-2.8 pp, i.e. not at all, while
+# it cost the pre-solve arm about 10 pp.
+#
+# It also stops filtering, which is the confound: the pre-solve drops the episode
+# when the teacher cannot solve the problem in three attempts, about 4-6% of
+# rollouts. Those come back here, and the GRPO groups they were shortening come
+# back to full size.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0810fc8-leak-terminate-baseline-nopre
+
+leak_handling_mode: terminate
+
+free_chat:
+  no_teaching_baseline: true
+
+teacher_pre:
+  enabled: false

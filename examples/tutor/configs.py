@@ -1617,6 +1617,21 @@ class TutorFreeChatConfig:
             )
         },
     )
+    no_teaching_baseline: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Score the re-test against no teaching at all. Once per problem "
+                "the student is given the re-test input with an empty transcript "
+                "and asked to solve it student_generalize.replays times; every "
+                "episode on that problem then reports and is rewarded on its "
+                "re-test fraction MINUS that baseline. The extra calls are "
+                "outside the GRPO group. Note that actor.group_baseline already "
+                "removes a per-problem constant, so while that is on this changes "
+                "the logged improvement and not the advantage."
+            )
+        },
+    )
     budget: int = field(
         default=0,
         metadata={

@@ -1,0 +1,41 @@
+# 0810fc2-leak-terminate-baseline -- leak-terminate, scored against no teaching.
+#
+# One key differs from leak-terminate.yaml: free_chat.no_teaching_baseline. Once
+# per problem the student is handed the re-test input with an empty transcript and
+# asked to solve it 4 times; every episode on that problem is then rewarded on its
+# re-test fraction MINUS that number. 0.75 against a 0.5 baseline is +0.25.
+#
+# READ THIS BEFORE TREATING IT AS AN ARM. actor.group_baseline is 'episode' with
+# leave-one-out, so it already subtracts the group's mean return. Subtracting a
+# per-problem constant from every episode in the group shifts that mean by the same
+# amount and leaves the advantage algebraically unchanged. Against leak-terminate
+# this is therefore NOT an experiment -- the two will train the same, and the
+# comparison is only a check that they do.
+#
+# What it is for is the number it reports:
+#
+#     retest/no_teaching_baseline   what the problem is worth with no help
+#     retest/improvement            the gain over that, per episode
+#     retest/improved               fraction of episodes that beat it
+#     retest/made_it_worse          fraction that came out below it
+#
+# `student_original_success` alone cannot say whether 0.55 is good teaching on hard
+# problems or poor teaching on easy ones. This can. It is also the no-teaching
+# control that would otherwise need its own arm, obtained here for four student
+# calls per problem instead of a whole run.
+#
+# COST. Four extra student calls and four judge calls per PROBLEM, not per episode:
+# the estimate is cached and the other seven rollouts of the group reuse it. The
+# student is frozen, so its unaided ability on a fixed problem does not drift, and
+# re-estimating per group would only add sampling noise to the reward. Against 16
+# problems x 8 rollouts x ~24 calls a step, this is under 2%.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0810fc2-leak-terminate-baseline
+
+leak_handling_mode: terminate
+
+free_chat:
+  no_teaching_baseline: true

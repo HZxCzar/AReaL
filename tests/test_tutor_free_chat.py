@@ -158,11 +158,11 @@ def main() -> int:
         # past turns with the tags removed, imitates them, and the malformed rate
         # climbs with depth -- 6.3% to 41.7% over depths 1-5 measured on this
         # rollout. A fixed budget puts every episode in that tail.
-        check(f"{prefix} 200 steps, not the inherited 100",
-              config.total_train_steps == 200,
+        check(f"{prefix} 500 steps, not the inherited 100",
+              config.total_train_steps == 500,
               f"got {config.total_train_steps}")
         check(f"{prefix} the epoch cap does not bind first",
-              config.total_train_epochs * 1.0 > 200 * 16 / 759,
+              config.total_train_epochs * 1.0 > 500 * 16 / 759,
               f"epochs_cap={config.total_train_epochs}")
         check(f"{prefix} teacher history keeps its tag skeleton",
               config.teacher_history_tags == "masked",
@@ -222,21 +222,34 @@ def main() -> int:
     print("\n[4] the teacher opens cold, with the budget and the task")
     workflow = make_workflow()
     messages = workflow._build_tutor_messages(tutor_state())
-    check("turn 1 is a single system message",
-          len(messages) == 1 and messages[0]["role"] == "system",
+    check("turn 1 is the system turn plus the turn that opens the conversation",
+          [m["role"] for m in messages] == ["system", "user"],
           f"got {[m['role'] for m in messages]}")
-    system = messages[0]["content"]
+    system, opening = messages[0]["content"], messages[-1]["content"]
     check("states the budget", "You have 5 turn budgets" in system)
     check("carries the task", TASK in system)
     check("says the student is tested alone afterwards",
-          "solve the problem from scratch" in system)
-    check("carries the output format contract",
-          "<reasoning>" in system and "<output>" in system)
-    check("carries the anti-leak clause",
-          "Do not reveal the problem's answer" in system)
+          "solve a problem from scratch" in system)
+    # The task is the last thing in the system turn. Everything the teacher reads
+    # before it writes is appended after this block, so anything placed below the
+    # task pushes the problem statement further from the point of generation --
+    # which is what the opening message stopped mentioning. See the prompts.py
+    # note on FREE_CHAT_TEACHER_SYSTEM_PROMPT.
+    check("the task is the last thing in the system turn",
+          system.rstrip().endswith(TASK), system.rstrip()[-120:])
+    # The two per-reply directives live one turn later now. See the prompts.py
+    # note on FREE_CHAT_TEACHER_SOLVE_PROMPT: a system turn that demanded the tag
+    # contract made the untagged pre-solve reply a violation of it.
+    check("the system turn is setting only, no per-reply directive",
+          "<reasoning>" not in system
+          and "Do not reveal the problem's answer" not in system)
+    check("the opening turn carries the output format contract",
+          "<reasoning>" in opening and "<output>" in opening)
+    check("the opening turn carries the anti-leak clause",
+          "Do not reveal the problem's answer" in opening)
     check("withholds the ground truth", GROUND_TRUTH not in system.replace(TASK, ""))
     check("training prompt == rollout prompt",
-          workflow._teacher_system_for_state(tutor_state(), clean=True) == system)
+          workflow._build_tutor_messages(tutor_state(), clean=True) == messages)
 
     print("\n[5] masked history hands the teacher its own tags back")
     masked = make_workflow(teacher_history_tags="masked")
@@ -245,12 +258,20 @@ def main() -> int:
         {"role": "teacher", "content": "What does Vieta give you?"},
         {"role": "student", "content": "a + b = m and ab = 2."},
     ]
-    own_turn_masked = masked._build_tutor_messages(
-        tutor_state(turns=history, turn_idx=2)
-    )[1]
-    own_turn_stripped = stripped._build_tutor_messages(
-        tutor_state(turns=history, turn_idx=2)
-    )[1]
+    # First assistant turn rather than a fixed index: the free-chat preamble sits
+    # between the system turn and the conversation, and grows by two messages
+    # when the pre-solve is on.
+    def first_own_turn(wf):
+        return next(
+            message
+            for message in wf._build_tutor_messages(
+                tutor_state(turns=history, turn_idx=2)
+            )
+            if message["role"] == "assistant"
+        )
+
+    own_turn_masked = first_own_turn(masked)
+    own_turn_stripped = first_own_turn(stripped)
     check("the teacher's own turn comes back as assistant",
           own_turn_masked["role"] == "assistant"
           and own_turn_stripped["role"] == "assistant")
@@ -279,15 +300,22 @@ def main() -> int:
           ))
 
     print("\n[6] the switchable blocks are switchable, in order")
+    # The two directives now ride on the turn that opens the conversation, in the
+    # order they had at the end of the system prompt.
     plain = make_workflow(teacher_anti_leak_instruction_enabled=False)
     check("anti-leak off removes it",
-          "Do not reveal the problem's answer"
-          not in plain._free_chat_teacher_system(tutor_state()))
+          "Do not reveal the problem's answer" not in plain._free_chat_open_prompt())
     thinking = make_workflow(enable_thinking=True)
     check("enable_thinking removes the tag contract",
-          "<reasoning>" not in thinking._free_chat_teacher_system(tutor_state()))
+          "<reasoning>" not in thinking._free_chat_open_prompt())
+    opening = workflow._free_chat_open_prompt()
+    check("opener, then the format contract, then anti-leak",
+          opening.index("Now you can start the conversation")
+          < opening.index("<reasoning>")
+          < opening.index("Do not reveal the problem's answer"))
+
     with_draft = make_workflow(teacher_pre_enabled=True)
-    drafted = with_draft._free_chat_teacher_system(
+    drafted = with_draft._build_tutor_messages(
         tutor_state(
             pre_solve=TeacherPreSolveResult(
                 enabled=True, mode="filter_solver", accepted=True,
@@ -295,13 +323,26 @@ def main() -> int:
             )
         )
     )
-    check("accepted pre-solve draft is appended",
-          "You've solved this problem" in drafted
-          and "Complete the square" in drafted)
-    check("the draft comes last",
-          drafted.index("You've solved this problem")
-          > drafted.index("Do not reveal the problem's answer"))
-    rejected = with_draft._free_chat_teacher_system(
+    check("the accepted draft is an assistant turn, not system text",
+          [m["role"] for m in drafted] == ["system", "user", "assistant", "user"],
+          f"got {[m['role'] for m in drafted]}")
+    check("asked for, answered, then the conversation opens",
+          "let us solve the problem ourselves first" in drafted[1]["content"]
+          and "Complete the square" in drafted[2]["content"]
+          and "Now you can start the conversation" in drafted[3]["content"])
+    check("the draft is nowhere in the system turn",
+          "Complete the square" not in drafted[0]["content"])
+    # The whole point of the ordering: nothing has demanded the tag contract yet
+    # when the pre-solve reply is produced, so plain prose there is not a
+    # violation and cannot teach the teacher to drop its tags.
+    check("no tag contract is in force when the pre-solve reply is produced",
+          "<reasoning>" not in drafted[0]["content"] + drafted[1]["content"])
+    check("the pre-solve call is conditioned on exactly that context",
+          with_draft._build_teacher_pre_solve_messages(
+              task=TASK, ground_truth=GROUND_TRUTH) == drafted[:2])
+    check("pre-solve off is the same prompt minus those two messages",
+          workflow._build_tutor_messages(tutor_state()) == [drafted[0], drafted[3]])
+    rejected = with_draft._build_tutor_messages(
         tutor_state(
             pre_solve=TeacherPreSolveResult(
                 enabled=True, mode="filter_solver", accepted=False,
@@ -309,8 +350,10 @@ def main() -> int:
             )
         )
     )
-    check("a rejected pre-solve is not appended",
-          "You've solved this problem" not in rejected)
+    check("a rejected pre-solve leaves no trace",
+          [m["role"] for m in rejected] == ["system", "user"]
+          and "nonsense" not in "".join(m["content"] for m in rejected),
+          f"got {[m['role'] for m in rejected]}")
 
     print("\n[7] the student is told nothing")
     student_messages = workflow._build_student_messages(
@@ -700,18 +743,78 @@ def main() -> int:
     else:
         check("rejected: num_iterations below 1", False, "constructed")
 
+    # The scheduler ships an engine to its workers as
+    # f"{cls.__module__}.{cls.__name__}" and re-imports it there. A worker runs
+    # `python3 -m areal.infra.rpc.rpc_server`, so a class defined inside
+    # train.main resolves to __main__.TutorFSDPPPOActor and every worker dies
+    # with EngineImportError before the first step. It has to live in a module
+    # that can be imported by name -- which is why pedagogical_rl keeps its actor
+    # in algorithm.py.
+    import importlib
+
+    from examples.tutor.algorithm import TutorFSDPPPOActor
+
+    engine_ref = f"{TutorFSDPPPOActor.__module__}.{TutorFSDPPPOActor.__name__}"
+    check("the actor is importable by name, not stuck in __main__",
+          TutorFSDPPPOActor.__module__ == "examples.tutor.algorithm",
+          f"got {engine_ref}")
+    check("a worker can resolve that reference",
+          getattr(
+              importlib.import_module(TutorFSDPPPOActor.__module__),
+              TutorFSDPPPOActor.__name__,
+          ) is TutorFSDPPPOActor,
+          engine_ref)
+    update_source = inspect.getsource(TutorFSDPPPOActor.ppo_update)
     source = inspect.getsource(sys.modules["examples.tutor.train"])
     check("an actor subclass loops over the passes",
-          "class TutorFSDPPPOActor" in source
-          and 'getattr(self.config, "num_iterations", 1)' in source
-          and "for iteration in range(iterations)" in source)
+          'getattr(self.config, "num_iterations", 1)' in update_source
+          and "for iteration in range(iterations)" in update_source)
     check("the trainer hands that subclass to the fsdp path",
           "def _create_train_engine" in source
           and "TutorFSDPPPOActor(config=actor_config)" in source)
     check("the scheduler is stepped between passes, not only after",
-          "self.lr_scheduler_step()" in source)
+          "self.lr_scheduler_step()" in update_source)
     check("num_iterations 1 falls back to the stock engine",
           'int(getattr(actor_config, "num_iterations", 1)) <= 1' in source)
+
+    print("\n[18] the no-teaching baseline is off by default and paid once")
+    from examples.tutor.configs import TutorFreeChatConfig
+
+    check("off by default", TutorFreeChatConfig().no_teaching_baseline is False)
+    check("every 0810 arm leaves it off for now",
+          all(not loaded[(a, n)].free_chat.no_teaching_baseline
+              for a in ALLOCATIONS for n in ARMS))
+    legacy_workflow = TutorAgentWorkflow(dataset_type="math", answer_scorer="math")
+    check("the cache and lock exist even with free chat off",
+          hasattr(legacy_workflow, "_no_teaching_baselines")
+          and hasattr(legacy_workflow, "_no_teaching_baseline_lock")
+          and legacy_workflow.free_chat_no_teaching_baseline is False)
+    check("off means no probe at all",
+          asyncio.run(
+              legacy_workflow._no_teaching_baseline(
+                  {"id": "x", "task": TASK, "ground_truth": GROUND_TRUTH},
+                  aux_caller=None, answer_judge_caller=None,
+              )
+          ) is None)
+
+    baseline_source = _inspect.getsource(
+        TutorAgentWorkflow._no_teaching_baseline
+    )
+    check("the baseline probe uses the same prompt the re-test uses",
+          "FREE_CHAT_STUDENT_SYSTEM_PROMPT" in baseline_source
+          and "FREE_CHAT_STUDENT_RETEST_TEMPLATE" in baseline_source,
+          "a different prompt here would be measured as teaching")
+    check("it is cached per problem, under a lock",
+          "_no_teaching_baselines[key]" in baseline_source
+          and "_no_teaching_baseline_lock" in baseline_source)
+    check("it never travels through shared instance state",
+          "no_teaching_baseline" in _inspect.signature(
+              TutorAgentWorkflow._run_student_generalization
+          ).parameters
+          and "no_teaching_baseline" in _inspect.signature(
+              TutorAgentWorkflow._log_rollout_stats
+          ).parameters,
+          "one workflow serves every concurrent episode")
 
     print()
     if FAILURES:

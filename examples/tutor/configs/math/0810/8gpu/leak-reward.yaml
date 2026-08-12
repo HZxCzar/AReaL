@@ -1,0 +1,16 @@
+# 0810fc8-leak-reward -- 8 GPUs. A leak costs the penalty and nothing else.
+#
+# The conversation runs the full budget whatever the teacher says. The leaking
+# turn stays in the transcript, so the re-test student sees the answer and will
+# very likely score 4/4; the episode lands at 1.0 - 1.0 = 0.0 and an honest
+# teacher beats it with 1 of 4.
+#
+# Paired against leak-terminate. The two files differ in exactly one key -- but at
+# 8 GPUs the pair cannot run concurrently. See base.yaml.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0810fc8-leak-reward
+
+leak_handling_mode: reward_only

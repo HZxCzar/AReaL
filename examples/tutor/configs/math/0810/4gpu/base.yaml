@@ -10,10 +10,19 @@
 # needs. Three concurrent 4-GPU arms is what killed 20260809_1920 -- 12 GPUs
 # requested against 8, all three arms produced 0 metric rows.
 #
-# rollout.max_concurrent_rollouts stays at the inherited 16. Here it is bounded
-# by the student endpoint rather than by GPUs: see the re-test cost note in
-# ../README.md, which is the thing most likely to set the step time in this
-# rollout.
+# CONCURRENCY. max_concurrent_rollouts 32, against the inherited 16.
+#
+# 16 is exactly one batch: a group is one problem's 8 rollouts and
+# train_dataset.batch_size is 16, so at 16 the rollout has nothing left to do
+# while the actor trains. 32 lets it prefetch the next batch. How far ahead it may
+# actually get is bounded by max_head_offpolicyness, which is 2 and unchanged, so
+# this raises overlap without raising staleness past what the trainer already
+# accepts.
+#
+# The external callers went 16 -> 32 in ../2gpu/base.yaml, which is the thing this
+# depends on: at 16 rollout slots the queue in front of the student endpoint was
+# what set the step time, and doubling the rollouts without doubling the calls
+# would only make that queue longer.
 defaults:
   - ../2gpu/base@_global_
   - _self_
@@ -25,6 +34,7 @@ cluster:
 
 rollout:
   backend: "sglang:d2p1t1"
+  max_concurrent_rollouts: 32
 
 actor:
   backend: "fsdp:d2p1t1"
