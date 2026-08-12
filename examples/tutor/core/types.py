@@ -227,6 +227,11 @@ class EpisodeArtifact:
 class RewardAssignment:
     reward: float
     reward_components: dict[str, float]
+    # The part of reward that belongs to the turn that produced it and must
+    # not be accumulated backward onto earlier turns by ReBN. Populated from
+    # EpisodeRewardComputer(turn_local_components=...); 0.0 keeps the old
+    # behaviour, where every component propagates.
+    local_reward: float = 0.0
 
 
 @dataclass(slots=True)

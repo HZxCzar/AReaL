@@ -498,6 +498,10 @@ class StudentGeneralizationResult:
     reward: float = 0.0
     public_history: str = ""
     reward_turn_idx: int | None = None
+    # Per-turn credit from the prefix re-tests, {turn_idx: reward}. The values
+    # sum to correctness_reward, so this changes only which turn gets paid, never
+    # the episode total.
+    turn_credits: dict[int, float] | None = None
 
 
 @dataclass(slots=True)
@@ -570,6 +574,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         leak_penalty_compute: float | None = None,
         leak_penalty_formula: float | None = None,
         leak_penalty_aggregation: str = "turn",
+        turn_local_reward_components: tuple[str, ...] | list[str] = (),
         format_error_penalty: float = 0.0,
         leaked_success_reward_scale: float = 1.0,
         assign_success_reward: bool = False,
@@ -634,6 +639,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_generalize_source: str = "sidecar",
         student_generalize_path: str = "",
         student_generalize_replays: int = 1,
+        student_generalize_turn_credit: bool = False,
+        student_generalize_turn_credit_replays: int = 0,
         format_handling_mode: str = "continue",
         student_generalize_retest_original: bool = False,
         student_generalize_level1_enabled: bool = True,
@@ -762,6 +769,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             float(leak_penalty_formula) if leak_penalty_formula is not None else 0.0
         )
         self.leak_penalty_aggregation = leak_penalty_aggregation
+        self.turn_local_reward_components = tuple(turn_local_reward_components)
         self.format_error_penalty = float(format_error_penalty)
         self.leaked_success_reward_scale = float(leaked_success_reward_scale)
         self.assign_success_reward = bool(assign_success_reward)
@@ -1135,6 +1143,21 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.student_generalize_replays = max(
             1, int(student_generalize_replays)
         )
+        self.student_generalize_turn_credit = bool(student_generalize_turn_credit)
+        # 0 means "same as the final re-test", which keeps S(t) and S(T) measured
+        # the same way so their difference carries no systematic bias.
+        self.student_generalize_turn_credit_replays = (
+            int(student_generalize_turn_credit_replays)
+            or self.student_generalize_replays
+        )
+        if self.student_generalize_turn_credit and not getattr(
+            self, "free_chat_no_teaching_baseline", False
+        ):
+            raise ValueError(
+                "student_generalize.turn_credit requires "
+                "free_chat.no_teaching_baseline: per-turn credit is "
+                "S(t) - S(t-1) and S(0) is that baseline."
+            )
         self.format_handling_mode = str(format_handling_mode or "continue")
         self.student_generalize_retest_original = bool(
             student_generalize_retest_original
@@ -2294,6 +2317,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             leak_penalty_compute=getattr(self, "leak_penalty_compute", None),
             leak_penalty_formula=getattr(self, "leak_penalty_formula", None),
             leak_penalty_aggregation=getattr(self, "leak_penalty_aggregation", "turn"),
+            turn_local_components=getattr(self, "turn_local_reward_components", ()),
             format_error_penalty=getattr(self, "format_error_penalty", 0.0),
             leaked_success_reward_scale=getattr(
                 self, "leaked_success_reward_scale", 1.0
@@ -2372,6 +2396,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             response_to_tensordict(
                 artifact.tutor_response,
                 reward=assignment.reward,
+                local_reward=(
+                    assignment.local_reward
+                    if getattr(self, "turn_local_reward_components", ())
+                    else None
+                ),
                 trajectory_id=trajectory_id,
                 turn_idx=artifact.turn_idx,
                 input_tokens_override=clean_input,
@@ -4175,6 +4204,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             student_output = _strip_reasoning_for_context(student_output_raw)
             judge_result = None
             correctness_reward = 0.0
+            turn_credits = None
             confidence = 0.0
             confidence_mean_logprob = None
             confidence_token_count = 0
@@ -4217,6 +4247,29 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     # statement should cost something.
                     scored_fraction = replay_fraction - no_teaching_baseline
                 correctness_reward = case.reward * scored_fraction
+                if (
+                    getattr(self, "student_generalize_turn_credit", False)
+                    and level == ORIGINAL_RETEST_LEVEL
+                    and no_teaching_baseline is not None
+                    and len(episode_artifact.turns) > 1
+                    # Eval reports the episode metric and trains nothing, so the
+                    # per-turn split has no consumer there. Skipping it keeps the
+                    # eval pass at one re-test per episode instead of one per turn.
+                    and not self._in_eval_rollout()
+                ):
+                    prefix_scores = await self._score_prefix_retests(
+                        episode_artifact=episode_artifact,
+                        anchor=anchor,
+                        aux_caller=aux_caller,
+                        answer_judge_caller=answer_judge_caller,
+                    )
+                    turn_credits = self._turn_credits_from_prefixes(
+                        turn_artifacts=episode_artifact.turns,
+                        prefix_scores=prefix_scores,
+                        final_fraction=replay_fraction,
+                        baseline=no_teaching_baseline,
+                        scale=case.reward,
+                    )
                 if getattr(self, "student_generalize_confidence_enabled", False):
                     if not student_result.token_logprobs:
                         raise RuntimeError(
@@ -4260,9 +4313,122 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     reward=reward,
                     public_history=anchor.public_history.summary,
                     reward_turn_idx=anchor.reward_turn_idx,
+                    turn_credits=turn_credits,
                 )
             )
         return results
+
+    @staticmethod
+    def _in_eval_rollout() -> bool:
+        """True inside the eval pass; False when there is no rollout context."""
+        try:
+            return bool(getattr(workflow_context.get(), "is_eval", False))
+        except Exception:  # noqa: BLE001 - no context outside a rollout worker
+            return False
+
+    async def _score_prefix_retests(
+        self,
+        *,
+        episode_artifact: EpisodeArtifact,
+        anchor: StudentGeneralizationAnchor,
+        aux_caller: Any,
+        answer_judge_caller: Any,
+    ) -> dict[int, float]:
+        """S(t) at every turn boundary except the last.
+
+        Cuts the public history after the student's reply to turn t -- which is
+        exactly ``public_history_after`` -- and runs the same solo re-test the
+        episode ends with. The final boundary is skipped because it is the
+        episode's own re-test, already measured.
+        """
+        replays = max(1, int(self.student_generalize_turn_credit_replays))
+        prefixes = [
+            (int(artifact.turn_idx), list(artifact.public_history_after or []))
+            for artifact in episode_artifact.turns[:-1]
+        ]
+        prefixes = [(idx, history) for idx, history in prefixes if history]
+        if not prefixes:
+            return {}
+
+        async def score(turn_idx, history):
+            probe_anchor = StudentGeneralizationAnchor(
+                public_history=PublicHistoryState(
+                    summary=anchor.public_history.summary,
+                    turn_count=len(history),
+                    turns=history,
+                ),
+                previous_student_output=anchor.previous_student_output,
+                teacher_feedback=anchor.teacher_feedback,
+                reward_turn_idx=anchor.reward_turn_idx,
+            )
+            messages = self._build_student_probe_messages(
+                episode_artifact=episode_artifact,
+                anchor=probe_anchor,
+                level=ORIGINAL_RETEST_LEVEL,
+                transfer_task="",
+            )
+            replies = await asyncio.gather(
+                *[
+                    self._call_auxiliary_messages(
+                        messages,
+                        aux_caller=aux_caller,
+                        rid_prefix=f"turn-credit-t{turn_idx}-r{replay_idx}",
+                    )
+                    for replay_idx in range(replays)
+                ]
+            )
+            usable = [reply for reply in replies if not reply.error]
+            if not usable:
+                return turn_idx, None
+            judged = await asyncio.gather(
+                *[
+                    self._score_answer_async(
+                        episode_artifact.task,
+                        episode_artifact.ground_truth,
+                        reply.text,
+                        answer_judge_caller=answer_judge_caller,
+                    )
+                    for reply in usable
+                ]
+            )
+            return turn_idx, sum(1 for j in judged if j.correct) / len(judged)
+
+        scored = await asyncio.gather(
+            *[score(idx, history) for idx, history in prefixes]
+        )
+        return {idx: value for idx, value in scored if value is not None}
+
+    def _turn_credits_from_prefixes(
+        self,
+        *,
+        turn_artifacts: list[TurnArtifact],
+        prefix_scores: dict[int, float],
+        final_fraction: float,
+        baseline: float,
+        scale: float,
+    ) -> dict[int, float]:
+        """Split scale * (S(T) - S(0)) into per-turn marginals S(t) - S(t-1).
+
+        The marginals telescope, so the episode reward is exactly what it was
+        before this setting existed -- only the turn it lands on changes. A
+        prefix whose re-test failed to score is carried forward rather than
+        dropped, which keeps that property intact.
+        """
+        credits: dict[int, float] = {}
+        previous = float(baseline)
+        last_position = len(turn_artifacts) - 1
+        for position, artifact in enumerate(turn_artifacts):
+            turn_idx = int(artifact.turn_idx)
+            if position == last_position:
+                current = float(final_fraction)
+            else:
+                scored = prefix_scores.get(turn_idx)
+                if scored is None:
+                    continue
+                current = float(scored)
+            credits[turn_idx] = scale * (current - previous)
+            previous = current
+        return credits
 
     def _apply_student_generalization_rewards(
         self,
@@ -4287,6 +4453,31 @@ class TutorAgentWorkflow(RolloutWorkflow):
             for artifact, assignment in zip(turn_artifacts, assignments, strict=True)
         }
         for result in student_generalization_results:
+            if result.turn_credits:
+                # Each turn is paid for the re-test gain it produced. The credits
+                # already sum to correctness_reward, so the episode total is
+                # unchanged; only the allocation across turns differs. Checked
+                # before the `not result.reward` guard below because the credits
+                # can be non-zero while summing to zero.
+                key = f"student_generalize_{result.level}"
+                for turn_idx, credit in result.turn_credits.items():
+                    credited = assignment_by_turn_idx.get(int(turn_idx))
+                    if credited is None or not credit:
+                        continue
+                    credited.reward_components[key] = (
+                        credited.reward_components.get(key, 0.0) + float(credit)
+                    )
+                    credited.reward += float(credit)
+                if result.confidence_reward and result.reward_turn_idx is not None:
+                    tail = assignment_by_turn_idx.get(int(result.reward_turn_idx))
+                    if tail is not None:
+                        ckey = f"student_generalize_{result.level}_confidence"
+                        tail.reward_components[ckey] = (
+                            tail.reward_components.get(ckey, 0.0)
+                            + float(result.confidence_reward)
+                        )
+                        tail.reward += float(result.confidence_reward)
+                continue
             if not result.reward:
                 continue
             assignment = None

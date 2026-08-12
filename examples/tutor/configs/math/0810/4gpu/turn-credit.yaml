@@ -1,0 +1,70 @@
+# 0810fc-turn-credit -- 4 GPUs. -- per-turn re-test credit on top of leak-terminate.
+#
+# WHAT IT CHANGES. Today the whole episode reward lands on the last turn, and
+# because ReBN accumulates turn rewards backward with turn_discount=1.0, every
+# turn of an episode ends up with an IDENTICAL return and therefore an identical
+# advantage. Measured on 20260812_064705: across 551 max-turns episodes the reward
+# sat on the last turn 344 times and on no turn 207 times, never in between. The
+# policy can learn "was this episode good" and never "was this turn good", which
+# is the most likely reason leak and format move at |t| = 4-9 while the teaching
+# term does not move at all.
+#
+# HOW. After the dialogue, cut the public history after the student's reply to
+# turn t and re-run the same solo re-test on that prefix, giving S(t). Turn t
+# earns retest_reward * (S(t) - S(t-1)), with S(0) the no-teaching baseline.
+#
+# The marginals telescope: sum_t (S(t) - S(t-1)) = S(T) - S(0), which is exactly
+# the episode reward this arm's control already pays. So the episode total is
+# unchanged and ONLY the allocation across turns differs. Nothing new is being
+# optimised; the same scalar is being attributed to the turn that earned it. That
+# also means ReBN stays correct rather than being worked around: with gamma=1 the
+# return at turn t becomes S(T) - S(t-1), "how much of the final gain came from
+# turn t onward", and the return at the first turn -- the one group_baseline
+# averages -- is untouched.
+#
+# It is a measured quantity, not a judge, so unlike rewarding in-conversation
+# correctness it cannot be gamed by getting the student to recite an answer mid
+# chat. A withheld leaked turn scores S(t) == S(t-1) and earns ~0, which is right:
+# the student never saw it.
+#
+# COST, AND THIS IS THE REAL PRICE. (turns - 1) * turn_credit_replays extra
+# student calls plus the same number of judge calls, PER EPISODE. It cannot be
+# cached the way no_teaching_baseline is, because every episode has its own
+# dialogue. At 5 turns and 4 replays that is 16 + 16 per episode against roughly
+# 24 student calls an episode today, so expect student-endpoint load to more than
+# double and step time to rise with it. max_concurrent_calls on the student is the
+# binding constraint. Lower turn_credit_replays trades noise for throughput; the
+# noise lands on the per-turn SPLIT, never on the episode total, because the
+# marginals still telescope.
+#
+# READING IT. Per-turn credit shows up in each turn's
+# reward_component/student_generalize_original in the debug traces, and the
+# episode total should still match rollout/retest/improvement. If the total moves
+# relative to the control, something is wrong with the split, not with the idea.
+#
+# WHAT TO WATCH. retest/improvement should be unchanged early (same total) while
+# the per-turn spread appears. The thing this arm is for is whether the teaching
+# term now has a gradient at all: on the control it slopes -0.142 per 100 steps
+# at t = -8.3 with a flat baseline.
+#
+# NOT COMBINED WITH THE LEAK CHANGE. reward.turn_local_components is left empty
+# so this is a single-factor arm. Add `turn_local_components: ["leak"]` under
+# reward to stop the leak penalty from discounting the good turns before it.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0810fc-turn-credit
+
+leak_handling_mode: terminate
+
+free_chat:
+  # Required: S(0) is this baseline. The workflow raises at construction if
+  # turn_credit is on without it.
+  no_teaching_baseline: true
+
+student_generalize:
+  turn_credit: true
+  # 0 = same replays as the final re-test, so S(t) and S(T) are measured the same
+  # way and their difference carries no systematic bias.
+  turn_credit_replays: 0

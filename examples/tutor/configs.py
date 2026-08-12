@@ -425,6 +425,33 @@ class TutorStudentGeneralizeConfig:
     )
     level1_reward: float = field(default=0.2)
     level2_reward: float = field(default=0.5)
+    turn_credit: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Pay each turn for the re-test gain it produced instead of "
+                "putting the whole episode reward on the last turn. After the "
+                "dialogue we cut the history after the student's reply to turn "
+                "t and re-run the solo re-test, giving S(t); turn t earns "
+                "retest_reward * (S(t) - S(t-1)), with S(0) the no-teaching "
+                "baseline. The marginals telescope to the old episode reward, "
+                "so the total is unchanged and only credit assignment differs. "
+                "Costs (turns - 1) * turn_credit_replays extra student calls "
+                "per episode. Requires free_chat.no_teaching_baseline."
+            )
+        },
+    )
+    turn_credit_replays: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Replays per intermediate prefix re-test. 0 means use "
+                "student_generalize.replays, which keeps S(t) and S(T) measured "
+                "the same way. Lower values are cheaper but noisier, and the "
+                "noise lands on the per-turn split rather than the total."
+            )
+        },
+    )
     retest_reward: float = field(
         default=0.0,
         metadata={
@@ -1064,6 +1091,22 @@ class TutorRewardConfig:
                 "saturated penalty per episode."
             ),
             "choices": ["turn", "episode"],
+        },
+    )
+    turn_local_components: list[str] = field(
+        default_factory=list,
+        metadata={
+            "help": (
+                "Reward component names that stay on the turn that produced "
+                "them instead of being accumulated backward onto earlier turns "
+                "by advantage_estimator='rebn'. Empty keeps the previous "
+                "behaviour, where a leak on the last turn discounts the "
+                "returns of every good turn before it. Names match the "
+                "reward_component/* metrics, e.g. 'leak', 'format_error', and "
+                "in staged leak mode 'leak_final_answer', 'leak_compute', "
+                "'leak_formula'. Requires advantage_estimator='rebn' and is "
+                "incompatible with actor.reward_norm."
+            )
         },
     )
     format_error_penalty: float = field(

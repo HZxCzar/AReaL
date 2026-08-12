@@ -1199,6 +1199,34 @@ class PPOActor:
         )
         if self.reward_norm:
             reward_score = self.reward_norm(reward_score)
+        # Turn-local reward components. ReBN accumulates turn rewards backward,
+        # so without this a penalty raised on the last turn (a leak, say) lands
+        # undiscounted in the returns of every earlier turn -- charging good
+        # teaching for a mistake it did not make. The workflow reports those
+        # components in a separate local_rewards column; we subtract them
+        # before accumulation and add them back after, so only the offending
+        # turn carries them. Absent column => unchanged behaviour.
+        local_reward_score = None
+        if "local_rewards" in data:
+            if self.config.advantage_estimator != "rebn":
+                # Only ReBN accumulates rewards across turns, so only ReBN can
+                # hold a component back from that accumulation. Fail loudly
+                # rather than silently propagating a component the config asked
+                # to keep local.
+                raise ValueError(
+                    "A 'local_rewards' column requires "
+                    "actor.advantage_estimator='rebn', got "
+                    f"{self.config.advantage_estimator!r}. Clear "
+                    "reward.turn_local_components or switch to ReBN."
+                )
+            local_reward_score = data["local_rewards"].to(reward_score.device)
+            # Same scaling and clipping as the total, so the subtraction below
+            # stays exact. reward_bias is deliberately not applied twice: it is
+            # a shift on the propagating return, not on each component.
+            local_reward_score = local_reward_score * self.reward_scaling
+            local_reward_score = torch.clip(
+                local_reward_score, max=self.reward_clip, min=-self.reward_clip
+            )
 
         loss_mask = data["loss_mask"].float()
         loss_mask = torch.roll(loss_mask, shifts=-1, dims=-1)
@@ -1292,13 +1320,25 @@ class PPOActor:
                 data["teacher_context_real_avg_logp"] = real_avg_logp
                 data["teacher_context_moved_avg_logp"] = moved_avg_logp
                 data["teacher_context_information_gain"] = information_gain
+            propagating_reward_score = (
+                reward_score
+                if local_reward_score is None
+                else reward_score - local_reward_score
+            )
             turn_returns = _compute_rebn_returns(
-                reward_score,
+                propagating_reward_score,
                 data["trajectory_id"].to(reward_score.device),
                 data["turn_idx"].to(reward_score.device),
                 self.config.turn_discount,
                 valid_mask=valid_turn_mask,
             )
+            if local_reward_score is not None:
+                # Added after accumulation but before the group baseline, so the
+                # episode scalar the baseline averages (the return at the first
+                # turn) also excludes other episodes' turn-local penalties.
+                turn_returns = turn_returns + local_reward_score * (
+                    valid_turn_mask.to(turn_returns.dtype)
+                )
             if self.config.group_baseline == "episode":
                 if "group_id" not in data:
                     raise ValueError(

@@ -42,6 +42,7 @@ def response_to_tensordict(
     response: Any,
     *,
     reward: float,
+    local_reward: float | None = None,
     trajectory_id: int | None = None,
     turn_idx: int | None = None,
     input_tokens_override: list[int] | None = None,
@@ -112,6 +113,16 @@ def response_to_tensordict(
         "trajectory_id": torch.tensor([trajectory_value], dtype=torch.long),
         "turn_idx": torch.tensor([turn_value], dtype=torch.long),
     }
+    if local_reward is not None:
+        effective_local_reward = float(local_reward)
+        if (
+            zero_reward_on_length_stop
+            and getattr(response, "stop_reason", None) == "length"
+        ):
+            effective_local_reward = 0.0
+        result["local_rewards"] = torch.tensor(
+            [effective_local_reward], dtype=torch.float32
+        )
     if batch_centered_penalty_weight is not None:
         score_valid = batch_centered_penalty_score is not None
         result["batch_centered_penalty_score"] = torch.tensor(

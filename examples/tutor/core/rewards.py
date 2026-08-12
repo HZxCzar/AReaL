@@ -35,6 +35,7 @@ class EpisodeRewardComputer:
         length_penalty_threshold_chars: int = 0,
         length_penalty_per_100_chars: float = 0.0,
         length_penalty_min: float = 0.0,
+        turn_local_components: tuple[str, ...] | list[str] = (),
     ) -> None:
         if leak_penalty_mode not in {"binary", "staged", "rawbase"}:
             raise ValueError(
@@ -98,6 +99,7 @@ class EpisodeRewardComputer:
         self.length_penalty_threshold_chars = length_penalty_threshold_chars
         self.length_penalty_per_100_chars = length_penalty_per_100_chars
         self.length_penalty_min = length_penalty_min
+        self.turn_local_components = frozenset(turn_local_components)
 
     async def compute(self, episode: EpisodeArtifact) -> list[RewardAssignment]:
         success_artifact = self._success_artifact(episode)
@@ -143,10 +145,18 @@ class EpisodeRewardComputer:
             if length_penalty:
                 components["length_penalty"] = length_penalty
             reward = float(sum(components.values()))
+            local_reward = float(
+                sum(
+                    value
+                    for name, value in components.items()
+                    if name in self.turn_local_components
+                )
+            )
             assignments.append(
                 RewardAssignment(
                     reward=reward,
                     reward_components=components,
+                    local_reward=local_reward,
                 )
             )
         return assignments
