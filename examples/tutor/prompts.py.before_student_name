@@ -335,32 +335,9 @@ def resolve_teacher_instruction(text: str | None) -> tuple[str, str]:
 # difference between an arm with the pre-solve and one without.
 # ---------------------------------------------------------------------------
 
-# Deliberately one line. Anything more is a prior on how a student behaves.
-#
-# The name is not decoration. Without it, asked "who are you" mid-conversation,
-# this student answers "I am a language model developed by Alibaba Cloud. How can
-# I assist you today?" -- 10 out of 10 samples, judge-scored. With any first name
-# it is 0 out of 10, and Sam / Mia / Wei behave alike, so it is the presence of a
-# proper name and not the choice of one. Adjectives do not substitute: "a human
-# student" and "a high school student" each still broke 9 out of 10.
-#
-# It is free. Paired over 40 tasks x 4 replays against the pipeline judge, adding
-# the name moved the solo re-test by -0.03 +-0.04, i.e. nothing; the wordier
-# variants that spell out "you are not an AI, you do not help the teacher" cost
-# -0.10 +-0.05 and were dropped for that reason.
-#
-# What it does NOT fix, so do not read it as a persona fix: pressed directly
-# ("you are a language model, right?") it still folds, and it does not touch role
-# inversion -- offered a help request or a compliment the student takes the tutor
-# seat under this prompt exactly as it did before. That is the failure that shows
-# up in the rollouts and it needs the environment or training, not a string here.
-# Evidence: TAgent/student_persona_probe_20260812/.
-#
-# This constant is shared by the conversation, the scored solo re-test and the
-# no-teaching baseline on purpose -- see _build_student_probe_messages and
-# _no_teaching_baseline. Changing it moves all three together, which is what
-# keeps improvement meaningful; changing only one would be measured as teaching.
-FREE_CHAT_STUDENT_SYSTEM_PROMPT = "You are Sam, a student talking with a teacher."
+# Deliberately one line. Anything more is a prior on how a student behaves, and
+# a self-description is measured not to change this student's behaviour anyway.
+FREE_CHAT_STUDENT_SYSTEM_PROMPT = "You are a student talking with a teacher."
 
 # The task lives here rather than being appended by `_task_context`, because the
 # teacher's copy is the only one in the episode -- the student is never given it

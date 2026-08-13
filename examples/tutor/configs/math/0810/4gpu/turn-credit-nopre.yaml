@@ -1,0 +1,44 @@
+# 0810fc-turn-credit-nopre -- 4 GPUs.
+# turn-credit.yaml with the pre-solve draft off. Pairs with turn-credit.yaml to
+# isolate pre-solve, and with leak-terminate-baseline-nopre.yaml to isolate turn
+# credit.
+#
+# WHY A NOPRE ARM IS WORTH A SLOT HERE. The reason to suspect leak pressure is
+# destroying teaching is that pre-solve's value IS a correct worked solution in
+# the teacher's context, which is exactly the material the leak judge fires on.
+# Without a draft there is much less of that material, so this arm is the control
+# where the hypothesis predicts little to erode. On 20260812_064711 that is what
+# happened: teaching sat flat at ~0.08 (slope t = 1.1) across 149 steps while its
+# pre-solve twin collapsed from 0.199 to 0.074. If turn credit lifts teaching here
+# too, the win is about credit assignment and not about protecting the draft.
+#
+# Everything else is turn-credit.yaml: each turn earns retest_reward *
+# (S(t) - S(t-1)) from prefix re-tests, the marginals telescope to the old episode
+# reward, and it costs (turns - 1) * turn_credit_replays extra student calls plus
+# the same number of judge calls per EPISODE.
+#
+# One cost note specific to this arm: without the filter_solver pre-solve, no
+# episode is skipped, so it runs ~7.5% more episodes per step than its pre-solve
+# twin and its turns run slightly longer (4.96 vs 4.51 measured). The prefix
+# re-test bill scales with both.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0810fc-turn-credit-nopre
+
+leak_handling_mode: terminate
+
+free_chat:
+  # Required: S(0) is this baseline. The workflow raises at construction if
+  # turn_credit is on without it.
+  no_teaching_baseline: true
+
+teacher_pre:
+  enabled: false
+
+student_generalize:
+  turn_credit: true
+  # 0 = same replays as the final re-test, so S(t) and S(T) are measured the same
+  # way and their difference carries no systematic bias.
+  turn_credit_replays: 0

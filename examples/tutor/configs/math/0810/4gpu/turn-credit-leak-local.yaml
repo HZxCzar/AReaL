@@ -1,0 +1,74 @@
+# 0810fc-turn-credit-leak-local -- 4 GPUs.
+# turn-credit.yaml plus the leak penalty held on the turn that leaked.
+#
+# HOW TO READ IT AS AN ARM. Against turn-credit.yaml this differs in exactly one
+# key, reward.turn_local_components, so that pair isolates the leak factor.
+# Against leak-terminate-baseline.yaml it differs in two, so do not read it as a
+# single-factor result there.
+#
+# WHY. ReBN accumulates turn rewards backward with turn_discount=1.0, and under
+# leak_handling_mode=terminate the leaking turn IS the last turn. So today a -1.0
+# leak penalty lands undiscounted in the return of every turn before it: three
+# turns of clean explanation get charged for a mistake made in the fourth. Note
+# this is NOT what reward.leak_penalty_aggregation controls -- both 'turn' and
+# 'episode' already put the penalty on a single turn ROW; the spreading happens
+# one layer down, in the advantage estimator.
+#
+# turn_local_components names the components that are held out of that backward
+# pass and added after it. The penalty itself is untouched at -1.0 and the
+# leaking turn still eats all of it. Leaks are still detected, still terminate
+# the episode, and the leaked message is still withheld from the student.
+#
+# It also takes leaks out of the group baseline. The baseline is the ReBN return
+# at an episode's FIRST turn, so once the leak stops propagating there it stops
+# depressing the yardstick its groupmates are measured against. Today a clean
+# episode sharing a group with a leaker is handed a free positive advantage for
+# merely not being the leaker; at a 5% leak rate that is about a third of groups.
+#
+# THE EVIDENCE, AND ITS LIMITS. On 20260812_064705 the teaching term collapsed
+# from 0.199 (steps 50-75) to 0.074 (steps 100+), ending below its no-presolve
+# control at 0.098, with a flat no-teaching baseline and slope t = -8.3. Across
+# three runs, the harder a run suppressed leaks the worse its teaching trend
+# (leak slope -0.027 / -0.081 / -0.112 against teach slope +0.068 / -0.002 /
+# -0.082). The mechanism that fits: pre-solve's value is the teacher holding a
+# correct worked solution, and the leak penalty targets exactly that material, so
+# sustained leak pressure erodes what pre-solve buys. That is n=3 and
+# correlational -- a hypothesis this arm tests, not a finding it assumes.
+#
+# WATCH THE LEAK RATE. This cuts the pressure against leaking by more than the
+# propagation term alone, because the spurious group-baseline bonus for not
+# leaking goes away too. That is correct behaviour, but it is the thing most
+# likely to go wrong. If rollout/leaks drifts above ~10%, drop reward.leak_penalty
+# to -0.2 or -0.3 rather than reverting turn_local_components: the point is to
+# stop the penalty discounting good turns, not to stop penalising leaks.
+#
+# THE TURN-CREDIT HALF is unchanged from turn-credit.yaml: each turn earns
+# retest_reward * (S(t) - S(t-1)) from prefix re-tests, the marginals telescope
+# to the old episode reward, and it costs (turns - 1) * turn_credit_replays extra
+# student calls plus the same number of judge calls per EPISODE. Measured offline
+# on 150 peak-window episodes, the per-turn profile was turn1 -0.040, turn2
+# +0.077, turn3 +0.088, turn4 +0.050, turn5 +0.012, summing to 0.187 against the
+# 0.199 training reported for that window.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0810fc-turn-credit-leak-local
+
+leak_handling_mode: terminate
+
+free_chat:
+  # Required: S(0) is this baseline. The workflow raises at construction if
+  # turn_credit is on without it.
+  no_teaching_baseline: true
+
+student_generalize:
+  turn_credit: true
+  # 0 = same replays as the final re-test, so S(t) and S(T) are measured the same
+  # way and their difference carries no systematic bias.
+  turn_credit_replays: 0
+
+reward:
+  # Held on the turn that produced it instead of being accumulated backward.
+  # Add "format_error" here too if format ever stops being ~0.0006.
+  turn_local_components: ["leak"]

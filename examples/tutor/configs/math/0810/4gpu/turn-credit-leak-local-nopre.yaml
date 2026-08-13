@@ -1,0 +1,51 @@
+# 0810fc-turn-credit-leak-local-nopre -- 4 GPUs.
+# turn-credit-leak-local.yaml with the pre-solve draft off.
+#
+# HOW TO READ IT AS AN ARM. One key from turn-credit-leak-local.yaml
+# (teacher_pre.enabled), one key from turn-credit-nopre.yaml
+# (reward.turn_local_components). With those two and turn-credit.yaml it closes a
+# 2x2 over {pre-solve on/off} x {leak local, leak propagating}, all four sharing
+# turn credit.
+#
+# WHAT THE 2x2 IS FOR. The leak-local change is predicted to matter MORE with
+# pre-solve than without: the claim is that the leak penalty erodes the correct
+# worked solution the draft puts in the teacher's context, and this arm has no
+# draft to erode. So the interaction is the result to look at, not the two main
+# effects. If leak-local helps equally with and without pre-solve, the mechanism
+# I proposed is wrong even if the change itself is good.
+#
+# The measurement that motivates it, restated so this file stands alone: on
+# 20260812_064705 (pre-solve, leak propagating) teaching fell 0.199 -> 0.074 while
+# leaks were driven 0.30 -> 0.02; on 20260812_064711 (no pre-solve) teaching held
+# flat at ~0.08 while leaks fell just as hard. n=3 runs, correlational.
+#
+# WATCH THE LEAK RATE, same as the pre-solve version. Holding the penalty on its
+# own turn also removes it from the group baseline, so clean episodes stop
+# collecting a spurious bonus for not being the leaker. If rollout/leaks drifts
+# above ~10%, drop reward.leak_penalty to -0.2 or -0.3 rather than reverting
+# turn_local_components.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0810fc-turn-credit-leak-local-nopre
+
+leak_handling_mode: terminate
+
+free_chat:
+  # Required: S(0) is this baseline. The workflow raises at construction if
+  # turn_credit is on without it.
+  no_teaching_baseline: true
+
+teacher_pre:
+  enabled: false
+
+student_generalize:
+  turn_credit: true
+  # 0 = same replays as the final re-test, so S(t) and S(T) are measured the same
+  # way and their difference carries no systematic bias.
+  turn_credit_replays: 0
+
+reward:
+  # Held on the turn that produced it instead of being accumulated backward.
+  turn_local_components: ["leak"]
