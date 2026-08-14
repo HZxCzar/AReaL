@@ -124,6 +124,12 @@ _COMPUTE_NODES = (
     ast.BinOp, ast.Compare, ast.For, ast.While, ast.comprehension,
     ast.If, ast.IfExp, ast.FunctionDef, ast.AsyncFunctionDef,
     ast.Import, ast.ImportFrom,
+    # `x += 101` carries its operator on the AugAssign node itself rather than in
+    # a child BinOp, so without this a turn that updates a running total reads as
+    # doing no computation. Caught on the first live episode: the student wrote
+    # `decimal_number += 101` reusing an earlier variable and was scored a
+    # constant print.
+    ast.AugAssign,
 )
 
 
@@ -167,22 +173,54 @@ class CellResult:
 @dataclass
 class CodeSession:
     """One episode's interpreter. Accepted cells accumulate; crashed ones do not,
-    so a broken turn cannot poison the names later turns rely on."""
+    so a broken turn cannot poison the names later turns rely on.
+
+    Also tallies the episode's channel health. These live here rather than on the
+    workflow because one workflow instance serves every concurrent episode, so
+    per-episode counters have to travel with the episode. All four are worth
+    watching: `crashes` and `no_program` say the student could not act at all,
+    `silent_cells` says it acted and told the teacher nothing, and
+    `constant_prints` says it printed a literal it had already worked out in its
+    head, which would make the code channel cosmetic.
+    """
 
     timeout_s: float = DEFAULT_TIMEOUT_S
     python: str = field(default_factory=lambda: sys.executable)
     _history: list[str] = field(default_factory=list)
+    crashes: int = 0
+    silent_cells: int = 0
+    constant_prints: int = 0
+    no_program: int = 0
 
     @property
     def turns_kept(self) -> int:
         return len(self._history)
 
+    def note_missing_program(self) -> None:
+        """The student produced nothing that parsed, after every retry."""
+        self.no_program += 1
+
+    def stats(self) -> dict[str, int]:
+        return {
+            "crashes": self.crashes,
+            "silent_cells": self.silent_cells,
+            "constant_prints": self.constant_prints,
+            "no_program": self.no_program,
+        }
+
     async def run(self, src: str) -> CellResult:
         if not src.strip():
+            self.crashes += 1
             return CellResult("", CRASH)
         result = await self._exec(src)
         if result.ok:
             self._history.append(src)
+            if result.silent:
+                self.silent_cells += 1
+            if is_constant_print(src):
+                self.constant_prints += 1
+        else:
+            self.crashes += 1
         return result
 
     async def peek(self, src: str) -> CellResult:

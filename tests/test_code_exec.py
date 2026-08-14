@@ -73,6 +73,12 @@ async def main():
     check("real arithmetic is not", is_constant_print("print(int('101',2) + 3)"), False)
     check("loop is not", is_constant_print("t=0\nfor i in range(3): t+=i\nt"), False)
     check("import is not", is_constant_print("import math\nmath.sqrt(4)"), False)
+    # Regression: caught on the first live episode. `+=` carries its operator on
+    # the AugAssign node, not a child BinOp, so a running total read as constant.
+    check("augmented assignment is not",
+          is_constant_print("total = 1\ntotal += 101\ntotal"), False)
+    check("plain literal assignment still is",
+          is_constant_print("answer = 42\nanswer"), True)
 
     print("\n== stdin is closed, so input() fails fast instead of hanging ==")
     s = CodeSession()

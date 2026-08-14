@@ -490,26 +490,33 @@ Now solve the problem from scratch:
 
 Write one Python program that works out the answer."""
 
-# Shown to the student after its program runs. `(no output)` rather than an empty
-# string so a silent cell is visible as a fact about the program rather than
-# reading as a missing message.
-CODE_STUDENT_RESULT_TEMPLATE = """\
-[result]
-{{ result }}"""
-
-# How the TEACHER sees a code student's turn: the program AND what it produced.
+# A code student's whole turn as it is stored in the public history: the program
+# and what running it produced.
 #
-# Not the output alone. The program is the richest window into the student's
-# mental model available -- you can read the wrong formula directly off it --
-# while the output is one number or a traceback. Showing only the output throws
-# away the diagnostic half, and the teacher already under-reads the student.
+# ONE rendering serves both sides. The public history holds a single string per
+# turn and both the teacher's view and the student's own view are rendered from
+# it, so the wording is neutral enough to read correctly in both directions --
+# the student sees its own program and result, the teacher sees the student's.
+#
+# The program is included, not just the output. It is the richest window into the
+# student's mental model available -- the wrong formula can be read straight off
+# it -- while the output is one number or a traceback. Showing only the output
+# throws the diagnostic half away, and the teacher already under-reads the
+# student.
+#
+# `(no output)` rather than an empty string, so a silent cell reads as a fact
+# about the program rather than as a missing message.
 CODE_STUDENT_TEACHER_VIEW_TEMPLATE = """\
-Student program:
 ```python
 {{ program }}
 ```
-Result:
+[result]
 {{ result }}"""
+
+CODE_STUDENT_NO_OUTPUT = "(no output)"
+# Every retry failed to produce parseable Python. Stored in place of the turn so
+# the teacher can see that the student could not act, which is itself teachable.
+CODE_STUDENT_NO_PROGRAM = "(no runnable program)"
 
 
 NO_VISIBLE_TUTORING_HISTORY = "No visible tutoring history yet."
