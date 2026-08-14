@@ -26,6 +26,11 @@ _STUDENT_GENERALIZE_MODES = {"only_success", "always"}
 _STUDENT_GENERALIZE_SOURCES = {"generated", "sidecar", "train"}
 _STUDENT_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
+STUDENT_MODE_TEXT = "text"
+STUDENT_MODE_CODE = "code"
+# The action space a student is allowed. See TutorStudentModelConfig.mode.
+STUDENT_MODES = frozenset({STUDENT_MODE_TEXT, STUDENT_MODE_CODE})
+
 TUTOR_EVAL_STUDENT_FIELD = "__tutor_student_name"
 TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD = "__tutor_student_prompt_group"
 TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD = "__tutor_student_prompt_index"
@@ -294,6 +299,24 @@ class TutorStudentModelConfig:
             )
         },
     )
+    mode: str = field(
+        default="text",
+        metadata={
+            "help": (
+                "How this student is allowed to act. 'text' replies in prose and "
+                "algebra, as before. 'code' is a CodeAct student: every reply is "
+                "one Python program, it is run in a persistent notebook-style "
+                "session, and what it produced is the only thing the student can "
+                "say -- the teacher sees the program and the result. The re-test "
+                "is a program whose output is judged as the answer. Two entries "
+                "on the SAME underlying model differing only in mode give a "
+                "student pair whose demand differs by action space rather than by "
+                "capability, which is the point: prompting cannot hold the code "
+                "channel across a conversation (compliance collapses after the "
+                "first turn), so it is enforced structurally instead."
+            )
+        },
+    )
     api_key: str = field(default="EMPTY")
     timeout: int = field(default=120)
     max_tokens: int = field(default=2048)
@@ -337,6 +360,12 @@ class TutorStudentModelConfig:
         self.weight = float(self.weight)
         if self.weight < 0.0:
             raise ValueError("student_models.weight must be non-negative.")
+        self.mode = str(self.mode).strip().lower()
+        if self.mode not in STUDENT_MODES:
+            raise ValueError(
+                "student_models.mode must be one of "
+                f"{sorted(STUDENT_MODES)}, got {self.mode!r}."
+            )
         self.timeout = int(self.timeout)
         if self.timeout <= 0:
             raise ValueError("student_models.timeout must be positive.")

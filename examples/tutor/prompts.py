@@ -452,6 +452,65 @@ Now try to solve the problem from scratch:
 
 Put your final answer in \\boxed{}."""
 
+# ---------------------------------------------------------------------------
+# The CODE student (student_models[*].mode: code).
+#
+# Same model as the text student, different action space: every reply is one
+# Python program, run in a notebook-style session whose namespace persists across
+# turns, and what it produced is the only thing the student can say.
+#
+# These two constants are the whole prompt side of it, and they are deliberately
+# thin, because THE CHANNEL IS NOT HELD BY THE PROMPT. Measured: at the re-test,
+# where the task is stated and the request is imperative, prompting alone gets
+# 20/20 compliance -- but in the middle of a conversation, with no task in view,
+# the same instruction collapses and the student answers in prose with a token
+# code block appended. So the enforcement is structural (the reply is prefilled
+# into a fence and must ast.parse, else it is regenerated) and the prompt only has
+# to describe the situation truthfully.
+#
+# Named like the text student for the same reason HEAD gave it a name: without one
+# the student breaks character when asked who it is.
+FREE_CHAT_CODE_STUDENT_SYSTEM_PROMPT = (
+    "You are Sam, a student talking with a teacher. You can only act by writing "
+    "Python. Each reply you give is one program; we run it and show you the "
+    "result. Your interpreter keeps its state between turns, so anything you "
+    "defined earlier is still there."
+)
+
+# The code student's re-test. Its program's output IS the answer, judged by the
+# same answer judge the text student's \boxed{} goes through -- so the two
+# students' scores are the same quantity measured through different channels.
+#
+# It does not say "print" and does not need to: the session echoes a trailing bare
+# expression the way a notebook does. Asking for a print here would be papering
+# over the executor, and 57% of this model's programs contain no print() at all.
+FREE_CHAT_CODE_STUDENT_RETEST_TEMPLATE = """\
+Now solve the problem from scratch:
+{{ task }}
+
+Write one Python program that works out the answer."""
+
+# Shown to the student after its program runs. `(no output)` rather than an empty
+# string so a silent cell is visible as a fact about the program rather than
+# reading as a missing message.
+CODE_STUDENT_RESULT_TEMPLATE = """\
+[result]
+{{ result }}"""
+
+# How the TEACHER sees a code student's turn: the program AND what it produced.
+#
+# Not the output alone. The program is the richest window into the student's
+# mental model available -- you can read the wrong formula directly off it --
+# while the output is one number or a traceback. Showing only the output throws
+# away the diagnostic half, and the teacher already under-reads the student.
+CODE_STUDENT_TEACHER_VIEW_TEMPLATE = """\
+Student program:
+```python
+{{ program }}
+```
+Result:
+{{ result }}"""
+
 
 NO_VISIBLE_TUTORING_HISTORY = "No visible tutoring history yet."
 NO_PREVIOUS_VISIBLE_TUTORING_HISTORY = "No previous visible tutoring history."

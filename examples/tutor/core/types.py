@@ -168,6 +168,10 @@ class StudentTurnState:
     latest_tutor_visible_output: str
     student_prompt_selection: PromptPoolSelection | None = None
     student_turn_behavior: StudentTurnBehavior | None = None
+    # The selected student's action space, 'text' or 'code'. Carried on the state
+    # rather than read off the workflow because one workflow instance serves every
+    # concurrent episode, so anything per-episode has to travel with the episode.
+    student_mode: str = "text"
 
 
 @dataclass(slots=True)
@@ -217,6 +221,9 @@ class EpisodeArtifact:
     teacher_pre_solve_result: TeacherPreSolveResult | None = None
     student_name: str = ""
     student_model: str = ""
+    # 'text' or 'code'. The re-test and the no-teaching baseline both branch on
+    # this, and both are built from the artifact rather than from workflow state.
+    student_mode: str = "text"
     teacher_prompt_selection: PromptPoolSelection | None = None
     student_prompt_selection: PromptPoolSelection | None = None
     initial_student_turn_behavior: StudentTurnBehavior | None = None
