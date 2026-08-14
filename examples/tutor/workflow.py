@@ -1981,6 +1981,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     teacher_pre_solve_result=teacher_pre_solve_result,
                     student_name=selected_student.name,
                     student_model=selected_student.model,
+                    student_mode=selected_student.mode,
                     teacher_prompt_selection=teacher_prompt_selection,
                     student_prompt_selection=student_prompt_selection,
                 )
@@ -2094,6 +2095,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
                 student_name=selected_student.name,
                 student_model=selected_student.model,
+                student_mode=selected_student.mode,
                 teacher_prompt_selection=teacher_prompt_selection,
                 student_prompt_selection=student_prompt_selection,
                 initial_student_turn_behavior=initial_student_turn_behavior,
@@ -2584,6 +2586,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     turn_artifacts, clean_teacher_inputs, strict=True
                 )
             ),
+            code_stats=code_session.stats() if code_session is not None else None,
         )
         if completed_repeat_outcome is not None and self.debug_trace_dir:
             await self._dump_eval_repeat_outcomes(*completed_repeat_outcome)
@@ -2602,12 +2605,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
             teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
             student_name=selected_student.name,
             student_model=selected_student.model,
+            student_mode=selected_student.mode,
             teacher_prompt_selection=teacher_prompt_selection,
             student_prompt_selection=student_prompt_selection,
             initial_student_turn_behavior=initial_student_turn_behavior,
             initial_student_question_generation=(
                 initial_student_question_generation
             ),
+            code_stats=code_session.stats() if code_session is not None else None,
         )
         if (
             episode_artifact.termination_reason == FORMAT_TERMINATION_REASON
@@ -5637,6 +5642,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         inference_prompt_tokens: int = 0,
         training_prompt_tokens: int = 0,
         no_teaching_baseline: float | None = None,
+        code_stats: dict[str, int] | None = None,
     ) -> tuple[int, list[float]] | None:
         success_round = next(
             (
@@ -5697,6 +5703,26 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 termination_reason == TEACHER_PRE_SKIPPED_TERMINATION_REASON
             ),
         }
+        # The code student's channel health. Present only for a code student, so
+        # the series is never padded with zeros that mean "not measured".
+        #
+        # This is a VALIDITY check, not performance telemetry. A rise in the code
+        # student's re-test score is ambiguous without it: either the teaching
+        # improved, or the teacher learned to hand over an answer the student just
+        # prints, in which case constant_prints climbs, the two students converge,
+        # and the arm has stopped testing that their demands differ. The mirror
+        # case is a fall in score that is really silent_cells -- a channel fault
+        # rather than a teaching one. The two need opposite fixes.
+        if code_stats is not None:
+            turns = max(len(traces), 1)
+            for name, value in code_stats.items():
+                metrics[f"code/{name}"] = float(value)
+                metrics[f"code/{name}_per_turn"] = float(value) / turns
+            productive = turns - int(code_stats.get("crashes", 0)) - int(
+                code_stats.get("silent_cells", 0)
+            ) - int(code_stats.get("no_program", 0))
+            # Turns that ran and actually told the teacher something.
+            metrics["code/productive_per_turn"] = max(0.0, productive / turns)
         if teacher_pre_solve_result is not None:
             metrics["teacher_pre/verification_enabled"] = float(
                 teacher_pre_solve_result.verification_enabled
@@ -6143,12 +6169,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_pre_solve_result: TeacherPreSolveResult | None = None,
         student_name: str = "",
         student_model: str = "",
+        student_mode: str = STUDENT_MODE_TEXT,
         teacher_prompt_selection: PromptPoolSelection | None = None,
         student_prompt_selection: PromptPoolSelection | None = None,
         initial_student_turn_behavior: StudentTurnBehavior | None = None,
         initial_student_question_generation: (
             StudentQuestionGenerationResult | None
         ) = None,
+        code_stats: dict[str, int] | None = None,
     ) -> None:
         if not self.debug_trace_dir:
             return
@@ -6174,7 +6202,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "student": {
                     "name": student_name,
                     "model": student_model,
+                    # Recorded so trace analysis can split by action space instead
+                    # of guessing it from the name string.
+                    "mode": student_mode,
                 },
+                "code_session": code_stats,
                 "prompt_pool": {
                     "teacher": (
                         asdict(teacher_prompt_selection)
