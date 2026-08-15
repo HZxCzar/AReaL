@@ -253,3 +253,6 @@ actor:
 
 evaluator:
   leak_terminate: false
+  # Training may terminate on malformed output; evaluation always measures the
+  # complete deployment dialogue and reports the format-error rate separately.
+  format_terminate: false

@@ -488,7 +488,8 @@ FREE_CHAT_CODE_STUDENT_RETEST_TEMPLATE = """\
 Now solve the problem from scratch:
 {{ task }}
 
-Write one Python program that works out the answer."""
+Write one Python program that works out the answer. Implement the full solution \
+in this program from beginning to end."""
 
 # A code student's whole turn as it is stored in the public history: the program
 # and what running it produced.

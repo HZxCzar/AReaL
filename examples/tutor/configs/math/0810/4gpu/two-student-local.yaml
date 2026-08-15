@@ -1,0 +1,147 @@
+# 0810fc-two-student-local -- 4 GPUs. -- the two-student arm with the leak and
+# format penalties kept on the turn that earned them, on top of two rollout fixes
+# that are not switches.
+#
+# ONE KEY differs from two-student-noeval.yaml:
+#
+#     reward.turn_local_components   []  ->  ["leak", "format_error"]
+#
+# The rest of what changed since 20260815_065439 is code, applies to every arm in
+# this worktree, and is described at the bottom of this file because it is what
+# makes this arm worth running rather than a re-run.
+#
+# ---------------------------------------------------------------------------
+# WHY -- the previous run's reward went up and none of it was teaching
+# ---------------------------------------------------------------------------
+#
+# 20260815_065439_0810fc-two-student-noeval, 135 steps, slopes per 100 steps with
+# t against a straight-line fit:
+#
+#     total reward                        +0.186   t = +7.1
+#       leak component                    +0.143   t = +10.6
+#       format_error component            +0.072   t = +4.3
+#       teaching (retest) component       -0.041   t = -2.3
+#
+# The three sum to the total. Every point of reward the policy earned in 135 steps
+# came from not leaking (0.285 -> 0.043 per episode) and not malforming (0.278 ->
+# 0.003), and the teaching term moved AGAINST the total the whole way. Per student,
+# text `solved` 0.509 -> 0.494 (t = -0.9, flat) and code `solved` 0.421 -> 0.351
+# (t = -2.5); the pooled headline is those two cancelling.
+#
+# It is NOT the missing-gradient failure ../README.md warns about. The within-group
+# spread of the re-test is 0.394 early and 0.372 late, with only 2.4% -> 8.6% of
+# groups constant, so GRPO had signal on teaching throughout. The reward simply had
+# two cheaper things to buy, and it bought them.
+#
+# BOTH ARE NOW SPENT. At 0.043 leaks and 0.003 format errors there is at most 0.045
+# of reward left in them together. Whatever this arm does next, it cannot come from
+# the same place the last 135 steps came from.
+#
+# ---------------------------------------------------------------------------
+# THE KEY -- turn_local_components ["leak", "format_error"]
+# ---------------------------------------------------------------------------
+#
+# `actor.advantage_estimator` is rebn with `turn_discount: 1.0`, so a turn reward
+# accumulates backward undiscounted: a leak on turn 5 lands in full in the return
+# of turns 1-4, which taught perfectly well. Naming a component here holds it on
+# the turn that raised it. For the episode group baseline only, the actor gathers
+# the local component total onto the first turn; this preserves the complete
+# episode scalar without spreading the penalty through the policy returns.
+#
+# This is two components against an inherited empty list, not one, and unlike
+# dev-chat's presolve-opd-frozen-w2-fmtlocal the second one is NOT inert here:
+# format errors ran 0.278 per episode over the first 16 steps of the reference run
+# before falling to 0.003. So the localization bites during exactly the early phase
+# where the policy is still deciding what a teacher turn looks like, which is the
+# phase this arm is being launched to change.
+#
+# Requires rebn and is incompatible with `actor.reward_norm`; the inherited chain
+# is rebn with reward_norm null, so both hold.
+#
+# ---------------------------------------------------------------------------
+# THE CODE FIXES -- no switch, and they change what a group means
+# ---------------------------------------------------------------------------
+#
+# 1. THE STUDENT IS DRAWN ONCE PER PROBLEM, NOT ONCE PER ROLLOUT. On the reference
+#    run 86 of 87 groups mixed a text and a code student, and removing student
+#    identity from the within-group variance took it from 0.155 to 0.110 -- 29-33%
+#    of the spread the advantage is computed from was which student the rollout
+#    happened to draw. The teacher speaks first, so it cannot know which student it
+#    faces at turn 1, and it can never control it. That third was noise the policy
+#    was being asked to explain, and it sat on the teaching term, which is the
+#    weakest of the three.
+#
+#    The draw is now seeded on (problem, weight version): constant across the
+#    group, redrawn on the next step, so no problem is pinned to one student for
+#    the 10.5 epochs of a 500-step run. Single-student arms are unaffected.
+#
+#    WHAT TO EXPECT. `student/qwen3-1.7b/selected` was 0.506 and pinned there by
+#    128 independent draws a step; it will now be a 16-problem binomial and will
+#    swing per step. The mix over a window is what stays at 0.5, not the mix per
+#    step. That is the variance moving out of the advantage and into a logged mean,
+#    which is where it belongs.
+#
+# 2. THE PRE-SOLVE RUNS ONCE PER PROBLEM PER STEP. Every rollout used to run its
+#    own -- at n_samples 8 and teacher_pre.attempts 3, up to 8 drafts and 24 judge
+#    calls where one draft was wanted -- and each rollout of the group then taught
+#    from a DIFFERENT private solution. The draft is cached on (problem, weight
+#    version), so the group shares it and the next update drops it rather than
+#    teaching from a stale solution. Watch `teacher_pre/cache_hit`: it should sit
+#    at (n_samples - 1)/n_samples = 0.875, lower only where a group straddles an
+#    update. A flat 0.0 means the sharing is not happening.
+#
+#    READ THIS BEFORE COMPARING GROUP SIZES. A rejection is now a property of the
+#    group, not of a rollout. `teacher_pre/accepted` was 0.927 and
+#    `stop/teacher_pre_skipped` 0.073, and that used to thin groups -- an 8-rollout
+#    group could contribute 6 episodes to the leave-one-out baseline. Now a group
+#    is all 8 or none. The share of episodes dropped is about the same, but it
+#    arrives as ~7% of PROBLEMS producing nothing, so the effective batch is
+#    roughly 14.8 problems rather than 16 thinned ones. Full groups are the better
+#    baseline; the smaller problem count is the price.
+#
+#    `teacher_pre.on_reject` is the switch for that and is left at its default
+#    `skip`, which is both the historical behaviour and the right one while the
+#    pre-solve is a filter on problems. `continue` teaches the rejected group with
+#    no draft instead of dropping it -- worth having if
+#    `stop/teacher_pre_skipped` climbs the way it did on dev-chat's
+#    leak-local-stable-from150 (0.103 -> 0.399 over 102 steps, where half the
+#    batch was being discarded because the teacher had lost its own math), since
+#    at that point skipping deletes exactly the problems worth teaching.
+#
+# ---------------------------------------------------------------------------
+# WHAT TO WATCH, in order
+# ---------------------------------------------------------------------------
+#
+#     teacher_pre/cache_hit          ~0.875 within the first step, or fix 2 is not
+#                                    live and nothing else here is trustworthy
+#     student/*/selected             swings per step now, ~0.5 over a window
+#     reward_component/student_generalize_original
+#                                    THE OBJECTIVE. It was -0.041/100 at t = -2.3.
+#                                    Flat is already a result; the leak and format
+#                                    terms cannot carry the total any further
+#     student/qwen3-1.7b-code/solved against student/qwen3-1.7b/solved -- the code
+#                                    arm is the one that was falling (t = -2.5)
+#     rollout/code/constant_prints_per_turn
+#                                    0.051 -> 0.057 on the reference run, flat. If
+#                                    it climbs the code channel is decorative and
+#                                    the arm is not testing what it claims to
+#     rollout/leaks, format_errors   both near zero already; they should stay there
+#                                    rather than reappear now that neither is
+#                                    discounting the turns before it
+#
+# COST. Strictly cheaper than the reference run: 7 of every 8 rollouts no longer
+# pay for a pre-solve, which removes roughly 1.2 teacher generations and 1.2 judge
+# calls per episode against about 24 external calls an episode.
+#
+# GPU BUDGET. At 4 GPUs an arm is half the node, so at most TWO run at once,
+# launched a minute apart. See ../README.md.
+defaults:
+  - two-student-noeval@_global_
+  - _self_
+
+trial_name: 0810fc-two-student-local
+
+reward:
+  turn_local_components:
+  - leak
+  - format_error

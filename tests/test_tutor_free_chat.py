@@ -601,14 +601,20 @@ def main() -> int:
     check("the config asks for in-the-wild evaluation",
           config.evaluator.leak_terminate is False,
           f"got {config.evaluator.leak_terminate}")
+    check("format termination is also disabled during evaluation",
+          config.evaluator.format_terminate is False)
     terminate_eval = _build_eval_workflow_kwargs(
-        {"leak_handling_mode": "terminate"}, config
+        {"leak_handling_mode": "terminate", "format_handling_mode": "terminate"}, config
     )
     check("eval stops terminating on a leak",
           terminate_eval["leak_handling_mode"] == "reward_only",
           f"got {terminate_eval['leak_handling_mode']}")
     check("eval asks for the train-consistent re-test too",
           terminate_eval["eval_preleak_retest"] is True)
+    check("eval continues after malformed turns",
+          terminate_eval["format_handling_mode"] == "continue")
+    check("format termination adds no second re-test",
+          "eval_preformat_retest" not in terminate_eval)
     reward_eval = _build_eval_workflow_kwargs(
         {"leak_handling_mode": "reward_only"}, loaded[("4gpu", "leak-reward")]
     )

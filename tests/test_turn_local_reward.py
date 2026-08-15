@@ -182,35 +182,40 @@ def _group_actor():
     )
 
 
-def test_group_baseline_is_contaminated_without_the_column():
-    result = _group_actor()._compute_advantages(_group_data())
-    # Episode 1 is clean, but its leave-one-out baseline is episode 2's return,
-    # which carries episode 2's leak -- so episode 1 is handed a free +1.0 of
-    # advantage for merely not being the leaker.
+def test_group_baseline_is_unchanged_by_the_split():
+    plain = _group_actor()._compute_advantages(_group_data())
+    split = _group_actor()._compute_advantages(
+        _group_data(local_rewards=torch.tensor([0.0, 0.0, 0.0, -1.0]))
+    )
     torch.testing.assert_close(
-        result["group_baseline"],
+        plain["group_baseline"],
         torch.tensor([-0.5, -0.5, 0.5, 0.5]),
         rtol=0.0,
         atol=0.0,
     )
+    torch.testing.assert_close(
+        split["group_baseline"], plain["group_baseline"], rtol=0.0, atol=0.0
+    )
 
 
-def test_group_baseline_excludes_other_episodes_turn_local_penalties():
-    result = _group_actor()._compute_advantages(
+def test_only_the_leaking_turn_keeps_the_penalty():
+    plain = _group_actor()._compute_advantages(_group_data())
+    split = _group_actor()._compute_advantages(
         _group_data(local_rewards=torch.tensor([0.0, 0.0, 0.0, -1.0]))
     )
-    # Both episodes taught +0.5, so every baseline is +0.5 and the leak no
-    # longer leaks into the other episode's yardstick.
     torch.testing.assert_close(
-        result["group_baseline"], torch.full((4,), 0.5), rtol=0.0, atol=0.0
-    )
-    # The whole -1.0 lands on the one turn that leaked, and nowhere else.
-    torch.testing.assert_close(
-        result["turn_advantage"],
-        torch.tensor([0.0, 0.0, 0.0, -1.0]),
+        plain["turn_advantage"],
+        torch.tensor([1.0, 1.0, -1.0, -1.0]),
         rtol=0.0,
         atol=0.0,
     )
+    torch.testing.assert_close(
+        split["turn_advantage"],
+        torch.tensor([1.0, 1.0, 0.0, -1.0]),
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert split["turn_advantage"][3] == plain["turn_advantage"][3]
 
 
 def test_local_rewards_require_rebn():

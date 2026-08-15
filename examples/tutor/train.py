@@ -305,6 +305,11 @@ def _build_eval_workflow_kwargs(
         eval_workflow_kwargs["eval_preleak_retest"] = (
             workflow_kwargs.get("leak_handling_mode") == "terminate"
         )
+    # Format termination is a training policy. Evaluation keeps the complete
+    # dialogue and reports malformed turns through format_errors; unlike leaks,
+    # there is intentionally no second prefix re-test.
+    if config.evaluator.format_terminate is False:
+        eval_workflow_kwargs["format_handling_mode"] = "continue"
     eval_workflow_kwargs["teacher_diversity_reward"] = {"enabled": False}
     eval_workflow_kwargs["teacher_context_reward"] = {"enabled": False}
     eval_workflow_kwargs["teacher_progress_judge"] = {"enabled": False}
@@ -530,6 +535,7 @@ def main(args):
         teacher_pre_verify=teacher_pre.verify,
         teacher_pre_attempts=teacher_pre.attempts,
         teacher_pre_max_tokens=teacher_pre.max_tokens,
+        teacher_pre_on_reject=teacher_pre.on_reject,
         student_system_prompt=config.student_system_prompt,
         student_prompt_pool_path=config.prompt_pool.student_train_path,
         student_heldout_prompt_pool_path="",

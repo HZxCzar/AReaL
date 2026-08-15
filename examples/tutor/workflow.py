@@ -279,6 +279,12 @@ LEAK_TERMINATION_REASON = "leak"
 FORMAT_TERMINATION_REASON = "format_error"
 TEACHER_PRE_SKIPPED_TERMINATION_REASON = "pre_solve_skipped"
 LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate"}
+TEACHER_PRE_ON_REJECT_MODES = {"skip", "continue"}
+# Live entries in the pre-solve cache. One step needs
+# train_dataset.batch_size (16) of them, so this is deep enough that nothing is
+# evicted while its group is still in flight; it exists only to stop the dict
+# growing for the length of a 500-step run.
+TEACHER_PRE_CACHE_MAX_ENTRIES = 256
 
 
 def load_prompt_pool(path: str, *, role: str) -> tuple[str, ...]:
@@ -667,6 +673,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_pre_verify: bool = True,
         teacher_pre_attempts: int = 3,
         teacher_pre_max_tokens: int = 0,
+        teacher_pre_on_reject: str = "skip",
         student_system_prompt: str = "",
         student_prompt_pool_path: str = "",
         student_heldout_prompt_pool_path: str = "",
@@ -731,6 +738,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
         # would put sampling noise straight into the reward.
         self._no_teaching_baselines: dict[str, float] = {}
         self._no_teaching_baseline_lock = asyncio.Lock()
+        # (problem, weight version) -> the in-flight or finished pre-solve for
+        # that group. Keyed on the version because the draft is a function of the
+        # teacher's weights: sharing it across the group is the point, sharing it
+        # across an update would be teaching from a stale solution.
+        self._teacher_pre_solve_cache: dict[
+            tuple[str, int], "asyncio.Future[TeacherPreSolveResult]"
+        ] = {}
+        self._teacher_pre_solve_lock = asyncio.Lock()
         self.dataset_type = (dataset_type or "").strip().lower()
         if self.dataset_type not in {"aime", "math", "polaris"}:
             raise ValueError("dataset_type must be one of: 'aime', 'math', 'polaris'.")
@@ -1081,6 +1096,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if self.teacher_pre_attempts < 1:
             raise ValueError("teacher_pre_attempts must be >= 1.")
         self.teacher_pre_max_tokens = int(teacher_pre_max_tokens)
+        self.teacher_pre_on_reject = (teacher_pre_on_reject or "skip").strip()
+        if self.teacher_pre_on_reject not in TEACHER_PRE_ON_REJECT_MODES:
+            raise ValueError(
+                "teacher_pre_on_reject must be 'skip' or 'continue', got "
+                f"{self.teacher_pre_on_reject!r}."
+            )
         self.student_system_prompt = student_system_prompt.strip()
         self.student_prompt_pool = load_prompt_pool(
             student_prompt_pool_path, role="student"
@@ -1399,11 +1420,38 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         return runtimes
 
+    def _group_rng(
+        self, role: str, group_key: str, rollout_version: int | None
+    ) -> random.Random:
+        """A draw that is constant across one problem's rollouts in one step.
+
+        `gconfig.n_samples` rollouts of a problem form the GRPO group, and
+        `actor.group_baseline='episode'` subtracts that group's mean return from
+        every member. Anything drawn independently per rollout therefore lands
+        directly in the advantage: with two students it was worth 29-33% of the
+        within-group spread on 20260815_065439, which the teacher cannot control
+        and cannot even see at turn 1, because it speaks first.
+
+        Seeding on the problem holds the draw fixed across the group; including
+        the weight version lets it be redrawn on the next step, so a problem is
+        not pinned to one student for all 10.5 epochs of a 500-step run.
+
+        A None version -- the external-client path, where there are no local
+        weights -- collapses to a single bucket, so the draw is fixed per problem
+        for the whole run. That is what you want there: the teacher behind an API
+        does not drift between steps, so there is nothing for a version to track.
+        """
+        seed = getattr(self, "prompt_pool_seed", 0)
+        version = int(rollout_version) if rollout_version is not None else -1
+        return random.Random(f"{seed}:{role}:{group_key}:{version}")
+
     def _select_student(
         self,
         data: dict[str, Any],
         *,
         aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller,
+        group_key: str = "",
+        rollout_version: int | None = None,
     ) -> SelectedStudent:
         try:
             is_eval = bool(getattr(workflow_context.get(), "is_eval", False))
@@ -1424,7 +1472,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     )
             else:
                 runtimes = list(student_model_runtimes.values())
-                runtime = random.choices(
+                # Group-scoped, not per-rollout: see _group_rng. With one student
+                # at positive weight this is the same draw either way, so every
+                # single-student arm is unaffected.
+                rng = self._group_rng(
+                    "student", group_key or str(data.get("id") or ""), rollout_version
+                )
+                runtime = rng.choices(
                     runtimes,
                     weights=[item.weight for item in runtimes],
                     k=1,
@@ -1882,6 +1936,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         # Attached by GroupedRolloutWorkflow only when wants_group_index is set.
         group_index = data.get("group_index")
         group_index = None if group_index is None else int(group_index)
+        # Identifies the GRPO group: every rollout of one problem shares it, and
+        # it is what the pre-solve cache and the student draw are scoped to. Same
+        # key the no-teaching baseline uses, so the two agree on what a problem is.
+        group_key = str(data.get("id") or task)
         trajectory_id = uuid.uuid4().int & ((1 << 63) - 1)
         self.last_student_generalization_results = []
         turn_artifacts: list[TurnArtifact] = []
@@ -1925,7 +1983,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
             external_client=external_client,
         )
         aux_caller = self._make_auxiliary_caller(chat_caller=aux_chat_caller)
-        selected_student = self._select_student(data, aux_caller=aux_caller)
+        selected_student = self._select_student(
+            data,
+            aux_caller=aux_caller,
+            group_key=group_key,
+            rollout_version=episode_lora_version,
+        )
         student_caller = selected_student.caller
         # One interpreter per episode, so names persist across the conversation's
         # turns. None for a text student, which is what switches _run_student and
@@ -1939,17 +2002,32 @@ class TutorAgentWorkflow(RolloutWorkflow):
             chat_caller=aux_chat_caller
         )
         teacher_pre_solve_result: TeacherPreSolveResult | None = None
+        teacher_pre_cache_hit = False
         self.last_teacher_pre_solve_result = None
         if getattr(self, "teacher_pre_enabled", False):
-            teacher_pre_solve_result = await self._run_teacher_pre_solve(
+            (
+                teacher_pre_solve_result,
+                teacher_pre_cache_hit,
+            ) = await self._teacher_pre_solve_for_group(
                 task,
                 ground_truth,
                 actor_caller=actor_caller,
                 answer_judge_caller=answer_judge_caller,
                 lora_version=episode_lora_version,
+                group_key=group_key,
             )
             self.last_teacher_pre_solve_result = teacher_pre_solve_result
-            if not teacher_pre_solve_result.accepted:
+            # 'continue' teaches this group without a draft instead of dropping
+            # it. The draft is shared now, so a rejection is a property of the
+            # group rather than of one rollout: under 'skip' the whole group goes,
+            # which is what makes the pre-solve filter a filter on problems.
+            # _free_chat_preamble and _append_teacher_pre_solve_context both gate
+            # on `accepted`, so passing an unaccepted result through is already
+            # the no-draft prompt.
+            if (
+                not teacher_pre_solve_result.accepted
+                and getattr(self, "teacher_pre_on_reject", "skip") == "skip"
+            ):
                 self.last_history = []
                 self.last_traces = []
                 self.last_student_generalization_results = []
@@ -1961,6 +2039,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     pre_success=False,
                     leak_count=0,
                     teacher_pre_solve_result=teacher_pre_solve_result,
+                    teacher_pre_cache_hit=teacher_pre_cache_hit,
                     student_name=selected_student.name,
                     teacher_prompt_selection=teacher_prompt_selection,
                     student_prompt_selection=student_prompt_selection,
@@ -2566,6 +2645,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             leak_count=episode_artifact.leak_count,
             student_generalization_results=student_generalization_results,
             teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
+            teacher_pre_cache_hit=teacher_pre_cache_hit,
             student_name=selected_student.name,
             student_call_failed=bool(
                 initial_student_error
@@ -2614,25 +2694,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
             code_stats=code_session.stats() if code_session is not None else None,
         )
-        if (
-            episode_artifact.termination_reason == FORMAT_TERMINATION_REASON
-            and getattr(self, "format_handling_mode", "continue") == "terminate"
-        ):
-            # Dropped from the loss, not penalised. An unparseable turn carries no
-            # information about how well the tutor teaches, and charging it -1.0
-            # made things worse: measured against the previous handling on the
-            # same split, reward and solve rate were unchanged while the format
-            # error rate rose about 6x. The reference systems terminate AND
-            # exclude the trajectory, which is also what DAPO does with truncated
-            # samples. Excluding matters more here than elsewhere because
-            # _compute_episode_loss_weights equalises gradient mass per episode:
-            # a one-short-turn episode gets a large multiplier, so a penalty
-            # lands on few tokens with amplified per-token weight.
-            #
-            # The episode is still logged and still dumped as a debug trace, and
-            # stop/format_error counts it. Watch that rate -- it is now the only
-            # thing keeping format errors visible.
-            return None
         if not results:
             return None
         return concat_padded_tensors(results)
@@ -2809,6 +2870,65 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "content": self._build_teacher_pre_solve_prompt(task=task),
             },
         ]
+
+    async def _teacher_pre_solve_for_group(
+        self,
+        task: str,
+        ground_truth: str,
+        *,
+        actor_caller: AReaLEngineActorCaller | ExternalActorCaller,
+        answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
+        lora_version: int | None,
+        group_key: str,
+    ) -> tuple[TeacherPreSolveResult, bool]:
+        """One pre-solve per problem per step, shared by that problem's group.
+
+        Every rollout used to run its own. At `gconfig.n_samples` 8 with
+        `teacher_pre.attempts` 3 that is up to 8 drafts and 24 judge calls where
+        one draft was wanted, and worse than the cost: each rollout of the group
+        taught from a DIFFERENT private solution, so the eight episodes whose mean
+        `actor.group_baseline` subtracts were not answering the same question. The
+        draft is a function of (teacher weights, problem), so it is cached on
+        exactly that pair -- shared across the group, and dropped by the next
+        weight update rather than going stale.
+
+        Returns the result and whether this rollout reused another's draft, which
+        is what `teacher_pre/cache_hit` reports. Expect (n_samples - 1)/n_samples
+        once this is working, lower only where a group straddles a weight update.
+        """
+        key = (group_key, int(lora_version) if lora_version is not None else -1)
+        async with self._teacher_pre_solve_lock:
+            pending = self._teacher_pre_solve_cache.get(key)
+            cache_hit = pending is not None
+            if pending is None:
+                pending = asyncio.ensure_future(
+                    self._run_teacher_pre_solve(
+                        task,
+                        ground_truth,
+                        actor_caller=actor_caller,
+                        answer_judge_caller=answer_judge_caller,
+                        lora_version=lora_version,
+                    )
+                )
+                self._teacher_pre_solve_cache[key] = pending
+                while len(self._teacher_pre_solve_cache) > TEACHER_PRE_CACHE_MAX_ENTRIES:
+                    # dicts are insertion-ordered, so this drops the oldest group.
+                    self._teacher_pre_solve_cache.pop(
+                        next(iter(self._teacher_pre_solve_cache))
+                    )
+        try:
+            # Shielded because the group's other rollouts are waiting on this same
+            # future: whichever rollout happened to create it must not take the
+            # draft down with it if it is cancelled.
+            result = await asyncio.shield(pending)
+        except Exception:
+            # Do not let one transient failure poison the whole group for this
+            # step -- drop the entry so the next sibling retries.
+            async with self._teacher_pre_solve_lock:
+                if self._teacher_pre_solve_cache.get(key) is pending:
+                    del self._teacher_pre_solve_cache[key]
+            raise
+        return result, cache_hit
 
     async def _run_teacher_pre_solve(
         self,
@@ -5713,6 +5833,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         leak_count: int,
         student_generalization_results: list[StudentGeneralizationResult] | None = None,
         teacher_pre_solve_result: TeacherPreSolveResult | None = None,
+        teacher_pre_cache_hit: bool = False,
         student_name: str = "",
         student_call_failed: bool = False,
         teacher_prompt_selection: PromptPoolSelection | None = None,
@@ -5810,6 +5931,17 @@ class TutorAgentWorkflow(RolloutWorkflow):
             metrics["teacher_pre/attempts"] = float(
                 len(teacher_pre_solve_result.attempts)
             )
+            # Whether this rollout reused its group's draft instead of generating
+            # its own. Expect (n_samples - 1)/n_samples = 0.875 at n_samples 8; a
+            # flat 0.0 means the sharing is not happening and every rollout is
+            # paying for its own pre-solve again.
+            #
+            # NOTE this changes how `attempts` above reads. A hit returns the
+            # group's result object, so all n_samples rollouts report that one
+            # draft's attempt count -- the series still means "attempts per
+            # accepted draft", but it is no longer a count of generations this
+            # rollout paid for. Multiply by (1 - cache_hit) for the call volume.
+            metrics["teacher_pre/cache_hit"] = float(bool(teacher_pre_cache_hit))
         if success_round > 0:
             metrics["solve_turn"] = int(success_round)
 

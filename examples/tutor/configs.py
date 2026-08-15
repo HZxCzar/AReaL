@@ -715,7 +715,8 @@ class TutorTeacherPreConfig:
         metadata={
             "help": (
                 "Maximum teacher pre-solve attempts when verification is enabled. "
-                "If no attempt is correct, the sample is skipped for this rollout."
+                "If no attempt is correct, teacher_pre.on_reject decides what "
+                "happens to the group."
             )
         },
     )
@@ -728,12 +729,37 @@ class TutorTeacherPreConfig:
             )
         },
     )
+    on_reject: str = field(
+        default="skip",
+        metadata={
+            "help": (
+                "What to do when verification rejects every attempt. The draft is "
+                "generated once per problem per weight version and shared by that "
+                "problem's whole GRPO group, so a rejection is a property of the "
+                "group rather than of one rollout. 'skip' drops the group for this "
+                "step, which is the historical behaviour and what makes the "
+                "pre-solve a filter on problems. 'continue' teaches the group with "
+                "no draft, so the episodes are trained on instead of discarded -- "
+                "the choice for arms where the draft is an ingredient (opd) rather "
+                "than a gate, and where dropping every problem the teacher cannot "
+                "yet solve removes exactly the problems worth teaching. Ignored "
+                "when verify is false, which never rejects."
+            ),
+            "choices": ["skip", "continue"],
+        },
+    )
 
     def __post_init__(self) -> None:
         if self.mode != "filter_solver":
             raise ValueError("teacher_pre.mode must be 'filter_solver'.")
         if int(self.attempts) < 1:
             raise ValueError("teacher_pre.attempts must be >= 1.")
+        self.on_reject = str(self.on_reject or "skip").strip().lower()
+        if self.on_reject not in {"skip", "continue"}:
+            raise ValueError(
+                "teacher_pre.on_reject must be 'skip' or 'continue', got "
+                f"{self.on_reject!r}."
+            )
 
 
 @dataclass
@@ -761,6 +787,20 @@ class TutorEvaluatorConfig(EvaluatorConfig):
                 "gets measured. With False the train-consistent number is still "
                 "reported, as student_original_preleak_success, computed on the "
                 "same rollout."
+            )
+        },
+    )
+    format_terminate: bool | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Whether a malformed teacher turn ends the conversation during "
+                "EVALUATION. None follows format_handling_mode. False evaluates "
+                "the deployment dialogue: the malformed turn gives the student "
+                "an empty message, the conversation continues to the budget, "
+                "and format_errors still reports the failure rate. Format "
+                "termination is a training policy and should not truncate the "
+                "headline evaluation."
             )
         },
     )
@@ -1766,17 +1806,17 @@ class TutorConfig(GRPOConfig):
                 "What to do when a teacher turn cannot be parsed. 'continue' "
                 "penalises the turn, hands the student an empty message and keeps "
                 "going -- the historical behaviour. 'terminate' ends the episode "
-                "at that turn, like leak_handling_mode='terminate'. Terminating is "
-                "the right default once measured: a malformed turn writes a blank "
+                "at that turn, like leak_handling_mode='terminate': the malformed "
+                "turn carries reward.format_error_penalty, the trajectory is "
+                "trained, and the re-test uses the prefix through the last "
+                "completed round. Terminating is useful because a malformed turn "
+                "writes a blank "
                 "assistant message into the tutor's own history and 88-98% of the "
                 "following turns are malformed too, so the rest of the episode "
                 "teaches nothing (student solves 0.3% of the time after one) while "
-                "still consuming turns and OPD supervision. Set "
-                "reward.format_error_penalty at 0.0: the episode is dropped from "
-                "the loss rather than scored, so a penalty would both be moot for "
-                "training and drag the logged reward down. Charging -1.0 instead "
-                "was measured as strictly worse -- same reward and solve rate, "
-                "about 6x the format error rate. Track stop/format_error."
+                "still consuming turns and OPD supervision. The format penalty "
+                "must be negative enough that terminating is not a cheap exit. "
+                "Track stop/format_error and rollout/format_errors."
             ),
             "choices": ["continue", "terminate"],
         },

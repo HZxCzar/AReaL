@@ -537,6 +537,34 @@ def _compute_rebn_returns(
     return returns
 
 
+def _episode_local_at_first_turn(
+    local_rewards: torch.Tensor,
+    trajectory_ids: torch.Tensor,
+    turn_indices: torch.Tensor,
+    valid_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Each episode's total turn-local reward, gathered onto its first turn.
+
+    Turn-local components stay on their own turn in the returns, but the episode
+    group baseline reads one scalar from the episode's first turn. Gather the
+    local total there for the baseline only so that scalar remains the complete
+    episode return.
+    """
+    gathered = torch.zeros_like(local_rewards)
+    valid = valid_mask.bool()
+    valid_indices = torch.nonzero(valid, as_tuple=False).flatten()
+    if valid_indices.numel() == 0:
+        return gathered
+    for trajectory_id in torch.unique(trajectory_ids[valid_indices]).tolist():
+        traj_mask = valid & (trajectory_ids == trajectory_id)
+        rows = torch.nonzero(traj_mask, as_tuple=False).flatten()
+        if rows.numel() == 0:
+            continue
+        first_row = rows[torch.argmin(turn_indices[rows])]
+        gathered[first_row] = local_rewards[rows].sum()
+    return gathered
+
+
 def _episode_scalars(
     turn_returns: torch.Tensor,
     trajectory_ids: torch.Tensor,
@@ -1332,13 +1360,23 @@ class PPOActor:
                 self.config.turn_discount,
                 valid_mask=valid_turn_mask,
             )
+            baseline_source = turn_returns
             if local_reward_score is not None:
-                # Added after accumulation but before the group baseline, so the
-                # episode scalar the baseline averages (the return at the first
-                # turn) also excludes other episodes' turn-local penalties.
-                turn_returns = turn_returns + local_reward_score * (
-                    valid_turn_mask.to(turn_returns.dtype)
+                local_masked = local_reward_score * valid_turn_mask.to(
+                    turn_returns.dtype
                 )
+                # Keep the local part on its own turn in the policy returns.
+                turn_returns = turn_returns + local_masked
+                # The episode baseline still needs the complete episode total.
+                # Gather local components onto turn one for that calculation
+                # only; the policy returns above remain turn-local.
+                if self.config.group_baseline == "episode":
+                    baseline_source = baseline_source + _episode_local_at_first_turn(
+                        local_masked,
+                        data["trajectory_id"].to(reward_score.device),
+                        data["turn_idx"].to(reward_score.device),
+                        valid_turn_mask,
+                    )
             if self.config.group_baseline == "episode":
                 if "group_id" not in data:
                     raise ValueError(
@@ -1348,7 +1386,7 @@ class PPOActor:
                         "survive to that point."
                     )
                 group_baseline = _compute_episode_group_baseline(
-                    turn_returns,
+                    baseline_source,
                     data["trajectory_id"].to(reward_score.device),
                     data["turn_idx"].to(reward_score.device),
                     data["group_id"].to(reward_score.device),

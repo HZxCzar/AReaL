@@ -1,0 +1,9 @@
+# Single-factor variant of two-student-local: malformed teacher output
+# terminates the training trajectory. leak and format_error remain turn-local.
+defaults:
+  - two-student-local@_global_
+  - _self_
+
+trial_name: 0810fc-two-student-local-format-terminate
+
+format_handling_mode: terminate
