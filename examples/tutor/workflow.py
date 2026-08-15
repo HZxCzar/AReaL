@@ -449,33 +449,6 @@ def extract_program(text: str) -> str | None:
     return None
 
 
-def code_answer_for_judge(output: str) -> str:
-    """Put a code student's result into the form the answer scorer reads.
-
-    THIS IS NOT COSMETIC. `extract_math_answer` returns the LAST \\boxed{...} in
-    the text and an EMPTY STRING when there is none, and the answer judge is then
-    asked whether empty equals the ground truth. A code student's answer is bare
-    stdout -- `100` -- so without this every code re-test was judged on nothing.
-    Measured on the first run: the judge credited 0.3% of code re-tests while a
-    crude string match on the same outputs credited 10.9%, a 36x gap that was
-    entirely this.
-
-    The full output is kept and the boxed answer appended, so the trace still
-    shows everything the program printed while the scorer sees a pointer to the
-    answer -- exactly the role \\boxed{} plays for the text student. That keeps the
-    two students' scores the same quantity through the same judge, which is the
-    whole basis for comparing them.
-
-    The LAST non-empty line is the answer. Under notebook semantics a trailing
-    bare expression echoes last, so that line is the value the program ended on;
-    a program that logs its search prints the log first and the answer last.
-    """
-    lines = [line for line in str(output or "").splitlines() if line.strip()]
-    if not lines:
-        return ""
-    return f"{output.rstrip()}\n\n\\boxed{{{lines[-1].strip()}}}"
-
-
 def _safe_scalar(**metrics: Any) -> None:
     try:
         stats_tracker.get(workflow_context.stat_scope()).scalar(**metrics)
@@ -3628,6 +3601,73 @@ class TutorAgentWorkflow(RolloutWorkflow):
     ) -> JudgeResult:
         return self.answer_scorer(task, ground_truth, student_answer)
 
+    async def _score_code_output(
+        self,
+        task: str,
+        ground_truth: str,
+        output: str,
+        *,
+        answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
+    ) -> JudgeResult:
+        """Score what a code student's program printed.
+
+        There is no extraction step here, and that is the point. A text student
+        marks its answer with \\boxed{}; a code student's answer is simply what it
+        printed. Running the boxed extractor over program output returns an empty
+        string, so the judge gets asked whether nothing equals the ground truth --
+        which is why the first two-student run credited 0.3% of code re-tests when
+        a crude match on the same outputs credited 10.9%.
+
+        An exact match on the whole output short-circuits without a judge call.
+        Everything else goes to the judge WITH THE OUTPUT VERBATIM and the ground
+        truth beside it, which is the thing best placed to decide whether a
+        program that printed a search log arrived at the right value. No harness
+        guess about which line holds the answer.
+
+        Empty output stays wrong, deliberately. A program that printed nothing has
+        not answered, and that is the student's failure, not the harness's -- the
+        teacher already sees "(no output)" in the result block and is the one
+        positioned to tell it to print. Short-circuited so it costs no judge call.
+        """
+        text = str(output or "").strip()
+        # Reuse the deterministic scorer for the clean case by presenting the whole
+        # output as the answer. Exact, not a guess: it matches only when the
+        # program printed the answer and nothing else.
+        exact_result = self._score_answer(task, ground_truth, f"\\boxed{{{text}}}")
+        if not text:
+            return exact_result
+        if exact_result.correct or not self.answer_judge_enabled:
+            return exact_result
+
+        # What the judge is shown IS the output, capped so a runaway log cannot
+        # crowd out the ground truth in the prompt.
+        shown = text if len(text) <= 2000 else text[:2000] + "\n...[truncated]"
+        cache_key = (str(task), str(ground_truth), shown)
+        cached = self._answer_judge_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        if answer_judge_caller is None:
+            result = self._answer_judge_failed_result(
+                exact_result, error="answer judge caller is unavailable"
+            )
+            self._answer_judge_cache[cache_key] = result
+            return result
+
+        judge_call = await self._call_auxiliary_prompt(
+            system_prompt=self.answer_judge_system_prompt,
+            user_prompt=self._build_answer_judge_prompt(task, ground_truth, shown),
+            aux_caller=answer_judge_caller,
+            rid_prefix="answer-judge-code",
+        )
+        if judge_call.error:
+            result = self._answer_judge_failed_result(
+                exact_result, error=judge_call.error
+            )
+        else:
+            result = self._parse_answer_judge_result(exact_result, judge_call)
+        self._answer_judge_cache[cache_key] = result
+        return result
+
     async def _score_answer_async(
         self,
         task: str,
@@ -3635,7 +3675,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_answer: str,
         *,
         answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
+        code_output: bool = False,
     ) -> JudgeResult:
+        if code_output:
+            return await self._score_code_output(
+                task,
+                ground_truth,
+                student_answer,
+                answer_judge_caller=answer_judge_caller,
+            )
         if getattr(self, "dataset_type", "aime") == "polaris":
             from examples.tutor.core.polaris import score_polaris_answer_async
 
@@ -4398,12 +4446,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
                 replay_results = [
                     TextCallResult(
-                        # code_answer_for_judge, not the bare output: the scorer
-                        # reads the last \boxed{...} and treats its absence as an
-                        # empty answer.
-                        text=(
-                            code_answer_for_judge(answer) if status == "ok" else ""
-                        ),
+                        # The raw program output. _score_answer_async is told it
+                        # is program output and shows it to the judge verbatim.
+                        text=answer if status == "ok" else "",
                         raw_text=program,
                         error=error,
                     )
@@ -4463,6 +4508,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                             case.ground_truth,
                             result.text,
                             answer_judge_caller=answer_judge_caller,
+                            code_output=code_session is not None,
                         )
                         for result in replay_results
                         if not result.error
@@ -5553,8 +5599,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 # not a missing measurement: unaided, this student could not
                 # produce an answer.
                 texts = [
-                    code_answer_for_judge(answer)
-                    for answer, _program, status, _err in answers
+                    answer for answer, _program, status, _err in answers
                     if status == "ok"
                 ]
                 attempted = sum(
@@ -5569,6 +5614,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                             ground_truth,
                             text,
                             answer_judge_caller=answer_judge_caller,
+                            code_output=True,
                         )
                         for text in texts
                         if text.strip()
