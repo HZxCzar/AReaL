@@ -449,6 +449,33 @@ def extract_program(text: str) -> str | None:
     return None
 
 
+def code_answer_for_judge(output: str) -> str:
+    """Put a code student's result into the form the answer scorer reads.
+
+    THIS IS NOT COSMETIC. `extract_math_answer` returns the LAST \\boxed{...} in
+    the text and an EMPTY STRING when there is none, and the answer judge is then
+    asked whether empty equals the ground truth. A code student's answer is bare
+    stdout -- `100` -- so without this every code re-test was judged on nothing.
+    Measured on the first run: the judge credited 0.3% of code re-tests while a
+    crude string match on the same outputs credited 10.9%, a 36x gap that was
+    entirely this.
+
+    The full output is kept and the boxed answer appended, so the trace still
+    shows everything the program printed while the scorer sees a pointer to the
+    answer -- exactly the role \\boxed{} plays for the text student. That keeps the
+    two students' scores the same quantity through the same judge, which is the
+    whole basis for comparing them.
+
+    The LAST non-empty line is the answer. Under notebook semantics a trailing
+    bare expression echoes last, so that line is the value the program ended on;
+    a program that logs its search prints the log first and the answer last.
+    """
+    lines = [line for line in str(output or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    return f"{output.rstrip()}\n\n\\boxed{{{lines[-1].strip()}}}"
+
+
 def _safe_scalar(**metrics: Any) -> None:
     try:
         stats_tracker.get(workflow_context.stat_scope()).scalar(**metrics)
@@ -4371,7 +4398,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
                 replay_results = [
                     TextCallResult(
-                        text=answer if status == "ok" else "",
+                        # code_answer_for_judge, not the bare output: the scorer
+                        # reads the last \boxed{...} and treats its absence as an
+                        # empty answer.
+                        text=(
+                            code_answer_for_judge(answer) if status == "ok" else ""
+                        ),
                         raw_text=program,
                         error=error,
                     )
@@ -5521,7 +5553,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 # not a missing measurement: unaided, this student could not
                 # produce an answer.
                 texts = [
-                    answer for answer, _program, status, _err in answers
+                    code_answer_for_judge(answer)
+                    for answer, _program, status, _err in answers
                     if status == "ok"
                 ]
                 attempted = sum(
