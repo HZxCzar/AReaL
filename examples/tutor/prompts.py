@@ -393,7 +393,7 @@ FREE_CHAT_TEACHER_SYSTEM_PROMPT = """\
 You are a teacher. You have {{ budget }} turn budgets to talk with a student. \
 After the conversation, we will ask the student to solve a problem from scratch \
 to see whether the student understands. Your goal is to teach the student so \
-that they can solve it on their own.
+that they can solve it on their own.{{ student_problem_context }}
 
 The math problem is:
 {{ task }}"""
@@ -448,6 +448,76 @@ Now you can start the conversation with the student."""
 # the first and only time the student is shown the task.
 FREE_CHAT_STUDENT_RETEST_TEMPLATE = """\
 Now try to solve the problem from scratch:
+{{ task }}
+
+Put your final answer in \\boxed{}."""
+
+
+# ---------------------------------------------------------------------------
+# TRANSFER VARIANTS, selected by free_chat.transfer_prompts
+#
+# For the datasets where the dialogue task and the re-test task are DIFFERENT
+# problems -- the numeric-variant build, where `task` is a variant and
+# `retest_task` is the source problem. Both are off by default: every non-
+# transfer arm keeps the two templates above unchanged.
+#
+# WHY THEY EXIST. Under the templates above the teacher is told "we will ask the
+# student to solve a problem from scratch ... so that they can solve it on their
+# own", which reads as THIS problem, and the student is then told "solve the
+# problem from scratch" about a problem it was never shown. Neither sentence is
+# true in the transfer setting, and the first one is the reason the teacher
+# teaches the instance: measured on 20260814_231617, within a GRPO group no
+# teacher behaviour predicted the re-test at all (every effect under 0.05
+# re-test points per 1 SD, signs flipping between windows), while the teacher
+# drifted toward a shorter and shorter opening turn (368 -> 206 chars).
+# ---------------------------------------------------------------------------
+
+# The transfer teacher prompt. Three changes from the non-transfer version:
+#
+#   * "teach the student so that they can solve it on their own" becomes
+#     "help them understand the underlying concepts". The goal is the method,
+#     not the instance, because the instance is not what gets tested.
+#   * "solve a problem from scratch" becomes "test the student with some
+#     related questions" -- plural, and "related" rather than "this", which is
+#     the only honest description of what happens.
+#   * the problem moves up, introduced as "Here is a math problem" rather than
+#     as the thing the student will be asked.
+#
+# ON THE TASK'S POSITION. The note above argues the task should go LAST, because
+# it used to sit thousands of characters from the point of generation. This
+# layout puts ~130 characters after it, against the ~2500-character pre-solve
+# draft that already sits between this block and generation, so the distance
+# argument is not materially affected. It is still the one thing here worth
+# watching if the opening message stops referring to the problem.
+#
+# {{ student_problem_context }} stays, in the same rendered form, so
+# free_chat.student_has_not_seen_problem still composes with this.
+FREE_CHAT_TEACHER_SYSTEM_PROMPT_TRANSFER = """\
+You are a teacher. You have {{ budget }} turn budgets to talk with a student.
+Here is a math problem:
+{{ task }}
+
+Your goal is to teach the student and help them understand the underlying \
+concepts. After the conversation, we will test the student with some related \
+questions.{{ student_problem_context }}"""
+
+# The transfer re-test prompt. "this problem" instead of "the problem from
+# scratch": the non-transfer wording says "the problem", a definite reference to
+# something the student is assumed to have seen, and in this setting it never
+# did -- the conversation was about a different problem. "this" points at the
+# text that follows and presupposes nothing.
+#
+# IT DELIBERATELY DOES NOT SAY "similar". An earlier draft read "this similar
+# problem", which cues the student that the conversation was relevant. Two
+# reasons it is not here. It would be the student's only such cue, which makes
+# establishing relevance the prompt's job rather than the teacher's, and the
+# teacher is what is being trained. And this same template is what the
+# no-teaching baseline S(0) renders with an EMPTY transcript, where "similar"
+# refers to nothing; _no_teaching_baseline has to use the IDENTICAL prompt,
+# because the baseline is subtracted from this probe's score and any difference
+# between the two is measured as teaching.
+FREE_CHAT_STUDENT_RETEST_TEMPLATE_TRANSFER = """\
+Now try to solve this problem:
 {{ task }}
 
 Put your final answer in \\boxed{}."""

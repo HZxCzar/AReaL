@@ -1,0 +1,83 @@
+# 0810fc-leak-local-stable-noeval -- 4 GPUs. -- does the fixed format terminate
+# recover? Training curve only, no evaluation.
+#
+# WHAT THIS IS. leak-local-stable, unchanged, with evaluation switched off. It is
+# the direct A/B against 20260814_164812_0810fc-leak-local-stable, which ran the
+# same config against the OLD terminate behaviour and degraded. Nothing about the
+# experiment differs; the only difference is the workflow fix underneath.
+#
+# THE BUG IT TESTS. A format-terminated episode used to return no training rows at
+# all -- terminate AND exclude, DAPO-style. That removed the only gradient pushing
+# back on malformed output, so malformation was free. Measured over steps 8-16 of
+# 20260814, in a 2x2 of OPD x format mode:
+#
+#                        malformed/episode        valid tokens/step
+#     OPD + terminate      0.68 -> 0.99                 41,639
+#     OPD + continue       1.18 -> 0.00                249,030
+#     noOPD + terminate    0.61 -> 0.90                 23,534
+#     noOPD + continue     1.15 -> 0.02                257,168
+#
+# The split was entirely by format mode -- the distillation was never involved.
+# The episode is now trained instead: the conversation still stops at the
+# malformed turn, that turn carries reward.format_error_penalty -0.5, and the
+# re-test still scores the prefix through the last completed round. Same shape as
+# leak_handling_mode: terminate, which always did this.
+#
+# WHAT SUCCESS LOOKS LIKE, and it is visible early -- kill the run once you know.
+#
+#     rollout/format_errors     must FALL, to ~0.02 by step 10, the way both
+#                               continue arms did. The broken run went
+#                               0.61 -> 0.84 over the same window, so the two
+#                               curves separate by step 5-6.
+#     ppo_actor/n_valid_tokens  the single number that says the fix took: ~250k a
+#                               step, against the ~24k the broken run trained on.
+#                               If it is still near 24k, episodes are still being
+#                               dropped.
+#     rollout/turns             expect BELOW the continue arms' 4.8 -- terminate
+#                               genuinely shortens episodes, and that is the point
+#                               of it, not a failure. Read it with format_errors:
+#                               short turns WITH low format errors is terminate
+#                               working; short turns WITH high format errors is
+#                               the bug still present.
+#     rollout/stop/format_error tracks format_errors under terminate by
+#                               construction. Not a failure signal on its own.
+#
+# THE ONE THING THAT COULD STILL GO WRONG. reward.format_error_penalty has to be
+# more negative than the worst honest outcome, or terminating is the cheap way out
+# of a losing episode. free_chat.no_teaching_baseline makes an honest episode that
+# teaches nothing worth about -baseline, and the measured baseline runs 0.33-0.53,
+# so the inherited -0.5 should clear it. If format_errors plateaus around 0.3-0.5
+# instead of falling to ~0, that is the reason and -1.0 is the next value to try.
+# Also watch ppo_actor/update/clip_ratio against the reference 0.004-0.007:
+# actor.episode_loss_weighting gives a one-turn episode roughly a 5x per-token
+# weight, which amplifies the penalty in the direction we want but concentrates a
+# large advantage on few tokens.
+#
+# NO EVALUATION. Both halves have to be off. freq_steps 25 is the periodic pass;
+# eval_before_train defaults to TRUE and is the version-0 pass that would
+# otherwise cost about 1500 s before step 1 even starts -- most of the wait for a
+# check that resolves by step 10. Evaluation is set by waves of external calls
+# rather than by GPUs, so switching it off is the whole saving here: expect a step
+# in the 250 s range and an answer inside an hour.
+#
+# Nothing else is touched, so this is NOT a results arm -- there is no eval curve
+# to compare with anything. total_train_steps is left at the inherited 500 on
+# purpose: kill the run when the answer is in rather than having to relaunch if it
+# looks good.
+#
+# GPU BUDGET. At 4 GPUs an arm is half the node, so at most TWO run at once,
+# launched a minute apart. presolve-opd-fix is currently one of them.
+defaults:
+  - leak-local-stable@_global_
+  - _self_
+
+trial_name: 0810fc-leak-local-stable-noeval
+
+evaluator:
+  # The version-0 pass, which is the expensive one for a short run.
+  eval_before_train: false
+  # And the periodic one. All three must be null: EpochStepTimeFreqCtl ORs them,
+  # and FrequencyControl only returns False forever when every frequency is unset.
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null

@@ -1,0 +1,21 @@
+# The same minimal collapse guard for 0810fc-leak-local-student-unaware.
+# The student-unaware prompt condition and all other settings stay inherited.
+defaults:
+  - ../4gpu/leak-local-student-unaware-stable@_global_
+  - _self_
+
+trial_name: 0810fc2-leak-local-student-unaware-stable
+
+cluster:
+  n_gpus_per_node: 2
+
+rollout:
+  backend: "sglang:d1p1t1"
+  max_concurrent_rollouts: 32
+
+actor:
+  backend: "fsdp:d1p1t1"
+
+stats_logger:
+  wandb:
+    group: 0810-freechat-2gpu

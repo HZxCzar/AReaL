@@ -1,0 +1,151 @@
+# 0815fc4-numeric-variant-r8-from50-turncredit -- 4 GPUs. -- per-turn re-test
+# credit, measured at the halved noise floor, with the centering it requires.
+#
+# Against numeric-variant-r8-from50.yaml: same dataset, same branch point, same
+# replays: 8, same leak-local accounting, same 2048-token cap. What differs is
+# per-turn credit AND the baseline/normalization package it needs, four keys
+# that move together. Read the WHY THE CENTERING IS PART OF IT section before
+# treating this as a single-factor arm -- it is not one, and it cannot be.
+#
+# WHY IT IS WORTH RE-RUNNING. 20260813_211206_0810fc-turn-credit-leak-local was
+# not a failure on the objective -- retest/improvement went 0.211 -> 0.297 by
+# step 60 and was still 0.287 at step 179, the flattest trajectory any arm in
+# this family has produced. What was wrong with it was the SPLIT. Each per-turn
+# credit is S(t) - S(t-1), a difference of two independent replay estimates, so
+# at replays=4 its noise is
+#
+#     sd = sqrt(2 * p(1-p) / 4) = 0.35 at p = 0.5
+#
+# against credits that are themselves quantised at 0.25. That is why the observed
+# per-turn profiles read as sign flips -- [0.5, -0.5, 0.5, 0.0, 0.0] -- rather
+# than as a teaching signal. At replays=8 the same quantity is 0.25 and the
+# credits are quantised at 0.125. The episode total was never the problem: the
+# marginals telescope to S(T) - S(0) exactly, whatever each one is measured with.
+#
+# So this is not a re-run of a rejected idea. It is the first time the per-turn
+# split is measured well enough to be read.
+#
+# WHY THE CENTERING IS PART OF IT, AND NOT A SECOND EXPERIMENT.
+#
+# Turn credit changes what a per-turn return IS. With turn_discount 1.0 the
+# return at turn t becomes S(T) - S(t-1) -- how much of the final gain came from
+# turn t onward -- so it shrinks systematically as t grows. Turn 1 carries the
+# whole episode gain, turn 5 carries one marginal.
+#
+# group_baseline: episode subtracts ONE scalar per episode: the group mean of the
+# return at the first turn, which is the episode total. That is the right
+# yardstick for turn 1 and the wrong one for every turn after it. Turn 5's
+# advantage becomes [S(T) - S(4)] - mean(S(T) - S(0)), so a late turn eats a
+# systematic offset of roughly minus the mean episode gain whether it was a good
+# turn or a bad one. The depth trend, not the teaching, becomes the dominant term.
+#
+# Then the inherited adv_norm makes it worse rather than absorbing it:
+#
+#     adv_norm: {mean_level: batch, std_level: batch}
+#
+# a batch mean mixes dialogue depths back together, and a batch std computed over
+# advantages whose variance is mostly that depth trend divides the genuine
+# per-turn contrast down toward nothing. That is the failure mode: the signal
+# this arm exists to produce is normalized away before it reaches the loss.
+#
+# group_baseline: turn removes it at the source. _compute_turn_group_baseline
+# strata are (group_id, turn_idx), so a rollout's turn-t return is compared only
+# against other rollouts of the SAME problem at the SAME depth. The depth trend
+# is common to the stratum and differences out, and what survives is the only
+# thing worth learning from: was this turn better than the seven other attempts
+# at this turn. adv_norm.mean_level: null then keeps a batch mean from
+# re-introducing the mixing, and std_level: batch keeps a single global scale.
+#
+# This is the same package turn-credit-leak-local.yaml carries, for the same
+# reason. The cost of it is honest: this arm differs from its control in credit
+# assignment and in centering, so a win does not attribute to one of them. There
+# is no version that separates them, because an episode baseline is not a
+# neutral choice under turn credit -- it is a wrong yardstick.
+#
+# COST, AND READ THIS BEFORE LAUNCHING. Turn credit costs
+# (turns - 1) * turn_credit_replays extra student calls plus the same number of
+# judge calls PER EPISODE, and it cannot be cached the way no_teaching_baseline
+# is, because every episode has its own dialogue. At the measured 4.3 turns and
+# 8 replays that is 26 + 26 on top of the control's ~30 calls an episode:
+#
+#     control  numeric-variant-r8-from50    ~30 calls/episode    ~3800 student calls/step
+#     here                                  ~83 calls/episode    ~4950 student calls/step
+#
+# against student_models[*].max_concurrent_calls of 32 and the auxiliary's 32.
+#
+# The reference point is 20260813_211206, which ran turn credit at replays=4 --
+# about 2750 student calls a step -- at 309 s median while two concurrent
+# non-turn-credit arms ran 381 s and 389 s. Turn credit was not what cost time
+# there; the step is actor-bound and the calls overlap into it. This arm is 1.8x
+# that call volume, which is where the endpoint plausibly becomes the binding
+# constraint instead. Expect 450-600 s a step, so about 19-25 h to the 150 steps
+# the comparison needs.
+#
+# IF IT LANDS ABOVE THAT, the fallback is turn_credit_replays: 4 below, which
+# halves the prefix bill and leaves the final re-test at 8. It is not free: the
+# interior marginals go back to sd 0.35, which is the noise this arm exists to
+# remove. Prefer dropping the control to one arm and giving this one the node
+# over crippling the measurement.
+#
+# WHAT TO WATCH.
+#
+#     reward_component/student_generalize_original   per turn in the debug
+#         traces. The split should now be graded rather than +-0.25 sign flips,
+#         and the per-turn profile should be stable across steps rather than
+#         re-shuffling every batch. That is the whole hypothesis.
+#     rollout/reward and rollout/retest/improvement   at steps 1-2 only. Both arms
+#         start from the same checkpoint and the marginals telescope, so the
+#         episode total is the same quantity and the two should agree there. If
+#         they do not, the split is broken. After that they diverge legitimately,
+#         because the advantages differ.
+#     ppo_actor/zero_advantage_turns/avg   NEW failure mode, and the price of the
+#         turn baseline. A singleton (group_id, turn_idx) stratum has no peer to
+#         compare against and contributes zero advantage. Episodes here are ragged
+#         -- leak and format both terminate -- so late depths have thin strata. It
+#         ran ~0.000 under the episode baseline; if it climbs, deep turns are
+#         training on nothing and the budget or the terminate modes are the knob.
+#     rollout/leaks   the turn baseline compares a leaking turn only with peers at
+#         the same depth. If leaks drift above ~10%, inspect per-depth stratum
+#         sizes before touching leak_penalty.
+#
+# GPU BUDGET. At 4 GPUs this and numeric-variant-r8-from50 are exactly the whole
+# node. Stagger the two launches by a minute: forked-worker ports are allocated
+# per run with no coordination between runs.
+defaults:
+  - numeric-variant-r8-from50@_global_
+  - _self_
+
+trial_name: 0815fc4-numeric-variant-r8-from50-turncredit
+
+student_generalize:
+  # Each turn earns retest_reward * (S(t) - S(t-1)) from a re-test of the
+  # conversation cut after that turn, with S(0) the no-teaching baseline
+  # (inherited on, and required -- the workflow raises at construction without
+  # it). The marginals telescope to S(T) - S(0), so the episode total is
+  # unchanged and only the allocation across turns differs.
+  turn_credit: true
+  # 0 = use student_generalize.replays, which is 8 here. S(t) and S(T) are then
+  # measured the same way, so their difference carries no systematic bias and the
+  # marginal noise is sqrt(2 * p(1-p) / 8) = 0.25 instead of 0.35 at 4.
+  #
+  # Set this to 4 if step time forces it. See the COST note above -- it halves
+  # the prefix calls and puts the interior marginals back where they were.
+  turn_credit_replays: 0
+
+actor:
+  # Compare a turn's return only against other rollouts of the same problem at
+  # the same dialogue depth. Required by turn credit, not an independent choice:
+  # under turn credit the returns carry a systematic depth trend that an episode
+  # baseline does not remove. Ragged episodes simply do not enter later strata.
+  group_baseline: turn
+  group_baseline_leave1out: true
+  # The same-turn baseline already centres every stratum. Keep only a global
+  # scale normalization; the inherited mean_level: batch would mix dialogue
+  # depths straight back together.
+  adv_norm:
+    mean_level: null
+    std_level: batch
+
+stats_logger:
+  wandb:
+    group: 0815-numeric-variant-r8-4gpu-noeval

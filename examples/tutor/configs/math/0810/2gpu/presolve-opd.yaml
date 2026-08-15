@@ -1,0 +1,75 @@
+# 0810fc2-presolve-opd -- 2 GPUs. Allocation only.
+#
+# One GPU for generation, one for the actor.
+#
+# WHY THIS INHERITS FROM ../4gpu INSTEAD OF FROM 2gpu/base. Everywhere else in
+# this tree the allocation files point the other way -- 4gpu/base inherits
+# 2gpu/base and overrides the hardware -- but 2gpu/ has no leak-local or
+# leak-local-stable, so reproducing this arm from 2gpu/base would mean
+# hand-copying the leak-local reward, the three stable settings and the eight
+# pre-solve/OPD keys into a second place. They would then drift the first time
+# either file is touched, and opd.loss_weight is a placeholder that is expected to
+# be re-tuned once opd_reverse_kl has been read off a real step.
+#
+# So the arrow is reversed and the rule is kept: an allocation file inherits the
+# experiment and overrides only the hardware. Every key below is one the 4gpu
+# files override away from the 2gpu defaults, restored to what
+# math/0810/2gpu/base.yaml has. `ref.backend` follows ${actor.backend} and needs
+# no line of its own.
+#
+# NOTHING about the experiment is set here. If a key that is not hardware appears
+# below, this file has become a different arm rather than the same one on less
+# silicon.
+#
+# COST -- READ BEFORE COMMITTING THREE DAYS. The step is actor-bound at this
+# allocation: measured on 20260811_2341 a 4-GPU step is 235-246 s with
+# timeperf/rollout at 0.0, so generation is fully overlapped and the trainer never
+# waits for data. Halving the actor's parallelism (d2 -> d1) roughly doubles the
+# blocking term, and this arm adds an OPD forward pass on top, so expect something
+# in the 400-500 s range per step rather than 288 s. The inherited
+# max_new_tokens 2048 pulls the other way, so measure rather than trusting that
+# range.
+#
+# Evaluation does NOT scale with GPUs. A pass is set by waves of external calls --
+# max_concurrent_rollouts counts groups, so 528 eval problems are 33 waves at any
+# allocation -- and runs about 1500 s regardless. At the inherited
+# total_train_steps 500 and evaluator.freq_steps 25 that is roughly
+#
+#     500 x 450 s              = 62 h of training
+#     20 passes x 1500 s       =  8 h of evaluation
+#                                ----
+#                                70 h, about three days
+#
+# If that is too long, raise evaluator.freq_steps to 50 (halves the eval bill for
+# 10 curve points instead of 20; the train-side re-test series is denser anyway)
+# or cut total_train_steps. Both are experiment settings, so set them in
+# ../4gpu/presolve-opd.yaml where they apply to both allocations, not here.
+#
+# CONCURRENCY. Back to the inherited 16 from the 32 that 4gpu/base sets. 16 is
+# exactly one batch -- a group is one problem's 8 rollouts and
+# train_dataset.batch_size is 16 -- so the rollout has nothing to prefetch while
+# the actor trains. That is the 2-GPU default and is left alone deliberately;
+# raising it here would be an experiment change smuggled into an allocation file.
+# The external callers stay at 32, which is set in 2gpu/base.yaml and is not
+# allocation.
+defaults:
+  - ../4gpu/presolve-opd@_global_
+  - _self_
+
+# 0810fc2-* at 2 GPUs, 0810fc-* at 4, so the two cannot collide on an output
+# directory or an nfs name_resolve record.
+trial_name: 0810fc2-presolve-opd
+
+cluster:
+  n_gpus_per_node: 2
+
+rollout:
+  backend: "sglang:d1p1t1"
+  max_concurrent_rollouts: 32
+
+actor:
+  backend: "fsdp:d1p1t1"
+
+stats_logger:
+  wandb:
+    group: 0810-freechat-2gpu

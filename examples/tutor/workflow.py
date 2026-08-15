@@ -207,10 +207,12 @@ from examples.tutor.prompts import (
     FILTER_SOLVER_SYSTEM_PROMPT,
     FILTER_SOLVER_USER_TEMPLATE,
     FREE_CHAT_STUDENT_RETEST_TEMPLATE,
+    FREE_CHAT_STUDENT_RETEST_TEMPLATE_TRANSFER,
     FREE_CHAT_STUDENT_SYSTEM_PROMPT,
     FREE_CHAT_TEACHER_OPEN_PROMPT,
     FREE_CHAT_TEACHER_SOLVE_PROMPT,
     FREE_CHAT_TEACHER_SYSTEM_PROMPT,
+    FREE_CHAT_TEACHER_SYSTEM_PROMPT_TRANSFER,
     INITIAL_TEACHER_FEEDBACK_PLACEHOLDER,
     LEAK_CHECK_DISABLED_FEEDBACK,
     LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE,
@@ -465,6 +467,26 @@ ORIGINAL_RETEST_LEVEL = "original"
 PRELEAK_RETEST_LEVEL = "original_preleak"
 _STUDENT_GENERALIZE_MODES = {"only_success", "always"}
 
+RETEST_TASK_FIELD = "retest_task"
+RETEST_GROUND_TRUTH_FIELD = "retest_ground_truth"
+
+
+def _retest_problem(data: dict[str, Any]) -> tuple[str, str]:
+    """Return the designated delayed re-test problem, with a legacy fallback."""
+    raw_task = data.get(RETEST_TASK_FIELD)
+    raw_ground_truth = data.get(RETEST_GROUND_TRUTH_FIELD)
+    if raw_task is None and raw_ground_truth is None:
+        return str(data.get("task", "")), str(data.get("ground_truth", ""))
+    if raw_task is None or raw_ground_truth is None:
+        raise ValueError(
+            f"{RETEST_TASK_FIELD} and {RETEST_GROUND_TRUTH_FIELD} must be set together."
+        )
+    task = str(raw_task)
+    ground_truth = str(raw_ground_truth)
+    if not task or not ground_truth:
+        raise ValueError("The designated re-test task and ground truth must be non-empty.")
+    return task, ground_truth
+
 
 @dataclass(slots=True)
 class StudentGeneralizationCase:
@@ -614,6 +636,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_pre_verify: bool = True,
         teacher_pre_attempts: int = 3,
         teacher_pre_max_tokens: int = 0,
+        teacher_pre_visibility: str = "rollout",
+        teacher_pre_on_reject: str = "skip",
+        # Matches TutorTeacherPreConfig.share_per_group, which is True. A caller
+        # that constructs the workflow directly must not get a different default
+        # from one that goes through train.py.
+        teacher_pre_share_per_group: bool = True,
         student_system_prompt: str = "",
         student_prompt_pool_path: str = "",
         student_heldout_prompt_pool_path: str = "",
@@ -662,6 +690,17 @@ class TutorAgentWorkflow(RolloutWorkflow):
         # budget overwrites max_turns, and max_turns is read by everything below.
         free_chat_config = dict(free_chat or {})
         self.free_chat_enabled = bool(free_chat_config.get("enabled", False))
+        self.free_chat_student_has_not_seen_problem = bool(
+            free_chat_config.get("student_has_not_seen_problem", False)
+        )
+        # Transfer datasets only: the dialogue task and the re-test task are
+        # different problems, so the teacher must not be told the student will be
+        # asked to solve THIS one and the student must not be told to solve "the
+        # problem" it never saw. Off by default, so every existing arm keeps its
+        # prompts byte-for-byte.
+        self.free_chat_transfer_prompts = bool(
+            free_chat_config.get("transfer_prompts", False)
+        )
         self.free_chat_budget = 0
         if self.free_chat_enabled:
             budget = int(free_chat_config.get("budget", 0) or 0)
@@ -678,6 +717,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
         # would put sampling noise straight into the reward.
         self._no_teaching_baselines: dict[str, float] = {}
         self._no_teaching_baseline_lock = asyncio.Lock()
+        # One pre-solve draft per (problem, weight version) when
+        # teacher_pre.share_per_group is on. Stores the in-flight TASK, not the
+        # result, so the other rollouts of a group await the same generation
+        # instead of queueing behind a lock -- the lock below is held only across
+        # the dict lookup and never across an await, so distinct problems still
+        # run concurrently.
+        #
+        # Keyed on the version as well as the problem, unlike
+        # _no_teaching_baselines: the student behind that cache is frozen, and the
+        # teacher behind this one is the thing being trained, so a draft must not
+        # survive a weight update.
+        self._teacher_pre_solve_shared: dict[tuple[str, int], Any] = {}
+        self._teacher_pre_solve_shared_lock = asyncio.Lock()
         self.dataset_type = (dataset_type or "").strip().lower()
         if self.dataset_type not in {"aime", "math", "polaris"}:
             raise ValueError("dataset_type must be one of: 'aime', 'math', 'polaris'.")
@@ -923,6 +975,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.opd_max_turns_per_episode = int(opd_config.get("max_turns_per_episode", 0))
         self.opd_skip_guided_rows = bool(opd_config.get("skip_guided_rows", True))
         self.opd_skip_leaked_rows = bool(opd_config.get("skip_leaked_rows", True))
+        self.opd_context = (
+            opd_config.get("context") or "instruction"
+        ).strip()
+        if self.opd_context not in {"instruction", "presolve"}:
+            raise ValueError("opd context must be 'instruction' or 'presolve'.")
         if self.opd_enabled and self.opd_loss_weight <= 0.0:
             raise ValueError("opd loss weight must be positive when enabled.")
         if self.opd_enabled and self.opd_reward_clip < 0.0:
@@ -1028,6 +1085,43 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if self.teacher_pre_attempts < 1:
             raise ValueError("teacher_pre_attempts must be >= 1.")
         self.teacher_pre_max_tokens = int(teacher_pre_max_tokens)
+        # Where an accepted draft is visible, and what a rejected one costs.
+        # 'rollout'/'skip' are the historical behaviour and the defaults, so a
+        # config that names neither is unchanged by this switch existing.
+        self.teacher_pre_visibility = (
+            teacher_pre_visibility or "rollout"
+        ).strip()
+        if self.teacher_pre_visibility not in {"rollout", "opd_only"}:
+            raise ValueError(
+                "teacher_pre_visibility must be 'rollout' or 'opd_only'."
+            )
+        self.teacher_pre_on_reject = (teacher_pre_on_reject or "skip").strip()
+        if self.teacher_pre_on_reject not in {"skip", "continue"}:
+            raise ValueError(
+                "teacher_pre_on_reject must be 'skip' or 'continue'."
+            )
+        self.teacher_pre_share_per_group = bool(teacher_pre_share_per_group)
+        # The two halves of the pre-solve switch, checked once both are parsed.
+        # configs.py rejects these combinations before a run starts; repeated here
+        # because the workflow is also constructed directly by the tests and the
+        # probe harnesses, which do not go through TutorConfig.
+        if self.opd_enabled and self.opd_context == "presolve":
+            if self.teacher_pre_visibility != "opd_only":
+                raise ValueError(
+                    "opd context 'presolve' requires teacher_pre_visibility="
+                    "'opd_only'; otherwise the draft is already in the policy's "
+                    "own prompt and the reverse KL is identically zero."
+                )
+            if not self.teacher_pre_enabled:
+                raise ValueError(
+                    "opd context 'presolve' requires teacher_pre_enabled=True."
+                )
+        elif self.teacher_pre_visibility == "opd_only":
+            raise ValueError(
+                "teacher_pre_visibility 'opd_only' requires opd_enabled=True with "
+                "opd context 'presolve'; otherwise the draft is generated, hidden "
+                "from the rollout, and never read."
+            )
         self.student_system_prompt = student_system_prompt.strip()
         self.student_prompt_pool = load_prompt_pool(
             student_prompt_pool_path, role="student"
@@ -1881,8 +1975,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         teacher_pre_solve_result: TeacherPreSolveResult | None = None
         self.last_teacher_pre_solve_result = None
-        if getattr(self, "teacher_pre_enabled", False):
-            teacher_pre_solve_result = await self._run_teacher_pre_solve(
+        if getattr(self, "teacher_pre_enabled", False) and not (
+            self._presolve_unused_at_eval()
+        ):
+            teacher_pre_solve_result = await self._teacher_pre_solve_for_episode(
+                data,
                 task,
                 ground_truth,
                 actor_caller=actor_caller,
@@ -1890,7 +1987,21 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 lora_version=episode_lora_version,
             )
             self.last_teacher_pre_solve_result = teacher_pre_solve_result
-            if not teacher_pre_solve_result.accepted:
+            if (
+                not teacher_pre_solve_result.accepted
+                # 'continue' keeps the episode and leaves the draft absent, so the
+                # filter stops being part of what this config does. Default
+                # 'skip' is the historical path below, unchanged.
+                #
+                # Note the scope: the draft is one decision per problem per weight
+                # version, so every rollout of the group reaches this branch with
+                # the same rejected result and takes the same side of it. 'skip'
+                # therefore drops the whole group for this step rather than
+                # thinning it, which is the behaviour GRPO wants -- a short group
+                # computes its leave-one-out baseline over fewer episodes, an
+                # absent one contributes no gradient at all.
+                and getattr(self, "teacher_pre_on_reject", "skip") == "skip"
+            ):
                 self.last_history = []
                 self.last_traces = []
                 self.last_student_generalization_results = []
@@ -2542,25 +2653,31 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 initial_student_question_generation
             ),
         )
-        if (
-            episode_artifact.termination_reason == FORMAT_TERMINATION_REASON
-            and getattr(self, "format_handling_mode", "continue") == "terminate"
-        ):
-            # Dropped from the loss, not penalised. An unparseable turn carries no
-            # information about how well the tutor teaches, and charging it -1.0
-            # made things worse: measured against the previous handling on the
-            # same split, reward and solve rate were unchanged while the format
-            # error rate rose about 6x. The reference systems terminate AND
-            # exclude the trajectory, which is also what DAPO does with truncated
-            # samples. Excluding matters more here than elsewhere because
-            # _compute_episode_loss_weights equalises gradient mass per episode:
-            # a one-short-turn episode gets a large multiplier, so a penalty
-            # lands on few tokens with amplified per-token weight.
-            #
-            # The episode is still logged and still dumped as a debug trace, and
-            # stop/format_error counts it. Watch that rate -- it is now the only
-            # thing keeping format errors visible.
-            return None
+        # A format-terminated episode is TRAINED, not discarded. It used to return
+        # no rows at all -- DAPO-style exclusion, on the reasoning that an
+        # unparseable turn says nothing about how well the tutor teaches. That was
+        # wrong, and measurably so: excluding is also excluding the only gradient
+        # that pushes back on malformed output. In a 2x2 of OPD x format mode over
+        # steps 8-16 of 20260814, the two terminate arms trained on 23-42k valid
+        # tokens a step against 249-257k for the continue arms -- about 90% of
+        # episodes discarded -- and their malformed rate climbed 0.61 -> 0.90 while
+        # the continue arms fell to 0.00 by step 9. Nothing corrected the drift
+        # because nothing was charged for it, and their re-test never moved because
+        # the episodes that could have taught anything were the ones being dropped.
+        #
+        # So this now matches leak_handling_mode='terminate', which always kept its
+        # episode: the conversation stops at the offending turn, that turn carries
+        # its penalty, and the re-test scores the prefix through the last completed
+        # round. The DAPO argument applies to LENGTH-truncated samples, whose
+        # log-probabilities are unreliable because the sequence is incomplete; a
+        # malformed-but-complete turn is an ordinary sample with an ordinary reward.
+        #
+        # reward.format_error_penalty is what makes terminating unattractive, so it
+        # has to clear the worst honest outcome -- see the note on
+        # format_handling_mode. Two things to watch: stop/format_error alongside
+        # rollout/turns, and ppo_actor/update/clip_ratio, because
+        # _compute_episode_loss_weights gives a one-turn episode a large multiplier
+        # and the penalty lands on few tokens with amplified per-token weight.
         if not results:
             return None
         return concat_padded_tensors(results)
@@ -2696,6 +2813,84 @@ class TutorAgentWorkflow(RolloutWorkflow):
             context_window_margin=self.context_window_margin,
             semaphore=self._self_aux_semaphore,
         )
+
+    async def _teacher_pre_solve_for_episode(
+        self,
+        data: dict[str, Any],
+        task: str,
+        ground_truth: str,
+        *,
+        actor_caller: AReaLEngineActorCaller | ExternalActorCaller,
+        answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
+        lora_version: int | None,
+    ) -> TeacherPreSolveResult:
+        """The draft for this problem at this weight version, shared by its group.
+
+        WHY SHARE. The draft rides in the teacher's prompt, so sampling one per
+        rollout gives the 8 rollouts of a group 8 DIFFERENT prompts. GRPO's
+        baseline assumes a common prompt: with independent drafts the leave-one-out
+        mean is partly averaging over which draft was drawn rather than over how
+        well the teacher taught, and that variance lands in every advantage in the
+        group. Sharing makes the within-group comparison isolate the conversation
+        given a fixed draft. It also costs one generation per problem instead of
+        `gconfig.n_samples`, and the group then shares a prompt prefix, which the
+        generation cache can reuse.
+
+        THIS IS NOT A SWITCH. `share_per_group` defaults True and there is no
+        reason to set it False; it survives only so a config.yaml saved before
+        20260815 still loads for --resume. It defaulted False until then, so every
+        arm that did not opt in ran with per-rollout drafts -- on
+        20260814_223024, 12 of 19 problems had all 8 rollouts on 8 distinct
+        drafts, against exactly 1 for the two arms that had set it.
+
+        SCOPE. The key carries the weight version, and versions older than the
+        previous one are dropped, so the cache holds at most the two versions
+        `max_head_offpolicyness` allows in flight. A draft is never reused across
+        a weight update: the teacher is the model being trained, which is exactly
+        what makes this different from `_no_teaching_baselines`, whose student is
+        frozen and which therefore caches for the whole run.
+
+        Falls back to per-episode generation when there is no version to key on --
+        that is the no-engine path, where there is no weight update to invalidate
+        against either.
+        """
+        def run() -> Any:
+            return self._run_teacher_pre_solve(
+                task,
+                ground_truth,
+                actor_caller=actor_caller,
+                answer_judge_caller=answer_judge_caller,
+                lora_version=lora_version,
+            )
+
+        if (
+            not getattr(self, "teacher_pre_share_per_group", False)
+            or lora_version is None
+        ):
+            return await run()
+
+        version = int(lora_version)
+        key = (str(data.get("id", task)), version)
+        # The lock guards the dict only. Creating the task under it and awaiting
+        # outside is what keeps one problem's generation from serialising the
+        # rest: an await inside would hold the lock for the whole 3-attempt
+        # generate-and-judge loop.
+        async with self._teacher_pre_solve_shared_lock:
+            pending = self._teacher_pre_solve_shared.get(key)
+            if pending is None:
+                pending = asyncio.create_task(run())
+                self._teacher_pre_solve_shared[key] = pending
+                stale = [
+                    cached
+                    for cached in self._teacher_pre_solve_shared
+                    if cached[1] < version - 1
+                ]
+                for cached in stale:
+                    self._teacher_pre_solve_shared.pop(cached, None)
+        # shield, because a plain `await task` propagates the awaiting
+        # coroutine's cancellation into the task. Without it the first rollout to
+        # be cancelled would kill the draft that the other seven are waiting on.
+        return await asyncio.shield(pending)
 
     def _teacher_pre_solve_tokens(self) -> int:
         if self.teacher_pre_max_tokens > 0:
@@ -3266,13 +3461,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
         level: str,
         transfer_task: str,
     ) -> list[dict[str, str]]:
-        """A probe continues the tutoring chat: same system prompt (carrying the
-        ORIGINAL task), the same dialogue, then one new user turn.
+        """A probe continues the tutoring chat: the same dialogue, then one new
+        user turn containing the designated re-test or transfer task.
 
         Each probe is built fresh from the anchor and never written back into
         `turns`, so level1 / level2 / original are independent branches that do
         not see each other's question or answer.
         """
+        is_retest = level in (ORIGINAL_RETEST_LEVEL, PRELEAK_RETEST_LEVEL)
+        context_task = (
+            transfer_task
+            if is_retest and transfer_task
+            else episode_artifact.task
+        )
         free_chat = bool(getattr(self, "free_chat_enabled", False))
         if free_chat:
             # The same one-line system prompt the conversation used, so the
@@ -3285,13 +3486,21 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
             system = (
                 f"{system.rstrip()}\n\n"
-                f"{self._task_context(episode_artifact.task)}"
+                f"{self._task_context(context_task)}"
             )
-        if level in (ORIGINAL_RETEST_LEVEL, PRELEAK_RETEST_LEVEL):
+        if is_retest:
+            # Must stay identical to the selector in `_no_teaching_baseline`:
+            # S(0) is subtracted from this probe's score, so any difference
+            # between the two prompts is measured as teaching.
+            retest_template = (
+                FREE_CHAT_STUDENT_RETEST_TEMPLATE_TRANSFER
+                if getattr(self, "free_chat_transfer_prompts", False)
+                else FREE_CHAT_STUDENT_RETEST_TEMPLATE
+            )
             final_turn = (
                 render_prompt(
-                    FREE_CHAT_STUDENT_RETEST_TEMPLATE,
-                    task=episode_artifact.task,
+                    retest_template,
+                    task=context_task,
                 )
                 if free_chat
                 else render_prompt(STUDENT_FINAL_SOLUTION_TEMPLATE)
@@ -3874,10 +4083,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
     ) -> dict[str, StudentGeneralizationCase]:
         cases: dict[str, StudentGeneralizationCase] = {}
         if getattr(self, "student_generalize_retest_original", False):
+            retest_task, retest_ground_truth = _retest_problem(data)
             cases[ORIGINAL_RETEST_LEVEL] = StudentGeneralizationCase(
                 level=ORIGINAL_RETEST_LEVEL,
-                task=str(data.get("task", "")),
-                ground_truth=str(data.get("ground_truth", "")),
+                task=retest_task,
+                ground_truth=retest_ground_truth,
                 # 0.0 keeps the historical behaviour where the re-test is scored
                 # and logged but never rewarded. free_chat sets it and makes this
                 # the entire episode reward.
@@ -3888,8 +4098,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 # must not move any advantage.
                 cases[PRELEAK_RETEST_LEVEL] = StudentGeneralizationCase(
                     level=PRELEAK_RETEST_LEVEL,
-                    task=str(data.get("task", "")),
-                    ground_truth=str(data.get("ground_truth", "")),
+                    task=retest_task,
+                    ground_truth=retest_ground_truth,
                     reward=0.0,
                 )
         payload: Any | None = None
@@ -4260,6 +4470,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     prefix_scores = await self._score_prefix_retests(
                         episode_artifact=episode_artifact,
                         anchor=anchor,
+                        retest_case=case,
                         aux_caller=aux_caller,
                         answer_judge_caller=answer_judge_caller,
                     )
@@ -4326,11 +4537,38 @@ class TutorAgentWorkflow(RolloutWorkflow):
         except Exception:  # noqa: BLE001 - no context outside a rollout worker
             return False
 
+    def _presolve_unused_at_eval(self) -> bool:
+        """True when generating a pre-solve here would produce something unread.
+
+        Under `teacher_pre.visibility: opd_only` the draft has exactly two
+        readers, and during an eval pass both are out: the rollout preamble hides
+        it by construction, and `_build_opd_prompt_tokens` returns None at eval
+        because the per-turn split has no consumer where nothing trains. So the
+        generation is dead work -- one teacher call per eval episode for a string
+        nothing looks at.
+
+        Skipping it is also the more honest measurement. The claim of the
+        distillation arm is that the deployed teacher no longer needs a draft, and
+        the eval pass is where that claim is measured; the eval teacher should be
+        the one that ships.
+
+        The teacher-progress judge is the remaining reader
+        (`_teacher_progress_reference_solution`), so it holds this off. Under
+        `visibility: rollout` this is always False, which is what keeps every
+        pre-existing arm's eval pass unchanged.
+        """
+        if getattr(self, "teacher_pre_visibility", "rollout") != "opd_only":
+            return False
+        if getattr(self, "teacher_progress_judge_enabled", False):
+            return False
+        return self._in_eval_rollout()
+
     async def _score_prefix_retests(
         self,
         *,
         episode_artifact: EpisodeArtifact,
         anchor: StudentGeneralizationAnchor,
+        retest_case: StudentGeneralizationCase,
         aux_caller: Any,
         answer_judge_caller: Any,
     ) -> dict[int, float]:
@@ -4365,7 +4603,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 episode_artifact=episode_artifact,
                 anchor=probe_anchor,
                 level=ORIGINAL_RETEST_LEVEL,
-                transfer_task="",
+                transfer_task=retest_case.task,
             )
             replies = await asyncio.gather(
                 *[
@@ -4383,8 +4621,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             judged = await asyncio.gather(
                 *[
                     self._score_answer_async(
-                        episode_artifact.task,
-                        episode_artifact.ground_truth,
+                        retest_case.task,
+                        retest_case.ground_truth,
                         reply.text,
                         answer_judge_caller=answer_judge_caller,
                     )
@@ -4758,9 +4996,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
         prompt are the same string and `clean` has nothing to drop.
         """
         system = render_prompt(
-            FREE_CHAT_TEACHER_SYSTEM_PROMPT,
+            FREE_CHAT_TEACHER_SYSTEM_PROMPT_TRANSFER
+            if getattr(self, "free_chat_transfer_prompts", False)
+            else FREE_CHAT_TEACHER_SYSTEM_PROMPT,
             budget=int(getattr(self, "free_chat_budget", 0) or self.max_turns),
             task=task,
+            student_problem_context=(
+                "\n\nThe student has not seen the math problem yet."
+                if getattr(
+                    self, "free_chat_student_has_not_seen_problem", False
+                )
+                else ""
+            ),
         )
         if ground_truth and self.teacher_show_ground_truth:
             system = f"{system}\n\n" + render_prompt(
@@ -4784,7 +5031,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
             parts.append(TEACHER_ADAPTIVE_INSTRUCTION)
         return "\n\n".join(parts)
 
-    def _free_chat_preamble(self, tutor_state: TutorTurnState) -> list[dict[str, str]]:
+    def _free_chat_preamble(
+        self,
+        tutor_state: TutorTurnState,
+        *,
+        presolve_visible: bool | None = None,
+    ) -> list[dict[str, str]]:
         """Everything before the first teacher reply, after the system turn.
 
         Two messages when the pre-solve ran and was accepted -- the request and
@@ -4792,11 +5044,24 @@ class TutorAgentWorkflow(RolloutWorkflow):
         With `teacher_pre.enabled` off the first two are simply absent and
         nothing else moves, which is what makes the no-pre-solve arm a control
         rather than a different prompt.
+
+        ``presolve_visible`` overrides `teacher_pre.visibility` for one call. None
+        follows the config, so nothing changes for a run that does not set it.
+        Under `visibility: opd_only` the rollout resolves to False and the OPD
+        teacher prompt passes True explicitly: the two prompts then differ by
+        exactly these two messages, which is what makes the reverse KL
+        attributable to the draft and to nothing else.
         """
         messages: list[dict[str, str]] = []
         pre_solve = tutor_state.teacher_pre_solve_result
+        show_presolve = (
+            getattr(self, "teacher_pre_visibility", "rollout") == "rollout"
+            if presolve_visible is None
+            else bool(presolve_visible)
+        )
         if (
             getattr(self, "teacher_pre_enabled", False)
+            and show_presolve
             and pre_solve is not None
             and pre_solve.accepted
         ):
@@ -4866,12 +5131,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
         clean: bool = False,
         include_guidance: bool = True,
         guidance_override: TeacherGuidance | None = None,
+        presolve_visible: bool | None = None,
     ) -> list[dict[str, str]]:
         """Messages for one teacher turn.
 
         ``guidance_override`` lets a caller ask for an instruction the rollout did
         not carry, which is how the OPD teacher is built: the row is unguided, and
         the teacher differs from it only by this instruction.
+
+        ``presolve_visible`` is the other way to privilege a teacher over the row:
+        it forces the pre-solve draft into the preamble that the rollout was
+        denied. None follows `teacher_pre.visibility`, which is the only thing any
+        pre-existing caller does.
 
         Under free chat a preamble sits between the system turn and the
         conversation: the pre-solve exchange when there is one, then the turn that
@@ -4886,7 +5157,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if include_guidance and guidance is not None:
             system = self._append_guidance_to_system(system, guidance.instruction)
         preamble = (
-            self._free_chat_preamble(tutor_state)
+            self._free_chat_preamble(
+                tutor_state, presolve_visible=presolve_visible
+            )
             if getattr(self, "free_chat_enabled", False)
             else []
         )
@@ -4982,6 +5255,17 @@ class TutorAgentWorkflow(RolloutWorkflow):
         # turn 1, which is where most episodes actually end.
         if int(state.turn_idx) - 1 < self.opd_min_prior_failed_turns:
             return "too_early"
+        if getattr(self, "opd_context", "instruction") == "presolve":
+            # No accepted draft means the privileged prompt would be identical to
+            # the training prompt: a forward pass for a reverse KL of exactly
+            # zero. Reachable whenever teacher_pre.on_reject is 'continue', which
+            # is the setting that keeps this arm's episode set equal to the
+            # no-draft arm's, so the rate of this is worth its own series.
+            pre_solve = state.teacher_pre_solve_result
+            if pre_solve is None or not pre_solve.accepted:
+                return "no_presolve"
+            if not str(pre_solve.raw_output or "").strip():
+                return "no_presolve"
         if not list(getattr(artifact.tutor_response, "output_tokens", []) or []):
             return "empty"
         return ""
@@ -5018,17 +5302,31 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     getattr(artifact.tutor_response, "tokenizer", None) or self.tokenizer
                 )
                 try:
-                    # Exactly the training prompt plus the instruction, so the
-                    # teacher and the policy differ by nothing else.
-                    messages = self._build_tutor_messages(
-                        artifact.tutor_state,
-                        clean=True,
-                        guidance_override=TeacherGuidance(
-                            kind="opd",
-                            name=self.opd_instruction_name,
-                            instruction=self.opd_instruction,
-                        ),
-                    )
+                    if getattr(self, "opd_context", "instruction") == "presolve":
+                        # Exactly the training prompt plus the two pre-solve
+                        # messages, so the teacher and the policy differ by the
+                        # draft and by nothing else. include_guidance=False keeps
+                        # a rollout-side guidance instruction out: this arm's
+                        # privilege is the draft, and stacking a second one on it
+                        # would make neither attributable.
+                        messages = self._build_tutor_messages(
+                            artifact.tutor_state,
+                            clean=True,
+                            include_guidance=False,
+                            presolve_visible=True,
+                        )
+                    else:
+                        # Exactly the training prompt plus the instruction, so the
+                        # teacher and the policy differ by nothing else.
+                        messages = self._build_tutor_messages(
+                            artifact.tutor_state,
+                            clean=True,
+                            guidance_override=TeacherGuidance(
+                                kind="opd",
+                                name=self.opd_instruction_name,
+                                instruction=self.opd_instruction,
+                            ),
+                        )
                     tokens = apply_chat_template(
                         tokenizer, messages, enable_thinking=self.enable_thinking
                     )
@@ -5060,7 +5358,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "opd/selected_turns": float(selected),
             "opd/selected_ratio": float(selected / max(1, len(turn_artifacts))),
         }
-        for reason in (
+        reasons = [
             "guided",
             "prompt_arm",
             "leak",
@@ -5069,7 +5367,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "episode_cap",
             "tokenization",
             "overlength",
-        ):
+        ]
+        if getattr(self, "opd_context", "instruction") == "presolve":
+            # Only in this arm, so the instruction arms do not gain a series that
+            # is zero by construction.
+            reasons.append("no_presolve")
+        for reason in reasons:
             metrics[f"opd/skipped_{reason}"] = float(skip_counts.get(reason, 0))
         _safe_scalar(**metrics)
         return prompts
@@ -5242,8 +5545,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         """
         if not getattr(self, "free_chat_no_teaching_baseline", False):
             return None
-        task = str(data.get("task", ""))
-        ground_truth = str(data.get("ground_truth", ""))
+        task, ground_truth = _retest_problem(data)
         key = str(data.get("id", task))
         cached = self._no_teaching_baselines.get(key)
         if cached is not None:
@@ -5260,8 +5562,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
             # measured as teaching.
             if getattr(self, "free_chat_enabled", False):
                 system = FREE_CHAT_STUDENT_SYSTEM_PROMPT
+                # Must stay identical to the selector in
+                # `_build_student_probe_messages`, for the reason in the comment
+                # just above: a different prompt here reads as teaching.
                 final_turn = render_prompt(
-                    FREE_CHAT_STUDENT_RETEST_TEMPLATE, task=task
+                    FREE_CHAT_STUDENT_RETEST_TEMPLATE_TRANSFER
+                    if getattr(self, "free_chat_transfer_prompts", False)
+                    else FREE_CHAT_STUDENT_RETEST_TEMPLATE,
+                    task=task,
                 )
             else:
                 system = self._student_system_prompt_for_selection(None)

@@ -1,0 +1,21 @@
+# The same minimal collapse guard for 0810fc-leak-local-student-unaware.
+# The student-unaware prompt condition and all other settings stay inherited.
+defaults:
+  - leak-local-student-unaware@_global_
+  - _self_
+
+trial_name: 0810fc-leak-local-student-unaware-stable
+
+# Stop at the first malformed teacher turn; do not continue the conversation
+# with an empty teacher message.
+format_handling_mode: terminate
+
+gconfig:
+  # Hard cap for each training generation. It leaves normal responses room but
+  # cuts off the 4096-token repetition mode observed in the collapsed run.
+  max_new_tokens: 2048
+
+actor:
+  # Give each episode equal total gradient weight regardless of token count, so
+  # abnormally long looping episodes do not dominate the update.
+  episode_loss_weighting: true

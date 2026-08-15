@@ -1,0 +1,110 @@
+# 0810fc-presolve-opd-w1 -- 4 GPUs. -- a distillation pull large enough to move
+# the policy. Terminate, no evaluation.
+#
+# ONE KEY differs from presolve-opd-noeval.yaml: opd.loss_weight, 0.05 -> 1.0.
+# Everything else -- format terminate, the leak-local reward, the stable
+# settings, share_per_group, min_prior_failed_turns 0, no eval -- is inherited.
+#
+# THE COMPARISON THIS SITS IN, all at matched settings now that terminate is
+# fixed. Measured over steps 40-74:
+#
+#     leak-local-stable-noeval   draft in the ROLLOUT, no OPD    retest 0.5464
+#     presolve-opd-fix           draft in the LOSS, w=0.05       retest 0.4152
+#     nopre                      no draft at all                 retest ~0.43
+#
+# The with-draft teacher is worth about +0.13, and at w=0.05 the distillation
+# captured none of it -- 0.4152 is the no-draft floor, not a partial transfer.
+# 20260814_223024_0810fc-leak-local-stable-noeval is the target curve and the
+# right control for this arm: same terminate, same no-eval, same stable settings,
+# differing only in whether the draft reaches the teacher through the prompt or
+# through the KL.
+#
+# WHY THE WEIGHT. Over 75 steps of 20260814_191835 the pull was measurably
+# negligible:
+#
+#     opd_advantage/avg   -0.00549     = 0.14% of |advantages/max| (3.898)
+#     opd_reverse_kl/avg   0.1097 nats/token
+#     0.05 x 0.1097     =  0.0055      exactly the observed pull
+#
+# Against a task advantage that adv_norm puts at unit std, that is nothing. The
+# decisive tell is that the reverse KL RISES over training -- 0.074 at step 0 to
+# 0.126 by step 70. A working distillation pulls the policy toward the teacher and
+# the divergence shrinks; here the task gradient drags the policy somewhere the
+# draft-conditioned teacher likes less every step, and the pull cannot hold it.
+#
+# 0.05 was a placeholder, set small pending a calibration against a fear that a
+# whole solution draft would move the context 10-30x more than the instruction
+# arms' one appended sentence. It did not: 0.11 nats against their 0.016-0.021,
+# about 5x. 1.0 is the reference implementation's default and puts the mean pull
+# at ~0.11, about 2.8% of the advantage range.
+#
+# WHAT THIS DECIDES, readable in ~30 steps with no eval in the way:
+#
+#   opd_reverse_kl FALLS and retest climbs toward 0.55   the weight was it. Tune.
+#   opd_reverse_kl FALLS and retest stays near 0.42      the policy matched the
+#                                                        teacher and it bought
+#                                                        nothing. Structural, see
+#                                                        below -- no weight fixes
+#                                                        it, stop there.
+#   opd_reverse_kl does not fall even at 1.0             the task gradient still
+#                                                        dominates; supervision
+#                                                        coverage is next.
+#
+# THE STRUCTURAL OBJECTION that outcome 2 would confirm. On-policy distillation
+# only reweights tokens the policy ALREADY sampled -- the KL is
+# log pi_policy(a_t) - log pi_teacher(a_t) over the rollout's own tokens. It
+# cannot make the policy say something it never says, and if the with-draft
+# teacher's edge is naming the right identity or quoting the right intermediate
+# value, those tokens are largely absent from no-draft rollouts and never enter
+# the KL. The privileged context is also problem-SPECIFIC: the instruction arms
+# distilled a general behaviour that transfers, while a draft carries this
+# problem's answer and the next problem has a different one.
+#
+# WATCH, in order. No eval, so these are all training-side.
+#
+#     ppo_actor/opd_reverse_kl/avg   the experiment. Must FALL from ~0.11. The
+#                                    only series that separates the three
+#                                    outcomes above.
+#     generalize/train/student_original_success   floor 0.42, target 0.546.
+#     rollout/retest/improvement     floor 0.065, target 0.222. The cleaner of
+#                                    the two, since it removes problem difficulty.
+#     ppo_actor/opd_advantage/min    the tail. reward_clip stays 2.0, so a single
+#                                    token can now contribute -2.0 against
+#                                    |advantages/max| 3.9, where at w=0.05 it
+#                                    could only reach -0.1, and opd_reverse_kl/max
+#                                    already sits at that ceiling. If
+#                                    update/clip_ratio climbs off its 0.004-0.007
+#                                    reference or grad_norm off 0.079, drop
+#                                    reward_clip to 0.5 -- that keeps the mean
+#                                    pull and caps the tail. Left at 2.0 so this
+#                                    stays a one-key change.
+#     rollout/format_errors          terminate is fixed and the control took it to
+#                                    0.00 by step 12, so this should stay ~0. A
+#                                    20x stronger pull toward a teacher whose
+#                                    context ends in untagged prose is still worth
+#                                    re-checking; under terminate a regression
+#                                    also shows as turns collapsing.
+#     ppo_actor/n_valid_tokens       ~250k. If it falls toward 24k the format
+#                                    exclusion is somehow back.
+#
+# NOT FIXED HERE. The arm erodes its own supervision: teacher_pre/accepted fell
+# 0.95 -> 0.75-0.85 and opd/skipped_no_presolve climbed 0.14 -> 0.6-1.3 turns per
+# episode over 75 steps, because the weights being trained to teach are the ones
+# generating the drafts. Left alone so this run tests one thing;
+# teacher_pre.verify false is the lever if it becomes binding.
+#
+# GPU BUDGET. At 4 GPUs an arm is half the node, so at most TWO at once, launched
+# a minute apart. leak-local-stable-noeval has already answered its question at
+# step 74 and can free the other slot -- presolve-opd-noeval itself (the same
+# arm at w=0.05) is the ideal partner, giving a clean w=1.0 vs w=0.05 pair under
+# identical conditions.
+defaults:
+  - presolve-opd-noeval@_global_
+  - _self_
+
+trial_name: 0810fc-presolve-opd-w1
+
+opd:
+  # 0.05 -> 1.0. The reference implementation's default, and ~20x the pull that
+  # measured as doing nothing.
+  loss_weight: 1.0

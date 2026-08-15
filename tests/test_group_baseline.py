@@ -10,6 +10,7 @@ import torch
 from areal.trainer.ppo.actor import (
     _compute_episode_group_baseline,
     _compute_episode_loss_weights,
+    _compute_turn_group_baseline,
     _episode_scalars,
 )
 
@@ -152,7 +153,13 @@ def test_loss_weights_equalize_episode_gradient_mass():
     weights = _compute_episode_loss_weights(traj, mask, tok)
 
     # episode token totals: A=20, B=10, C=40, D=10, E=30 -> mean 22
-    expected = {1001: 22 / 20, 2002: 22 / 10, 3003: 22 / 40, 4004: 22 / 10, 5005: 22 / 30}
+    expected = {
+        1001: 22 / 20,
+        2002: 22 / 10,
+        3003: 22 / 40,
+        4004: 22 / 10,
+        5005: 22 / 30,
+    }
     for tid, want in expected.items():
         got = weights[traj == tid]
         assert torch.allclose(got, torch.full_like(got, want), atol=1e-6), tid
@@ -184,3 +191,68 @@ def test_row_order_does_not_matter():
 
     assert torch.allclose(base_a[perm], base_b, atol=1e-6)
     assert torch.allclose(w_a[perm], w_b, atol=1e-6)
+
+
+TURN_ROWS = [
+    # trajectory, turn, group, return, tokens
+    (11, 1, 0, 10.0, 1),
+    (22, 2, 0, 2.0, 1),
+    (44, 1, 1, 100.0, 1),
+    (11, 3, 0, 1.0, 1),
+    (33, 1, 0, 6.0, 1),
+    (55, 2, 1, 20.0, 1),
+    (22, 1, 0, 8.0, 1),
+    (44, 2, 1, 40.0, 1),
+    (11, 2, 0, 4.0, 1),
+    (55, 1, 1, 80.0, 1),
+]
+
+
+def test_turn_baseline_compares_only_same_group_and_depth():
+    traj, turn, group, ret, _tok, mask = _tensors(TURN_ROWS)
+    baseline = _compute_turn_group_baseline(
+        ret, traj, turn, group, mask, leave_one_out=True
+    )
+    advantage = ret - baseline
+
+    expected = {
+        (11, 1): 3.0,
+        (22, 1): 0.0,
+        (33, 1): -3.0,
+        (11, 2): 2.0,
+        (22, 2): -2.0,
+        (11, 3): 0.0,  # no zero-imputation: this depth is a singleton
+        (44, 1): 20.0,
+        (55, 1): -20.0,
+        (44, 2): 20.0,
+        (55, 2): -20.0,
+    }
+    for row in range(len(TURN_ROWS)):
+        key = (int(traj[row]), int(turn[row]))
+        assert advantage[row].item() == expected[key]
+
+
+def test_turn_baseline_excludes_masked_rows_and_is_permutation_invariant():
+    traj, turn, group, ret, _tok, mask = _tensors(TURN_ROWS)
+    mask[(traj == 22) & (turn == 2)] = False
+    ret[(traj == 22) & (turn == 2)] = 1_000_000.0
+    baseline = _compute_turn_group_baseline(
+        ret, traj, turn, group, mask, leave_one_out=True
+    )
+
+    # The remaining group-0 turn-2 row is a singleton; the masked huge value is
+    # neither used as its peer nor assigned a baseline of its own.
+    row_a2 = (traj == 11) & (turn == 2)
+    assert torch.allclose(baseline[row_a2], ret[row_a2])
+    assert baseline[(traj == 22) & (turn == 2)].item() == 0.0
+
+    perm = torch.randperm(len(TURN_ROWS))
+    permuted = _compute_turn_group_baseline(
+        ret[perm],
+        traj[perm],
+        turn[perm],
+        group[perm],
+        mask[perm],
+        leave_one_out=True,
+    )
+    assert torch.allclose(baseline[perm], permuted)

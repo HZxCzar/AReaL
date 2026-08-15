@@ -96,6 +96,7 @@ def make_workflow(**attrs: object) -> TutorAgentWorkflow:
         "free_chat_enabled": True,
         "free_chat_budget": 5,
         "max_turns": 5,
+        "free_chat_student_has_not_seen_problem": False,
         "enable_thinking": False,
         "teacher_show_ground_truth": False,
         "teacher_anti_leak_instruction_enabled": True,
@@ -230,6 +231,20 @@ def main() -> int:
     check("carries the task", TASK in system)
     check("says the student is tested alone afterwards",
           "solve a problem from scratch" in system)
+    unseen_sentence = "The student has not seen the math problem yet."
+    check("does not add student problem awareness state by default",
+          unseen_sentence not in system)
+    unseen_messages = make_workflow(
+        free_chat_student_has_not_seen_problem=True
+    )._build_tutor_messages(tutor_state())
+    unseen_system = unseen_messages[0]["content"]
+    expected_unseen_system = system.replace(
+        "\n\nThe math problem is:",
+        f"\n\n{unseen_sentence}\n\nThe math problem is:",
+        1,
+    )
+    check("student unseen switch adds only the factual sentence",
+          unseen_system == expected_unseen_system, unseen_system)
     # The task is the last thing in the system turn. Everything the teacher reads
     # before it writes is appended after this block, so anything placed below the
     # task pushes the problem statement further from the point of generation --
@@ -781,6 +796,8 @@ def main() -> int:
     from examples.tutor.configs import TutorFreeChatConfig
 
     check("off by default", TutorFreeChatConfig().no_teaching_baseline is False)
+    check("student unseen switch is off by default",
+          TutorFreeChatConfig().student_has_not_seen_problem is False)
     check("every 0810 arm leaves it off for now",
           all(not loaded[(a, n)].free_chat.no_teaching_baseline
               for a in ALLOCATIONS for n in ARMS))
@@ -789,6 +806,13 @@ def main() -> int:
           hasattr(legacy_workflow, "_no_teaching_baselines")
           and hasattr(legacy_workflow, "_no_teaching_baseline_lock")
           and legacy_workflow.free_chat_no_teaching_baseline is False)
+    configured_unseen_workflow = TutorAgentWorkflow(
+        dataset_type="math",
+        answer_scorer="math",
+        free_chat={"student_has_not_seen_problem": True},
+    )
+    check("workflow reads the student unseen switch",
+          configured_unseen_workflow.free_chat_student_has_not_seen_problem)
     check("off means no probe at all",
           asyncio.run(
               legacy_workflow._no_teaching_baseline(

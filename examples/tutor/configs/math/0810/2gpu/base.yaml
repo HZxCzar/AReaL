@@ -1,8 +1,8 @@
 # 0810 / freechat -- teacher-first free conversation, scored only by a delayed
 # solo re-test.
 #
-# Everything not named below is inherited from math/0808/full/2gpu/base.yaml:
-# the endpoints, the model, the split, the allocation, the optimiser.
+# This file is intentionally self-contained: endpoints, model, split, allocation,
+# optimiser, rollout, actor and evaluation settings are all declared below.
 #
 # WHAT THIS CHANGES, AND WHY
 #
@@ -42,104 +42,41 @@
 # 5 student calls, 4 re-test calls, 4 re-test judge calls, and up to 5 leak
 # checks. Watch the student endpoint: a training step is 16 problems x 8 rollouts
 # = 128 episodes x 4 re-tests = 512 student calls that all arrive at the end of
-# the rollout wave, against student_models[0].max_concurrent_calls of 16.
-defaults:
-  - ../../0808/full/2gpu/base@_global_
-  - _self_
+# the rollout wave, against student_models[0].max_concurrent_calls of 32.
 
+experiment_name: tutor-math-baseline
 trial_name: 0810fc2-base
-
-# The budget. free_chat.budget overwrites max_turns at startup so the two cannot
-# disagree; both are written out because max_turns is what the rest of the code
-# reads and budget is what the teacher is told.
+seed: 42
+enable_offload: false
+total_train_epochs: 150
+tokenizer_path: ${actor.path}
+workflow: examples.tutor.workflow.TutorAgentWorkflow
+eval_workflow: ${workflow}
+dataset_type: math
+answer_scorer: math
 max_turns: 5
-free_chat:
-  enabled: true
-  budget: 5
-
+enable_thinking: false
+leak_handling_mode: reward_only
+teacher_show_ground_truth: false
+teacher_anti_leak_instruction_enabled: true
 student_generalize:
   enabled: true
   source: sidecar
-  path: ''
-  # A no-op with both transfer levels off: the re-test uses an anchor that does
-  # not require a solved episode. Set to 'always' anyway so this does not read as
-  # if the re-test were gated on success.
-  mode: always
-  # The fine-grained signal: 4 independent solo attempts per rollout.
-  replays: 4
-  retest_original: true
-  # The entire episode reward. 1.0 against leak_penalty -1.0 puts a teacher that
-  # leaks and scores 4/4 at 0.0, behind an honest teacher who scores 2/4.
-  retest_reward: 1.0
-  level1_enabled: false
-  level2_enabled: false
   level1_reward: 0.0
   level2_reward: 0.0
-
-reward:
-  # REQUIRED, and the workflow refuses to start otherwise. Reaching the budget is
-  # the normal ending now, so the inherited -1.0 would charge every episode.
-  max_turn_penalty: 0.0
-  # Dead in this rollout: there is no per-turn success left to reward.
-  success: 0.0
-  assign_success_reward: false
-  early_success_bonus: 0.0
-  # Unchanged from 0808/full.
-  format_error_penalty: -0.5
-  leak_penalty: -1.0
-  leak_penalty_mode: rawbase
-  leak_penalty_aggregation: episode
-
-# Overridden by the two leak arms.
-leak_handling_mode: reward_only
-
-# The teacher's own past turns keep their tag skeleton instead of being handed
-# back as bare text. Observation side only -- reward and sampling are untouched.
-#
-# WHY THIS IS NOT OPTIONAL HERE. Under the inherited 'stripped' the teacher sees
-# one instruction saying "always use <reasoning>/<output>" and then, by turn 4,
-# three examples of itself not using them. The few-shot wins. Measured on
-# 20260810_234129 (143 episodes, stripped), malformed turns by depth:
-#
-#   depth      1      2      3      4      5
-#   malformed  6.3%   8.0%  23.9%  34.1%  41.7%
-#
-# configs.py records the same curve running to 73.4% at depth 10. A fixed budget
-# makes this far worse than it was in the answer-attempt loop, because every
-# episode now reaches the depths where the rate is high instead of stopping at an
-# average of 2.1 turns: rollout/format_errors starts at 0.62 per episode here
-# against 0.26 for 0808 stripped and 0.15 for 0808 masked, same model.
-teacher_history_tags: masked
-
-# Inherited as 'continue'. Note that 'terminate' is now SAFE here in a way it was
-# not in 0808/full: there, an early format exit dodged max_turn_penalty -1.0, so
-# terminating was a cheap way out of a losing episode. With max_turn_penalty 0.0
-# a format-terminated episode collects format_error_penalty -0.5 and loses its
-# re-test, which is strictly worse than the worst honest outcome of 0.0.
-format_handling_mode: continue
-
-# ENDPOINT CONCURRENCY. Doubled from the inherited 16 to 32 on all four external
-# callers -- the auxiliary model (answer judge and leak judge) and all three
-# student slots.
-#
-# WHY. The external calls, not the GPUs, set the wall clock. An eval pass is
-# 1650-1840 s and is almost entirely these calls: 528 problems x (5 student
-# replies + 4 re-tests + 4 answer judges + up to 5 leak checks). GPU count does
-# not touch that number, and at 4 GPUs timeperf/rollout is already 0.0, meaning
-# generation keeps up and the trainer never waits for data. The queue in front of
-# these 16 slots is what is left.
-#
-# WHY IT IS RESTATED IN FULL. student_models is a list, and omegaconf replaces a
-# list on merge rather than merging element-wise, so there is no way to override
-# max_concurrent_calls on one entry without writing all three. Everything below
-# is copied verbatim from ../../0808/full/2gpu/base.yaml except the four
-# max_concurrent_calls values. THAT MEANS IT CAN DRIFT: if the endpoints, keys or
-# sampling parameters change in the 0808 base, they will not follow here.
-#
-# NOTE this is a property of the remote services, not of this run. If they start
-# refusing or timing out, this is the first thing to put back to 16 --
-# student_models[*].timeout is 120 s and a saturated endpoint shows up as
-# student/<name>/call_failed rather than as a slowdown.
+  mode: always
+  path: ''
+  replays: 4
+  retest_original: true
+  level1_enabled: false
+  level2_enabled: false
+  retest_reward: 1.0
+teacher_pre:
+  enabled: true
+  mode: filter_solver
+  attempts: 3
+  max_tokens: 0
+  verify: true
 auxiliary_model:
   mode: api
   enable_thinking: false
@@ -162,7 +99,6 @@ auxiliary_model:
         enable_thinking: false
   answer_judge_enabled: true
   answer_judge_max_tokens: 256
-
 student_models:
 - name: qwen3-1.7b
   weight: 1.0
@@ -213,43 +149,218 @@ student_models:
       x-inspire-inference-key: tutor-train-gemma3-1b-student
     extra_body:
       repetition_penalty: 1.05
-
-stats_logger:
-  wandb:
-    group: 0810-freechat-2gpu
-
-# Two passes over each collected batch instead of one. ppo_n_minibatches 4 already
-# takes four optimizer steps per batch, but they are four chunks of ONE pass; this
-# makes it two passes, eight steps. Rollout is what costs here -- about 24 external
-# calls an episode -- so this is the only lever that buys more optimization without
-# buying more generation. The extra pass is off-policy against the parameters the
-# first one produced and the PPO clip is what bounds it, which is why it is safer
-# than the equivalent bump in lr. Room to do it: clip_ratio ran 0.0017 and
-# grad_norm 0.079 against gradient_clipping 1.0.
-# 500, not the inherited 100. The measured effect on the objective in the closest
-# reference run is about +0.7pp per 10 steps, and a slope standard error falls as
-# n^-1.5, so 100 steps cannot separate that from zero.
-#
-# COST, measured on 20260811_2341: a train step is 235-246 s and an eval pass is
-# 1650-1840 s, so at evaluator.freq_steps 25 the arithmetic is
-#
-#     500 x 240 s                     = 33 h of training
-#     20 eval passes x 1750 s         =  10 h of evaluation
-#                                       ---
-#                                       43 h per arm
-#
-# against about 17 h at 200 steps. Two arms fit the node at 4 GPUs, so a paired
-# comparison is about two days. Raise evaluator.freq_steps to 50 if that is too
-# long: it halves the eval bill for 10 points on the curve instead of 20, and the
-# training-side re-test series is denser than the eval one anyway.
-#
-# 500 x 16 problems is 10.5 epochs over the 759-row split, against 4.2 at 200 and
-# 2.1 at 100. That is more repetition per problem than any run in this group has
-# had; watch for the train-side re-test climbing while the eval one does not.
-total_train_steps: 500
-
+reward:
+  format_error_penalty: -0.5
+  success: 0.0
+  leak_penalty_mode: rawbase
+  assign_success_reward: false
+  leak_penalty: -1.0
+  leak_penalty_aggregation: episode
+  outcome_prior_turn_weight: 0.5
+  outcome_credit_gamma: 0.9
+  early_success_bonus: 0.0
+  max_turn_penalty: 0.0
+  enable_turn_penalty: false
+  turn_penalty: -0.01
+  length_penalty_threshold_chars: 0
+  length_penalty_per_100_chars: 0.0
+  length_penalty_min: 0.0
+debug_trace_dir: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/debug_traces/${experiment_name}/${trial_name}
+debug_trace_every_n_rollouts: 10
+cluster:
+  n_nodes: 1
+  n_gpus_per_node: 2
+  fileroot: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor
+  name_resolve:
+    type: nfs
+    nfs_record_root: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/name_resolve
+scheduler:
+  type: local
+rollout:
+  backend: sglang:d1p1t1
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  tokenizer_path: ${tokenizer_path}
+  max_concurrent_rollouts: 16
+  queue_size: null
+  consumer_batch_size: ${train_dataset.batch_size}
+  max_head_offpolicyness: 2
+  pause_grace_period: 10
+  enable_rollout_tracing: false
+  scheduling_spec: ${actor.scheduling_spec}
+  use_lora: true
+  dump_to_file: true
+  openai:
+    mode: inline
+    tool_call_parser: qwen25
+    reasoning_parser: qwen3
+    chat_template_type: concat
+    export_style: concat
+    turn_discount: 1.0
+gconfig:
+  n_samples: 8
+  min_new_tokens: 0
+  max_new_tokens: 4096
+  max_tokens: 24576
+  greedy: false
+  temperature: 0.7
+  top_p: 1.0
+  lora_name: default_lora
+eval_gconfig:
+  n_samples: 1
+  min_new_tokens: 0
+  max_new_tokens: 4096
+  max_tokens: 24576
+  greedy: false
+  temperature: 0.7
+  top_p: 1.0
+  lora_name: default_lora
 actor:
+  backend: fsdp:d1p1t1
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+  init_from_scratch: false
+  disable_dropout: true
+  gradient_checkpointing: true
+  dtype: bfloat16
+  mb_spec:
+    n_mbs: 1
+    max_tokens_per_mb: 40960
+  optimizer:
+    type: adam
+    lr: 5.0e-05
+    weight_decay: 0.0
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1.0e-08
+    lr_scheduler_type: constant
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.001
+  eps_clip: 0.4
+  use_ppo_clip: true
+  advantage_estimator: rebn
+  turn_discount: 1.0
+  temperature: ${gconfig.temperature}
+  reward_scaling: 1.0
+  reward_bias: 0.0
+  kl_ctl: 0.0
+  ppo_n_minibatches: 4
+  recompute_logprob: true
+  use_decoupled_loss: true
+  behave_imp_weight_cap: 5.0
+  reward_norm: null
+  adv_norm:
+    mean_level: batch
+    std_level: batch
+  weight_update_mode: disk
+  use_lora: ${rollout.use_lora}
+  peft_type: lora
+  lora_rank: 16
+  lora_alpha: 16
+  target_modules:
+  - all-linear
+  max_new_tokens: ${gconfig.max_new_tokens}
+  scheduling_spec:
+  - task_type: worker
+    port_count: 2
+    gpu: 1
+    cmd: python3 -m areal.infra.rpc.rpc_server
+    env_vars: {}
+  group_baseline: episode
+  group_baseline_leave1out: true
+  episode_loss_weighting: false
   num_iterations: 2
-
+ref:
+  backend: ${actor.backend}
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${actor.path}
+  init_from_scratch: false
+  disable_dropout: true
+  dtype: ${actor.dtype}
+  mb_spec:
+    n_mbs: 1
+    max_tokens_per_mb: 40960
+  optimizer: null
+  scheduling_strategy:
+    type: colocation
+    target: actor
+  scheduling_spec: ${actor.scheduling_spec}
+sglang:
+  model_path: ${actor.path}
+  random_seed: ${seed}
+  skip_tokenizer_init: true
+  dtype: ${actor.dtype}
+  max_running_requests: 32
+  context_length: 40960
+  mem_fraction_static: 0.75
+  enable_lora: ${actor.use_lora}
+  max_lora_rank: ${actor.lora_rank}
+  max_loaded_loras: 16
+train_dataset:
+  batch_size: 16
+  shuffle: true
+  pin_memory: false
+  num_workers: 0
+  path: examples/tutor/data/math_1.7b_8b/math_pass@2
+  type: rl
+  max_length: 16384
+valid_dataset:
+  batch_size: ${train_dataset.batch_size}
+  pin_memory: false
+  num_workers: 0
+  path: examples/tutor/data/math_1.7b_8b/math_pass@2
+  type: rl
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 50
+  freq_secs: null
+recover:
+  mode: auto
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 10
+  freq_steps: null
+  freq_secs: 3600
 evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 25
+  freq_secs: null
+  max_samples: null
+  average_rollouts: 1
+  student_model_names:
+  - qwen3-1.7b
+  teacher_pre_verify: false
   leak_terminate: false
+  # Same argument, for the same reason: terminating on a malformed turn is a
+  # training policy, and nothing cuts a real conversation short because the
+  # teacher mis-tagged a reply. The rate is still reported by format_errors.
+  # Under terminate the step-0 eval of 20260814_053136 ended 83.5% of episodes
+  # on a format error and only 16.5% reached the budget -- and that pass is the
+  # baseline every later point is read against.
+  format_terminate: false
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: offline
+    entity: hz-czar-stanford
+    project: TAgent
+    name: ${trial_name}
+    group: 0810-freechat-2gpu
+format_handling_mode: continue
+total_train_steps: 500
+free_chat:
+  enabled: true
+  budget: 5
+teacher_history_tags: masked

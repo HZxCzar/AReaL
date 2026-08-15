@@ -537,6 +537,37 @@ def _compute_rebn_returns(
     return returns
 
 
+def _episode_local_at_first_turn(
+    local_rewards: torch.Tensor,
+    trajectory_ids: torch.Tensor,
+    turn_indices: torch.Tensor,
+    valid_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Each episode's total turn-local reward, gathered onto its first turn.
+
+    The group baseline reads one scalar per episode off the return at the
+    episode's smallest turn_idx, and that scalar has to be the episode TOTAL or
+    the advantages stop centring. Turn-local components deliberately stay on
+    their own turn in the returns, so for the baseline they are collected here
+    instead. Without this a leak on the last turn appears in a turn return but in
+    no baseline, leaving a constant negative advantage on every turn that nothing
+    cancels -- which deflates the logits and drives entropy up.
+    """
+    gathered = torch.zeros_like(local_rewards)
+    valid = valid_mask.bool()
+    valid_indices = torch.nonzero(valid, as_tuple=False).flatten()
+    if valid_indices.numel() == 0:
+        return gathered
+    for trajectory_id in torch.unique(trajectory_ids[valid_indices]).tolist():
+        traj_mask = valid & (trajectory_ids == trajectory_id)
+        rows = torch.nonzero(traj_mask, as_tuple=False).flatten()
+        if rows.numel() == 0:
+            continue
+        first_row = rows[torch.argmin(turn_indices[rows])]
+        gathered[first_row] = local_rewards[rows].sum()
+    return gathered
+
+
 def _episode_scalars(
     turn_returns: torch.Tensor,
     trajectory_ids: torch.Tensor,
@@ -627,6 +658,68 @@ def _compute_episode_group_baseline(
         ].clamp_min(1.0)
 
     baseline[valid_rows] = episode_baseline[episode_index[valid_rows]]
+    return baseline
+
+
+def _compute_turn_group_baseline(
+    turn_returns: torch.Tensor,
+    trajectory_ids: torch.Tensor,
+    turn_indices: torch.Tensor,
+    group_ids: torch.Tensor,
+    valid_mask: torch.Tensor,
+    leave_one_out: bool,
+) -> torch.Tensor:
+    """Per-row baseline from other episodes at the same group and turn depth.
+
+    Ragged episodes contribute only at turns they actually reached. A singleton
+    ``(group_id, turn_idx)`` stratum uses its own return as the baseline, yielding
+    zero relative advantage instead of importing a value from another depth.
+    """
+    baseline = torch.zeros_like(turn_returns)
+    valid_rows = torch.nonzero(valid_mask.bool(), as_tuple=False).flatten()
+    if valid_rows.numel() == 0:
+        return baseline
+
+    # ReBN exports exactly one row per episode and turn. Check this explicitly so
+    # leave-one-out never accidentally compares a trajectory with a duplicate of
+    # itself.
+    member_keys = torch.stack(
+        (
+            group_ids[valid_rows],
+            turn_indices[valid_rows],
+            trajectory_ids[valid_rows],
+        ),
+        dim=1,
+    )
+    if torch.unique(member_keys, dim=0).shape[0] != valid_rows.numel():
+        raise ValueError(
+            "Turn group baseline requires at most one valid row per "
+            "(group_id, turn_idx, trajectory_id)."
+        )
+
+    stratum_keys = torch.stack((group_ids[valid_rows], turn_indices[valid_rows]), dim=1)
+    _, stratum_inverse = torch.unique(stratum_keys, dim=0, return_inverse=True)
+    n_strata = int(stratum_inverse.max().item()) + 1
+    valid_returns = turn_returns[valid_rows]
+
+    stratum_sum = turn_returns.new_zeros(n_strata)
+    stratum_sum.index_add_(0, stratum_inverse, valid_returns)
+    stratum_count = turn_returns.new_zeros(n_strata)
+    stratum_count.index_add_(0, stratum_inverse, torch.ones_like(valid_returns))
+
+    if leave_one_out:
+        counts = stratum_count[stratum_inverse]
+        row_baseline = torch.where(
+            counts > 1.0,
+            (stratum_sum[stratum_inverse] - valid_returns) / (counts - 1.0),
+            valid_returns,
+        )
+    else:
+        row_baseline = stratum_sum[stratum_inverse] / stratum_count[
+            stratum_inverse
+        ].clamp_min(1.0)
+
+    baseline[valid_rows] = row_baseline
     return baseline
 
 
@@ -1332,31 +1425,53 @@ class PPOActor:
                 self.config.turn_discount,
                 valid_mask=valid_turn_mask,
             )
+            baseline_source = turn_returns
             if local_reward_score is not None:
-                # Added after accumulation but before the group baseline, so the
-                # episode scalar the baseline averages (the return at the first
-                # turn) also excludes other episodes' turn-local penalties.
-                turn_returns = turn_returns + local_reward_score * (
-                    valid_turn_mask.to(turn_returns.dtype)
+                local_masked = local_reward_score * valid_turn_mask.to(
+                    turn_returns.dtype
                 )
-            if self.config.group_baseline == "episode":
+                # The local part rides on its own turn only. That is the point: a
+                # leak on the last turn must not discount the good turns before
+                # it.
+                turn_returns = turn_returns + local_masked
+                if self.config.group_baseline == "episode":
+                    # The legacy episode baseline needs the episode TOTAL.
+                    # Gather local terms onto turn one for that baseline only;
+                    # the returns above keep their per-turn placement. The turn
+                    # baseline instead compares the final return at each depth.
+                    baseline_source = baseline_source + _episode_local_at_first_turn(
+                        local_masked,
+                        data["trajectory_id"].to(reward_score.device),
+                        data["turn_idx"].to(reward_score.device),
+                        valid_turn_mask,
+                    )
+            if self.config.group_baseline is not None:
                 if "group_id" not in data:
                     raise ValueError(
-                        "actor.group_baseline='episode' requires a 'group_id' "
+                        f"actor.group_baseline={self.config.group_baseline!r} "
+                        "requires a 'group_id' "
                         "column in rollout data. It is attached by the trainer "
                         "before compute_advantages; check that rollout groups "
                         "survive to that point."
                     )
-                group_baseline = _compute_episode_group_baseline(
-                    turn_returns,
+                baseline_fn = (
+                    _compute_episode_group_baseline
+                    if self.config.group_baseline == "episode"
+                    else _compute_turn_group_baseline
+                )
+                baseline_returns = (
+                    baseline_source
+                    if self.config.group_baseline == "episode"
+                    else turn_returns
+                )
+                group_baseline = baseline_fn(
+                    baseline_returns,
                     data["trajectory_id"].to(reward_score.device),
                     data["turn_idx"].to(reward_score.device),
                     data["group_id"].to(reward_score.device),
                     valid_turn_mask,
                     self.config.group_baseline_leave1out,
                 )
-                # A_t = G_t - b_g. A shift, so within-episode return differences
-                # (mid-turn rewards) survive untouched.
                 turn_returns = turn_returns - group_baseline
                 data["group_baseline"] = group_baseline
             if self.adv_norm is not None and valid_turn_mask.any():

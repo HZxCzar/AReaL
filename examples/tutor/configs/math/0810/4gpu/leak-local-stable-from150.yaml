@@ -1,0 +1,10 @@
+# Branch the collapse-guarded arm from the last regular checkpoint before the
+# repetition collapse. globalstep149 means 150 completed training updates.
+defaults:
+  - leak-local-stable@_global_
+  - _self_
+
+trial_name: 0810fc-leak-local-stable-from150
+
+actor:
+  init_lora_path: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/checkpoints/root/tutor-math-baseline/20260813_053934_0810fc-leak-local/default/epoch3epochstep8globalstep149

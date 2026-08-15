@@ -1,0 +1,129 @@
+# 0815fc4-numeric-variant-r8-from50 -- 4 GPUs. -- the same arm branched at its
+# peak, with twice the re-test replays.
+#
+# Three keys differ from numeric-variant-retest-original-noeval.yaml:
+# student_generalize.replays, free_chat.transfer_prompts and
+# actor.init_lora_path. The dataset, the method, the reward and the disabled
+# evaluator are all inherited unchanged.
+#
+# THIS IS NOT A SINGLE-FACTOR CHANGE AGAINST 20260814_231617. Two things move at
+# once -- the replay count and the prompt wording -- so if the post-peak slide
+# stops, that does not attribute to one of them. They are bundled because they
+# aim at the same finding from opposite ends: the measurement is too noisy to
+# learn from, and the thing being measured was described to the teacher wrongly.
+# Splitting them would cost another 4-GPU arm and 20 hours for an attribution
+# that changes nothing about what to do next.
+#
+# WHY. 20260814_231617 rose to about step 45 and then slid for 155 steps:
+#
+#     student_original_success   +0.152 +-0.054 /100 steps (t=+2.8)  over 0-50
+#                                -0.040 +-0.009 /100 steps (t=-4.5)  over 50-204
+#     retest/improvement         +0.193 +-0.064 (t=+3.0)  then  -0.028 +-0.011 (t=-2.5)
+#
+# The rise is the two deterministic penalties being paid off -- leaks 0.167 ->
+# 0.059 an episode and format errors 0.210 -> 0.009, both finished by step 40.
+# After that the only thing left to optimise is the re-test, and the re-test is
+# mostly noise. Decomposing the within-problem variance of the re-test fraction
+# across the 8 rollouts of a group -- which is exactly the quantity GRPO
+# differences to form the advantage:
+#
+#     window          within-problem var   binomial floor @4   teacher's share
+#     steps 30-60           0.107               0.062                42%
+#     steps 90-120          0.124               0.062                50%
+#     steps 175-205         0.124               0.062                50%
+#
+# Half of the advantage is the student's own sampling noise. And the other half
+# does not attach to anything: regressing the re-test fraction on seven
+# teacher-behaviour features WITHIN a group -- total chars, opening length, math
+# density, praise turns, new-problem turns, question turns, turn count -- every
+# effect is under 0.05 re-test points per 1 SD and the signs flip between
+# windows. 3 of 21 tests clear |t|=2, which is chance. The reward has no stable
+# opinion about what the teacher does, so past step 50 the policy follows noise,
+# and it sharpens while it drifts: entropy 0.171 -> 0.053 (t=-15), grad_norm
+# 0.090 -> 0.172, the teacher's opening turn 368 -> 206 chars, and cross-turn
+# repetition +0.29 per 100 steps over the last 65.
+#
+# WHAT replays: 8 DOES. It halves the binomial floor to 0.031, which lifts the
+# teacher's share of the within-group variance from ~50% to ~66% and cuts the
+# noise SD of the advantage by 1.41x. That is the entire intervention: the same
+# signal, measured better. The reward is still a fraction in [0, 1] -- eighths
+# instead of quarters -- so its scale is unchanged and the two runs are directly
+# comparable.
+#
+# The no-teaching baseline reads student_generalize.replays as well, so S(0) is
+# also measured at 8 and both sides of retest/improvement gain the precision.
+#
+# WHY FROM STEP 50. That checkpoint is the peak -- improvement 0.157 and
+# student_original_success 0.498 over steps 40-50 -- and the last point at which
+# the deterministic gradient was still doing the work. Branching there asks the
+# one question that matters: with the noise floor halved, does the slope after
+# the peak stop being negative? Starting from scratch would spend 50 steps
+# re-learning leaks and format, which replays does not touch.
+#
+# THIS IS A BRANCH, NOT A RESUME. init_lora_path loads adapter weights only. The
+# optimiser state, the dataset position and the no-teaching-baseline cache all
+# start fresh, and the step counter restarts at 0. Read this run's step N against
+# the parent's step 50+N.
+#
+# HOW LONG. The decline being tested against was -0.040 +-0.009 per 100 steps
+# measured over 155 steps, so roughly 150 steps are needed here to separate
+# "flat" from "the same slope again". Anything earlier is underpowered against a
+# slope that small. total_train_steps is left at the inherited 500 on purpose --
+# kill the run once the answer is in rather than having to relaunch.
+#
+# COST. Four extra student calls and four extra judge calls an episode, against
+# roughly 24 today, so about +33% external calls: 128 episodes x 8 re-tests =
+# 1024 student calls arriving in one wave at the end of each rollout, against
+# student_models[*].max_concurrent_calls of 32. The reference for how much that
+# hurts is the turn-credit arm, which added 32 calls an episode -- twice this --
+# and cost 2% of wall clock (288 s against 282 s a step) because the step is
+# actor-bound, not call-bound. Expect 290-310 s a step. If it lands well above
+# that, the student endpoint queue is the reason and max_concurrent_calls is the
+# knob, not the allocation.
+#
+# NO EVALUATION, inherited. There is no held-out number here; the comparison is
+# this run's training-side re-test series against the parent's steps 50-204.
+#
+# GPU BUDGET. At 4 GPUs an arm is half the node, so at most TWO run at once,
+# launched a minute apart. See ../README.md.
+defaults:
+  - numeric-variant-retest-original-noeval@_global_
+  - _self_
+
+trial_name: 0815fc4-numeric-variant-r8-from50
+
+student_generalize:
+  # 4 -> 8. The binomial floor on a per-episode re-test fraction is
+  # p(1-p)/replays, so this is the only knob that moves it.
+  replays: 8
+
+free_chat:
+  # Transfer wording for the teacher system prompt and the student re-test
+  # prompt. See the block comment on FREE_CHAT_TEACHER_SYSTEM_PROMPT_TRANSFER in
+  # prompts.py for the exact text and what changed.
+  #
+  # The default wording is wrong for this dataset in both directions. The teacher
+  # is told "we will ask the student to solve a problem from scratch ... so that
+  # they can solve it on their own", which reads as THIS problem and aims it at
+  # the instance; it now asks for the underlying concepts and says the test will
+  # be "some related questions". The student is told to solve "the problem from
+  # scratch" -- a definite reference to something it never saw, since the
+  # conversation was about a different problem; it now says "this problem",
+  # which presupposes nothing. It deliberately does not say "similar": that
+  # would make the prompt, rather than the teacher, responsible for telling the
+  # student the conversation was relevant, and the teacher is what is trained.
+  #
+  # This is a property of the dataset rather than of the arm, so it belongs in
+  # the dataset config the day the old one stops being the reference for a
+  # finished run. It is set here to leave numeric-variant-retest-original-noeval
+  # meaning exactly what 20260814_231617 ran.
+  transfer_prompts: true
+
+actor:
+  # 20260814_231617_0814fc4-numeric-variant-retest-original-noeval.
+  # globalstep49 means 50 completed training updates -- the peak of that run.
+  init_lora_path: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/checkpoints/root/tutor-math-numeric-variant-retest/20260814_231617_0814fc4-numeric-variant-retest-original-noeval/default/epoch2epochstep1globalstep49
+
+stats_logger:
+  wandb:
+    group: 0815-numeric-variant-r8-4gpu-noeval

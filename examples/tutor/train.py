@@ -305,6 +305,15 @@ def _build_eval_workflow_kwargs(
         eval_workflow_kwargs["eval_preleak_retest"] = (
             workflow_kwargs.get("leak_handling_mode") == "terminate"
         )
+    # Same argument for a malformed turn: 'terminate' exists to make format drift
+    # expensive while learning, and nothing cuts a real conversation short because
+    # the teacher mis-tagged a reply. Under 'continue' the student is handed an
+    # empty message and the episode runs on, and rollout/format_errors still
+    # reports the rate, so this hides nothing -- it only stops a training policy
+    # from truncating the measurement. There is no 'disabled' mode to preserve, so
+    # unlike the leak override this is a plain assignment.
+    if config.evaluator.format_terminate is False:
+        eval_workflow_kwargs["format_handling_mode"] = "continue"
     eval_workflow_kwargs["teacher_diversity_reward"] = {"enabled": False}
     eval_workflow_kwargs["teacher_context_reward"] = {"enabled": False}
     eval_workflow_kwargs["teacher_progress_judge"] = {"enabled": False}
@@ -530,6 +539,9 @@ def main(args):
         teacher_pre_verify=teacher_pre.verify,
         teacher_pre_attempts=teacher_pre.attempts,
         teacher_pre_max_tokens=teacher_pre.max_tokens,
+        teacher_pre_visibility=teacher_pre.visibility,
+        teacher_pre_on_reject=teacher_pre.on_reject,
+        teacher_pre_share_per_group=teacher_pre.share_per_group,
         student_system_prompt=config.student_system_prompt,
         student_prompt_pool_path=config.prompt_pool.student_train_path,
         student_heldout_prompt_pool_path="",

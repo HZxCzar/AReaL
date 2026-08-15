@@ -21,9 +21,9 @@ from examples.tutor.core.types import (
     LeakCheckResult,
     TurnArtifact,
 )
+from tests.test_rebn_advantage import _make_actor
 
 from areal.api.cli_args import PPOActorConfig
-from tests.test_rebn_advantage import _make_actor
 
 
 def _leak(leaked: bool) -> LeakCheckResult:
@@ -182,35 +182,91 @@ def _group_actor():
     )
 
 
-def test_group_baseline_is_contaminated_without_the_column():
-    result = _group_actor()._compute_advantages(_group_data())
-    # Episode 1 is clean, but its leave-one-out baseline is episode 2's return,
-    # which carries episode 2's leak -- so episode 1 is handed a free +1.0 of
-    # advantage for merely not being the leaker.
+def _turn_group_data(**extra):
+    """Three equal teaching episodes; episode 3 leaks only at turn 2."""
+    base = {
+        "input_ids": torch.zeros((6, 4), dtype=torch.long),
+        "attention_mask": torch.ones((6, 4), dtype=torch.bool),
+        "loss_mask": torch.tensor([[0, 1, 0, 0]] * 6, dtype=torch.long),
+        "logprobs": torch.zeros((6, 4)),
+        "rewards": torch.tensor([0.0, 0.5, 0.0, 0.5, 0.0, -0.5]),
+        "local_rewards": torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, -1.0]),
+        "trajectory_id": torch.tensor([1, 1, 2, 2, 3, 3]),
+        "turn_idx": torch.tensor([1, 2, 1, 2, 1, 2]),
+        "group_id": torch.zeros(6, dtype=torch.long),
+    }
+    base.update(extra)
+    return base
+
+
+def _turn_group_actor():
+    return _make_actor(
+        PPOActorConfig(
+            advantage_estimator="rebn",
+            turn_discount=1.0,
+            kl_ctl=0.0,
+            adv_norm=None,
+            group_baseline="turn",
+            group_baseline_leave1out=True,
+        )
+    )
+
+
+def test_turn_group_baseline_keeps_local_penalty_at_its_depth():
+    result = _turn_group_actor()._compute_advantages(_turn_group_data())
     torch.testing.assert_close(
-        result["group_baseline"],
+        result["turn_advantage"],
+        torch.tensor([0.0, 0.5, 0.0, 0.5, 0.0, -1.0]),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_group_baseline_is_unchanged_by_the_split():
+    """The episode total is the same either way, so the yardstick must be too.
+
+    This is the regression test for the bug that drove entropy up: the scalar the
+    baseline reads was taken from the first turn's return, so a penalty raised on
+    the last turn was missing from it. That shortfall sat on every turn as an
+    uncancelled negative advantage.
+    """
+    plain = _group_actor()._compute_advantages(_group_data())
+    split = _group_actor()._compute_advantages(
+        _group_data(local_rewards=torch.tensor([0.0, 0.0, 0.0, -1.0]))
+    )
+    # Episode 1 is scored against episode 2's total of 0.5 teaching - 1.0 leak.
+    torch.testing.assert_close(
+        plain["group_baseline"],
         torch.tensor([-0.5, -0.5, 0.5, 0.5]),
         rtol=0.0,
         atol=0.0,
     )
+    torch.testing.assert_close(
+        split["group_baseline"], plain["group_baseline"], rtol=0.0, atol=0.0
+    )
 
 
-def test_group_baseline_excludes_other_episodes_turn_local_penalties():
-    result = _group_actor()._compute_advantages(
+def test_only_the_leaking_turn_keeps_the_penalty():
+    plain = _group_actor()._compute_advantages(_group_data())
+    split = _group_actor()._compute_advantages(
         _group_data(local_rewards=torch.tensor([0.0, 0.0, 0.0, -1.0]))
     )
-    # Both episodes taught +0.5, so every baseline is +0.5 and the leak no
-    # longer leaks into the other episode's yardstick.
+    # Row 2 is episode 2's clean first turn; row 3 is the turn that leaked.
     torch.testing.assert_close(
-        result["group_baseline"], torch.full((4,), 0.5), rtol=0.0, atol=0.0
-    )
-    # The whole -1.0 lands on the one turn that leaked, and nowhere else.
-    torch.testing.assert_close(
-        result["turn_advantage"],
-        torch.tensor([0.0, 0.0, 0.0, -1.0]),
+        plain["turn_advantage"],
+        torch.tensor([1.0, 1.0, -1.0, -1.0]),
         rtol=0.0,
         atol=0.0,
     )
+    torch.testing.assert_close(
+        split["turn_advantage"],
+        torch.tensor([1.0, 1.0, 0.0, -1.0]),
+        rtol=0.0,
+        atol=0.0,
+    )
+    # The leaker is charged exactly as much as before; only the innocent turn in
+    # front of it is relieved.
+    assert split["turn_advantage"][3] == plain["turn_advantage"][3]
 
 
 def test_local_rewards_require_rebn():

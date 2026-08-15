@@ -1,0 +1,116 @@
+# 0810fc-presolve-opd-frozen -- 4 GPUs. -- distil from a FROZEN, already-trained
+# with-draft teacher instead of from the live policy. Terminate, no evaluation.
+#
+# TWO CHANGES from presolve-opd-noeval.yaml: opd.teacher_source goes to
+# 'checkpoint', and the `ref` engine is configured to hold the teacher. They are
+# one change in two places -- configs.py refuses either alone.
+#
+# WHY. Same-weights context distillation has no fixed point. The teacher is the
+# policy with an extra prompt, so the target moves with every update, and a
+# per-token KL penalty applied through the PPO surrogate can only push DOWN the
+# probability of tokens that were sampled -- it never pushes up the ones the
+# teacher preferred, because those carry no gradient. The only response available
+# to the policy is to flatten. Measured on 20260815_054008 at loss_weight 1.0:
+#
+#     step        0      2      4      6      7
+#     opd_kl   0.083  0.073  0.213  0.483  0.509     should FALL, grew 6x
+#     entropy  0.216  0.226  0.314  0.441  0.385
+#     clip     0.000  0.008  0.099  0.269  0.274     reference 0.004-0.007
+#     retest   0.435  0.450  0.347  0.331  0.271
+#
+# and at loss_weight 0.05 the same drift ran 0.074 -> 0.126 over 70 steps, too
+# weak to do anything. There is no weight where 'policy' both converges and acts.
+#
+# A FIXED teacher restores the reference formulation: suppressing the tokens it
+# dislikes redistributes mass toward it, because the target does not move.
+#
+# THE TEACHER. 20260813_053934_0810fc-leak-local at globalstep149 -- the with-draft
+# arm at its peak (retest 0.7064 at step 150), saved before the step-170 format
+# collapse. Rank 16, alpha 16, the same seven target modules as this run's actor,
+# over the same Qwen3-8B base, so it loads as a plain adapter swap with no
+# conversion. That checkpoint IS the target curve this arm is trying to reach.
+#
+# HOW IT LOADS. fsdp_engine._apply_peft_wrapper takes init_lora_path and calls
+# PeftModel.from_pretrained, so any engine with use_lora plus that path holds that
+# adapter. The `ref` slot is reused because it is the one frozen, optimizer-less
+# engine that already exists, with offload wiring and a compute_logp; rl_trainer
+# now builds it for a checkpoint teacher as well as for a KL reference, and skips
+# its own ref_logp pass while actor.kl_ctl is 0 so nothing pays for an unused
+# forward. actor.kl_ctl must stay 0 -- the two uses would need different weights
+# in the same engine, and configs.py rejects the combination.
+#
+# The POLICY still starts from a fresh adapter. Initialising it from step149 would
+# hand it the with-draft behaviour directly and there would be nothing to measure.
+#
+# COST. A second 8B engine, resident. offload is OFF on purpose: these are H200s
+# at 141 GB and a frozen 8B in bf16 is about 16 GB, so paying a CPU->GPU transfer
+# before every OPD forward would cost more than the memory it frees. It also
+# keeps the run off AReaL's global offload path -- ref.offload: true requires a
+# top-level enable_offload: true, which arms every engine's offload machinery for
+# the sake of one model that fits anyway. If memory ever does get tight, those two
+# keys go together and rl_trainer already onloads/offloads the ref around the OPD
+# pass. Expect the extra forward in timeperf/opd_teacher_logp, which ran 6.9 s at
+# 4 GPUs with the live policy as the teacher.
+#
+# WHAT THIS DECIDES. The floor is 0.42 (no draft), the target 0.546
+# (leak-local-stable-noeval, draft in the prompt), and w=0.05 with a live teacher
+# sat at 0.415 -- no transfer at all.
+#
+#     opd_reverse_kl/avg   must FALL now. This is the whole point of freezing: a
+#                          fixed target the policy can actually approach. If it
+#                          still rises, the problem is not the moving target and
+#                          reverse KL on sampled tokens is the wrong instrument.
+#     student_original_success   floor 0.42, target 0.546.
+#     update/entropy/avg   the runaway signature was 0.216 -> 0.441. Should stay
+#                          flat now; if it climbs again the flattening dynamic
+#                          survives freezing.
+#     update/clip_ratio    reference 0.004-0.007. 0.274 was the blowup.
+#
+# LOSS WEIGHT. Back to 0.05, deliberately. 1.0 was what made the instability
+# visible fast, and the frozen teacher changes the dynamics enough that the weight
+# has to be re-read rather than assumed: measure opd_reverse_kl for a few steps
+# and raise only if it converges and the pull is too small to move retest.
+#
+# GPU BUDGET. At 4 GPUs an arm is half the node, and this one now carries a third
+# engine. If it will not fit, drop ref.offload to false only after checking
+# memory, or run it as the sole arm.
+defaults:
+  - presolve-opd-noeval@_global_
+  - _self_
+
+trial_name: 0810fc-presolve-opd-frozen
+
+opd:
+  teacher_source: checkpoint
+  loss_weight: 0.05
+
+# The frozen teacher. `path` is the base; init_lora_path is the trained adapter
+# that goes on top of it. The LoRA fields have to match the adapter -- rank 16,
+# alpha 16, the same seven modules -- or _validate_init_lora_config rejects it.
+ref:
+  backend: ${actor.backend}
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${actor.path}
+  init_from_scratch: false
+  disable_dropout: true
+  dtype: ${actor.dtype}
+  # Resident. See COST above -- true here also requires top-level enable_offload.
+  offload: false
+  optimizer: null
+  use_lora: true
+  peft_type: lora
+  lora_rank: 16
+  lora_alpha: 16
+  target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+  init_lora_path: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/checkpoints/root/tutor-math-baseline/20260813_053934_0810fc-leak-local/default/epoch3epochstep8globalstep149
+  mb_spec:
+    n_mbs: 1
+    max_tokens_per_mb: 40960

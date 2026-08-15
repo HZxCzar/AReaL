@@ -19,8 +19,8 @@
 # optimised; the same scalar is being attributed to the turn that earned it. That
 # also means ReBN stays correct rather than being worked around: with gamma=1 the
 # return at turn t becomes S(T) - S(t-1), "how much of the final gain came from
-# turn t onward", and the return at the first turn -- the one group_baseline
-# averages -- is untouched.
+# turn t onward". Because those suffix returns have different meanings by depth,
+# the actor baseline below compares only rollouts at the same turn index.
 #
 # It is a measured quantity, not a judge, so unlike rewarding in-conversation
 # correctness it cannot be gamed by getting the student to recite an answer mid
@@ -47,9 +47,9 @@
 # term now has a gradient at all: on the control it slopes -0.142 per 100 steps
 # at t = -8.3 with a flat baseline.
 #
-# NOT COMBINED WITH THE LEAK CHANGE. reward.turn_local_components is left empty
-# so this is a single-factor arm. Add `turn_local_components: ["leak"]` under
-# reward to stop the leak penalty from discounting the good turns before it.
+# NOT COMBINED WITH THE LEAK CHANGE. reward.turn_local_components is left empty.
+# All turn-credit arms now share the same-depth baseline and std-only advantage
+# scaling, so comparisons among them still isolate their named factors.
 defaults:
   - base@_global_
   - _self_
@@ -68,3 +68,11 @@ student_generalize:
   # 0 = same replays as the final re-test, so S(t) and S(T) are measured the same
   # way and their difference carries no systematic bias.
   turn_credit_replays: 0
+
+actor:
+  # Suffix returns are comparable only at the same dialogue depth.
+  group_baseline: turn
+  group_baseline_leave1out: true
+  adv_norm:
+    mean_level: null
+    std_level: batch

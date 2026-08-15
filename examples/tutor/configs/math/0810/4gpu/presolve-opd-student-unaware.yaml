@@ -1,0 +1,46 @@
+# 0810fc-presolve-opd-student-unaware -- 4 GPUs. -- presolve-opd, with the
+# teacher told the student has not seen the problem.
+#
+# ONE KEY differs from presolve-opd.yaml: free_chat.student_has_not_seen_problem.
+# Everything else -- the distillation, the leak-local reward, the stable settings
+# -- is inherited. Read the two against each other.
+#
+# WHAT THE KEY DOES. Adds one sentence to the teacher's system prompt, before the
+# problem statement: "The student has not seen the math problem yet." It states a
+# fact and does not instruct the teacher how to respond, which is what makes it a
+# clean single-factor change rather than a new persona.
+#
+# WHY IT PAIRS WITH THIS ARM IN PARTICULAR. The failure this arm risks
+# distilling is precisely a consequence of the teacher not knowing this: over
+# 1647 episodes the opening shared 0.527 of its content words with the draft
+# against 0.214 with the task, 20.6% of openings continued a conversation that
+# never happened, and 2.6% credited the student with work it had never done. A
+# teacher that has read a full solution and does not know the student is blind
+# writes a next-step hint about a problem that was never named. Telling it the
+# student is blind is the cheapest thing that could remove that from the
+# privileged teacher's distribution -- and the privileged teacher's distribution
+# is what the reverse KL copies into the weights.
+#
+# So this is not just another ablation stacked on the arm. If presolve-opd loses
+# to its control because it distilled the parroting, this arm is the version that
+# should not, and the paired difference isolates that mechanism.
+#
+# NOTE the sentence lands in the system prompt, which is shared by the rollout
+# prompt, the OPD teacher prompt AND the pre-solve context. So the two prompts
+# still differ by exactly the two pre-solve messages and nothing else -- the
+# reverse KL stays attributable to the draft.
+#
+# ITS OWN CONTROL is leak-local-student-unaware-stable, which is the same
+# sentence without the distillation.
+#
+# GPU BUDGET. At 4 GPUs an arm is half the node, so at most TWO run at once,
+# launched a minute apart. Note that presolve-opd and this arm are a pair, so they
+# are the two -- nothing else fits beside them. See ../README.md.
+defaults:
+  - presolve-opd@_global_
+  - _self_
+
+trial_name: 0810fc-presolve-opd-student-unaware
+
+free_chat:
+  student_has_not_seen_problem: true

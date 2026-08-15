@@ -1300,17 +1300,20 @@ class PPOActorConfig(TrainEngineConfig):
             "at its first turn) across the episodes of a rollout group, so the "
             "baseline is episode-weighted rather than turn-weighted, and subtracts "
             "it from every turn return. Because it is a shift, within-episode "
-            "return differences (mid-turn rewards) are preserved exactly. Requires "
+            "return differences (mid-turn rewards) are preserved exactly. 'turn' "
+            "instead compares returns only across episodes with the same group_id "
+            "and turn_idx; missing ragged turns are excluded and singleton strata "
+            "produce zero relative advantage. Requires "
             "advantage_estimator='rebn' and a 'group_id' column in rollout data. "
             "None disables it.",
-            "choices": ["episode", None],
+            "choices": ["episode", "turn", None],
         },
     )
     group_baseline_leave1out: bool = field(
         default=True,
         metadata={
-            "help": "Exclude an episode from its own group baseline. Only used when "
-            "actor.group_baseline='episode'."
+            "help": "Exclude an episode from its own group baseline. Used when "
+            "actor.group_baseline is 'episode' or 'turn'."
         },
     )
     episode_loss_weighting: bool = field(
@@ -1445,9 +1448,9 @@ class PPOActorConfig(TrainEngineConfig):
             raise ValueError(
                 f"turn_discount must be in [0, 1], got {self.turn_discount}."
             )
-        if self.group_baseline not in {None, "episode"}:
+        if self.group_baseline not in {None, "episode", "turn"}:
             raise ValueError(
-                "actor.group_baseline must be 'episode' or None, "
+                "actor.group_baseline must be 'episode', 'turn', or None, "
                 f"got {self.group_baseline!r}."
             )
         if self.group_baseline is not None and self.advantage_estimator != "rebn":

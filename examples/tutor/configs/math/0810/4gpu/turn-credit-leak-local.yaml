@@ -1,10 +1,9 @@
 # 0810fc-turn-credit-leak-local -- 4 GPUs.
-# turn-credit.yaml plus the leak penalty held on the turn that leaked.
+# Turn credit plus a turn-local leak penalty and a same-depth group baseline.
 #
-# HOW TO READ IT AS AN ARM. Against turn-credit.yaml this differs in exactly one
-# key, reward.turn_local_components, so that pair isolates the leak factor.
-# Against leak-terminate-baseline.yaml it differs in two, so do not read it as a
-# single-factor result there.
+# HOW TO READ IT AS AN ARM. This is the candidate fix for the failed original
+# turn-credit-leak-local run. It deliberately changes the baseline and advantage
+# centering as one package, so it no longer isolates only the leak-local factor.
 #
 # WHY. ReBN accumulates turn rewards backward with turn_discount=1.0, and under
 # leak_handling_mode=terminate the leaking turn IS the last turn. So today a -1.0
@@ -19,11 +18,10 @@
 # leaking turn still eats all of it. Leaks are still detected, still terminate
 # the episode, and the leaked message is still withheld from the student.
 #
-# It also takes leaks out of the group baseline. The baseline is the ReBN return
-# at an episode's FIRST turn, so once the leak stops propagating there it stops
-# depressing the yardstick its groupmates are measured against. Today a clean
-# episode sharing a group with a leaker is handed a free positive advantage for
-# merely not being the leaker; at a 5% leak rate that is about a third of groups.
+# The same-depth group baseline below uses the final return at that row, including
+# any turn-local penalty. A leak is therefore compared only with peer rollouts at
+# the same dialogue depth: it can create a relative bonus for clean peers at that
+# depth, but it cannot contaminate earlier turns or another depth's yardstick.
 #
 # THE EVIDENCE, AND ITS LIMITS. On 20260812_064705 the teaching term collapsed
 # from 0.199 (steps 50-75) to 0.074 (steps 100+), ending below its no-presolve
@@ -35,14 +33,12 @@
 # sustained leak pressure erodes what pre-solve buys. That is n=3 and
 # correlational -- a hypothesis this arm tests, not a finding it assumes.
 #
-# WATCH THE LEAK RATE. This cuts the pressure against leaking by more than the
-# propagation term alone, because the spurious group-baseline bonus for not
-# leaking goes away too. That is correct behaviour, but it is the thing most
-# likely to go wrong. If rollout/leaks drifts above ~10%, drop reward.leak_penalty
-# to -0.2 or -0.3 rather than reverting turn_local_components: the point is to
-# stop the penalty discounting good turns, not to stop penalising leaks.
+# WATCH THE LEAK RATE. Pure group-relative centering cannot learn from a penalty
+# when every rollout in the same depth stratum has the same value, and a singleton
+# late-depth stratum has zero relative advantage. If rollout/leaks drifts above
+# ~10%, inspect per-depth stratum sizes and advantages before changing the penalty.
 #
-# THE TURN-CREDIT HALF is unchanged from turn-credit.yaml: each turn earns
+# THE TURN-CREDIT REWARDS are unchanged from turn-credit.yaml: each turn earns
 # retest_reward * (S(t) - S(t-1)) from prefix re-tests, the marginals telescope
 # to the old episode reward, and it costs (turns - 1) * turn_credit_replays extra
 # student calls plus the same number of judge calls per EPISODE. Measured offline
@@ -72,3 +68,14 @@ reward:
   # Held on the turn that produced it instead of being accumulated backward.
   # Add "format_error" here too if format ever stops being ~0.0006.
   turn_local_components: ["leak"]
+
+actor:
+  # Compare suffix returns only against other rollouts of the same problem at
+  # the same dialogue depth. Ragged episodes simply do not enter later strata.
+  group_baseline: turn
+  group_baseline_leave1out: true
+  # The same-turn baseline already centres every stratum. Keep only a global
+  # scale normalization; a batch mean would mix dialogue depths again.
+  adv_norm:
+    mean_level: null
+    std_level: batch

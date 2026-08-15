@@ -121,8 +121,18 @@ def main() -> int:
 
     trainer_src = inspect.getsource(rl)
     check("_has_opd gates the call", "_has_opd(rollout_batch)" in trainer_src)
-    check("_attach_opd_teacher_logps is called", "_attach_opd_teacher_logps(self.actor" in trainer_src)
-    call = trainer_src.index("_attach_opd_teacher_logps(self.actor")
+    # The engine is chosen rather than hardcoded: the live policy for context
+    # distillation, the frozen ref engine when opd.teacher_source is 'checkpoint'.
+    check(
+        "_attach_opd_teacher_logps is called",
+        "_attach_opd_teacher_logps(opd_engine" in trainer_src,
+    )
+    check(
+        "on the live policy by default, and the ref engine when frozen",
+        "opd_engine = self.ref if self._opd_frozen_teacher else self.actor"
+        in trainer_src,
+    )
+    call = trainer_src.index("_attach_opd_teacher_logps(opd_engine")
     adv = trainer_src.index("compute_advantages(")
     check(
         "it runs before advantages are computed",

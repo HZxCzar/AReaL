@@ -1,0 +1,14 @@
+defaults:
+  - presolve-opd@_global_
+  - _self_
+
+trial_name: 0810fc-presolve-opd-noeval
+
+evaluator:
+  # The version-0 pass, which is the expensive one for a short run.
+  eval_before_train: false
+  # And the periodic one. All three must be null: EpochStepTimeFreqCtl ORs them,
+  # and FrequencyControl only returns False forever when every frequency is unset.
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null

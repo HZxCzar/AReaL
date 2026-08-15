@@ -19,11 +19,10 @@
 # leaks were driven 0.30 -> 0.02; on 20260812_064711 (no pre-solve) teaching held
 # flat at ~0.08 while leaks fell just as hard. n=3 runs, correlational.
 #
-# WATCH THE LEAK RATE, same as the pre-solve version. Holding the penalty on its
-# own turn also removes it from the group baseline, so clean episodes stop
-# collecting a spurious bonus for not being the leaker. If rollout/leaks drifts
-# above ~10%, drop reward.leak_penalty to -0.2 or -0.3 rather than reverting
-# turn_local_components.
+# WATCH THE LEAK RATE, same as the pre-solve version. The local penalty enters
+# only its same-depth comparison. Singleton late-depth strata and all-equal
+# strata have zero relative advantage, so inspect per-depth group sizes if leaks
+# drift upward.
 defaults:
   - base@_global_
   - _self_
@@ -49,3 +48,11 @@ student_generalize:
 reward:
   # Held on the turn that produced it instead of being accumulated backward.
   turn_local_components: ["leak"]
+
+actor:
+  # Suffix returns are comparable only at the same dialogue depth.
+  group_baseline: turn
+  group_baseline_leave1out: true
+  adv_norm:
+    mean_level: null
+    std_level: batch

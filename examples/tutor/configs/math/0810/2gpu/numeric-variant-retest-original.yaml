@@ -1,0 +1,26 @@
+# Free-chat numeric-transfer arm.
+#
+# Each row's task/ground_truth is an accepted numeric variant, so every teacher
+# turn, pre-solve and leak check is grounded in the variant. The delayed
+# "original" re-test reads retest_task/retest_ground_truth from the same row,
+# which are the untouched source problem and answer. The student still sees no
+# problem statement until that final re-test turn.
+#
+# This is a dataset-only delta against 2gpu/base. Existing datasets without the
+# two retest fields retain the historical task/ground_truth behaviour.
+defaults:
+  - base@_global_
+  - _self_
+
+experiment_name: tutor-math-numeric-variant-retest
+trial_name: 0814fc2-numeric-variant-retest-original
+
+train_dataset:
+  path: examples/tutor/data/math_1.7b_8b/numeric_variant_retest_original_0814
+
+valid_dataset:
+  path: ${train_dataset.path}
+
+stats_logger:
+  wandb:
+    group: 0814-numeric-variant-retest-2gpu

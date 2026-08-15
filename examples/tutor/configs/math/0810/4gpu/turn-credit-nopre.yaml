@@ -1,7 +1,7 @@
 # 0810fc-turn-credit-nopre -- 4 GPUs.
 # turn-credit.yaml with the pre-solve draft off. Pairs with turn-credit.yaml to
-# isolate pre-solve, and with leak-terminate-baseline-nopre.yaml to isolate turn
-# credit.
+# isolate pre-solve. Against leak-terminate-baseline-nopre.yaml it tests the full
+# turn-credit package (marginal rewards plus same-depth baseline), not one key.
 #
 # WHY A NOPRE ARM IS WORTH A SLOT HERE. The reason to suspect leak pressure is
 # destroying teaching is that pre-solve's value IS a correct worked solution in
@@ -15,7 +15,8 @@
 # Everything else is turn-credit.yaml: each turn earns retest_reward *
 # (S(t) - S(t-1)) from prefix re-tests, the marginals telescope to the old episode
 # reward, and it costs (turns - 1) * turn_credit_replays extra student calls plus
-# the same number of judge calls per EPISODE.
+# the same number of judge calls per EPISODE. Its same-depth baseline and std-only
+# advantage scaling are also retained here.
 #
 # One cost note specific to this arm: without the filter_solver pre-solve, no
 # episode is skipped, so it runs ~7.5% more episodes per step than its pre-solve
@@ -42,3 +43,11 @@ student_generalize:
   # 0 = same replays as the final re-test, so S(t) and S(T) are measured the same
   # way and their difference carries no systematic bias.
   turn_credit_replays: 0
+
+actor:
+  # Suffix returns are comparable only at the same dialogue depth.
+  group_baseline: turn
+  group_baseline_leave1out: true
+  adv_norm:
+    mean_level: null
+    std_level: batch

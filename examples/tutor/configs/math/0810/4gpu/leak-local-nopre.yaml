@@ -1,0 +1,74 @@
+# 0810fc-leak-local-nopre -- 4 GPUs. -- leak-local without the teacher's private
+# solution draft.
+#
+# One key differs from leak-local.yaml: teacher_pre.enabled. Read the two against
+# each other; everything else, including turn_local_components and the
+# no-teaching baseline, is identical.
+#
+# WHY THIS PAIR IS WORTH A SLOT. leak-local is so far the only arm where the
+# teaching term rises under RL. Over steps 15-90, against a flat no-teaching
+# baseline of ~0.35:
+#
+#     arm                        retest/improvement   slope per 100 steps
+#     leak-terminate-baseline           0.200          +0.023  (t =  0.8)
+#     leak-local                        0.246          +0.127  (t = +4.3)
+#     turn-credit                       0.194          +0.058  (t =  1.2)
+#     turn-credit + leak-local          0.111          -0.370  (t = -10.4)
+#
+# and on the full control run the same slope was -0.142 (t = -8.3). So holding
+# the leak penalty on the turn that leaked, instead of letting ReBN charge it to
+# every turn before it, is what stopped the teaching term being traded away.
+#
+# The open question this arm answers is whether that gain needs the draft.
+# Presolve was the largest single effect measured on this task -- 0.211 with it
+# against 0.088 without, 3/3 pairs -- but on 20260812_064705 its advantage did
+# not survive training: retest/improvement peaked at 0.199 around step 50-75 and
+# fell to 0.074 by step 100+, ending BELOW the nopre arm at 0.098. The proposed
+# reading was that presolve's value lives in exactly the content the leak penalty
+# suppresses, so sustained leak pressure erodes it and nopre has nothing to erode.
+#
+# If that reading is right, leak-local should help the PRE arm much more than this
+# one, because it is the PRE arm that had something to lose. If instead this arm
+# gains the same amount, the leak-local effect is independent of the draft and the
+# two are additive rather than one rescuing the other.
+#
+# WHAT THIS ARM DOES NOT ISOLATE. Unchanged from leak-terminate-baseline-nopre.yaml
+# -- teacher_pre.enabled is one flag over two mechanisms, the draft in the system
+# prompt and the three-attempt filter that skips unsolvable episodes, and there is
+# no knob between them. Read that file's header before treating a loss here as
+# evidence about the draft alone.
+#
+# WATCH. stop/teacher_pre_skipped must be identically 0 and the whole
+# teacher_pre/* family absent, or the flag did not take. Then rollout/leaks:
+# leak-local runs 0.108 against the control's 0.085, which is the expected cost of
+# no longer charging the penalty to non-leaking turns. If it climbs past ~10% here
+# too, drop leak_penalty to -0.2 rather than reverting the accounting.
+#
+# COST. Nothing beyond leak-local, and slightly cheaper than it: no draft
+# generation and no draft judge calls, about 1.33 teacher generations an episode.
+#
+# GPU BUDGET. Unchanged and still binding: at 4 GPUs an arm is half the node, so
+# at most TWO of these run at once, launched a minute apart. See ../README.md.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0810fc-leak-local-nopre
+
+leak_handling_mode: terminate
+
+free_chat:
+  no_teaching_baseline: true
+
+reward:
+  # Identical to leak-local.yaml. The leak penalty is still -1.0, still
+  # terminating, and the leaked message is still withheld from the student; it
+  # just stops being accumulated backward onto the turns that came before it.
+  turn_local_components: ["leak"]
+
+# The one key that differs from leak-local.yaml. See
+# leak-terminate-baseline-nopre.yaml for why mode / attempts / verify are
+# deliberately not written out: they are dead once this is false, and spelling
+# them here would read as if the filter were still running.
+teacher_pre:
+  enabled: false

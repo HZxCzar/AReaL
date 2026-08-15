@@ -831,9 +831,29 @@ class PPOTrainer:
             )
             self.critic = self._create_critic(config.critic, critic_alloc)
         self.ref = None
-        if config.actor.kl_ctl > 0 and config.ref is not None:
+        # The ref engine has a second job: on-policy distillation from a FROZEN
+        # teacher. `opd.teacher_source: checkpoint` scores the privileged prompt
+        # under a checkpoint instead of under the live policy, and the ref slot is
+        # the one frozen, optimizer-less engine that already exists, with offload
+        # wiring and a compute_logp. Its own ref_logp is skipped below when
+        # kl_ctl is 0, so nothing pays for a pass it does not use.
+        opd_cfg = getattr(config, "opd", None)
+        self._opd_frozen_teacher = bool(
+            opd_cfg is not None
+            and getattr(opd_cfg, "enabled", False)
+            and getattr(opd_cfg, "teacher_source", "policy") == "checkpoint"
+        )
+        if config.ref is not None and (
+            config.actor.kl_ctl > 0 or self._opd_frozen_teacher
+        ):
             ref_alloc = ModelAllocation.from_str(config.ref.backend, name="ref")
             self.ref = self._create_train_engine(config.ref, ref_alloc)
+        if self._opd_frozen_teacher and self.ref is None:
+            raise ValueError(
+                "opd.teacher_source='checkpoint' needs a `ref` engine to hold the "
+                "frozen teacher, but `ref` is not configured. Give it "
+                "use_lora/init_lora_path pointing at the teacher checkpoint."
+            )
 
         self.teacher = None
         if config.teacher is not None:
@@ -1283,7 +1303,11 @@ class PPOTrainer:
                 if self._should_offload_critic:
                     self._offload_model(self.critic, role="critic")
 
-            if self.ref is not None:
+            # Only when the KL-to-reference penalty is actually on. The ref engine
+            # may exist purely to hold the frozen OPD teacher, and ref_logp is
+            # multiplied by kl_ctl, so at 0.0 this whole pass is a forward over the
+            # batch whose result is scaled to zero.
+            if self.ref is not None and self.config.actor.kl_ctl > 0:
                 if self._should_offload_ref:
                     self._onload_model(self.ref, role="ref")
                 with (
@@ -1428,8 +1452,19 @@ class PPOTrainer:
                         args={"global_step": global_step},
                     ),
                 ):
-                    _attach_opd_teacher_logps(self.actor, rollout_batch)
-                    self.actor.get_device_stats().log("opd teacher logp")
+                    # The live policy by default -- context distillation, where
+                    # the teacher differs from the policy only by its prompt. With
+                    # opd.teacher_source='checkpoint' the frozen ref engine scores
+                    # the privileged prompt instead, which is the reference
+                    # formulation: a fixed teacher gives the KL a target that does
+                    # not move underneath the policy.
+                    opd_engine = self.ref if self._opd_frozen_teacher else self.actor
+                    if self._opd_frozen_teacher and self._should_offload_ref:
+                        self._onload_model(self.ref, role="ref")
+                    _attach_opd_teacher_logps(opd_engine, rollout_batch)
+                    opd_engine.get_device_stats().log("opd teacher logp")
+                    if self._opd_frozen_teacher and self._should_offload_ref:
+                        self._offload_model(self.ref, role="ref")
 
             with (
                 stats_tracker.record_timing("compute_advantage"),

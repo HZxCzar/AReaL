@@ -1,0 +1,26 @@
+# 0810fc-leak-local-student-unaware -- 4 GPUs.
+#
+# Matches leak-local.yaml: teacher presolve is enabled, the re-test is scored
+# against a no-teaching baseline, and the leak penalty stays on the turn that
+# leaked. Turn credit remains disabled. The only added prompt condition states
+# that the student has not seen the math problem yet.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0810fc-leak-local-student-unaware
+
+leak_handling_mode: terminate
+
+free_chat:
+  no_teaching_baseline: true
+  student_has_not_seen_problem: true
+
+teacher_pre:
+  enabled: true
+
+student_generalize:
+  turn_credit: false
+
+reward:
+  turn_local_components: ["leak"]

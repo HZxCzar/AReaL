@@ -1,0 +1,58 @@
+# 0810fc-leak-local -- 4 GPUs. -- leak penalty stays on the turn that leaked.
+#
+# WHAT IT CHANGES. ReBN accumulates turn rewards backward with turn_discount=1.0,
+# so a leak raised on the last turn lands undiscounted in the returns of every
+# turn before it. Under leak_handling_mode=terminate the leaking turn IS the last
+# turn, so the whole episode absorbs it: three clean explanatory turns are told
+# they were worth -1.0 because the fourth gave the answer away. This arm reports
+# the leak component in a separate column that is held out of the backward
+# accumulation and added only at its own turn.
+#
+# The penalty itself is untouched -- still -1.0, still terminating, and the leaked
+# message is still withheld from the student. Only its blast radius changes.
+#
+# WHY IT MIGHT MATTER MORE THAN THE 5% LEAK RATE SUGGESTS. Leaking and explaining
+# well occupy overlapping token space: stating a result, showing a computation.
+# A penalty that reaches every turn does not only suppress leaks, it suppresses
+# the explanatory material next to them. Measured on 20260812_064705, the teacher
+# drifts from 300 to 200 chars a turn and 2.05 to 1.45 math expressions a turn
+# while leaks fall 0.30 -> 0.02, and the teaching term slopes -0.142 per 100 steps
+# at t = -8.3 with a flat baseline. Across three runs, the harder the leak
+# suppression, the worse the teaching trend.
+#
+# THE EPISODE SCALAR STILL SEES IT. actor.group_baseline='episode' reads one
+# scalar per episode off the return at its FIRST turn, so a penalty raised later
+# would be missing from the yardstick, and the shortfall would sit on every turn
+# as an advantage nothing cancels. That deflates the logits: an earlier build of
+# this arm ran max logit 41 -> 38 and entropy 0.09 -> 0.34 in eight steps. The
+# baseline now gathers each episode's local total onto its first turn, so it
+# still measures the episode total while the returns keep the per-turn placement.
+#
+# COST. None. No extra calls -- this is a change to how an existing number is
+# accounted for, not a new measurement.
+#
+# WHAT TO WATCH. rollout/leaks first: this removes the part of the penalty that
+# was landing on non-leaking turns, so pressure against leaking is genuinely
+# lower. If it climbs past ~10%, drop leak_penalty to -0.2 rather than reverting.
+# Then ppo_actor/update/entropy/avg and vocab_max_logits, which is where the
+# accounting bug showed up before it showed up anywhere else. Then whether
+# retest/improvement stops sloping down.
+#
+# SINGLE FACTOR. student_generalize.turn_credit stays off, so within a clean
+# episode every turn still shares one advantage. Pair with turn-credit.yaml for
+# the 2x2.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0810fc-leak-local
+
+leak_handling_mode: terminate
+
+free_chat:
+  no_teaching_baseline: true
+
+reward:
+  # Component names match the reward_component/* metrics. Add 'format_error' too
+  # if you want the same treatment there; it is at 0.0006 so it changes little.
+  turn_local_components: ["leak"]
