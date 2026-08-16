@@ -135,6 +135,14 @@ from examples.tutor.configs import (
     TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
     TutorStudentModelConfig,
 )
+from examples.tutor.core.attention_mask import (
+    DEFAULT_MASK,
+    apply_student_mask,
+    is_identity,
+    mask_current_turn,
+    mask_label,
+    normalize_mask,
+)
 from examples.tutor.core.callers import (
     ApiAuxiliaryCaller,
     AReaLEngineActorCaller,
@@ -208,6 +216,7 @@ from examples.tutor.prompts import (
     FILTER_SOLVER_USER_TEMPLATE,
     FREE_CHAT_STUDENT_RETEST_TEMPLATE,
     FREE_CHAT_STUDENT_RETEST_TEMPLATE_TRANSFER,
+    FREE_CHAT_STUDENT_MASK_NOTE,
     FREE_CHAT_STUDENT_SYSTEM_PROMPT,
     FREE_CHAT_TEACHER_OPEN_PROMPT,
     FREE_CHAT_TEACHER_SOLVE_PROMPT,
@@ -552,6 +561,10 @@ class StudentModelRuntime:
     weight: float
     caller: ApiAuxiliaryCaller
     confidence_caller: ApiAuxiliaryCaller | None = None
+    # What this student may see of the dialogue. Two runtimes can share model and
+    # caller and differ only here, which is how several learners are defined over
+    # one served endpoint. See core/attention_mask.py.
+    mask: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_MASK))
 
 
 @dataclass(slots=True)
@@ -560,6 +573,7 @@ class SelectedStudent:
     model: str
     caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller
     confidence_caller: ApiAuxiliaryCaller | None = None
+    mask: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_MASK))
 
 
 class TutorAgentWorkflow(RolloutWorkflow):
@@ -1369,6 +1383,23 @@ class TutorAgentWorkflow(RolloutWorkflow):
             context_length=model_context_length,
             context_window_margin=context_window_margin,
         )
+        # Logged because a mask that silently fails to apply produces a run that
+        # looks exactly like the unmasked control, and the conclusion would be
+        # "masks do not matter" rather than "the plumbing broke". One line at
+        # startup makes that distinguishable from the log alone.
+        masked = [
+            f"{runtime.name}={mask_label(runtime.mask)}(w={runtime.weight:g})"
+            for runtime in self.student_model_runtimes.values()
+        ]
+        # Run-level, not per-student: every student in a masked run gets the note
+        # explaining the markers, so an unmasked control differs from the others
+        # by its mask alone rather than by its instructions too.
+        self.student_mask_active = any(
+            not is_identity(runtime.mask)
+            for runtime in self.student_model_runtimes.values()
+        )
+        if masked and self.student_mask_active:
+            logger.info("student attention masks: %s", ", ".join(masked))
         self.tokenizer_path = tokenizer_path
         self.model_context_length = model_context_length
 
@@ -1391,7 +1422,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if config.name in seen_names:
                 raise ValueError("student_models names must be unique.")
             seen_names.add(config.name)
-            normalized.append(asdict(config))
+            entry = asdict(config)
+            # Validated here rather than at first use, so a bad mode fails at
+            # startup instead of thousands of episodes into a run.
+            entry["mask"] = normalize_mask(entry.get("mask"))
+            normalized.append(entry)
 
         if normalized and not any(config["weight"] > 0.0 for config in normalized):
             raise ValueError(
@@ -1427,6 +1462,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 name=student["name"],
                 model=student["model"],
                 weight=student["weight"],
+                mask=student["mask"],
                 caller=ApiAuxiliaryCaller(api_caller),
                 confidence_caller=(
                     ApiAuxiliaryCaller(
@@ -1474,6 +1510,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 model=runtime.model,
                 caller=runtime.caller,
                 confidence_caller=runtime.confidence_caller,
+                mask=runtime.mask,
             )
 
         if forced_name:
@@ -2048,6 +2085,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             latest_tutor_visible_output=INITIAL_TEACHER_FEEDBACK_PLACEHOLDER,
             student_prompt_selection=student_prompt_selection,
             student_turn_behavior=initial_student_turn_behavior,
+            student_mask=selected_student.mask,
         )
         free_chat = bool(getattr(self, "free_chat_enabled", False))
         if free_chat:
@@ -2280,6 +2318,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 latest_tutor_visible_output=tutor_visible_output,
                 student_prompt_selection=student_prompt_selection,
                 student_turn_behavior=student_turn_behavior,
+                student_mask=selected_student.mask,
             )
             student_prompt = self._build_student_prompt_from_state(student_state)
             student_answer_raw, student_error = await self._run_student(
@@ -3479,7 +3518,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             # The same one-line system prompt the conversation used, so the
             # re-test is the same student. The task appears for the first time in
             # the final user turn below.
-            system = FREE_CHAT_STUDENT_SYSTEM_PROMPT
+            system = self._free_chat_student_system()
         else:
             system = self._student_system_prompt_for_selection(
                 episode_artifact.student_prompt_selection
@@ -3509,13 +3548,31 @@ class TutorAgentWorkflow(RolloutWorkflow):
             final_turn = render_prompt(
                 STUDENT_TRANSFER_TURN_TEMPLATE, transfer_task=transfer_task
             )
+        # THE SAME MASK AS THE DIALOGUE, and this is not optional. The reward is
+        # this probe's score, so if the re-test saw more of the transcript than
+        # the student did while talking, the teacher would be paid for
+        # information that never reached the learner. The mask is looked up by
+        # student name rather than threaded through the anchor because probes are
+        # built after the episode, and student_model_runtimes is read-only shared
+        # config so the lookup is safe from any rollout worker.
+        probe_turns = apply_student_mask(
+            list(anchor.public_history.turns),
+            self._mask_for_student(episode_artifact.student_name),
+        )
         return [
             {"role": "system", "content": system},
-            *self._render_conversation(
-                anchor.public_history.turns, speaker="student"
-            ),
+            *self._render_conversation(probe_turns, speaker="student"),
             {"role": "user", "content": final_turn},
         ]
+
+    def _mask_for_student(self, student_name: str) -> dict[str, Any] | None:
+        """The configured mask for a student, or None when it has no entry.
+
+        None rather than raising: the legacy single-student path has no
+        student_models entry at all, and it must keep seeing the full history.
+        """
+        runtime = getattr(self, "student_model_runtimes", {}).get(student_name or "")
+        return runtime.mask if runtime is not None else None
 
     def _build_leak_check_prompt(
         self, task: str, ground_truth: str, teacher_action: str
@@ -5177,6 +5234,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
         ]
 
+    def _free_chat_student_system(self) -> str:
+        """The student system prompt, plus the mask note when the run uses masks.
+
+        One function for all three callers -- the conversation, the scored
+        re-test and the no-teaching baseline -- because a difference between them
+        would be measured as teaching rather than as a prompt change.
+        """
+        if not getattr(self, "student_mask_active", False):
+            return FREE_CHAT_STUDENT_SYSTEM_PROMPT
+        return "\n\n".join(
+            (FREE_CHAT_STUDENT_SYSTEM_PROMPT, FREE_CHAT_STUDENT_MASK_NOTE)
+        )
+
     def _build_student_messages(
         self, state: StudentTurnState
     ) -> list[dict[str, str]]:
@@ -5185,12 +5255,25 @@ class TutorAgentWorkflow(RolloutWorkflow):
             # only ever learns what this is about from what the teacher says,
             # which is the point: telling it to solve the task on every turn is
             # what made every reply an answer attempt.
-            system = FREE_CHAT_STUDENT_SYSTEM_PROMPT
+            system = self._free_chat_student_system()
         else:
             system = self._student_system_prompt_for_state(state)
             system = f"{system.rstrip()}\n\n{self._task_context(state.task)}"
-        turns = list(state.public_history.turns)
-        latest_teacher_output = state.latest_tutor_visible_output.strip()
+        # History first, then the turn being answered, and the two are masked
+        # DIFFERENTLY. A memory limit (teacher_fade / student_fade) describes what
+        # survives into later turns, so it leaves the live turn whole -- a student
+        # that cannot read the message it is replying to cannot reply at all, and
+        # every arm would collapse together. An attention limit (long_drop)
+        # describes what is read in the first place, so it truncates the live turn
+        # too: someone who stops reading long messages stops reading this one.
+        # Without that, a long message lands in full at the moment it is sent and
+        # only fades afterwards, which removes most of the pressure toward brevity.
+        turns = apply_student_mask(
+            list(state.public_history.turns), state.student_mask
+        )
+        latest_teacher_output = mask_current_turn(
+            state.latest_tutor_visible_output.strip(), state.student_mask
+        )
         if latest_teacher_output:
             turns.append({"role": "teacher", "content": latest_teacher_output})
         messages = [
@@ -5561,7 +5644,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             # subtracted from that probe's score, so any difference here would be
             # measured as teaching.
             if getattr(self, "free_chat_enabled", False):
-                system = FREE_CHAT_STUDENT_SYSTEM_PROMPT
+                system = self._free_chat_student_system()
                 # Must stay identical to the selector in
                 # `_build_student_probe_messages`, for the reason in the comment
                 # just above: a different prompt here reads as teaching.

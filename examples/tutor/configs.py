@@ -267,6 +267,78 @@ class TutorPromptPoolConfig:
 
 
 @dataclass
+class TutorStudentMaskConfig:
+    """What this student is allowed to see of the dialogue it is having.
+
+    The mechanism behind heterogeneous students that need no fine-tuning: the
+    same frozen model behaves like a different learner because a different part
+    of the transcript reaches it. See core/attention_mask.py for why this is
+    preferred over a persona (which this student ignores) and over an SFT
+    profile (which has to be defended as a modelling choice).
+
+    Applied to the HISTORY only. The turn being answered is always visible, so
+    the mask is a memory limit rather than deafness.
+    """
+
+    mode: str = field(
+        default="full",
+        metadata={
+            "help": (
+                "full: nothing hidden. teacher_fade: the teacher's earlier turns "
+                "are dropped, so only what the student said itself survives and "
+                "teaching persists only if the student was made to produce it. "
+                "student_fade: the student's own earlier turns are dropped, so "
+                "each teacher message must stand alone. long_drop: teacher text "
+                "past long_drop_words is never read, in history AND in the turn "
+                "being answered, so only short messages land at all. "
+                "The two fades are MEMORY limits and touch history only; "
+                "long_drop is an ATTENTION limit and also truncates the live turn."
+            )
+        },
+    )
+    keep_recent: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "For the fade modes: how many of the faded role's most recent "
+                "turns survive. 0 forgets all of them; 1 remembers only the last. "
+                "A value at or above the turn count makes the mask a no-op. Note "
+                "that with the live turn always visible, teacher_fade at 1 lets "
+                "the student effectively retain two teacher turns."
+            )
+        },
+    )
+    long_drop_words: int = field(
+        default=75,
+        metadata={
+            "help": (
+                "long_drop only: the word count past which the student stops "
+                "reading a teacher message. 75 is set so a short teaching turn "
+                "(under ~70 words) arrives intact while a 150-250 word "
+                "explanation loses roughly two thirds -- the cut is exactly "
+                "'longer than a brief teacher writes'."
+            )
+        },
+    )
+    placeholder: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Replace masked content with a short marker instead of deleting "
+                "it. A faded turn keeps its role and says its content is no "
+                "longer remembered; a truncated message ends in an ellipsis. "
+                "This preserves strict user/assistant alternation -- deletion "
+                "leaves runs of same-role messages that some chat templates "
+                "merge or reject -- and it keeps the next turn's references "
+                "coherent, so a reply reads as forgetful rather than confused. "
+                "Set false for hard deletion; the mask label records which, "
+                "because two runs differing only in this are not comparable."
+            )
+        },
+    )
+
+
+@dataclass
 class TutorStudentModelConfig:
     name: str = field(
         default=MISSING,
@@ -300,6 +372,10 @@ class TutorStudentModelConfig:
     temperature: float = field(default=0.7)
     top_p: float | None = field(default=None)
     max_concurrent_calls: int = field(default=8)
+    # Two entries may share base_url and model and differ only here: that is the
+    # intended way to define several students over one served endpoint, and it is
+    # why `name` rather than `model` keys the per-student metrics.
+    mask: TutorStudentMaskConfig = field(default_factory=TutorStudentMaskConfig)
     request_params: dict[str, Any] = field(
         default_factory=dict,
         metadata={

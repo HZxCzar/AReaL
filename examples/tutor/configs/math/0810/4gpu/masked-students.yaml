@@ -1,0 +1,224 @@
+# 0810fc-masked-students -- 4 GPUs. Three learners over ONE frozen model,
+# differing only in which part of the dialogue reaches them.
+#
+# WHAT THIS IS FOR. Every earlier attempt at heterogeneous students failed for a
+# reason that was not about teaching. Prompted personas: the student ignores a
+# self-description. SFT profiles off MalruleLib: they learned a 4-line format and
+# scored 1.5-4.4% on MATH against base's 33%. SFT profiles rebuilt in-domain:
+# format and teachability both fixed, but the wrong-approach profile came out
+# with base's error mix to two decimal places, because base is ALREADY 85%
+# wrong-approach and a majority-mode profile is just the base model.
+#
+# And the adaptivity question never got a gradient to work with. One oracle hint
+# helped every failure mode equally (+0.099 wrong-approach, +0.148 slip). Two
+# oracle hints aimed at different deficits ranked identically in every mode: the
+# 2x2 interaction was +0.001 +-0.037, no rank flip.
+#
+# A mask is a different kind of intervention. It installs no behaviour, fits no
+# parameters and requires no training. It removes information, and the
+# differential teaching need FOLLOWS from the removal rather than being
+# stipulated -- which is also what makes it defensible in a paper. See
+# examples/tutor/core/attention_mask.py for the argument in full.
+#
+# THE THREE LEARNERS, and what each one makes optimal.
+#
+#   student_fade   loses its own earlier turns, keeps everything it was told.
+#                  Each teacher message must stand alone, because the student
+#                  cannot refer back to its own working. Favours LONG,
+#                  self-contained explanations -- the Coverage hypothesis.
+#
+#   teacher_fade   loses the teacher's earlier turns, keeps its own words.
+#                  Anything the teacher said at turn 1 is gone by turn 4 unless
+#                  the student was made to restate it. Favours ELICITATION --
+#                  the Generation hypothesis, worth d=0.40 in the retention
+#                  literature.
+#
+#   long_drop      teacher text past long_drop_words is never read, in history
+#                  AND in the turn being answered. Favours BREVITY.
+#
+# WHY THREE AND NOT TWO. student_fade and teacher_fade can be satisfied at once by
+# a long self-contained message that ends with "now say that back to me", which
+# would be a dominant fixed policy and would leave nothing to adapt to -- exactly
+# how the failure-mode version died. long_drop is what breaks that: it wants SHORT
+# messages while student_fade wants LONG ones, and no message length is optimal
+# for both. The tension is on a scalar the teacher directly controls.
+#
+# MEMORY LIMITS VS AN ATTENTION LIMIT. The two fades describe what survives into
+# later turns, so they touch history only and the message being answered is always
+# whole -- a student that cannot read its current turn cannot reply at all.
+# long_drop describes what is read in the first place, so it also truncates the
+# live turn. That asymmetry is what makes brevity actually pay.
+#
+# The turn budget adds a second source of tension: a turn spent eliciting a
+# restatement is a turn not spent explaining, so at 5 turns the allocations
+# compete.
+#
+# THE MASK IS NEVER TOLD TO THE TEACHER. The teacher sees the full history and
+# has no field naming the student, so it has to infer the learner type from how
+# the replies behave. That is the adaptation problem, and it is inside training
+# rather than assumed: workflow._select_student samples a student per episode and
+# the name reaches metrics only.
+#
+# THE MASK APPLIES TO THE RE-TEST TOO, and that is load-bearing. The reward is
+# the solo re-test on a replay of the transcript; if the re-test saw more than the
+# student did while talking, the teacher would be paid for information that never
+# reached the learner.
+#
+# ONE BASELINE FOR ALL THREE. no_teaching_baseline is measured on an EMPTY
+# transcript, and masking an empty transcript is a no-op, so every learner shares
+# the same per-problem baseline. Gains are directly comparable with no
+# per-student normalisation -- which the SFT profiles never allowed, since each
+# had its own baseline and its own ceiling.
+#
+# WHAT TO WATCH, in order.
+#
+#   1. rollout/student/<name>/selected      about 1/3 each, or the mixture is off
+#   2. rollout/student/<name>/solved        each learner off floor and ceiling;
+#                                           a learner stuck at baseline is an
+#                                           all-fail group with no GRPO gradient
+#   3. the adaptation signature             mean VISIBLE teacher words per
+#                                           learner. If the teacher adapts, the
+#                                           three series separate; if it settles
+#                                           on one length, it found a compromise
+#                                           and there is no adaptation. Known
+#                                           correct direction: short for
+#                                           long-drop, long for student-fade.
+#   4. generalize/test/student_original_success per learner, from the forced-student
+#                                           eval that evaluator.student_model_names
+#                                           null already runs
+#
+# (3) is the point of this arm: one number per learner, with a known correct
+# direction, rather than a judge deciding whether a strategy changed.
+#
+# A startup log line lists each student's resolved mask. A mask that silently
+# fails to apply makes this run look exactly like the unmasked control, and the
+# conclusion would read as "learners need the same teaching" when the plumbing
+# broke; check that line before trusting anything else.
+#
+# COST. Identical to the control. No extra calls, no adapters to serve, no SFT.
+# The masks make the student's prompts SHORTER, so if anything this is cheaper.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0810fc-masked-students
+
+leak_handling_mode: terminate
+
+free_chat:
+  # Required for the shared per-problem baseline that every gain is read against.
+  no_teaching_baseline: true
+
+# RESTATED IN FULL because omegaconf replaces a list on merge rather than merging
+# element-wise, so there is no way to add a mask to one entry without writing all
+# of them. Everything below is copied from ../2gpu/base.yaml except `name`, the
+# weights, and the `mask` blocks. THAT MEANS IT CAN DRIFT: if the endpoints, keys
+# or sampling parameters change in the base, they will not follow here.
+#
+# All three learners share base_url and model -- they are the SAME served model.
+# `name` is what keys per-student metrics and forced eval, which is why it differs.
+student_models:
+# Coverage learner: keeps what it was told, forgets what it said.
+- name: student-fade
+  weight: 1.0
+  mask:
+    mode: student_fade
+    keep_recent: 0
+  base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+  model: qwen3-1.7b
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+# Generation learner: keeps its own words, forgets the teacher's. keep_recent 0
+# rather than 1 because at 1 the most recent teacher turn survives into history
+# and, with the current turn always visible, the student would effectively retain
+# two teacher turns -- a much weaker constraint than intended.
+- name: teacher-fade
+  weight: 1.0
+  mask:
+    mode: teacher_fade
+    keep_recent: 0
+  base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+  model: qwen3-1.7b
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+# Brevity learner, and the only ATTENTION limit of the three: long_drop truncates
+# the LIVE turn as well as history, so a long message never lands at all rather
+# than landing now and fading later. 75 words is set so a brief teaching turn
+# arrives intact while a 200-word explanation loses roughly two thirds.
+- name: long-drop
+  weight: 1.0
+  mask:
+    mode: long_drop
+    long_drop_words: 75
+  base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+  model: qwen3-1.7b
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+# Unmasked control at weight 0.0: never sampled during training, but
+# evaluator.student_model_names is null, which evaluates EVERY configured
+# student. So this gives the no-constraint reference curve for free, the same
+# trick the llama and gemma entries use in the base config.
+- name: full-control
+  weight: 0.0
+  mask:
+    mode: full
+  base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+  model: qwen3-1.7b
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+
+stats_logger:
+  wandb:
+    group: 0810-masked-students

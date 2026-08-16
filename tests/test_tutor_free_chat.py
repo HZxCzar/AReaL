@@ -824,10 +824,28 @@ def main() -> int:
     baseline_source = _inspect.getsource(
         TutorAgentWorkflow._no_teaching_baseline
     )
+    probe_source = _inspect.getsource(
+        TutorAgentWorkflow._build_student_probe_messages
+    )
+    # Both must reach the student system prompt through the SAME accessor. It used
+    # to be the bare constant in both places; the attention masks moved it behind
+    # _free_chat_student_system, which appends the mask note when a run configures
+    # masks. Checking for the shared accessor rather than for a constant name is
+    # what keeps the invariant -- baseline prompt == re-test prompt -- enforced
+    # structurally instead of by two copies happening to agree.
     check("the baseline probe uses the same prompt the re-test uses",
-          "FREE_CHAT_STUDENT_SYSTEM_PROMPT" in baseline_source
+          "_free_chat_student_system" in baseline_source
+          and "_free_chat_student_system" in probe_source
           and "FREE_CHAT_STUDENT_RETEST_TEMPLATE" in baseline_source,
           "a different prompt here would be measured as teaching")
+    check("the mask note reaches all three student prompts or none",
+          _inspect.getsource(
+              TutorAgentWorkflow._free_chat_student_system
+          ).count("FREE_CHAT_STUDENT_MASK_NOTE") == 1
+          and "_free_chat_student_system" in _inspect.getsource(
+              TutorAgentWorkflow._build_student_messages
+          ),
+          "the conversation, the re-test and the baseline must agree")
     check("it is cached per problem, under a lock",
           "_no_teaching_baselines[key]" in baseline_source
           and "_no_teaching_baseline_lock" in baseline_source)
