@@ -189,6 +189,31 @@ def main() -> int:
     mask["mode"] = "student_fade"
     ok &= check("module default intact", DEFAULT_MASK == snapshot)
 
+    # The masks are only worth anything if a GRPO group faces ONE learner. A
+    # per-rollout draw puts mask identity straight into the advantage --
+    # group_baseline='episode' subtracts the group mean -- and with three masks
+    # that is variance the teacher can neither see nor control, since it speaks
+    # first. Measured at 29-33% of within-group spread with only two students.
+    print("\nthe student draw is group-scoped")
+    from examples.tutor.workflow import TutorAgentWorkflow  # noqa: E402
+
+    flow = TutorAgentWorkflow(dataset_type="math", answer_scorer="math")
+
+    def draw(problem, version=0, role="student"):
+        return flow._group_rng(role, problem, version).random()
+
+    ok &= check("eight rollouts of one problem draw alike",
+                len({draw("train-1") for _ in range(8)}) == 1)
+    ok &= check("different problems can draw differently",
+                len({draw(f"train-{i}") for i in range(8)}) > 1)
+    ok &= check("a new weight version redraws",
+                draw("train-1", 0) != draw("train-1", 1))
+    ok &= check("roles are independent streams",
+                draw("train-1", 0, "student") != draw("train-1", 0, "teacher"))
+    ok &= check("a None version is one stable bucket",
+                flow._group_rng("student", "train-1", None).random()
+                == flow._group_rng("student", "train-1", None).random())
+
     print("\n" + ("ALL PASS" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1
 

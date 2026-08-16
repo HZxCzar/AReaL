@@ -1475,11 +1475,39 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         return runtimes
 
+    def _group_rng(
+        self, role: str, group_key: str, rollout_version: int | None
+    ) -> random.Random:
+        """A draw that is constant across one problem's rollouts in one step.
+
+        `gconfig.n_samples` rollouts of a problem form the GRPO group, and
+        `actor.group_baseline='episode'` subtracts that group's mean return from
+        every member. Anything drawn independently per rollout therefore lands
+        directly in the advantage. With two students that was measured at 29-33%
+        of the within-group spread on 20260815_065439; with three attention masks
+        it would be worse, and the teacher can neither see nor control which one
+        it drew, because it speaks first. That variance would sit on the teaching
+        term, which is the weakest of the three.
+
+        Seeding on the problem holds the draw fixed across the group; including
+        the weight version lets it be redrawn next step, so a problem is not
+        pinned to one student for all 10.5 epochs of a 500-step run.
+
+        A None version -- the external-client path, where there are no local
+        weights -- collapses to one bucket, fixing the draw per problem for the
+        whole run. That is right there: a teacher behind an API does not drift
+        between steps, so there is no version to track.
+        """
+        version = int(rollout_version) if rollout_version is not None else -1
+        return random.Random(f"{self.prompt_pool_seed}:{role}:{group_key}:{version}")
+
     def _select_student(
         self,
         data: dict[str, Any],
         *,
         aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller,
+        group_key: str = "",
+        rollout_version: int | None = None,
     ) -> SelectedStudent:
         try:
             is_eval = bool(getattr(workflow_context.get(), "is_eval", False))
@@ -1500,7 +1528,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     )
             else:
                 runtimes = list(student_model_runtimes.values())
-                runtime = random.choices(
+                # Group-scoped, not per-rollout: see _group_rng. With one student
+                # at positive weight this is the same draw either way, so every
+                # single-student arm is unaffected.
+                rng = self._group_rng(
+                    "student", group_key or str(data.get("id") or ""), rollout_version
+                )
+                runtime = rng.choices(
                     runtimes,
                     weights=[item.weight for item in runtimes],
                     k=1,
@@ -1954,6 +1988,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             return None
 
         task = str(data["task"])
+        # The GRPO group is one problem's n_samples rollouts, so the problem id is
+        # the group. Falls back to the task text when a row carries no id.
+        group_key = str(data.get("id") or task)
         ground_truth = str(data["ground_truth"])
         # Attached by GroupedRolloutWorkflow only when wants_group_index is set.
         group_index = data.get("group_index")
@@ -2001,7 +2038,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
             external_client=external_client,
         )
         aux_caller = self._make_auxiliary_caller(chat_caller=aux_chat_caller)
-        selected_student = self._select_student(data, aux_caller=aux_caller)
+        selected_student = self._select_student(
+            data,
+            aux_caller=aux_caller,
+            group_key=group_key,
+            rollout_version=episode_lora_version,
+        )
         student_caller = selected_student.caller
         student_generalize_caller = self._make_student_generalization_caller(
             aux_caller=student_caller,

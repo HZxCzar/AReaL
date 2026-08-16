@@ -104,6 +104,45 @@ defaults:
 trial_name: 0810fc-masked-students
 
 leak_handling_mode: terminate
+# Malformed teacher output ends the trajectory. Safe here because
+# reward.max_turn_penalty is 0.0, so a format-terminated episode collects the
+# format penalty and loses its re-test -- strictly worse than the worst honest
+# outcome, rather than a cheap way out of a losing episode.
+format_handling_mode: terminate
+
+# KEEP LEAK AND FORMAT ON THE TURN THAT EARNED THEM. advantage_estimator is rebn
+# with turn_discount 1.0, so a turn reward accumulates backward undiscounted: a
+# leak on turn 5 lands in full in the returns of turns 1-4, which may have taught
+# perfectly well. Naming a component here holds it local.
+#
+# It matters most early, which is exactly the phase this arm is meant to change. On
+# 20260815_065439 every point of reward the policy earned came from these two --
+# leak +0.143 and format +0.072 per 100 steps -- while the teaching term moved
+# AGAINST the total at -0.041. Both are nearly spent now (0.043 leaks, 0.003 format
+# errors), so whatever this arm earns cannot come from the same place.
+#
+# Requires rebn and is incompatible with actor.reward_norm; the inherited chain is
+# rebn with reward_norm null, so both hold.
+reward:
+  turn_local_components:
+  - leak
+  - format_error
+
+# MUST BE OVERRIDDEN. The base pins this to ['qwen3-1.7b'], a name no student in
+# this arm carries, and configs.py raises on an eval student with no student_models
+# entry -- so leaving it would fail at startup. Naming all four gives a per-learner
+# eval curve including the unmasked control, the only way to see whether masking
+# costs absolute performance rather than merely redistributing it.
+#
+# AND IT IS THE EXPENSIVE LINE. The evaluator expands the validation set once per
+# named student, so 528 problems becomes 2112 and a pass that cost ~1500 s costs
+# ~6000 s. At freq_steps 25 over 500 steps that is 20 passes, about 33 h of
+# evaluation on top of ~33 h of training. 50 halves it to 10 points on the curve,
+# enough to see three series separate -- and the adaptation signature this arm is
+# really for is a TRAINING-side number, available every step.
+evaluator:
+  student_model_names: null
+  freq_steps: 50
 
 free_chat:
   # Required for the shared per-problem baseline that every gain is read against.
