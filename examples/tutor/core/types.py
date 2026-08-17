@@ -158,6 +158,11 @@ class TutorTurnState:
     student_reply_before_teacher: str = ""
     preceding_student_turn_behavior: StudentTurnBehavior | None = None
     guidance: TeacherGuidance | None = None
+    # Exact prior teacher replies, parallel to the teacher turns in
+    # ``public_history``. Keeping this outside PublicHistoryState prevents the
+    # student's conversation and re-test views from ever receiving private
+    # reasoning. A tuple snapshots the history stored on each training row.
+    previous_tutor_raw_outputs: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -221,6 +226,9 @@ class EpisodeArtifact:
     student_prompt_selection: PromptPoolSelection | None = None
     initial_student_turn_behavior: StudentTurnBehavior | None = None
     initial_student_question_generation: StudentQuestionGenerationResult | None = None
+    # Both transcripts and both scorers' solutions from the tutor/PedagogicalRL
+    # cross, for the debug trace. Evaluation only, and None everywhere else.
+    cross_eval_details: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)

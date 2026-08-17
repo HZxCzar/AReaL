@@ -518,6 +518,7 @@ def main(args):
         opd=asdict(config.opd),
         prompt_instruction=asdict(config.prompt_instruction),
         free_chat=asdict(config.free_chat),
+        cross_eval=asdict(config.cross_eval),
         teacher_history_tags=config.teacher_history_tags,
         local_advantage_turn_discount=config.actor.turn_discount,
         teacher_system_prompt=config.teacher_system_prompt,

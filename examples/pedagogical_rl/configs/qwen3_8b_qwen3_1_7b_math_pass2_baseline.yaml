@@ -1,0 +1,273 @@
+experiment_name: pedagogical-rl-math
+trial_name: qwen3-8b-qwen3-1.7b-math-pass2-baseline
+
+seed: 42
+enable_offload: false
+dynamic_bs: false
+# AReaL's dataset batch counts problem groups. 16 problems x gconfig.n_samples=8
+# gives 128 episodes per outer step. Stop explicitly at 750 rollout batches =
+# 96,000 episodes. actor.num_iterations=2 yields 1,500 optimizer updates.
+total_train_epochs: 19
+total_train_steps: 750
+tokenizer_path: ${actor.path}
+
+workflow: examples.pedagogical_rl.workflow.PedagogicalRLWorkflow
+eval_workflow: ${workflow}
+max_train_examples: 640
+max_eval_examples: -1
+debug_trace_dir: ${cluster.fileroot}/${experiment_name}/${trial_name}/debug_traces
+debug_trace_every_n_rollouts: 10
+
+student_model:
+  # Same deployment the tutor arm uses. A hardcoded endpoint here would
+  # both go stale and break comparability: the two arms must talk to the
+  # same student.
+  base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+  model: ${oc.env:PED_STUDENT_API_MODEL,qwen3-1.7b}
+  api_key: ${oc.env:INF_API_KEY}
+  timeout: 120
+  max_retries: 2
+  max_concurrent_calls: 4
+  seed: 42
+  top_k: 20
+  min_p: 0.0
+  extra_headers:
+    x-inspire-inference-key: tutor-train-qwen17b-student
+  chat_template_kwargs:
+    enable_thinking: false
+
+judge_model:
+  base_url: ${oc.env:TUTOR_QWEN3_8B_BASE_URL}
+  model: ${oc.env:PED_AUX_API_MODEL,qwen3-8b}
+  api_key: ${student_model.api_key}
+  timeout: 120
+  max_retries: 2
+  max_concurrent_calls: 4
+  seed: 42
+  top_k: 20
+  min_p: 0.0
+  extra_headers:
+    x-inspire-inference-key: tutor-train-qwen8b-auxiliary
+  chat_template_kwargs:
+    enable_thinking: false
+
+generation:
+  max_teacher_turns: 10
+  max_tokens_in_conversation: 24576
+  max_tokens_per_teacher_turn: 4096
+  max_tokens_per_student_turn: 2048
+  max_tokens_per_student_attempt: 2048
+  max_tokens_per_judge_attempt: 1024
+  number_student_attempts: 8
+  number_judge_attempts: 2
+  student_temperature: 0.7
+  student_top_p: 0.8
+  judge_temperature: 0.0
+  judge_top_p: 1.0
+  extra_penalty_for_rejected_judges: 1.0
+  use_thinking: false
+  # Training gate only. Evaluation always records both turn-level and native
+  # whole-dialogue leak judgments on the same completed rollout.
+  leak_judge_mode: pedagogical_rl
+
+teacher_pre:
+  enabled: false
+  # true: verify up to `attempts` drafts and reject the rollout if all fail.
+  # false: generate exactly one unjudged private draft.
+  verify: true
+  attempts: 3
+  # Non-positive values reuse generation.max_tokens_per_teacher_turn.
+  max_tokens: 0
+
+cluster:
+  n_nodes: 1
+  n_gpus_per_node: 2
+  fileroot: ${oc.env:PED_AREAL_OUTPUT_ROOT,output/pedagogical_rl}
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${cluster.fileroot}/name_resolve
+
+scheduler:
+  type: local
+
+rollout:
+  backend: "sglang:d1p1t1"
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  tokenizer_path: ${tokenizer_path}
+  max_concurrent_rollouts: 16
+  queue_size: null
+  consumer_batch_size: ${train_dataset.batch_size}
+  # PedagogicalRL is synchronous/on-policy. Do not let a later actor version
+  # enter the batch while the 128 trajectories are being collected.
+  max_head_offpolicyness: 0
+  pause_grace_period: 10
+  enable_rollout_tracing: false
+  scheduling_spec: ${actor.scheduling_spec}
+  use_lora: true
+  dump_to_file: true
+  openai:
+    mode: inline
+    tool_call_parser: qwen25
+    reasoning_parser: qwen3
+    chat_template_type: concat
+    export_style: concat
+    turn_discount: 1.0
+
+gconfig:
+  n_samples: 8
+  min_new_tokens: 0
+  max_new_tokens: 4096
+  # PedagogicalRL caps visible dialogue content at 24,576 tokens while its
+  # inference context is 40,960, leaving room for system/chat-template tokens.
+  max_tokens: 40960
+  greedy: false
+  temperature: 0.7
+  top_p: 1.0
+  lora_name: default_lora
+
+eval_gconfig:
+  n_samples: 1
+  min_new_tokens: 0
+  max_new_tokens: 4096
+  max_tokens: 40960
+  greedy: false
+  temperature: 0.7
+  top_p: 1.0
+  lora_name: default_lora
+
+actor:
+  backend: "fsdp:d1p1t1"
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${oc.env:PED_TEACHER_BASE_MODEL,examples/pedagogical_rl/models/teacher}
+  init_from_scratch: false
+  disable_dropout: true
+  gradient_checkpointing: true
+  dtype: bfloat16
+  mb_spec:
+    n_mbs: 1
+    max_tokens_per_mb: 40960
+  optimizer:
+    type: adam
+    lr: 5.0e-5
+    weight_decay: 0.0
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1.0e-8
+    lr_scheduler_type: constant
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.001
+  eps_clip: 0.4
+  use_ppo_clip: true
+  advantage_estimator: gae
+  temperature: ${gconfig.temperature}
+  reward_scaling: 1.0
+  reward_bias: 0.0
+  reward_clip: 20.0
+  kl_ctl: 0.0
+  ppo_n_minibatches: 1
+  recompute_logprob: true
+  use_decoupled_loss: false
+  behave_imp_weight_cap: null
+  behave_imp_weight_mode: disabled
+  reward_norm:
+    mean_level: group
+    std_level: group
+    std_unbiased: true
+    eps: 1.0e-4
+    group_size: ${gconfig.n_samples}
+  adv_norm: null
+  num_iterations: 2
+  weight_update_mode: disk
+  use_lora: ${rollout.use_lora}
+  peft_type: lora
+  lora_rank: 16
+  lora_alpha: 16
+  target_modules: [all-linear]
+  max_new_tokens: ${gconfig.max_new_tokens}
+  scheduling_spec:
+    - task_type: worker
+      port_count: 2
+      gpu: 1
+      cmd: python3 -m areal.infra.rpc.rpc_server
+      env_vars: {}
+
+ref: null
+critic: null
+
+sglang:
+  model_path: ${actor.path}
+  random_seed: ${seed}
+  skip_tokenizer_init: true
+  dtype: ${actor.dtype}
+  max_running_requests: 64
+  context_length: 40960
+  mem_fraction_static: 0.75
+  enable_lora: ${actor.use_lora}
+  max_lora_rank: ${actor.lora_rank}
+  max_loaded_loras: 16
+
+train_dataset:
+  # One AReaL task is one problem group and returns gconfig.n_samples episodes.
+  batch_size: 16
+  # PedagogicalRL shuffles both the selected dataset and its train sampler.
+  shuffle: true
+  drop_last: true
+  pin_memory: false
+  num_workers: 0
+  path: examples/pedagogical_rl/data/math_1.7b_8b/math_pass@2
+  type: rl
+  max_length: 40960
+  # The example selects the official PedagogicalRL first-640 subset before the
+  # trainer starts. Keep loading local so Dataset.select() is available.
+  scheduling_spec: null
+
+valid_dataset:
+  batch_size: 16
+  shuffle: false
+  pin_memory: false
+  num_workers: 0
+  path: ${train_dataset.path}
+  type: rl
+  scheduling_spec: null
+
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 10
+  freq_secs: null
+
+recover:
+  mode: auto
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 10
+  freq_secs: 3600
+
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  eval_before_train: true
+  freq_epochs: null
+  freq_steps: 10
+  freq_secs: null
+  average_rollouts: 3
+
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: offline
+    entity: hz-czar-stanford
+    project: TAgent
+    name: ${trial_name}
+    group: pedagogical-rl-qwen3-math-pass2
+    tags: [qwen3-8b, qwen3-1.7b, math-pass2, pedagogical-rl, lora]

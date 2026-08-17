@@ -1,0 +1,185 @@
+# The SFT arm of the head-to-head: distil the teacher's own answers, no teaching.
+#
+# The third line of the comparison. The teacher answers the 759 training problems
+# under the standard math prompt, the correct ones are kept, and the student is
+# fine-tuned on them. No dialogue, no student, no RL. Whatever the two taught
+# arms score above this is what teaching bought over plain distillation.
+#
+# BUILD THE DATA FIRST -- this config has no generation step of its own:
+#
+#     set -a && . ./.env && set +a
+#     PYTHONPATH=$PWD .venv/bin/python \
+#         examples/tutor/scripts/build_sft_distill_dataset.py \
+#         --out ${cluster.fileroot}/data/distill_qwen3_8b   # see below
+#
+# The teacher gets up to 3 tries per problem and sampling STOPS at the first
+# solution the judge accepts, so every row of `correct/` is right and there is
+# exactly one row per solved problem. A problem it never solves in 3 tries is
+# skipped rather than trained on with a wrong target -- summary.json reports
+# `coverage` and `problems_skipped`, and both belong next to whatever this arm
+# scores, because a floor built on 95% of the split is a floor on 95% of it.
+#
+# ONE ROW PER PROBLEM IS THE FAIR CHOICE. Keeping every correct sample instead
+# would give a problem the teacher finds easy several rows and a hard one a
+# single row, so the student would train mostly on what was already easy --
+# exactly the part of the split where teaching has least to add. It is also the
+# unit the RL arms train on, which makes "all three arms train on the same 759
+# rows" literally true. `--per-task 0` builds the larger imbalanced set if you
+# want it for comparison.
+#
+# THEN TRAIN, reusing the stock SFT entry point -- there is no tutor-specific
+# training code here, and there should not be:
+#
+#     PYTHONPATH=$PWD .venv/bin/python examples/math/gsm8k_sft.py \
+#         --config examples/tutor/configs/sft/qwen3-1.7b-distill.yaml
+#
+# THEN SCORE, which is the part that has to match the other two arms:
+#
+#     PYTHONPATH=$PWD .venv/bin/python examples/tutor/scripts/eval_sft_student.py \
+#         --checkpoint <saver output>/epoch3epochstep0globalstep0 \
+#         --out /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/sft/results.json
+#
+# WHAT IS TRAINED ON WHAT. The 759 TRAIN problems, the same rows both RL arms
+# train on. The 528 test problems are never generated for, never trained on and
+# never tuned on -- the holdout below is 2% of the training examples and exists
+# only to give the SFT trainer a loss curve.
+#
+# THE PROMPT FORMAT IS THE MATH TEMPLATE, NOT EITHER SCORER'S. Training pairs are
+# `<problem>\n\nPlease reason step by step, and put your final answer within
+# \boxed{}.` -> the teacher's solution, under the student's chat template. At
+# evaluation this student is prompted by the two shared scorers, whose wording it
+# has never seen. That is deliberate: bending the eval prompt toward this arm's
+# training format would stop the three arms sharing one instrument, and it is the
+# instrument that makes the table a table. Both scorers do ask for a boxed answer,
+# so the request is the same in substance.
+#
+# NOT COMPARABLE ON ABSOLUTE VALUES with the RL arms' student numbers. Those reach
+# the student over the INF endpoint; eval_sft_student.py serves a checkpoint
+# locally with SGLang. It scores the base model through the same harness for that
+# reason -- quote the base-to-SFT difference, not the raw number.
+experiment_name: tutor-sft-distill
+trial_name: qwen3-1.7b-distill-correct
+
+seed: 42
+enable_offload: false
+# About 750 examples: one per problem, over the 759 the teacher solves within 3
+# tries at a measured 0.94 per-attempt pass rate. At batch 32 that is ~23
+# optimizer steps an epoch, so three epochs is ~70 steps -- enough for a 1.7B to
+# learn a fixed answer format, and about where a set this small stops improving
+# and starts memorising. saver.freq_epochs 1 keeps every epoch so the stopping
+# point comes from the holdout loss and eval_sft_student.py rather than from this
+# comment.
+total_train_epochs: 3
+tokenizer_path: ${actor.path}
+
+cluster:
+  n_nodes: 1
+  n_gpus_per_node: 2
+  fileroot: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/sft
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${cluster.fileroot}/name_resolve
+
+scheduler:
+  type: local
+
+actor:
+  backend: "fsdp:d2p1t1"
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  # The same frozen student both RL arms teach, before any training.
+  path: ${oc.env:TUTOR_STUDENT_BASE_MODEL,examples/tutor/models/student}
+  init_from_scratch: false
+  gradient_checkpointing: true
+  dtype: bfloat16
+  mb_spec:
+    max_tokens_per_mb: 8192
+  optimizer:
+    type: adam
+    # 1e-5, not the 2e-5 of examples/math/gsm8k_sft.yaml. That config trains on
+    # 7.5k GSM8K rows; this is ~750 examples on a 1.7B model, where the larger
+    # rate overfits inside one epoch and the arm stops measuring distillation.
+    lr: 1.0e-5
+    weight_decay: 0.05
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1.0e-5
+    lr_scheduler_type: cosine
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.03
+  scheduling_spec:
+    - task_type: worker
+      port_count: 2
+      gpu: 1
+      mem: 32
+      cmd: python3 -m areal.infra.rpc.rpc_server
+      env_vars: {}
+
+train_dataset:
+  batch_size: 32
+  shuffle: true
+  pin_memory: true
+  num_workers: 2
+  # Written by build_sft_distill_dataset.py, under this run's own fileroot and
+  # NOT under examples/tutor/data -- that path is a symlink to the shared data
+  # directory every worktree reads. Already tokenized to input_ids and loss_mask,
+  # so the generic load_from_disk path in areal/dataset/__init__.py picks it up
+  # and no dataset builder is needed.
+  path: ${cluster.fileroot}/data/distill_qwen3_8b/correct
+  type: sft
+  max_length: 4096
+  # REQUIRED. Left unset, get_custom_dataset returns an RDataset backed by the
+  # remote data service, which raises "not connected to a DataController" the
+  # first time the trainer indexes it. null takes the local load_from_disk path,
+  # the same reason the ped arm's train_dataset sets it.
+  scheduling_spec: null
+
+valid_dataset:
+  batch_size: 32
+  pin_memory: true
+  num_workers: 2
+  # 2% of the TRAINING examples, for the loss curve only. The comparison's eval
+  # set is the 528 test problems and is scored by eval_sft_student.py, never here.
+  path: ${cluster.fileroot}/data/distill_qwen3_8b/correct
+  type: sft
+  max_length: 4096
+  scheduling_spec: null
+
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  # Every epoch, so all three are available to score and the stopping point is
+  # measured rather than guessed.
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: null
+
+recover:
+  mode: disabled
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: 3600
+
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: null
+
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: offline
+    entity: hz-czar-stanford
+    project: TAgent
+    name: ${trial_name}
+    group: tutor-sft-distill
+    tags: [qwen3-1.7b, math-pass2, sft, distillation, no-teaching]

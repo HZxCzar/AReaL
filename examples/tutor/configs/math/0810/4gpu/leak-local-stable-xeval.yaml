@@ -1,0 +1,144 @@
+# 0810fc-leak-local-stable-xeval -- OUR arm of the PedagogicalRL head-to-head.
+#
+# Training is leak-local-stable, unchanged and inherited whole. The only thing
+# this file adds is the evaluation cross: at every eval pass the teacher also
+# runs PedagogicalRL's classroom dialogue, and both transcripts are scored by
+# both measurements.
+#
+#     xeval/free_chat/retest/success       our rollout,   our score
+#     xeval/free_chat/interview/success    our rollout,   their score
+#     xeval/classroom/retest/success       their rollout, our score
+#     xeval/classroom/interview/success    their rollout, their score
+#
+# The ped arm emits the same four names off its own teacher, so the eight-cell
+# table is one set of series. Its config is
+# examples/pedagogical_rl/configs/qwen3_8b_qwen3_1_7b_math_pass2_baseline_xeval.yaml
+# and its cross_eval block is IDENTICAL to the one below, key for key. Change
+# one and you must change the other; the instrument is shared but the numbers
+# fed to it are not.
+#
+# WHAT EACH AXIS IS
+#
+# The protocol axis is the dialogue. Ours: the teacher opens, the pair talks for
+# five rounds, nothing is judged in between and the student is never shown the
+# problem. Theirs: a GUIDED/ATTEMPTED classroom, up to ten teacher turns, the
+# student answers in-band and an ATTEMPTED episode opens with its own attempt.
+#
+# The scorer axis is what happens afterwards. Ours: replay the transcript on a
+# fresh branch, show the problem for the first time, four independent solo
+# attempts, AReaL's exact math scorer then its LLM answer judge, score = the
+# fraction correct. Theirs: the student re-reads the dialogue in their
+# student-perspective form, eight solutions from ONE n-choice request, scored by
+# a lowercased string compare on the last \boxed{} span.
+#
+# The two scorers are not the same quantity even on the same transcript, and
+# that is the point of running both. Their exact match calls \boxed{\frac{1}{2}}
+# wrong against a ground truth of 1/2; ours judges it right.
+# xeval/*/interview/success_math reports their eight samples under our math
+# scorer, so a ranking that survives only one scorer is visible as such.
+#
+# ONE ASYMMETRY IS DELIBERATE AND CANNOT BE REMOVED. Their student's system
+# prompt contains the problem statement. Ours does not -- under free chat the
+# student first sees it in the final turn. So the interview scorer always tells
+# the student what it is working on and the retest scorer only tells it at the
+# end. That is a real difference between the two measurements rather than an
+# implementation artefact, and normalising it would mean scoring neither arm the
+# way its own paper does.
+#
+# WHAT THIS DOES NOT CONTROL FOR. We train with a verified teacher pre-solve
+# (the teacher drafts a solution privately, and a problem group is dropped if no
+# draft is judged correct); their baseline has teacher_pre off entirely. Each
+# method trains its own way, so that stays, but it means a win here is a win for
+# the method AS CONFIGURED, not for the rollout design alone. stop/
+# teacher_pre_skipped runs 1.6-12% depending on the run -- those rows never
+# reach our teacher and do reach theirs.
+#
+# COST. A crossed problem costs one extra dialogue (up to 10 teacher and 10
+# student calls), four extra student calls and up to four judge calls per
+# re-test, one n-choice request per interview, and up to 15 leak-judge calls --
+# roughly 50 external calls against the ~24 an ordinary episode makes. At the
+# full 528 eval problems and freq_steps 25 over 500 steps that is about 25 h of
+# extra evaluation.
+#
+# sample_rate is 1.0 and stays there: this is the evaluation the whole
+# comparison rests on, so it runs on the entire split rather than an estimate of
+# it. SE per cell is about 2.2 pp in a single pass and about 3.1 pp on a
+# difference between two cells, before the ~20 passes are pooled. The knob still
+# exists for a smoke run -- it selects on a hash of the problem text so both
+# arms would cross the same subset -- but a subsampled column is not what this
+# arm is for. Lower evaluator.freq_steps instead if the eval tail is what hurts:
+# that costs points on the curve rather than precision at each point.
+#
+# A FREE CROSS-CHECK. xeval/free_chat/retest/success is this arm's own headline
+# re-measured through the shared instrument, so it should track
+# generalize/test/student_original_success. It is computed independently rather
+# than copied precisely so that it can disagree: if those two series separate,
+# the instrument is not reproducing what this arm is rewarded on and no column
+# of the table is trustworthy.
+defaults:
+  - leak-local-stable@_global_
+  - _self_
+
+trial_name: 0810fc-leak-local-stable-xeval
+
+# ============================================================================
+# Everything below this line is byte-identical to the ped arm's cross_eval
+# block. Keep it that way.
+# ============================================================================
+cross_eval:
+  enabled: true
+  # Every eval problem. Below 1.0 it selects on a hash of the problem text, so
+  # both arms would still cross the same subset without agreeing on a seed or an
+  # ordering -- but this is the measurement the comparison is for, so it runs on
+  # the whole split.
+  sample_rate: 1.0
+  # False would keep only the two scorers on this arm's own transcript -- the
+  # cheap half, which answers the scoring question and not the protocol one.
+  run_other_protocol: true
+  free_chat:
+    # Must equal free_chat.budget, which this arm inherits as 5. The workflow
+    # raises at startup if they disagree, because the ped arm is configured from
+    # this same number and a silent mismatch would show up only as an
+    # unexplained gap in the free_chat column.
+    budget: 5
+    max_student_tokens: 2048
+    # Must equal the tutor arm's teacher_history_tags, which math/0810 sets to
+    # 'masked' and which the tutor arm validates at startup. Under 'stripped' the
+    # teacher imitates its own untagged replies and malformed turns run 6.3% at
+    # depth 1 rising to 41.7% at depth 5, so a mismatch would compare a teacher
+    # that keeps its format contract against one that loses it.
+    teacher_history_tags: masked
+  classroom:
+    # Their generation block, verbatim.
+    max_teacher_turns: 10
+    max_tokens_in_conversation: 24576
+    max_tokens_per_student_turn: 2048
+    max_tokens_per_student_attempt: 2048
+    include_thinking: false
+  retest:
+    # Matches student_generalize.replays, so the cell is the quantity this arm
+    # is actually rewarded on.
+    replays: 4
+    max_tokens: 2048
+  interview:
+    # Matches their generation.number_student_attempts.
+    attempts: 8
+    max_tokens: 2048
+    # Their unnamed student variant. The free-chat dialogue never used a name,
+    # so scoring it with a named persona would introduce a stranger at the last
+    # turn.
+    student_name: ''
+    # Null uses the student's own timeout times attempts. One n-choice request
+    # generates eight completions and otherwise times out on every problem,
+    # which scores as a teaching failure rather than as an error.
+    timeout: null
+  leak_judges:
+    # Both judges on both transcripts. We train against the turn-level rawbase
+    # judge and they train against the whole-dialogue one, so each arm read
+    # under its own judge flatters itself. Metrics only: neither terminates a
+    # rollout and neither touches a reward.
+    enabled: true
+    turn_enabled: true
+    native_enabled: true
+    native_attempts: 2
+    native_max_retries: 5

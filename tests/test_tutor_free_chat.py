@@ -116,6 +116,7 @@ def tutor_state(
     turns: list[dict[str, str]] | None = None,
     turn_idx: int = 1,
     pre_solve: TeacherPreSolveResult | None = None,
+    raw_outputs: tuple[str, ...] = (),
 ) -> TutorTurnState:
     return TutorTurnState(
         task=TASK,
@@ -126,6 +127,7 @@ def tutor_state(
         turn_idx=turn_idx,
         max_turns=5,
         teacher_pre_solve_result=pre_solve,
+        previous_tutor_raw_outputs=raw_outputs,
     )
 
 
@@ -266,27 +268,42 @@ def main() -> int:
     check("training prompt == rollout prompt",
           workflow._build_tutor_messages(tutor_state(), clean=True) == messages)
 
-    print("\n[5] masked history hands the teacher its own tags back")
+    print("\n[5] teacher history can be stripped, masked, or unmasked")
     masked = make_workflow(teacher_history_tags="masked")
     stripped = make_workflow(teacher_history_tags="stripped")
+    unmasked = make_workflow(teacher_history_tags="unmasked")
     history = [
         {"role": "teacher", "content": "What does Vieta give you?"},
         {"role": "student", "content": "a + b = m and ab = 2."},
     ]
+    raw_teacher_turn = """\
+<reasoning>
+The student remembered both Vieta relations; next ask them to eliminate b.
+</reasoning>
+<output>
+What does Vieta give you?
+</output>"""
     # First assistant turn rather than a fixed index: the free-chat preamble sits
     # between the system turn and the conversation, and grows by two messages
     # when the pre-solve is on.
-    def first_own_turn(wf):
+    def first_own_turn(wf, *, raw_outputs=()):
         return next(
             message
             for message in wf._build_tutor_messages(
-                tutor_state(turns=history, turn_idx=2)
+                tutor_state(
+                    turns=history,
+                    turn_idx=2,
+                    raw_outputs=raw_outputs,
+                )
             )
             if message["role"] == "assistant"
         )
 
     own_turn_masked = first_own_turn(masked)
     own_turn_stripped = first_own_turn(stripped)
+    own_turn_unmasked = first_own_turn(
+        unmasked, raw_outputs=(raw_teacher_turn,)
+    )
     check("the teacher's own turn comes back as assistant",
           own_turn_masked["role"] == "assistant"
           and own_turn_stripped["role"] == "assistant")
@@ -301,10 +318,29 @@ def main() -> int:
     check("stripped is the bare text it used to be",
           own_turn_stripped["content"].strip() == "What does Vieta give you?",
           own_turn_stripped["content"][:80])
+    check("unmasked restores the exact prior teacher reply",
+          own_turn_unmasked["content"] == raw_teacher_turn,
+          own_turn_unmasked["content"][:120])
+    check("unmasked exposes the earlier reasoning to the teacher",
+          "next ask them to eliminate b" in own_turn_unmasked["content"])
+    check("unmasked falls back to the masked skeleton without private state",
+          first_own_turn(unmasked)["content"] == own_turn_masked["content"])
     check("the student never sees the tag protocol either way",
           all(
               "<reasoning>" not in message["content"]
               for message in masked._build_student_messages(
+                  StudentTurnState(
+                      task=TASK,
+                      public_history=PublicHistoryState(turns=history),
+                      previous_student_output="a + b = m and ab = 2.",
+                      latest_tutor_visible_output="Now substitute.",
+                  )
+              )
+          ))
+    check("the student never sees the teacher's private reasoning",
+          all(
+              "next ask them to eliminate b" not in message["content"]
+              for message in unmasked._build_student_messages(
                   StudentTurnState(
                       task=TASK,
                       public_history=PublicHistoryState(turns=history),
@@ -423,6 +459,11 @@ def main() -> int:
         max_turn_penalty=0.0,
         leak_handling_mode="reward_only",
     )
+    accepted_unmasked = TutorAgentWorkflow(
+        **base_kwargs, teacher_history_tags="unmasked"
+    )
+    check("accepted: unmasked teacher history",
+          accepted_unmasked.teacher_history_tags == "unmasked")
     for label, override in (
         ("student_generalize disabled", {"student_generalize_enabled": False}),
         ("retest_original off", {"student_generalize_retest_original": False}),
@@ -430,6 +471,7 @@ def main() -> int:
         ("max_turn_penalty non-zero", {"max_turn_penalty": -1.0}),
         ("budget 0 and max_turns 0", {"max_turns": 0, "free_chat": {
             "enabled": True, "budget": 0}}),
+        ("unknown teacher history mode", {"teacher_history_tags": "private"}),
     ):
         kwargs = dict(base_kwargs)
         kwargs.update(override)

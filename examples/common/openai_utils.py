@@ -75,12 +75,11 @@ class AsyncLLMCaller:
                 max_retries=0,
             )
 
-    async def call(
+    def _resolve_request(
         self,
         messages: list[dict[str, str]],
-        *,
-        request_overrides: dict[str, Any] | None = None,
-    ) -> LLMCallResult:
+        request_overrides: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         if self._client is None:
             raise RuntimeError("openai package is required for auxiliary model calls")
         resolved_request_config = {
@@ -112,14 +111,10 @@ class AsyncLLMCaller:
                     f"safety_margin={self.context_budget.safety_margin}."
                 )
             request_kwargs["max_completion_tokens"] = safe_max_completion_tokens
-        async with self._semaphore:
-            response = await self._client.chat.completions.create(
-                model=self.config.model,
-                messages=messages,
-                extra_body=resolved_request_config.get("extra_body") or None,
-                **request_kwargs,
-            )
-        choice = response.choices[0]
+        return request_kwargs, resolved_request_config.get("extra_body") or None
+
+    @staticmethod
+    def _choice_to_result(choice: Any) -> LLMCallResult:
         content = (choice.message.content or "").strip()
         choice_logprobs = getattr(choice, "logprobs", None)
         logprob_content = getattr(choice_logprobs, "content", None) or []
@@ -136,6 +131,59 @@ class AsyncLLMCaller:
             for item in logprob_content
         )
         return LLMCallResult(text=content, token_logprobs=token_logprobs)
+
+    async def call(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> LLMCallResult:
+        request_kwargs, extra_body = self._resolve_request(messages, request_overrides)
+        async with self._semaphore:
+            response = await self._client.chat.completions.create(
+                model=self.config.model,
+                messages=messages,
+                extra_body=extra_body,
+                **request_kwargs,
+            )
+        return self._choice_to_result(response.choices[0])
+
+    async def call_many(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        n: int,
+        request_overrides: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> list[LLMCallResult]:
+        """Draw ``n`` independent samples from one request.
+
+        This is the call PedagogicalRL makes to score a dialogue, so the tutor
+        arm uses it too and the two are measured identically.
+        """
+
+        if n < 1:
+            raise ValueError("n must be positive")
+        request_kwargs, extra_body = self._resolve_request(messages, request_overrides)
+        request_kwargs["n"] = int(n)
+        if timeout is not None:
+            # The client-level timeout is sized for a single completion; an
+            # n-choice request generates n times as much and needs its own.
+            request_kwargs["timeout"] = float(timeout)
+        async with self._semaphore:
+            response = await self._client.chat.completions.create(
+                model=self.config.model,
+                messages=messages,
+                extra_body=extra_body,
+                **request_kwargs,
+            )
+        choices = sorted(response.choices, key=lambda choice: choice.index)
+        if len(choices) != n:
+            raise RuntimeError(
+                f"Model {self.config.model!r} returned {len(choices)} choices, "
+                f"expected {n}"
+            )
+        return [self._choice_to_result(choice) for choice in choices]
 
     async def call_text(self, messages: list[dict[str, str]]) -> str:
         return (await self.call(messages)).text

@@ -129,6 +129,36 @@ class ApiAuxiliaryCaller:
             token_logprobs=result.token_logprobs,
         )
 
+    async def call_text_many(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        n: int,
+        rid_prefix: str = "auxiliary",
+        timeout: float | None = None,
+    ) -> list[TextCallResult]:
+        """Draw ``n`` samples from a single request, as PedagogicalRL does."""
+
+        del rid_prefix
+        try:
+            results = await self.caller.call_many(
+                messages,
+                n=n,
+                request_overrides=self.request_overrides,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            return [TextCallResult(text="", raw_text="", error=str(exc))] * n
+        return [
+            TextCallResult(
+                text=strip_reasoning_for_context(result.text),
+                raw_text=result.text,
+                error=None,
+                token_logprobs=result.token_logprobs,
+            )
+            for result in results
+        ]
+
 
 class AReaLEngineChatCaller:
     def __init__(
@@ -230,6 +260,28 @@ class AReaLEngineAuxiliaryCaller:
             text=result.visible_text,
             raw_text=result.raw_text,
             error=None,
+        )
+
+    async def call_text_many(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        n: int,
+        rid_prefix: str = "auxiliary",
+        timeout: float | None = None,
+    ) -> list[TextCallResult]:
+        """Sample ``n`` times. The engine backend seeds per request, so unlike
+        the API caller these are separate calls rather than one ``n``-choice
+        request."""
+
+        del timeout
+        return list(
+            await asyncio.gather(
+                *(
+                    self.call_text(messages, rid_prefix=f"{rid_prefix}-{index}")
+                    for index in range(n)
+                )
+            )
         )
 
     def _generation_config(self) -> Any:

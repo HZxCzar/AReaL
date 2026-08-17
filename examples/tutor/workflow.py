@@ -129,6 +129,11 @@ from examples.common.openai_utils import (
     make_teacher_client,
 )
 from examples.common.parsing import parse_json_dict
+
+# The head-to-head instrument. Imported from the pedagogical_rl package rather
+# than reimplemented here so that both arms provably run one copy of the two
+# protocols and the two scorers -- the same reason judges.py is shared.
+from examples.pedagogical_rl import cross_eval
 from examples.tutor.configs import (
     TUTOR_EVAL_STUDENT_FIELD,
     TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
@@ -619,6 +624,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         guided_slots: dict[str, Any] | None = None,
         opd: dict[str, Any] | None = None,
         free_chat: dict[str, Any] | None = None,
+        cross_eval: dict[str, Any] | None = None,
         prompt_instruction: dict[str, Any] | None = None,
         teacher_history_tags: str = "stripped",
         local_advantage_turn_discount: float = 1.0,
@@ -712,6 +718,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.free_chat_no_teaching_baseline = bool(
             free_chat_config.get("no_teaching_baseline", False)
         )
+        self._init_cross_eval(cross_eval)
         # task_id -> fraction the student solves unaided. The student never
         # changes, so this is estimated once and reused; re-estimating per group
         # would put sampling noise straight into the reward.
@@ -984,9 +991,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError("opd loss weight must be positive when enabled.")
         if self.opd_enabled and self.opd_reward_clip < 0.0:
             raise ValueError("opd reward clip must be non-negative (0 disables).")
-        if teacher_history_tags not in {"stripped", "masked"}:
+        if teacher_history_tags not in {"stripped", "masked", "unmasked"}:
             raise ValueError(
-                "teacher_history_tags must be 'stripped' or 'masked'."
+                "teacher_history_tags must be 'stripped', 'masked', or 'unmasked'."
             )
         self.teacher_history_tags = teacher_history_tags
         prompt_instr = dict(prompt_instruction or {})
@@ -2171,6 +2178,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             turns=initial_turns,
         )
         previous_tutor_visible_output = ""
+        previous_tutor_raw_outputs: tuple[str, ...] = ()
         previous_student_output = initial_student_answer
         preceding_student_turn_behavior = initial_effective_student_turn_behavior
         previous_feedback = TutorPrivateFeedback(
@@ -2198,6 +2206,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     turn_idx=turn_idx,
                     task=task,
                 ),
+                previous_tutor_raw_outputs=previous_tutor_raw_outputs,
             )
             try:
                 response, tutor_raw_output = await self._generate_tutor_response(
@@ -2352,6 +2361,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
 
             public_history = next_public_history
+            previous_tutor_raw_outputs = (
+                *previous_tutor_raw_outputs,
+                tutor_raw_output if not tutor_format_error else "",
+            )
             previous_tutor_visible_output = tutor_visible_output
             previous_student_output = student_answer
             preceding_student_turn_behavior = effective_student_turn_behavior
@@ -2419,6 +2432,24 @@ class TutorAgentWorkflow(RolloutWorkflow):
             answer_judge_caller=answer_judge_caller,
             no_teaching_baseline=episode_no_teaching_baseline,
         )
+        # The head-to-head cross. Evaluation only, and it touches nothing above:
+        # the reward is already decided by the re-test, and every series it adds
+        # is namespaced under xeval/.
+        if self._cross_eval_active() and self._cross_eval_selected(task):
+            cross_eval_metrics, cross_eval_details = await self._run_cross_eval(
+                task=task,
+                ground_truth=ground_truth,
+                turn_artifacts=turn_artifacts,
+                initial_student_answer=initial_student_answer,
+                actor_caller=actor_caller,
+                student_caller=student_caller,
+                aux_caller=aux_caller,
+                answer_judge_caller=answer_judge_caller,
+                lora_version=episode_lora_version,
+                teacher_pre_solve_result=teacher_pre_solve_result,
+            )
+            _safe_scalar(**cross_eval_metrics)
+            episode_artifact.cross_eval_details = cross_eval_details
         await self._annotate_teacher_diversity(turn_artifacts)
         reward_computer = EpisodeRewardComputer(
             success_reward=self.success_reward,
@@ -4945,21 +4976,35 @@ class TutorAgentWorkflow(RolloutWorkflow):
         *,
         speaker: str,
         own_turn_template: str | None = None,
+        own_turn_raw_outputs: tuple[str, ...] | None = None,
     ) -> list[dict[str, str]]:
         """Shared dialogue seen from one side: own turns assistant, other user.
 
         ``own_turn_template`` re-wraps the speaker's OWN turns, and is how the
         teacher gets the shape of its replies back after `public_history`
-        stripped the tags off them. It takes a single ``{visible}`` field. Only
-        the teacher passes it; the student's view must stay plain text, because
-        the student is never shown the tag protocol.
+        stripped the tags off them. It takes a single ``{visible}`` field.
+        ``own_turn_raw_outputs`` takes precedence when an aligned non-empty raw
+        reply exists; this is the teacher-only unmasked history. Only the teacher
+        passes either argument. The student's view stays plain text because its
+        state contains only the public transcript.
         """
         rendered = []
+        own_turn_idx = 0
         for turn in turns:
             is_own = turn["role"] == speaker
             content = turn["content"]
-            if is_own and own_turn_template is not None:
-                content = own_turn_template.format(visible=content)
+            if is_own:
+                raw_content = (
+                    own_turn_raw_outputs[own_turn_idx]
+                    if own_turn_raw_outputs is not None
+                    and own_turn_idx < len(own_turn_raw_outputs)
+                    else ""
+                )
+                own_turn_idx += 1
+                if raw_content:
+                    content = raw_content
+                elif own_turn_template is not None:
+                    content = own_turn_template.format(visible=content)
             # Environment feedback rides on the other side's turn and is only
             # ever shown to the teacher.
             env = turn.get("env") if speaker == "teacher" and not is_own else None
@@ -4969,6 +5014,250 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 {"role": "assistant" if is_own else "user", "content": content}
             )
         return rendered
+
+    # ------------------------------------------------------------------
+    # The tutor / PedagogicalRL cross. Evaluation only; training is untouched.
+    #
+    # The instrument itself lives in examples/pedagogical_rl/cross_eval.py and
+    # is imported by BOTH arms, so the two protocols and the two scorers are one
+    # implementation rather than two that drift. Everything below is the
+    # adapter: it turns this workflow's callers into the plain async callables
+    # that module takes, and hands it the transcript this arm's eval rollout
+    # already produced.
+    # ------------------------------------------------------------------
+
+    def _init_cross_eval(self, cross_eval: dict[str, Any] | None) -> None:
+        config = dict(cross_eval or {})
+        self.cross_eval_enabled = bool(config.get("enabled", False))
+        self.cross_eval_sample_rate = float(config.get("sample_rate", 1.0) or 1.0)
+        self.cross_eval_run_other_protocol = bool(
+            config.get("run_other_protocol", True)
+        )
+        self._cross_eval_config = config
+        if not self.cross_eval_enabled:
+            return
+        if not getattr(self, "free_chat_enabled", False):
+            raise ValueError(
+                "cross_eval.enabled requires free_chat.enabled: the free_chat "
+                "half of the cross is this arm's own rollout, and there is no "
+                "transcript to hand the scorers without it."
+            )
+        budget = int(dict(config.get("free_chat") or {}).get("budget", 0) or 0)
+        if budget and budget != int(self.free_chat_budget):
+            # Validated rather than inherited. The ped arm has to be given this
+            # number explicitly, and the whole cross is void if the two arms run
+            # our protocol at different lengths -- which would otherwise show up
+            # only as an unexplained gap in one column of the table.
+            raise ValueError(
+                "cross_eval.free_chat.budget "
+                f"({budget}) must equal free_chat.budget "
+                f"({int(self.free_chat_budget)}); the ped arm is configured "
+                "from the same number and the protocol must match."
+            )
+        tags = str(
+            dict(config.get("free_chat") or {}).get("teacher_history_tags", "")
+        )
+        own_tags = str(getattr(self, "teacher_history_tags", "masked"))
+        if tags and tags != own_tags:
+            # Same reason as the budget. Under 'stripped' the teacher imitates
+            # its own untagged replies and malformed turns climb with depth, so a
+            # mismatch would put a teacher that keeps its format contract against
+            # one that loses it and call the gap a difference in teaching.
+            raise ValueError(
+                f"cross_eval.free_chat.teacher_history_tags ({tags!r}) must "
+                f"equal teacher_history_tags ({own_tags!r}); the ped arm runs "
+                "our protocol from that value."
+            )
+
+    def _cross_eval_active(self) -> bool:
+        if not getattr(self, "cross_eval_enabled", False):
+            return False
+        return self._in_eval_rollout()
+
+    def _cross_eval_selected(self, task: str) -> bool:
+        """Whether this problem is in the crossed subset.
+
+        A stable hash of the problem text, not a counter or a seed: both arms
+        run different code in a different order, and this is what makes them
+        cross exactly the same problems anyway.
+        """
+
+        rate = float(getattr(self, "cross_eval_sample_rate", 1.0) or 1.0)
+        if rate >= 1.0:
+            return True
+        digest = hashlib.sha256(task.encode("utf-8")).hexdigest()
+        return (int(digest[:8], 16) % 10_000) < rate * 10_000
+
+    @staticmethod
+    def _cross_eval_transcript(
+        turn_artifacts: list[TurnArtifact], initial_student_answer: str = ""
+    ) -> list[dict[str, str]]:
+        """This episode's dialogue in the shared teacher/student form.
+
+        The student-visible half of each teacher turn, so a malformed turn
+        contributes the empty string it actually handed the student rather than
+        the tags the student never saw.
+        """
+
+        transcript: list[dict[str, str]] = []
+        if initial_student_answer:
+            transcript.append({"role": "student", "content": initial_student_answer})
+        for artifact in turn_artifacts:
+            visible = str(artifact.tutor_visible_output or "").strip()
+            transcript.append({"role": "teacher", "content": visible})
+            student_output = str(artifact.student_output or "").strip()
+            if student_output:
+                transcript.append({"role": "student", "content": student_output})
+        return transcript
+
+    def _cross_eval_specs(self) -> dict[str, Any]:
+        config = getattr(self, "_cross_eval_config", {}) or {}
+        free_chat = dict(config.get("free_chat") or {})
+        classroom = dict(config.get("classroom") or {})
+        retest = dict(config.get("retest") or {})
+        interview = dict(config.get("interview") or {})
+        leak_judges = dict(config.get("leak_judges") or {})
+        specs = {
+            "free_chat": cross_eval.FreeChatSpec(
+                budget=int(free_chat.get("budget", 0) or self.free_chat_budget),
+                enable_thinking=bool(getattr(self, "enable_thinking", False)),
+                show_ground_truth=bool(
+                    getattr(self, "teacher_show_ground_truth", False)
+                ),
+                student_has_not_seen_problem=bool(
+                    getattr(self, "free_chat_student_has_not_seen_problem", False)
+                ),
+                max_student_tokens=int(free_chat.get("max_student_tokens", 2048)),
+                # Follows the arm, not the cross-eval block: the teacher has to
+                # see its own history here exactly as it does in the rollout
+                # being compared.
+                teacher_history_tags=str(
+                    getattr(self, "teacher_history_tags", "masked")
+                ),
+            ),
+            "classroom": cross_eval.ClassroomSpec(
+                max_teacher_turns=int(classroom.get("max_teacher_turns", 10)),
+                max_tokens_in_conversation=int(
+                    classroom.get("max_tokens_in_conversation", 24576)
+                ),
+                max_tokens_per_student_turn=int(
+                    classroom.get("max_tokens_per_student_turn", 2048)
+                ),
+                max_tokens_per_student_attempt=int(
+                    classroom.get("max_tokens_per_student_attempt", 2048)
+                ),
+                include_thinking=bool(classroom.get("include_thinking", False)),
+            ),
+            "retest": cross_eval.RetestSpec(
+                replays=int(
+                    retest.get("replays", 0)
+                    or getattr(self, "student_generalize_replays", 4)
+                ),
+                max_tokens=int(retest.get("max_tokens", 2048)),
+            ),
+            "interview": cross_eval.InterviewSpec(
+                attempts=int(interview.get("attempts", 8)),
+                max_tokens=int(interview.get("max_tokens", 2048)),
+                student_name=str(interview.get("student_name", "") or ""),
+                timeout=interview.get("timeout"),
+            ),
+            "leak_judges": None,
+        }
+        if leak_judges.get("enabled", True):
+            specs["leak_judges"] = cross_eval.LeakJudgeSpec(
+                turn_enabled=bool(leak_judges.get("turn_enabled", True)),
+                native_enabled=bool(leak_judges.get("native_enabled", True)),
+                native_attempts=int(leak_judges.get("native_attempts", 2)),
+                native_max_retries=int(leak_judges.get("native_max_retries", 5)),
+            )
+        return specs
+
+    async def _run_cross_eval(
+        self,
+        *,
+        task: str,
+        ground_truth: str,
+        turn_artifacts: list[TurnArtifact],
+        initial_student_answer: str,
+        actor_caller: Any,
+        student_caller: Any,
+        aux_caller: Any,
+        answer_judge_caller: Any,
+        lora_version: int | None,
+        teacher_pre_solve_result: TeacherPreSolveResult | None,
+    ) -> tuple[dict[str, float], dict[str, Any]]:
+        specs = self._cross_eval_specs()
+        draft = ""
+        if (
+            teacher_pre_solve_result is not None
+            and teacher_pre_solve_result.accepted
+        ):
+            draft = str(teacher_pre_solve_result.raw_output or "")
+        specs["free_chat"].teacher_draft = draft
+        specs["classroom"].teacher_draft = draft
+
+        async def teacher_call(messages, *, rid_prefix: str = "xeval") -> str:
+            result = await actor_caller.generate(
+                messages, lora_version=lora_version, rid_prefix=rid_prefix
+            )
+            return str(result.raw_text or "")
+
+        async def student_call(
+            messages, *, n: int = 1, max_tokens=None, rid_prefix="xeval", timeout=None
+        ) -> list[str]:
+            # max_tokens is the caller's own configured limit here rather than
+            # the spec's: the tutor callers take it from student_models[*], and
+            # threading a per-call override through them would change the
+            # student for the arm's own rollout too. The two arms' student
+            # limits are the same number today; if they diverge this is where
+            # it stops being true.
+            del max_tokens
+            results = await student_caller.call_text_many(
+                messages, n=n, rid_prefix=rid_prefix, timeout=timeout
+            )
+            if any(result.error for result in results):
+                raise RuntimeError(
+                    next(result.error for result in results if result.error)
+                )
+            return [str(result.raw_text or result.text or "") for result in results]
+
+        async def judge_call(messages, *, rid_prefix: str = "xeval-judge") -> str:
+            result = await aux_caller.call_text(messages, rid_prefix=rid_prefix)
+            if result.error:
+                raise RuntimeError(result.error)
+            return str(result.raw_text or result.text or "")
+
+        async def answer_judge(*, task: str, ground_truth: str, answer: str) -> bool:
+            judged = await self._score_answer_async(
+                task,
+                ground_truth,
+                answer,
+                answer_judge_caller=answer_judge_caller,
+            )
+            return bool(judged.correct)
+
+        return await cross_eval.run_cross_eval(
+            task=task,
+            ground_truth=ground_truth,
+            own_protocol="free_chat",
+            own_transcript=self._cross_eval_transcript(
+                turn_artifacts, initial_student_answer
+            ),
+            own_initial_attempt=initial_student_answer,
+            teacher_call=teacher_call,
+            student_call=student_call,
+            judge_call=judge_call,
+            answer_judge=answer_judge,
+            tokenizer=self.tokenizer,
+            free_chat=specs["free_chat"],
+            classroom=specs["classroom"],
+            retest=specs["retest"],
+            interview=specs["interview"],
+            leak_judges=specs["leak_judges"],
+            run_other_protocol=bool(
+                getattr(self, "cross_eval_run_other_protocol", True)
+            ),
+        )
 
     def _free_chat_teacher_system(
         self, task: str, ground_truth: str | None = None
@@ -5171,7 +5460,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 speaker="teacher",
                 own_turn_template=(
                     TEACHER_HISTORY_MASKED_TEMPLATE
-                    if getattr(self, "teacher_history_tags", "stripped") == "masked"
+                    if getattr(self, "teacher_history_tags", "stripped")
+                    in {"masked", "unmasked"}
+                    else None
+                ),
+                own_turn_raw_outputs=(
+                    tutor_state.previous_tutor_raw_outputs
+                    if getattr(self, "teacher_history_tags", "stripped")
+                    == "unmasked"
                     else None
                 ),
             ),

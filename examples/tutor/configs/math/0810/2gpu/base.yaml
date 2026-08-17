@@ -165,6 +165,9 @@ reward:
   length_penalty_threshold_chars: 0
   length_penalty_per_100_chars: 0.0
   length_penalty_min: 0.0
+  # Lists replace on merge; spelling out both components preserves leak-local.
+  turn_local_components: ["leak", "format_error"]
+
 debug_trace_dir: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/debug_traces/${experiment_name}/${trial_name}
 debug_trace_every_n_rollouts: 10
 cluster:

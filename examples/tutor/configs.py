@@ -2,6 +2,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+# The head-to-head cross is configured from one place for both arms; see the
+# module docstring for why it is not defined here.
+from examples.pedagogical_rl.cross_eval_config import CrossEvalConfig
 from examples.tutor.prompts import (
     DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT,
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
@@ -2018,6 +2021,7 @@ class TutorConfig(GRPOConfig):
         default_factory=TutorInstructionPromptConfig
     )
     free_chat: TutorFreeChatConfig = field(default_factory=TutorFreeChatConfig)
+    cross_eval: CrossEvalConfig = field(default_factory=CrossEvalConfig)
     actor: TutorActorConfig = field(default_factory=TutorActorConfig)
     teacher_history_tags: str = field(
         default="stripped",
@@ -2028,7 +2032,10 @@ class TutorConfig(GRPOConfig):
                 "removed, which the model imitates -- malformed turns run 2.1% "
                 "at depth 1 and 73.4% at depth 10 on an untrained teacher. "
                 "'masked' restores the tag skeleton with the reasoning content "
-                "replaced by a placeholder. Observation side only; reward and "
+                "replaced by a placeholder. 'unmasked' replays each exact prior "
+                "teacher reply, including its private reasoning, only in the "
+                "teacher's view; the student and re-test still receive the "
+                "visible public transcript. Observation side only; reward and "
                 "sampling are untouched."
             )
         },
