@@ -1,0 +1,11 @@
+# Line endings are normalized on commit. A whole-file upload from a Windows
+# editor is how examples/tutor/workflow.py, core/types.py, core/code_exec.py and
+# two tests landed with CRLF on the dev/rewrite line: every line then reads as
+# modified, so the diff against the fork point was +6497/-5959 on workflow.py
+# for a real change of +590/-52, and the unification merge conflicted on
+# essentially every hunk instead of on the handful that actually collided.
+*.py    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.sh    text eol=lf
+*.md    text eol=lf
