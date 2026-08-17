@@ -1,0 +1,74 @@
+# 0810fc-masked-students-r2 -- resume the masked-students arm from its last
+# healthy weights, with the dual clip that was missing when it died.
+#
+# WHAT KILLED THE FIRST RUN. 20260816_070410 trained cleanly for 190 steps and
+# diverged at 195. The cause was actor.c_clip being unset: the negative branch of
+# the PPO objective is unbounded without it, so one batch of large negative
+# advantages drove a set of tokens' log-probs toward minus infinity in a single
+# update. Entropy went 0.105 -> 9.8 in four steps, format errors reached 0.78,
+# 84% of episodes were dropped at the pre-solve filter, and the trainer starved
+# because it could no longer fill a batch. The full argument is in the c_clip
+# comment in ../2gpu/base.yaml; c_clip: 3.0 now comes from there, so this file
+# does not set it.
+#
+# WHY THIS RESUMES FROM STEP 149 AND NOT 199. The saver wrote checkpoints at 49,
+# 99, 149 and 199, but 199 landed at 03:16, twenty minutes AFTER the divergence --
+# its entropy was 10.2, so those weights are the broken policy. The recover
+# snapshot is worse: recover/current.json points at globalstep194, which is the
+# step the collapse began on. 149 is the last checkpoint taken while the run was
+# healthy: entropy 0.085, format errors ~0.000, reward positive and rising.
+#
+# NEW TRIAL NAME, AND THAT IS LOAD-BEARING. recover.mode is 'auto', so relaunching
+# under the old trial name would find recover/current.json and silently resume the
+# collapse from step 194 -- the exact failure, restored optimizer state and all.
+# A new name gives a clean recover directory and a clean output directory.
+#
+# WHAT IS NOT CARRIED OVER. init_lora_path restores adapter WEIGHTS only. Optimizer
+# moments, the LR schedule position and the dataloader cursor all restart, and the
+# step counter restarts at 0. Practically that means: Adam re-warms over a few
+# steps, and the epoch order is reshuffled, so this is a warm start rather than a
+# true resume. total_train_steps is cut to 350 accordingly -- 149 are already paid
+# for, and 350 more reaches the same ~500 of training the arm was scoped for.
+#
+# WHAT IS DELIBERATELY UNCHANGED. reward.turn_local_components still holds both
+# leak and format_error on their own turn, even though concentrating a -1.0 leak
+# penalty onto one turn is what fattened the negative tail that lit the fuse. Two
+# reasons to leave it: the tail is the fuel and c_clip is the fire door, so fixing
+# the door is the test that matters; and changing both at once means a second
+# collapse tells us nothing about which change failed. If it diverges again with
+# c_clip on, dropping leak from that list is the next single-factor step.
+#
+# WHAT TO WATCH, and the first two are new.
+#
+#   ppo_actor/update/dual_clipped_tokens   should be near zero while healthy and
+#                                          spike exactly where the old run died.
+#                                          A spike here is the guard rail doing
+#                                          its job, not a problem.
+#   ppo_actor/update/behave_imp_weight/avg the early-warning series. It sat at
+#                                          0.99 for 190 steps and fell 0.95 ->
+#                                          0.54 -> 0.21 across the collapse. If it
+#                                          leaves 0.95 again, something is wrong
+#                                          even if entropy still looks fine.
+#   ppo_actor/update/entropy/avg           was 0.06 healthy, drifted to 0.13 over
+#                                          the 90 steps before dying. Treat a
+#                                          sustained climb past ~0.15 as a warning.
+#   rollout/format_errors                  the fuel. It rose 0.006 -> 0.168 in the
+#                                          seven steps before the divergence, so
+#                                          it leads the failure and is the cheapest
+#                                          thing to watch.
+#   the startup mask log line              all four masks must resolve, or the run
+#                                          is an unmasked control wearing a hat.
+defaults:
+  - masked-students@_global_
+  - _self_
+
+trial_name: 0810fc-masked-students-r2
+
+actor:
+  # The last checkpoint written while the policy was healthy. Adapter weights
+  # only -- see the note above on what does not come with them.
+  init_lora_path: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/checkpoints/root/tutor-math-baseline/20260816_070410_0810fc-masked-students/default/epoch3epochstep8globalstep149
+
+# 149 steps are already paid for; 350 more lands at the ~500 this arm was scoped
+# for. Raise it if the warm start costs more than the few steps expected.
+total_train_steps: 350

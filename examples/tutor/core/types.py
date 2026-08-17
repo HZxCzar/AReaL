@@ -173,6 +173,12 @@ class StudentTurnState:
     latest_tutor_visible_output: str
     student_prompt_selection: PromptPoolSelection | None = None
     student_turn_behavior: StudentTurnBehavior | None = None
+    # Which part of the history this student may see, carried from the student
+    # selected for the episode. None means the whole history, so a rollout that
+    # configures no masks behaves exactly as before. The mask restricts the
+    # STUDENT's view only -- the teacher and the reward path read the unmasked
+    # public_history, which is what makes the teacher's inference problem real.
+    student_mask: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)

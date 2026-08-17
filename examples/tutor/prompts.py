@@ -362,6 +362,33 @@ def resolve_teacher_instruction(text: str | None) -> tuple[str, str]:
 # keeps improvement meaningful; changing only one would be measured as teaching.
 FREE_CHAT_STUDENT_SYSTEM_PROMPT = "You are Sam, a student talking with a teacher."
 
+# Appended to the student system prompt whenever the run configures any attention
+# mask, so the markers a masked transcript contains are interpretable rather than
+# baffling. See core/attention_mask.py.
+#
+# THIS IS A READING CONVENTION, NOT A PERSONA. It says what a notation means; it
+# does not ask the model to behave forgetfully. That distinction matters because a
+# self-description is measured not to change this student's behaviour at all --
+# the mask has to work by absence of information, and this sentence only stops the
+# student from treating a placeholder as gibberish or as the teacher's actual
+# words.
+#
+# GIVEN TO EVERY STUDENT IN A MASKED RUN, INCLUDING AN UNMASKED CONTROL. If only
+# the masked ones received it, the control would differ from them by an extra
+# instruction as well as by its mask, and the comparison would no longer isolate
+# the mask. A control simply never encounters a marker.
+#
+# Shared by the conversation, the scored re-test and the no-teaching baseline for
+# the same reason the base prompt is: a difference between those three would be
+# measured as teaching.
+# One clause, one marker. An earlier version explained (forget) and (...)
+# separately; the two are now the same token, so a truncated message ends the same
+# way a faded turn is replaced and this sentence covers both.
+FREE_CHAT_STUDENT_MASK_NOTE = (
+    "You sometimes forget details of a conversation; (forget) marks a message "
+    "you no longer remember."
+)
+
 # The task lives here rather than being appended by `_task_context`, because the
 # teacher's copy is the only one in the episode -- the student is never given it
 # until the re-test.
