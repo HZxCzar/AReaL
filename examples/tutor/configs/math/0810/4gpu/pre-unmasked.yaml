@@ -1,0 +1,18 @@
+# Experimental history-visible variant of leak-local-stable.yaml.
+# The parent remains unchanged. This arm changes only the teacher's observation
+# of its own earlier turns and localizes the existing format penalty just like
+# the already-local leak penalty.
+defaults:
+  - leak-local-stable@_global_
+  - _self_
+
+trial_name: 0810fc-pre-unmasked
+
+# Replay each valid prior teacher reply verbatim, including <reasoning>, only in
+# the teacher view. Student and re-test prompts still use the public <output> text.
+teacher_history_tags: unmasked
+
+reward:
+  # OmegaConf replaces lists rather than merging them, so keep "leak" when adding
+  # the turn-local format penalty inherited from reward.format_error_penalty.
+  turn_local_components: ["leak", "format_error"]

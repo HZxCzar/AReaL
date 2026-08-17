@@ -1,0 +1,17 @@
+# Experimental history-visible variant of leak-local-stable-nopre.yaml.
+# The parent remains unchanged. This is the no-pre-solve half of the same pair:
+# teacher reasoning history is visible and both leak and format penalties stay
+# local to the turn that raised them.
+defaults:
+  - leak-local-stable-nopre@_global_
+  - _self_
+
+trial_name: 0810fc-nopre-unmasked
+
+# Replay each valid prior teacher reply verbatim, including <reasoning>, only in
+# the teacher view. Student and re-test prompts still use the public <output> text.
+teacher_history_tags: unmasked
+
+reward:
+  # Lists replace on merge; spelling out both components preserves leak-local.
+  turn_local_components: ["leak", "format_error"]

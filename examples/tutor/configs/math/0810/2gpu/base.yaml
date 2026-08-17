@@ -240,6 +240,42 @@ actor:
     warmup_steps_proportion: 0.001
   eps_clip: 0.4
   use_ppo_clip: true
+  # DUAL CLIPPING. Without this the negative branch of the PPO objective is
+  # unbounded, and that is what destroyed 20260816_070410 at step 195.
+  #
+  # For a NEGATIVE advantage, pg_loss1 = |A| * ratio grows without limit as the
+  # ratio grows, and the pessimistic max() selects exactly that branch once the
+  # ratio passes 1 + eps_clip. eps_clip bounds the term the max() discards, not
+  # the one it keeps, so it is no protection here. One batch carrying a cluster of
+  # large negative advantages therefore drives those tokens' log-probs toward
+  # minus infinity in a single update.
+  #
+  # Measured, per step, on that run: format errors had risen to 0.168/episode by
+  # 193, each -0.5 and concentrated on one turn by turn_local_components, giving
+  # an advantage minimum of -3.5 against a batch mean of -0.38. Then
+  #
+  #   step 193   clip_ratio 0.015   approx_kl -0.023   imp_weight min 2.9e-07
+  #   step 194   clip_ratio 0.037   approx_kl -0.098   imp_weight min 6.5e-14
+  #   step 195   clip_ratio 0.153   approx_kl -1.288   imp_weight min 5.3e-19
+  #   step 196   clip_ratio 0.331   approx_kl -1.943   imp_weight min 1.1e-43
+  #
+  # An importance weight of 1e-43 is a token the policy now assigns essentially
+  # zero probability while the behaviour policy had just sampled it. Probability
+  # mass has to go somewhere, so it spread across the vocabulary: entropy went
+  # 0.105 -> 0.608 -> 4.2 -> 9.8 over four steps, format errors reached 0.78, and
+  # 84% of episodes were dropped at the pre-solve filter.
+  #
+  # AND THE COLLAPSE IS ONE-WAY without this. behave_imp_weight_mode is
+  # 'token_mask' with cap 5.0, which zeroes any token whose ratio exceeded the
+  # cap -- after the jump that is most of them, so the samples carrying the
+  # correction were discarded. Mean importance weight fell to 0.21 by step 198:
+  # four fifths of the gradient signal gone, and the fifth that remained was the
+  # part the broken policy already agreed with.
+  #
+  # 3.0 bounds a single example's downward push at 3 * |A| instead of unbounded.
+  # It costs nothing when the policy is healthy -- dual_clipped_tokens stays near
+  # zero -- so this is a guard rail, not a tuning change.
+  c_clip: 3.0
   advantage_estimator: rebn
   turn_discount: 1.0
   temperature: ${gconfig.temperature}

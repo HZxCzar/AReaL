@@ -1,0 +1,24 @@
+# Minimal collapse guard for 0810fc-leak-local.
+# Everything else stays inherited from the exact original arm.
+defaults:
+  - leak-local@_global_
+  - _self_
+
+trial_name: 0810fc-leak-local-stable-nopre
+
+# A malformed teacher turn ends the episode immediately instead of feeding the
+# student an empty message and letting the teacher keep drifting for later turns.
+format_handling_mode: terminate
+
+gconfig:
+  # Normal responses were far below this; degenerate loops were consuming the
+  # inherited 4096-token ceiling. This is the training-generation hard cap.
+  max_new_tokens: 2048
+
+actor:
+  # Normalize token losses so every episode has equal total gradient weight.
+  # A long looping episode therefore cannot outweigh several normal episodes.
+  episode_loss_weighting: true
+
+teacher_pre:
+  enabled: false
