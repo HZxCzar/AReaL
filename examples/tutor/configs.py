@@ -29,6 +29,11 @@ _STUDENT_GENERALIZE_MODES = {"only_success", "always"}
 _STUDENT_GENERALIZE_SOURCES = {"generated", "sidecar", "train"}
 _STUDENT_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
+STUDENT_MODE_TEXT = "text"
+STUDENT_MODE_CODE = "code"
+# The action space a student is allowed. See TutorStudentModelConfig.mode.
+STUDENT_MODES = frozenset({STUDENT_MODE_TEXT, STUDENT_MODE_CODE})
+
 TUTOR_EVAL_STUDENT_FIELD = "__tutor_student_name"
 TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD = "__tutor_student_prompt_group"
 TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD = "__tutor_student_prompt_index"
@@ -369,6 +374,24 @@ class TutorStudentModelConfig:
             )
         },
     )
+    mode: str = field(
+        default="text",
+        metadata={
+            "help": (
+                "How this student is allowed to act. 'text' replies in prose and "
+                "algebra, as before. 'code' is a CodeAct student: every reply is "
+                "one Python program, it is run in a persistent notebook-style "
+                "session, and what it produced is the only thing the student can "
+                "say -- the teacher sees the program and the result. The re-test "
+                "is a program whose output is judged as the answer. Two entries "
+                "on the SAME underlying model differing only in mode give a "
+                "student pair whose demand differs by action space rather than by "
+                "capability, which is the point: prompting cannot hold the code "
+                "channel across a conversation (compliance collapses after the "
+                "first turn), so it is enforced structurally instead."
+            )
+        },
+    )
     api_key: str = field(default="EMPTY")
     timeout: int = field(default=120)
     max_tokens: int = field(default=2048)
@@ -416,6 +439,12 @@ class TutorStudentModelConfig:
         self.weight = float(self.weight)
         if self.weight < 0.0:
             raise ValueError("student_models.weight must be non-negative.")
+        self.mode = str(self.mode).strip().lower()
+        if self.mode not in STUDENT_MODES:
+            raise ValueError(
+                "student_models.mode must be one of "
+                f"{sorted(STUDENT_MODES)}, got {self.mode!r}."
+            )
         self.timeout = int(self.timeout)
         if self.timeout <= 0:
             raise ValueError("student_models.timeout must be positive.")
@@ -765,7 +794,8 @@ class TutorTeacherPreConfig:
         metadata={
             "help": (
                 "Maximum teacher pre-solve attempts when verification is enabled. "
-                "If no attempt is correct, the sample is skipped for this rollout."
+                "If no attempt is correct, teacher_pre.on_reject decides what "
+                "happens to the group."
             )
         },
     )
@@ -932,6 +962,25 @@ class TutorEvaluatorConfig(EvaluatorConfig):
                 "having failed it. Training can still verify, which keeps the "
                 "training support clean, while the reported number stops "
                 "depending on a checker that does not exist at deployment."
+            )
+        },
+    )
+    teacher_pre_enabled: bool | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Override teacher_pre.enabled during evaluation only. None keeps eval "
+                "identical to training, which with teacher_pre_verify False is the "
+                "usual setting: the teacher drafts a solution but nothing checks it. "
+                "False evaluates a teacher that never drafts at all -- the deployment "
+                "condition for an arm whose claim is that the trained teacher no "
+                "longer needs one. True forces the draft on where training had it off. "
+                "Together with teacher_pre_verify this spans the three eval regimes: "
+                "draft-unverified, draft-verified, and no draft. "
+                "NOTE under teacher_pre.visibility opd_only the draft has no reader "
+                "at eval at all -- the rollout hides it and OPD does not run there -- "
+                "so _presolve_unused_at_eval skips the generation whatever this is set "
+                "to. There is nothing to measure either way, only a call to save."
             )
         },
     )

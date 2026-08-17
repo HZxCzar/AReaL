@@ -166,20 +166,21 @@ def sharing_workflow(**attrs):
 
 
 def gather_group(workflow, *, version, n=8, problem="p1"):
+    """The group's drafts. Unwraps the (result, cache_hit) pair the workflow returns."""
     async def go():
         return await asyncio.gather(*[
-            workflow._teacher_pre_solve_for_episode(
-                {"id": problem},
+            workflow._teacher_pre_solve_for_group(
                 TASK,
                 GROUND_TRUTH,
                 actor_caller=None,
                 answer_judge_caller=None,
                 lora_version=version,
+                group_key=problem,
             )
             for _ in range(n)
         ])
 
-    return asyncio.run(go())
+    return [result for result, _cache_hit in asyncio.run(go())]
 
 
 

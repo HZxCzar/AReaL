@@ -1,0 +1,138 @@
+# 0810fc-two-student -- one teacher, two students that differ by ACTION SPACE.
+#
+# Both entries are the same underlying qwen3-1.7b at the same sampling settings.
+# The only difference is `mode`, so capability is held fixed and what varies is
+# what the student can do: reply in prose, or emit one Python program per turn run
+# in a notebook-style session whose namespace persists, with the program and its
+# result being the only thing it can say.
+#
+# WHY THIS AXIS. Three earlier attempts at student heterogeneity gave the teacher
+# nothing to adapt to. Prompted personas do not stick on this model; capability
+# pairs (gemma, llama) want easier teaching rather than different teaching; pacing
+# and lecture-vs-dialogue both came back null. Action space is the first axis where
+# the best teaching strategy measurably differs by student -- on a panel of 8
+# strategies against the trained step-149 teacher, the code student's best was a
+# concrete ordered recipe (0.653) which was only mid-ranked for the prose student
+# (0.507), and the argmax differed in ~96% of held-out splits.
+#
+# WHAT TO WATCH, and it is not the reward. The adaptation prize measured on that
+# panel is only about +4pp for an ORACLE teacher that is told which student it
+# faces, against a 11.5-point spread for simply choosing a good fixed strategy. A
+# 4pp reward difference will not clear noise in a training curve. The evidence that
+# adaptation is emerging is BEHAVIOURAL: the teacher's messages should diverge by
+# student type, and per depth that divergence should start near zero -- the teacher
+# speaks first, before it has seen anything, so turn 1 cannot be adapted -- and
+# grow with depth. Flat divergence with rising reward means a better teacher, not
+# an adaptive one, which is what the previous three axes produced.
+#
+# The code student's channel health is logged per episode and is the other thing
+# to read early: crashes, silent_cells (ran fine, said nothing), constant_prints
+# (printed a literal it had already worked out, making the channel cosmetic) and
+# no_program (nothing parseable after retries). On a live two-turn check these ran
+# 0/0/0/0; if constant_prints climbs, the code channel is decorative and the arm
+# is not testing what it claims to.
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0810fc-two-student
+
+leak_handling_mode: terminate
+
+free_chat:
+  # Required for the code student: its unaided rate differs from the prose
+  # student's, so the baseline is keyed by (problem, mode) and each student is
+  # scored against its own floor rather than the other's.
+  no_teaching_baseline: true
+
+# student_models is a LIST, and omegaconf replaces a list on merge rather than
+# merging element-wise, so all entries have to be written out. Everything below is
+# copied from ../2gpu/base.yaml except that the qwen3-1.7b entry is duplicated
+# with mode: code, and the two share the weight that entry used to hold alone.
+# THAT MEANS IT CAN DRIFT: if endpoints, keys or sampling change in the base, they
+# will not follow here.
+student_models:
+- name: qwen3-1.7b
+  mode: text
+  weight: 0.5
+  base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+  model: qwen3-1.7b
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+# The same model, the same sampling, a different action space. Named separately so
+# every student/<name>/* metric splits the two arms without any extra plumbing.
+- name: qwen3-1.7b-code
+  mode: code
+  weight: 0.5
+  base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+  model: qwen3-1.7b
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+- name: llama-3.1-8b-instruct
+  mode: text
+  weight: 0.0
+  base_url: ${oc.env:TUTOR_LLAMA31_8B_BASE_URL}
+  model: llama-3.1-8b-instruct
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.6
+  top_p: 0.9
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-llama31-8b-student
+- name: gemma-3-1b-it
+  mode: text
+  weight: 0.0
+  base_url: ${oc.env:TUTOR_GEMMA3_1B_BASE_URL}
+  model: gemma-3-1b-it
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.0
+  top_p: null
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-gemma3-1b-student
+    extra_body:
+      repetition_penalty: 1.05
+
+# Evaluate against BOTH students explicitly. Without this the eval pass samples by
+# weight and the two arms are mixed inside one number; naming them expands the
+# validation set once per student, so generalize/test/* is reported per student and
+# the cross-comparison is available without a second pass.
+evaluator:
+  leak_terminate: false
+  student_model_names:
+  - qwen3-1.7b
+  - qwen3-1.7b-code

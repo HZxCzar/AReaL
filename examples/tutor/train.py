@@ -292,6 +292,13 @@ def _build_eval_workflow_kwargs(
         eval_workflow_kwargs["teacher_pre_verify"] = bool(
             config.evaluator.teacher_pre_verify
         )
+    # And whether it drafts at all. The config decides: an arm whose claim is that
+    # the trained teacher no longer needs a draft measures that claim here, and the
+    # internal skip in _presolve_unused_at_eval must not be what settles it.
+    if config.evaluator.teacher_pre_enabled is not None:
+        eval_workflow_kwargs["teacher_pre_enabled"] = bool(
+            config.evaluator.teacher_pre_enabled
+        )
     # Terminating on a leak is a training policy. Evaluating under it measures a
     # truncation that does not exist at deployment, so unless asked otherwise the
     # eval conversation runs to the budget and the train-consistent number is

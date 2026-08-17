@@ -658,14 +658,20 @@ What does Vieta give you?
     check("the config asks for in-the-wild evaluation",
           config.evaluator.leak_terminate is False,
           f"got {config.evaluator.leak_terminate}")
+    check("format termination is also disabled during evaluation",
+          config.evaluator.format_terminate is False)
     terminate_eval = _build_eval_workflow_kwargs(
-        {"leak_handling_mode": "terminate"}, config
+        {"leak_handling_mode": "terminate", "format_handling_mode": "terminate"}, config
     )
     check("eval stops terminating on a leak",
           terminate_eval["leak_handling_mode"] == "reward_only",
           f"got {terminate_eval['leak_handling_mode']}")
     check("eval asks for the train-consistent re-test too",
           terminate_eval["eval_preleak_retest"] is True)
+    check("eval continues after malformed turns",
+          terminate_eval["format_handling_mode"] == "continue")
+    check("format termination adds no second re-test",
+          "eval_preformat_retest" not in terminate_eval)
     reward_eval = _build_eval_workflow_kwargs(
         {"leak_handling_mode": "reward_only"}, loaded[("4gpu", "leak-reward")]
     )
@@ -869,22 +875,34 @@ What does Vieta give you?
     probe_source = _inspect.getsource(
         TutorAgentWorkflow._build_student_probe_messages
     )
-    # Both must reach the student system prompt through the SAME accessor. It used
-    # to be the bare constant in both places; the attention masks moved it behind
-    # _free_chat_student_system, which appends the mask note when a run configures
-    # masks. Checking for the shared accessor rather than for a constant name is
-    # what keeps the invariant -- baseline prompt == re-test prompt -- enforced
-    # structurally instead of by two copies happening to agree.
+    # All three must reach BOTH strings -- system prompt and re-test template --
+    # through the same resolver. It used to be the bare constants in every place;
+    # the attention masks moved the system prompt behind an accessor, and the code
+    # student plus transfer_prompts turned the template into a choice of four, so
+    # _free_chat_student_prompts now returns the pair. Checking for the shared
+    # resolver rather than for constant names is what keeps the invariant --
+    # baseline prompt == re-test prompt == dialogue prompt -- enforced structurally
+    # instead of by copies happening to agree.
+    resolver_source = _inspect.getsource(
+        TutorAgentWorkflow._free_chat_student_prompts
+    )
     check("the baseline probe uses the same prompt the re-test uses",
-          "_free_chat_student_system" in baseline_source
-          and "_free_chat_student_system" in probe_source
-          and "FREE_CHAT_STUDENT_RETEST_TEMPLATE" in baseline_source,
+          "_free_chat_student_prompts" in baseline_source
+          and "_free_chat_student_prompts" in probe_source,
           "a different prompt here would be measured as teaching")
+    check("neither picks a template constant of its own",
+          "FREE_CHAT_STUDENT_RETEST_TEMPLATE" not in baseline_source
+          and "FREE_CHAT_CODE_STUDENT_RETEST_TEMPLATE" not in baseline_source
+          and "FREE_CHAT_STUDENT_RETEST_TEMPLATE" not in probe_source,
+          "the resolver is the only place that chooses")
+    check("the resolver covers behavior x transfer, all four cells",
+          resolver_source.count("FREE_CHAT_CODE_STUDENT_RETEST_TEMPLATE_TRANSFER") == 1
+          and resolver_source.count("FREE_CHAT_CODE_STUDENT_RETEST_TEMPLATE") == 2
+          and resolver_source.count("FREE_CHAT_STUDENT_RETEST_TEMPLATE_TRANSFER") == 1,
+          "a missing cell would silently fall back to another student's prompt")
     check("the mask note reaches all three student prompts or none",
-          _inspect.getsource(
-              TutorAgentWorkflow._free_chat_student_system
-          ).count("FREE_CHAT_STUDENT_MASK_NOTE") == 1
-          and "_free_chat_student_system" in _inspect.getsource(
+          resolver_source.count("FREE_CHAT_STUDENT_MASK_NOTE") == 1
+          and "_free_chat_student_prompts" in _inspect.getsource(
               TutorAgentWorkflow._build_student_messages
           ),
           "the conversation, the re-test and the baseline must agree")

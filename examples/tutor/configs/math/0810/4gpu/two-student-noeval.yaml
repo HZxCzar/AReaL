@@ -1,0 +1,74 @@
+# 0810fc-two-student-noeval -- 4 GPUs. -- the two-student arm, training curve only.
+#
+# WHAT THIS IS. two-student, unchanged, with evaluation switched off. Same reason
+# as leak-local-stable-noeval: the questions this arm has to answer first are all
+# visible on the training side within minutes, and the eval pass in front of them
+# is the expensive part.
+#
+# AND IT IS WORSE HERE THAN ANYWHERE ELSE. two-student names BOTH students to the
+# evaluator, so the validation set is expanded once per student -- 528 problems
+# becomes 1056, and a pass that already cost ~1500 s costs ~3000 s. On the first
+# launch (20260814_213747) that pass had produced 24 episodes in 17 minutes with
+# three other arms contending, and every one of them was the TEXT student, because
+# the expansion concatenates the two students in order rather than interleaving
+# them. So the code student -- the entire point of the arm -- would not have been
+# exercised at all until the pass was half done. Training rollouts sample by
+# weight, 50/50, so with eval off the first code-student episode arrives in the
+# first batch.
+#
+# WHAT TO WATCH, and it is visible in the first few steps.
+#
+#     rollout/code/no_program        must be ~0. Anything else means the student
+#                                    could not produce parseable Python even after
+#                                    retries, and the channel is not being held.
+#     rollout/code/silent_cells      must be ~0. A cell that runs and prints
+#                                    nothing hands the teacher "(no output)", and
+#                                    that failure silently voided a third of turns
+#                                    in an earlier harness before the executor
+#                                    echoed trailing expressions.
+#     rollout/code/crashes           some is fine and is teachable -- a traceback
+#                                    is a diagnosis the teacher can act on. It ran
+#                                    0.11/turn on a live two-turn check.
+#     rollout/code/constant_prints   THE ONE THAT INVALIDATES THE ARM. The program
+#                                    did no arithmetic; the student printed a
+#                                    literal it had already worked out in its head.
+#                                    If this climbs, the teacher has learned to
+#                                    walk the student to an answer it merely
+#                                    prints, the leak judge need never fire because
+#                                    the ground truth is never stated, and the two
+#                                    students have converged -- while the re-test
+#                                    score GOES UP. Reward alone cannot see this.
+#     student/qwen3-1.7b/*           against student/qwen3-1.7b-code/*, which is
+#                                    where the two arms separate. Both are the same
+#                                    model at the same sampling settings, so a gap
+#                                    is the action space and nothing else.
+#
+# WHAT THIS ARM CANNOT SHOW YET. The behavioural adaptation measure -- teacher
+# output divergence by student type, per depth, which should sit near zero at turn
+# 1 because the teacher speaks before it has seen anything and grow with depth --
+# is not emitted. Without it, a rise in reward here does not distinguish "the
+# teacher adapted" from "the teacher got better at both", and the measured
+# adaptation prize is only about +4pp against an 11.5-point spread for simply
+# teaching well, so reward is the wrong instrument to look for it in.
+#
+# NOT A RESULTS ARM. There is no eval curve to compare with anything.
+# total_train_steps stays at the inherited 500 on purpose: kill it once the channel
+# health question is settled rather than having to relaunch if it looks good.
+#
+# GPU BUDGET. At 4 GPUs an arm is half the node, so at most TWO run at once,
+# launched a minute apart.
+defaults:
+  - two-student@_global_
+  - _self_
+
+trial_name: 0810fc-two-student-noeval
+
+evaluator:
+  # The version-0 pass, which is the expensive one for a short run -- and twice as
+  # expensive here, because both students are named.
+  eval_before_train: false
+  # And the periodic one. All three must be null: EpochStepTimeFreqCtl ORs them,
+  # and FrequencyControl only returns False forever when every frequency is unset.
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null

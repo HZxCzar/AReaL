@@ -138,6 +138,8 @@ from examples.tutor.configs import (
     TUTOR_EVAL_STUDENT_FIELD,
     TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
     TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
+    STUDENT_MODE_CODE,
+    STUDENT_MODE_TEXT,
     TutorStudentModelConfig,
 )
 from examples.tutor.core.attention_mask import (
@@ -156,6 +158,11 @@ from examples.tutor.core.callers import (
     ExternalActorCaller,
     TextCallResult,
     apply_chat_template,
+)
+from examples.tutor.core.code_exec import (
+    CodeSession,
+    is_constant_print,
+    is_valid_python,
 )
 from examples.tutor.core.confidence import compute_answer_token_confidence
 from examples.tutor.core.generalization import load_student_generalize_bank
@@ -219,6 +226,11 @@ from examples.tutor.prompts import (
     EMPTY_PLACEHOLDER,
     FILTER_SOLVER_SYSTEM_PROMPT,
     FILTER_SOLVER_USER_TEMPLATE,
+    CODE_STUDENT_NO_OUTPUT,
+    CODE_STUDENT_NO_PROGRAM,
+    CODE_STUDENT_TEACHER_VIEW_TEMPLATE,
+    FREE_CHAT_CODE_STUDENT_RETEST_TEMPLATE,
+    FREE_CHAT_CODE_STUDENT_SYSTEM_PROMPT,
     FREE_CHAT_STUDENT_RETEST_TEMPLATE,
     FREE_CHAT_STUDENT_RETEST_TEMPLATE_TRANSFER,
     FREE_CHAT_STUDENT_MASK_NOTE,
@@ -283,6 +295,11 @@ LEAK_TERMINATION_REASON = "leak"
 FORMAT_TERMINATION_REASON = "format_error"
 TEACHER_PRE_SKIPPED_TERMINATION_REASON = "pre_solve_skipped"
 LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate"}
+TEACHER_PRE_ON_REJECT_MODES = {"skip", "continue"}
+# Live entries in the pre-solve cache. One step needs
+# train_dataset.batch_size (16) of them, so this is deep enough that nothing is
+# evicted while its group is still in flight; it exists only to stop the dict
+# growing for the length of a 500-step run.
 
 
 def load_prompt_pool(path: str, *, role: str) -> tuple[str, ...]:
@@ -418,6 +435,39 @@ def load_prompt_text(path: str, *, role: str) -> str:
     if not prompt:
         raise ValueError(f"{role} prompt file must be non-empty: {file_path}")
     return prompt
+
+
+_CODE_FENCE_RE = re.compile(r"```(?:python|py)?\s*\n(.*?)(?:```|\Z)", re.S)
+
+
+def extract_program(text: str) -> str | None:
+    """Pull a runnable program out of a code student's reply, or None.
+
+    Takes the first fenced block if there is one, otherwise the whole reply, and
+    returns it only if it parses.
+
+    WHY NOT PREFILL THE REPLY. Forcing generation to open inside a ```python
+    fence is the stronger enforcement, but it needs SGLang's
+    `continue_final_message`, and student_models entries may point at any
+    OpenAI-compatible endpoint, so the training path must not depend on a
+    backend-specific request field. Prefill also measurably costs accuracy (0.25
+    against 0.45 on a solo re-test probe) because it removes the planning tokens
+    before the code.
+
+    Extraction plus regeneration gets the same guarantee more cheaply: mid
+    conversation this student writes prose with a code block appended, and the
+    block is the part that matters. Prose alone does not parse, so the caller
+    regenerates rather than executing English as Python -- which is what made a
+    third of turns look like crashes in an earlier harness.
+    """
+    if not text:
+        return None
+    blocks = _CODE_FENCE_RE.findall(text)
+    candidates = [*blocks, text.replace("```python", "").replace("```", "")]
+    for candidate in candidates:
+        if candidate.strip() and is_valid_python(candidate):
+            return candidate
+    return None
 
 
 def _safe_scalar(**metrics: Any) -> None:
@@ -570,6 +620,9 @@ class StudentModelRuntime:
     # caller and differ only here, which is how several learners are defined over
     # one served endpoint. See core/attention_mask.py.
     mask: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_MASK))
+    # 'text' or 'code'. See TutorStudentModelConfig.mode. Carried on the runtime
+    # rather than looked up by name so every downstream branch reads one field.
+    mode: str = STUDENT_MODE_TEXT
 
 
 @dataclass(slots=True)
@@ -579,6 +632,11 @@ class SelectedStudent:
     caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller
     confidence_caller: ApiAuxiliaryCaller | None = None
     mask: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_MASK))
+    mode: str = STUDENT_MODE_TEXT
+
+    @property
+    def is_code(self) -> bool:
+        return self.mode == STUDENT_MODE_CODE
 
 
 class TutorAgentWorkflow(RolloutWorkflow):
@@ -738,17 +796,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
         # would put sampling noise straight into the reward.
         self._no_teaching_baselines: dict[str, float] = {}
         self._no_teaching_baseline_lock = asyncio.Lock()
-        # One pre-solve draft per (problem, weight version) when
-        # teacher_pre.share_per_group is on. Stores the in-flight TASK, not the
-        # result, so the other rollouts of a group await the same generation
-        # instead of queueing behind a lock -- the lock below is held only across
-        # the dict lookup and never across an await, so distinct problems still
-        # run concurrently.
+        # (problem, weight version) -> the in-flight pre-solve TASK for that group,
+        # when teacher_pre.share_per_group is on. The task and not the result, so the
+        # group's other rollouts await the same generation instead of queueing behind
+        # a lock -- the lock is held only across the dict lookup and never across an
+        # await, so distinct problems still run concurrently.
         #
-        # Keyed on the version as well as the problem, unlike
-        # _no_teaching_baselines: the student behind that cache is frozen, and the
-        # teacher behind this one is the thing being trained, so a draft must not
-        # survive a weight update.
+        # Keyed on the version as well as the problem, unlike _no_teaching_baselines:
+        # the student behind that cache is frozen, and the teacher behind this one is
+        # the thing being trained, so a draft must not survive a weight update.
+        # Versions older than the previous one are dropped, which bounds the cache at
+        # the two versions max_head_offpolicyness allows in flight -- exact, where a
+        # fixed entry cap would have been a guess.
         self._teacher_pre_solve_shared: dict[tuple[str, int], Any] = {}
         self._teacher_pre_solve_shared_lock = asyncio.Lock()
         self.dataset_type = (dataset_type or "").strip().lower()
@@ -1479,6 +1538,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     if self.student_generalize_confidence_enabled
                     else None
                 ),
+                mode=str(student.get("mode", STUDENT_MODE_TEXT)),
             )
         return runtimes
 
@@ -1552,6 +1612,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 caller=runtime.caller,
                 confidence_caller=runtime.confidence_caller,
                 mask=runtime.mask,
+                mode=runtime.mode,
             )
 
         if forced_name:
@@ -2002,6 +2063,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         # Attached by GroupedRolloutWorkflow only when wants_group_index is set.
         group_index = data.get("group_index")
         group_index = None if group_index is None else int(group_index)
+        # Identifies the GRPO group: every rollout of one problem shares it, and
+        # it is what the pre-solve cache and the student draw are scoped to. Same
+        # key the no-teaching baseline uses, so the two agree on what a problem is.
+        group_key = str(data.get("id") or task)
         trajectory_id = uuid.uuid4().int & ((1 << 63) - 1)
         self.last_student_generalization_results = []
         turn_artifacts: list[TurnArtifact] = []
@@ -2052,6 +2117,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
             rollout_version=episode_lora_version,
         )
         student_caller = selected_student.caller
+        # One interpreter per episode, so names persist across the conversation's
+        # turns. None for a text student, which is what switches _run_student and
+        # the re-test over to the prose path.
+        code_session = CodeSession() if selected_student.is_code else None
         student_generalize_caller = self._make_student_generalization_caller(
             aux_caller=student_caller,
             confidence_caller=selected_student.confidence_caller,
@@ -2060,32 +2129,37 @@ class TutorAgentWorkflow(RolloutWorkflow):
             chat_caller=aux_chat_caller
         )
         teacher_pre_solve_result: TeacherPreSolveResult | None = None
+        teacher_pre_cache_hit = False
         self.last_teacher_pre_solve_result = None
         if getattr(self, "teacher_pre_enabled", False) and not (
             self._presolve_unused_at_eval()
         ):
-            teacher_pre_solve_result = await self._teacher_pre_solve_for_episode(
-                data,
+            (
+                teacher_pre_solve_result,
+                teacher_pre_cache_hit,
+            ) = await self._teacher_pre_solve_for_group(
                 task,
                 ground_truth,
                 actor_caller=actor_caller,
                 answer_judge_caller=answer_judge_caller,
                 lora_version=episode_lora_version,
+                group_key=group_key,
             )
             self.last_teacher_pre_solve_result = teacher_pre_solve_result
+            # 'continue' keeps the group and leaves the draft absent, so the filter
+            # stops being part of what this config does. Default 'skip' is the
+            # historical path below, unchanged. _free_chat_preamble and
+            # _append_teacher_pre_solve_context both gate on `accepted`, so passing an
+            # unaccepted result through is already the no-draft prompt.
+            #
+            # Note the scope: the draft is one decision per problem per weight
+            # version, so every rollout of the group reaches this branch with the same
+            # rejected result and takes the same side of it. 'skip' therefore drops the
+            # whole group for this step rather than thinning it, which is the behaviour
+            # GRPO wants -- a short group computes its leave-one-out baseline over
+            # fewer episodes, an absent one contributes no gradient at all.
             if (
                 not teacher_pre_solve_result.accepted
-                # 'continue' keeps the episode and leaves the draft absent, so the
-                # filter stops being part of what this config does. Default
-                # 'skip' is the historical path below, unchanged.
-                #
-                # Note the scope: the draft is one decision per problem per weight
-                # version, so every rollout of the group reaches this branch with
-                # the same rejected result and takes the same side of it. 'skip'
-                # therefore drops the whole group for this step rather than
-                # thinning it, which is the behaviour GRPO wants -- a short group
-                # computes its leave-one-out baseline over fewer episodes, an
-                # absent one contributes no gradient at all.
                 and getattr(self, "teacher_pre_on_reject", "skip") == "skip"
             ):
                 self.last_history = []
@@ -2099,6 +2173,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     pre_success=False,
                     leak_count=0,
                     teacher_pre_solve_result=teacher_pre_solve_result,
+                    teacher_pre_cache_hit=teacher_pre_cache_hit,
                     student_name=selected_student.name,
                     teacher_prompt_selection=teacher_prompt_selection,
                     student_prompt_selection=student_prompt_selection,
@@ -2119,6 +2194,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     teacher_pre_solve_result=teacher_pre_solve_result,
                     student_name=selected_student.name,
                     student_model=selected_student.model,
+                    student_mode=selected_student.mode,
                     teacher_prompt_selection=teacher_prompt_selection,
                     student_prompt_selection=student_prompt_selection,
                 )
@@ -2135,6 +2211,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             student_prompt_selection=student_prompt_selection,
             student_turn_behavior=initial_student_turn_behavior,
             student_mask=selected_student.mask,
+            student_mode=selected_student.mode,
         )
         free_chat = bool(getattr(self, "free_chat_enabled", False))
         if free_chat:
@@ -2149,6 +2226,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ) = await self._run_student(
                 initial_student_state,
                 aux_caller=student_caller,
+                code_session=code_session,
             )
         initial_student_answer = _strip_reasoning_for_context(
             initial_student_answer_raw
@@ -2197,6 +2275,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 teacher_pre_solve_result=teacher_pre_solve_result,
                 student_name=selected_student.name,
                 student_model=selected_student.model,
+                student_mode=selected_student.mode,
                 teacher_prompt_selection=teacher_prompt_selection,
                 student_prompt_selection=student_prompt_selection,
                 initial_student_turn_behavior=initial_student_turn_behavior,
@@ -2230,6 +2309,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
                 student_name=selected_student.name,
                 student_model=selected_student.model,
+                student_mode=selected_student.mode,
                 teacher_prompt_selection=teacher_prompt_selection,
                 student_prompt_selection=student_prompt_selection,
                 initial_student_turn_behavior=initial_student_turn_behavior,
@@ -2370,11 +2450,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_prompt_selection=student_prompt_selection,
                 student_turn_behavior=student_turn_behavior,
                 student_mask=selected_student.mask,
+                student_mode=selected_student.mode,
             )
             student_prompt = self._build_student_prompt_from_state(student_state)
             student_answer_raw, student_error = await self._run_student(
                 student_state,
                 aux_caller=student_caller,
+                code_session=code_session,
             )
             student_answer = _strip_reasoning_for_context(student_answer_raw)
             # Free chat scores nothing mid-episode. A per-turn judge would buy
@@ -2491,6 +2573,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             teacher_pre_solve_result=teacher_pre_solve_result,
             student_name=selected_student.name,
             student_model=selected_student.model,
+            student_mode=selected_student.mode,
             teacher_prompt_selection=teacher_prompt_selection,
             student_prompt_selection=student_prompt_selection,
             initial_student_turn_behavior=initial_student_turn_behavior,
@@ -2503,6 +2586,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         # Cached per problem, so the other seven rollouts of this group get it free.
         episode_no_teaching_baseline = await self._no_teaching_baseline(
             data,
+            student_mode=selected_student.mode,
             aux_caller=student_generalize_caller,
             answer_judge_caller=answer_judge_caller,
         )
@@ -2512,6 +2596,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             aux_caller=student_generalize_caller,
             answer_judge_caller=answer_judge_caller,
             no_teaching_baseline=episode_no_teaching_baseline,
+            code_session=code_session,
         )
         # The head-to-head cross. Evaluation only, and it touches nothing above:
         # the reward is already decided by the re-test, and every series it adds
@@ -2720,6 +2805,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             leak_count=episode_artifact.leak_count,
             student_generalization_results=student_generalization_results,
             teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
+            teacher_pre_cache_hit=teacher_pre_cache_hit,
             student_name=selected_student.name,
             student_call_failed=bool(
                 initial_student_error
@@ -2740,6 +2826,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     turn_artifacts, clean_teacher_inputs, strict=True
                 )
             ),
+            code_stats=code_session.stats() if code_session is not None else None,
         )
         if completed_repeat_outcome is not None and self.debug_trace_dir:
             await self._dump_eval_repeat_outcomes(*completed_repeat_outcome)
@@ -2758,12 +2845,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
             teacher_pre_solve_result=episode_artifact.teacher_pre_solve_result,
             student_name=selected_student.name,
             student_model=selected_student.model,
+            student_mode=selected_student.mode,
             teacher_prompt_selection=teacher_prompt_selection,
             student_prompt_selection=student_prompt_selection,
             initial_student_turn_behavior=initial_student_turn_behavior,
             initial_student_question_generation=(
                 initial_student_question_generation
             ),
+            code_stats=code_session.stats() if code_session is not None else None,
         )
         # A format-terminated episode is TRAINED, not discarded. It used to return
         # no rows at all -- DAPO-style exclusion, on the reasoning that an
@@ -2926,84 +3015,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             semaphore=self._self_aux_semaphore,
         )
 
-    async def _teacher_pre_solve_for_episode(
-        self,
-        data: dict[str, Any],
-        task: str,
-        ground_truth: str,
-        *,
-        actor_caller: AReaLEngineActorCaller | ExternalActorCaller,
-        answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
-        lora_version: int | None,
-    ) -> TeacherPreSolveResult:
-        """The draft for this problem at this weight version, shared by its group.
-
-        WHY SHARE. The draft rides in the teacher's prompt, so sampling one per
-        rollout gives the 8 rollouts of a group 8 DIFFERENT prompts. GRPO's
-        baseline assumes a common prompt: with independent drafts the leave-one-out
-        mean is partly averaging over which draft was drawn rather than over how
-        well the teacher taught, and that variance lands in every advantage in the
-        group. Sharing makes the within-group comparison isolate the conversation
-        given a fixed draft. It also costs one generation per problem instead of
-        `gconfig.n_samples`, and the group then shares a prompt prefix, which the
-        generation cache can reuse.
-
-        THIS IS NOT A SWITCH. `share_per_group` defaults True and there is no
-        reason to set it False; it survives only so a config.yaml saved before
-        20260815 still loads for --resume. It defaulted False until then, so every
-        arm that did not opt in ran with per-rollout drafts -- on
-        20260814_223024, 12 of 19 problems had all 8 rollouts on 8 distinct
-        drafts, against exactly 1 for the two arms that had set it.
-
-        SCOPE. The key carries the weight version, and versions older than the
-        previous one are dropped, so the cache holds at most the two versions
-        `max_head_offpolicyness` allows in flight. A draft is never reused across
-        a weight update: the teacher is the model being trained, which is exactly
-        what makes this different from `_no_teaching_baselines`, whose student is
-        frozen and which therefore caches for the whole run.
-
-        Falls back to per-episode generation when there is no version to key on --
-        that is the no-engine path, where there is no weight update to invalidate
-        against either.
-        """
-        def run() -> Any:
-            return self._run_teacher_pre_solve(
-                task,
-                ground_truth,
-                actor_caller=actor_caller,
-                answer_judge_caller=answer_judge_caller,
-                lora_version=lora_version,
-            )
-
-        if (
-            not getattr(self, "teacher_pre_share_per_group", False)
-            or lora_version is None
-        ):
-            return await run()
-
-        version = int(lora_version)
-        key = (str(data.get("id", task)), version)
-        # The lock guards the dict only. Creating the task under it and awaiting
-        # outside is what keeps one problem's generation from serialising the
-        # rest: an await inside would hold the lock for the whole 3-attempt
-        # generate-and-judge loop.
-        async with self._teacher_pre_solve_shared_lock:
-            pending = self._teacher_pre_solve_shared.get(key)
-            if pending is None:
-                pending = asyncio.create_task(run())
-                self._teacher_pre_solve_shared[key] = pending
-                stale = [
-                    cached
-                    for cached in self._teacher_pre_solve_shared
-                    if cached[1] < version - 1
-                ]
-                for cached in stale:
-                    self._teacher_pre_solve_shared.pop(cached, None)
-        # shield, because a plain `await task` propagates the awaiting
-        # coroutine's cancellation into the task. Without it the first rollout to
-        # be cancelled would kill the draft that the other seven are waiting on.
-        return await asyncio.shield(pending)
-
     def _teacher_pre_solve_tokens(self) -> int:
         if self.teacher_pre_max_tokens > 0:
             return self.teacher_pre_max_tokens
@@ -3044,6 +3055,94 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "content": self._build_teacher_pre_solve_prompt(task=task),
             },
         ]
+
+    async def _teacher_pre_solve_for_group(
+        self,
+        task: str,
+        ground_truth: str,
+        *,
+        actor_caller: AReaLEngineActorCaller | ExternalActorCaller,
+        answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
+        lora_version: int | None,
+        group_key: str,
+    ) -> tuple[TeacherPreSolveResult, bool]:
+        """The draft for this problem at this weight version, shared by its group.
+
+        WHY SHARE. The draft rides in the teacher's prompt, so sampling one per
+        rollout gives the 8 rollouts of a group 8 DIFFERENT prompts. GRPO's baseline
+        assumes a common prompt: with independent drafts the leave-one-out mean is
+        partly averaging over which draft was drawn rather than over how well the
+        teacher taught, and that variance lands in every advantage in the group.
+        Sharing makes the within-group comparison isolate the conversation given a
+        fixed draft. It also costs one generation per problem instead of
+        `gconfig.n_samples` -- at `teacher_pre.attempts` 3 that is up to 8 drafts and
+        24 judge calls where one draft was wanted -- and the group then shares a
+        prompt prefix the generation cache can reuse. Measured on 20260814_223024,
+        12 of 19 problems had all 8 rollouts on 8 distinct drafts before this.
+
+        SWITCHABLE, but `share_per_group` defaults True and off is only useful to
+        reproduce a run recorded before 20260815 or to measure the variance sharing
+        removes. Off falls back to a per-episode generation, as does a None
+        `lora_version` -- the no-engine path, where there is no weight update to
+        invalidate against either.
+
+        SCOPE. The key carries the weight version, and versions older than the
+        previous one are dropped, so the cache holds at most the two versions
+        `max_head_offpolicyness` allows in flight. A draft is never reused across a
+        weight update: the teacher is the model being trained, which is exactly what
+        makes this different from `_no_teaching_baselines`, whose student is frozen
+        and which therefore caches for the whole run.
+
+        Returns the result and whether this rollout reused another's draft, which is
+        what `teacher_pre/cache_hit` reports. Expect (n_samples - 1)/n_samples once
+        this is working, lower only where a group straddles a weight update.
+        """
+
+        def run() -> Any:
+            return self._run_teacher_pre_solve(
+                task,
+                ground_truth,
+                actor_caller=actor_caller,
+                answer_judge_caller=answer_judge_caller,
+                lora_version=lora_version,
+            )
+
+        if (
+            not getattr(self, "teacher_pre_share_per_group", False)
+            or lora_version is None
+        ):
+            return (await run(), False)
+
+        version = int(lora_version)
+        key = (str(group_key), version)
+        # The lock guards the dict only. Creating the task under it and awaiting
+        # outside is what keeps one problem's generation from serialising the rest:
+        # an await inside would hold the lock for the whole generate-and-judge loop.
+        async with self._teacher_pre_solve_shared_lock:
+            pending = self._teacher_pre_solve_shared.get(key)
+            cache_hit = pending is not None
+            if pending is None:
+                pending = asyncio.ensure_future(run())
+                self._teacher_pre_solve_shared[key] = pending
+                for stale in [
+                    cached
+                    for cached in self._teacher_pre_solve_shared
+                    if cached[1] < version - 1
+                ]:
+                    self._teacher_pre_solve_shared.pop(stale, None)
+        try:
+            # shield, because a plain `await` propagates the awaiting coroutine's
+            # cancellation into the task. Without it the first rollout to be
+            # cancelled would kill the draft the other seven are waiting on.
+            result = await asyncio.shield(pending)
+        except Exception:
+            # Do not let one transient failure poison the whole group for this step
+            # -- drop the entry so the next sibling retries.
+            async with self._teacher_pre_solve_shared_lock:
+                if self._teacher_pre_solve_shared.get(key) is pending:
+                    del self._teacher_pre_solve_shared[key]
+            raise
+        return (result, cache_hit)
 
     async def _run_teacher_pre_solve(
         self,
@@ -3173,11 +3272,43 @@ class TutorAgentWorkflow(RolloutWorkflow):
         state: StudentTurnState,
         *,
         aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
+        code_session: CodeSession | None = None,
     ) -> tuple[str, str | None]:
+        """One student turn. Returns (visible_turn_text, error).
+
+        A code student's turn is a program plus what running it produced, and that
+        pair is what goes into the public history -- see
+        CODE_STUDENT_TEACHER_VIEW_TEMPLATE for why one rendering serves both the
+        teacher's view and the student's own.
+        """
+        messages = self._build_student_messages(state)
+        rid = f"student-{state.public_history.turn_count}"
+        if (
+            getattr(state, "student_mode", STUDENT_MODE_TEXT) == STUDENT_MODE_CODE
+            and code_session is not None
+        ):
+            program, _raw, _attempts, error = await self._call_student_for_program(
+                messages, aux_caller=aux_caller, rid_prefix=rid
+            )
+            if program is None:
+                if error and error != "no parseable program":
+                    # An endpoint failure, not the student's doing.
+                    return "", error
+                code_session.note_missing_program()
+                return CODE_STUDENT_NO_PROGRAM, None
+            cell = await code_session.run(program)
+            return (
+                render_prompt(
+                    CODE_STUDENT_TEACHER_VIEW_TEMPLATE,
+                    program=program.strip(),
+                    result=cell.output.strip() or CODE_STUDENT_NO_OUTPUT,
+                ),
+                None,
+            )
         result = await self._call_auxiliary_messages(
-            self._build_student_messages(state),
+            messages,
             aux_caller=aux_caller,
-            rid_prefix=f"student-{state.public_history.turn_count}",
+            rid_prefix=rid,
         )
         if result.error:
             return "", result.error
@@ -3432,6 +3563,65 @@ class TutorAgentWorkflow(RolloutWorkflow):
         caller = aux_caller or self._make_auxiliary_caller(engine=None)
         return await caller.call_text(messages, rid_prefix=rid_prefix)
 
+    async def _call_student_for_program(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        aux_caller: Any,
+        rid_prefix: str,
+        retries: int = 3,
+    ) -> tuple[str | None, str, int, str | None]:
+        """Get one runnable program out of a code student.
+
+        Returns (program, raw_reply, attempts_used, error). program is None when
+        every attempt failed to yield parseable Python, which the caller records
+        as a turn that produced nothing rather than executing prose.
+        """
+        raw = ""
+        error: str | None = None
+        for attempt in range(max(1, retries)):
+            result = await self._call_auxiliary_messages(
+                messages,
+                aux_caller=aux_caller,
+                rid_prefix=f"{rid_prefix}-a{attempt}",
+            )
+            if result.error:
+                error = result.error
+                continue
+            raw = result.raw_text or result.text or ""
+            error = None
+            program = extract_program(raw)
+            if program is not None:
+                return program, raw, attempt + 1, None
+        return None, raw, max(1, retries), error
+
+    async def _code_student_answer(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        session: CodeSession,
+        aux_caller: Any,
+        rid_prefix: str,
+        keep: bool,
+    ) -> tuple[str, str, str, str | None]:
+        """One code-student act: write a program, run it, report what it produced.
+
+        Returns (answer_text, program, status, error). `answer_text` is what gets
+        judged or shown, and it is the program's OUTPUT -- so a code student's
+        score is the same quantity as a text student's boxed answer, measured
+        through a different channel and scored by the same judge.
+
+        `keep` is False for the re-test and the no-teaching baseline: those run on
+        a branch and must not change the session the conversation built.
+        """
+        program, _raw, _attempts, error = await self._call_student_for_program(
+            messages, aux_caller=aux_caller, rid_prefix=rid_prefix
+        )
+        if program is None:
+            return "", "", "crash", error or "no parseable program"
+        result = await (session.run(program) if keep else session.peek(program))
+        return result.output, program, result.status, None
+
     async def _run_public_summary_update(
         self,
         *,
@@ -3587,12 +3777,20 @@ class TutorAgentWorkflow(RolloutWorkflow):
             else episode_artifact.task
         )
         free_chat = bool(getattr(self, "free_chat_enabled", False))
+        code_student = (
+            getattr(episode_artifact, "student_mode", STUDENT_MODE_TEXT)
+            == STUDENT_MODE_CODE
+        )
         if free_chat:
             # The same one-line system prompt the conversation used, so the
             # re-test is the same student. The task appears for the first time in
             # the final user turn below.
-            system = self._free_chat_student_system()
+            system, free_chat_retest_template = self._free_chat_student_prompts(
+                getattr(episode_artifact, "student_mode", STUDENT_MODE_TEXT)
+            )
         else:
+            # Unused off free chat; bound so the name exists on both branches.
+            free_chat_retest_template = ""
             system = self._student_system_prompt_for_selection(
                 episode_artifact.student_prompt_selection
             )
@@ -3601,19 +3799,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 f"{self._task_context(context_task)}"
             )
         if is_retest:
-            # Must stay identical to the selector in `_no_teaching_baseline`:
-            # S(0) is subtracted from this probe's score, so any difference
-            # between the two prompts is measured as teaching.
-            retest_template = (
-                FREE_CHAT_STUDENT_RETEST_TEMPLATE_TRANSFER
-                if getattr(self, "free_chat_transfer_prompts", False)
-                else FREE_CHAT_STUDENT_RETEST_TEMPLATE
-            )
+            # The same resolver `_no_teaching_baseline` uses, which is the point:
+            # S(0) is subtracted from this probe's score, so a difference between the
+            # two prompts would be measured as teaching rather than read as a bug.
             final_turn = (
-                render_prompt(
-                    retest_template,
-                    task=context_task,
-                )
+                render_prompt(free_chat_retest_template, task=context_task)
                 if free_chat
                 else render_prompt(STUDENT_FINAL_SOLUTION_TEMPLATE)
             )
@@ -3767,6 +3957,73 @@ class TutorAgentWorkflow(RolloutWorkflow):
     ) -> JudgeResult:
         return self.answer_scorer(task, ground_truth, student_answer)
 
+    async def _score_code_output(
+        self,
+        task: str,
+        ground_truth: str,
+        output: str,
+        *,
+        answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
+    ) -> JudgeResult:
+        """Score what a code student's program printed.
+
+        There is no extraction step here, and that is the point. A text student
+        marks its answer with \\boxed{}; a code student's answer is simply what it
+        printed. Running the boxed extractor over program output returns an empty
+        string, so the judge gets asked whether nothing equals the ground truth --
+        which is why the first two-student run credited 0.3% of code re-tests when
+        a crude match on the same outputs credited 10.9%.
+
+        An exact match on the whole output short-circuits without a judge call.
+        Everything else goes to the judge WITH THE OUTPUT VERBATIM and the ground
+        truth beside it, which is the thing best placed to decide whether a
+        program that printed a search log arrived at the right value. No harness
+        guess about which line holds the answer.
+
+        Empty output stays wrong, deliberately. A program that printed nothing has
+        not answered, and that is the student's failure, not the harness's -- the
+        teacher already sees "(no output)" in the result block and is the one
+        positioned to tell it to print. Short-circuited so it costs no judge call.
+        """
+        text = str(output or "").strip()
+        # Reuse the deterministic scorer for the clean case by presenting the whole
+        # output as the answer. Exact, not a guess: it matches only when the
+        # program printed the answer and nothing else.
+        exact_result = self._score_answer(task, ground_truth, f"\\boxed{{{text}}}")
+        if not text:
+            return exact_result
+        if exact_result.correct or not self.answer_judge_enabled:
+            return exact_result
+
+        # What the judge is shown IS the output, capped so a runaway log cannot
+        # crowd out the ground truth in the prompt.
+        shown = text if len(text) <= 2000 else text[:2000] + "\n...[truncated]"
+        cache_key = (str(task), str(ground_truth), shown)
+        cached = self._answer_judge_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        if answer_judge_caller is None:
+            result = self._answer_judge_failed_result(
+                exact_result, error="answer judge caller is unavailable"
+            )
+            self._answer_judge_cache[cache_key] = result
+            return result
+
+        judge_call = await self._call_auxiliary_prompt(
+            system_prompt=self.answer_judge_system_prompt,
+            user_prompt=self._build_answer_judge_prompt(task, ground_truth, shown),
+            aux_caller=answer_judge_caller,
+            rid_prefix="answer-judge-code",
+        )
+        if judge_call.error:
+            result = self._answer_judge_failed_result(
+                exact_result, error=judge_call.error
+            )
+        else:
+            result = self._parse_answer_judge_result(exact_result, judge_call)
+        self._answer_judge_cache[cache_key] = result
+        return result
+
     async def _score_answer_async(
         self,
         task: str,
@@ -3774,7 +4031,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_answer: str,
         *,
         answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
+        code_output: bool = False,
     ) -> JudgeResult:
+        if code_output:
+            return await self._score_code_output(
+                task,
+                ground_truth,
+                student_answer,
+                answer_judge_caller=answer_judge_caller,
+            )
         if getattr(self, "dataset_type", "aime") == "polaris":
             from examples.tutor.core.polaris import score_polaris_answer_async
 
@@ -4435,6 +4700,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller,
         answer_judge_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None,
         no_teaching_baseline: float | None = None,
+        code_session: CodeSession | None = None,
     ) -> list[StudentGeneralizationResult]:
         if not bool(getattr(self, "student_generalize_enabled", False)):
             return []
@@ -4513,19 +4779,52 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 transfer_task=case.task,
             )
             replays = max(1, int(getattr(self, "student_generalize_replays", 1)))
-            replay_results = await asyncio.gather(
-                *[
-                    self._call_auxiliary_messages(
-                        probe_messages,
-                        aux_caller=aux_caller,
-                        rid_prefix=(
-                            f"student-transfer-{level}-"
-                            f"{anchor.public_history.turn_count}-r{replay_idx}"
-                        ),
+            if code_session is not None:
+                # The re-test runs on a branch: `peek` so the conversation's
+                # namespace is visible to the program but nothing the re-test does
+                # is written back, and the replays stay independent of each other.
+                # What gets judged is the program's OUTPUT, so the code student's
+                # score is the same quantity as the text student's boxed answer
+                # through the same judge.
+                code_answers = await asyncio.gather(
+                    *[
+                        self._code_student_answer(
+                            probe_messages,
+                            session=code_session,
+                            aux_caller=aux_caller,
+                            rid_prefix=(
+                                f"student-transfer-{level}-"
+                                f"{anchor.public_history.turn_count}-r{replay_idx}"
+                            ),
+                            keep=False,
+                        )
+                        for replay_idx in range(replays)
+                    ]
+                )
+                replay_results = [
+                    TextCallResult(
+                        # The raw program output. _score_answer_async is told it
+                        # is program output and shows it to the judge verbatim.
+                        text=answer if status == "ok" else "",
+                        raw_text=program,
+                        error=error,
                     )
-                    for replay_idx in range(replays)
+                    for answer, program, status, error in code_answers
                 ]
-            )
+            else:
+                replay_results = await asyncio.gather(
+                    *[
+                        self._call_auxiliary_messages(
+                            probe_messages,
+                            aux_caller=aux_caller,
+                            rid_prefix=(
+                                f"student-transfer-{level}-"
+                                f"{anchor.public_history.turn_count}-r{replay_idx}"
+                            ),
+                        )
+                        for replay_idx in range(replays)
+                    ]
+                )
             # The first successful attempt is canonical for logging and
             # confidence. Falling back to attempt 1 keeps traces and confidence
             # semantics unchanged at replays=1, while making sure a single failed
@@ -4566,6 +4865,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                             case.ground_truth,
                             result.text,
                             answer_judge_caller=answer_judge_caller,
+                            code_output=code_session is not None,
                         )
                         for result in replay_results
                         if not result.error
@@ -5572,28 +5872,63 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
         ]
 
-    def _free_chat_student_system(self) -> str:
-        """The student system prompt, plus the mask note when the run uses masks.
+    def _free_chat_student_prompts(
+        self, student_mode: str = STUDENT_MODE_TEXT
+    ) -> tuple[str, str]:
+        """The student's system prompt and re-test template for one student.
 
-        One function for all three callers -- the conversation, the scored
-        re-test and the no-teaching baseline -- because a difference between them
-        would be measured as teaching rather than as a prompt change.
+        A student is a (behavior, information) pair, and the re-test problem may be a
+        different problem from the dialogue's, so three independent switches decide
+        these two strings:
+
+            behavior      student_mode text | code    -> which prompt family
+            information   student_mask active         -> whether the (forget) note rides along
+            transfer      free_chat.transfer_prompts  -> "from scratch" or not
+
+        ONE FUNCTION FOR ALL THREE CALLERS -- the dialogue turn, the scored re-test
+        probe, and the no-teaching baseline. S(0) is subtracted from the probe's
+        score, so a disagreement between those last two is measured as TEACHING
+        rather than read as a prompt bug. A ternary per call site is exactly how that
+        drifts, and there were five of them across the two branches this merges.
         """
-        if not getattr(self, "student_mask_active", False):
-            return FREE_CHAT_STUDENT_SYSTEM_PROMPT
-        return "\n\n".join(
-            (FREE_CHAT_STUDENT_SYSTEM_PROMPT, FREE_CHAT_STUDENT_MASK_NOTE)
-        )
+        code = str(student_mode or STUDENT_MODE_TEXT) == STUDENT_MODE_CODE
+        transfer = bool(getattr(self, "free_chat_transfer_prompts", False))
+        if code:
+            system = FREE_CHAT_CODE_STUDENT_SYSTEM_PROMPT
+            retest = (
+                FREE_CHAT_CODE_STUDENT_RETEST_TEMPLATE_TRANSFER
+                if transfer
+                else FREE_CHAT_CODE_STUDENT_RETEST_TEMPLATE
+            )
+        else:
+            system = FREE_CHAT_STUDENT_SYSTEM_PROMPT
+            retest = (
+                FREE_CHAT_STUDENT_RETEST_TEMPLATE_TRANSFER
+                if transfer
+                else FREE_CHAT_STUDENT_RETEST_TEMPLATE
+            )
+        if getattr(self, "student_mask_active", False):
+            # The note explains the (forget) marker the mask leaves in the
+            # transcript, so it belongs to any masked student whatever its action
+            # space -- the code student reads the same marked-up history. The code
+            # path skipped it, which left (code, masked) an unexplained mask.
+            system = "\n\n".join((system, FREE_CHAT_STUDENT_MASK_NOTE))
+        return system, retest
 
     def _build_student_messages(
         self, state: StudentTurnState
     ) -> list[dict[str, str]]:
+        code_student = (
+            getattr(state, "student_mode", STUDENT_MODE_TEXT) == STUDENT_MODE_CODE
+        )
         if getattr(self, "free_chat_enabled", False):
             # No task, no subject, no instruction about what to do. The student
             # only ever learns what this is about from what the teacher says,
             # which is the point: telling it to solve the task on every turn is
             # what made every reply an answer attempt.
-            system = self._free_chat_student_system()
+            system, _ = self._free_chat_student_prompts(
+                getattr(state, "student_mode", STUDENT_MODE_TEXT)
+            )
         else:
             system = self._student_system_prompt_for_state(state)
             system = f"{system.rstrip()}\n\n{self._task_context(state.task)}"
@@ -5618,7 +5953,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
             {"role": "system", "content": system},
             *self._render_conversation(turns, speaker="student"),
         ]
-        behavior_prompt = self._student_turn_behavior_prompt(state)
+        # A behaviour prompt is prose telling the student how to reply, which is
+        # meaningless to one whose only reply is a program, and it would be a
+        # second instruction competing with the format the channel enforces.
+        behavior_prompt = (
+            "" if code_student else self._student_turn_behavior_prompt(state)
+        )
         if behavior_prompt:
             if messages[-1]["role"] == "user":
                 messages[-1] = {
@@ -5956,18 +6296,35 @@ class TutorAgentWorkflow(RolloutWorkflow):
         *,
         aux_caller: Any,
         answer_judge_caller: Any,
+        student_mode: str = STUDENT_MODE_TEXT,
     ) -> float | None:
-        """What this problem is worth with no teaching, cached per problem.
+        """What this problem is worth with no teaching, cached per problem AND mode.
 
         The same messages the re-test uses, with an empty transcript: the student
         gets the task and nothing else. None when the setting is off or every
         student call failed, and the caller then leaves the reward alone rather
         than subtracting a fabricated zero.
+
+        KEYED BY MODE, not by problem alone. A code student and a text student
+        solve the same problem unaided at different rates, so one shared number
+        would charge one of them the other's baseline and be measured as teaching.
         """
         if not getattr(self, "free_chat_no_teaching_baseline", False):
             return None
+        # The RE-TEST problem, not the dialogue's: under transfer_prompts they are
+        # different problems, and S(0) has to be the difficulty of the one the student
+        # will actually be tested on.
         task, ground_truth = _retest_problem(data)
-        key = str(data.get("id", task))
+        # KEYED BY MODE TOO. Both halves of this key are load-bearing and each branch
+        # had only one of them. Without the mode a text and a code student on the same
+        # problem share one estimate, so whichever drew first sets it and the other is
+        # charged someone else's unaided ability -- and with student_generalize.
+        # turn_credit on, S(0) is the first term of the telescoping sum, so turn 1's
+        # credit and the episode total are both wrong by that offset.
+        key = f"{data.get('id', task)}::{student_mode}"
+        # Needed below: an unaided code student still has to RUN its program, so the
+        # baseline goes through the exec path rather than reading the reply as text.
+        code_student = student_mode == STUDENT_MODE_CODE
         cached = self._no_teaching_baselines.get(key)
         if cached is not None:
             return cached
@@ -5982,16 +6339,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
             # subtracted from that probe's score, so any difference here would be
             # measured as teaching.
             if getattr(self, "free_chat_enabled", False):
-                system = self._free_chat_student_system()
-                # Must stay identical to the selector in
-                # `_build_student_probe_messages`, for the reason in the comment
-                # just above: a different prompt here reads as teaching.
-                final_turn = render_prompt(
-                    FREE_CHAT_STUDENT_RETEST_TEMPLATE_TRANSFER
-                    if getattr(self, "free_chat_transfer_prompts", False)
-                    else FREE_CHAT_STUDENT_RETEST_TEMPLATE,
-                    task=task,
+                system, retest_template = self._free_chat_student_prompts(
+                    student_mode
                 )
+                # The same resolver `_build_student_probe_messages` uses, for the
+                # reason in the comment just above: a different prompt here reads as
+                # teaching.
+                final_turn = render_prompt(retest_template, task=task)
             else:
                 system = self._student_system_prompt_for_selection(None)
                 system = f"{system.rstrip()}\n\n{self._task_context(task)}"
@@ -6001,6 +6355,50 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 {"role": "user", "content": final_turn},
             ]
             replays = max(1, int(getattr(self, "student_generalize_replays", 1)))
+            if code_student:
+                # Each replay gets its own empty session: no teaching means no
+                # prior cells either, so the namespace starts bare.
+                answers = await asyncio.gather(
+                    *[
+                        self._code_student_answer(
+                            messages,
+                            session=CodeSession(),
+                            aux_caller=aux_caller,
+                            rid_prefix=f"no-teaching-baseline-r{index}",
+                            keep=False,
+                        )
+                        for index in range(replays)
+                    ]
+                )
+                # A program that crashed or printed nothing is a failed attempt,
+                # not a missing measurement: unaided, this student could not
+                # produce an answer.
+                texts = [
+                    answer for answer, _program, status, _err in answers
+                    if status == "ok"
+                ]
+                attempted = sum(
+                    1 for _a, _p, _s, err in answers if err != "no parseable program"
+                )
+                if not attempted:
+                    return None
+                judged = await asyncio.gather(
+                    *[
+                        self._score_answer_async(
+                            task,
+                            ground_truth,
+                            text,
+                            answer_judge_caller=answer_judge_caller,
+                            code_output=True,
+                        )
+                        for text in texts
+                        if text.strip()
+                    ]
+                )
+                correct = sum(1 for item in judged if item.correct)
+                baseline = correct / max(attempted, 1)
+                self._no_teaching_baselines[key] = baseline
+                return baseline
             attempts = await asyncio.gather(
                 *[
                     self._call_auxiliary_messages(
@@ -6090,6 +6488,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         leak_count: int,
         student_generalization_results: list[StudentGeneralizationResult] | None = None,
         teacher_pre_solve_result: TeacherPreSolveResult | None = None,
+        teacher_pre_cache_hit: bool = False,
         student_name: str = "",
         student_call_failed: bool = False,
         teacher_prompt_selection: PromptPoolSelection | None = None,
@@ -6098,6 +6497,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         inference_prompt_tokens: int = 0,
         training_prompt_tokens: int = 0,
         no_teaching_baseline: float | None = None,
+        code_stats: dict[str, int] | None = None,
     ) -> tuple[int, list[float]] | None:
         success_round = next(
             (
@@ -6158,6 +6558,26 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 termination_reason == TEACHER_PRE_SKIPPED_TERMINATION_REASON
             ),
         }
+        # The code student's channel health. Present only for a code student, so
+        # the series is never padded with zeros that mean "not measured".
+        #
+        # This is a VALIDITY check, not performance telemetry. A rise in the code
+        # student's re-test score is ambiguous without it: either the teaching
+        # improved, or the teacher learned to hand over an answer the student just
+        # prints, in which case constant_prints climbs, the two students converge,
+        # and the arm has stopped testing that their demands differ. The mirror
+        # case is a fall in score that is really silent_cells -- a channel fault
+        # rather than a teaching one. The two need opposite fixes.
+        if code_stats is not None:
+            turns = max(len(traces), 1)
+            for name, value in code_stats.items():
+                metrics[f"code/{name}"] = float(value)
+                metrics[f"code/{name}_per_turn"] = float(value) / turns
+            productive = turns - int(code_stats.get("crashes", 0)) - int(
+                code_stats.get("silent_cells", 0)
+            ) - int(code_stats.get("no_program", 0))
+            # Turns that ran and actually told the teacher something.
+            metrics["code/productive_per_turn"] = max(0.0, productive / turns)
         if teacher_pre_solve_result is not None:
             metrics["teacher_pre/verification_enabled"] = float(
                 teacher_pre_solve_result.verification_enabled
@@ -6166,6 +6586,17 @@ class TutorAgentWorkflow(RolloutWorkflow):
             metrics["teacher_pre/attempts"] = float(
                 len(teacher_pre_solve_result.attempts)
             )
+            # Whether this rollout reused its group's draft instead of generating
+            # its own. Expect (n_samples - 1)/n_samples = 0.875 at n_samples 8; a
+            # flat 0.0 means the sharing is not happening and every rollout is
+            # paying for its own pre-solve again.
+            #
+            # NOTE this changes how `attempts` above reads. A hit returns the
+            # group's result object, so all n_samples rollouts report that one
+            # draft's attempt count -- the series still means "attempts per
+            # accepted draft", but it is no longer a count of generations this
+            # rollout paid for. Multiply by (1 - cache_hit) for the call volume.
+            metrics["teacher_pre/cache_hit"] = float(bool(teacher_pre_cache_hit))
         if success_round > 0:
             metrics["solve_turn"] = int(success_round)
 
@@ -6604,12 +7035,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_pre_solve_result: TeacherPreSolveResult | None = None,
         student_name: str = "",
         student_model: str = "",
+        student_mode: str = STUDENT_MODE_TEXT,
         teacher_prompt_selection: PromptPoolSelection | None = None,
         student_prompt_selection: PromptPoolSelection | None = None,
         initial_student_turn_behavior: StudentTurnBehavior | None = None,
         initial_student_question_generation: (
             StudentQuestionGenerationResult | None
         ) = None,
+        code_stats: dict[str, int] | None = None,
     ) -> None:
         if not self.debug_trace_dir:
             return
@@ -6635,7 +7068,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "student": {
                     "name": student_name,
                     "model": student_model,
+                    # Recorded so trace analysis can split by action space instead
+                    # of guessing it from the name string.
+                    "mode": student_mode,
                 },
+                "code_session": code_stats,
                 "prompt_pool": {
                     "teacher": (
                         asdict(teacher_prompt_selection)
