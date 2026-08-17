@@ -2104,7 +2104,10 @@ class TutorConfig(GRPOConfig):
                 "removed, which the model imitates -- malformed turns run 2.1% "
                 "at depth 1 and 73.4% at depth 10 on an untrained teacher. "
                 "'masked' restores the tag skeleton with the reasoning content "
-                "replaced by a placeholder. Observation side only; reward and "
+                "replaced by a placeholder. 'unmasked' replays each exact prior "
+                "teacher reply, including its private reasoning, only in the "
+                "teacher's view; the student and re-test still receive the "
+                "visible public transcript. Observation side only; reward and "
                 "sampling are untouched."
             )
         },

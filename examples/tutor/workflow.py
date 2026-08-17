@@ -998,9 +998,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError("opd loss weight must be positive when enabled.")
         if self.opd_enabled and self.opd_reward_clip < 0.0:
             raise ValueError("opd reward clip must be non-negative (0 disables).")
-        if teacher_history_tags not in {"stripped", "masked"}:
+        if teacher_history_tags not in {"stripped", "masked", "unmasked"}:
             raise ValueError(
-                "teacher_history_tags must be 'stripped' or 'masked'."
+                "teacher_history_tags must be 'stripped', 'masked', or 'unmasked'."
             )
         self.teacher_history_tags = teacher_history_tags
         prompt_instr = dict(prompt_instruction or {})
@@ -2251,6 +2251,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             turns=initial_turns,
         )
         previous_tutor_visible_output = ""
+        previous_tutor_raw_outputs: tuple[str, ...] = ()
         previous_student_output = initial_student_answer
         preceding_student_turn_behavior = initial_effective_student_turn_behavior
         previous_feedback = TutorPrivateFeedback(
@@ -2278,6 +2279,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     turn_idx=turn_idx,
                     task=task,
                 ),
+                previous_tutor_raw_outputs=previous_tutor_raw_outputs,
             )
             try:
                 response, tutor_raw_output = await self._generate_tutor_response(
@@ -2433,6 +2435,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
 
             public_history = next_public_history
+            previous_tutor_raw_outputs = (
+                *previous_tutor_raw_outputs,
+                tutor_raw_output if not tutor_format_error else "",
+            )
             previous_tutor_visible_output = tutor_visible_output
             previous_student_output = student_answer
             preceding_student_turn_behavior = effective_student_turn_behavior
@@ -5044,21 +5050,35 @@ class TutorAgentWorkflow(RolloutWorkflow):
         *,
         speaker: str,
         own_turn_template: str | None = None,
+        own_turn_raw_outputs: tuple[str, ...] | None = None,
     ) -> list[dict[str, str]]:
         """Shared dialogue seen from one side: own turns assistant, other user.
 
         ``own_turn_template`` re-wraps the speaker's OWN turns, and is how the
         teacher gets the shape of its replies back after `public_history`
-        stripped the tags off them. It takes a single ``{visible}`` field. Only
-        the teacher passes it; the student's view must stay plain text, because
-        the student is never shown the tag protocol.
+        stripped the tags off them. It takes a single ``{visible}`` field.
+        ``own_turn_raw_outputs`` takes precedence when an aligned non-empty raw
+        reply exists; this is the teacher-only unmasked history. Only the teacher
+        passes either argument. The student's view stays plain text because its
+        state contains only the public transcript.
         """
         rendered = []
+        own_turn_idx = 0
         for turn in turns:
             is_own = turn["role"] == speaker
             content = turn["content"]
-            if is_own and own_turn_template is not None:
-                content = own_turn_template.format(visible=content)
+            if is_own:
+                raw_content = (
+                    own_turn_raw_outputs[own_turn_idx]
+                    if own_turn_raw_outputs is not None
+                    and own_turn_idx < len(own_turn_raw_outputs)
+                    else ""
+                )
+                own_turn_idx += 1
+                if raw_content:
+                    content = raw_content
+                elif own_turn_template is not None:
+                    content = own_turn_template.format(visible=content)
             # Environment feedback rides on the other side's turn and is only
             # ever shown to the teacher.
             env = turn.get("env") if speaker == "teacher" and not is_own else None
@@ -5270,7 +5290,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 speaker="teacher",
                 own_turn_template=(
                     TEACHER_HISTORY_MASKED_TEMPLATE
-                    if getattr(self, "teacher_history_tags", "stripped") == "masked"
+                    if getattr(self, "teacher_history_tags", "stripped")
+                    in {"masked", "unmasked"}
+                    else None
+                ),
+                own_turn_raw_outputs=(
+                    tutor_state.previous_tutor_raw_outputs
+                    if getattr(self, "teacher_history_tags", "stripped")
+                    == "unmasked"
                     else None
                 ),
             ),

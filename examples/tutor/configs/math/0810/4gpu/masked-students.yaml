@@ -83,9 +83,9 @@
 #                                           and there is no adaptation. Known
 #                                           correct direction: short for
 #                                           long-drop, long for student-fade.
-#   4. generalize/test/student_original_success per learner, from the forced-student
-#                                           eval that evaluator.student_model_names
-#                                           null already runs
+#   4. held-out evaluation                 disabled in this training-only config;
+#                                           evaluate selected checkpoints in a
+#                                           separate run when needed
 #
 # (3) is the point of this arm: one number per learner, with a known correct
 # direction, rather than a judge deciding whether a strategy changed.
@@ -128,21 +128,16 @@ reward:
   - leak
   - format_error
 
-# MUST BE OVERRIDDEN. The base pins this to ['qwen3-1.7b'], a name no student in
-# this arm carries, and configs.py raises on an eval student with no student_models
-# entry -- so leaving it would fail at startup. Naming all four gives a per-learner
-# eval curve including the unmasked control, the only way to see whether masking
-# costs absolute performance rather than merely redistributing it.
-#
-# AND IT IS THE EXPENSIVE LINE. The evaluator expands the validation set once per
-# named student, so 528 problems becomes 2112 and a pass that cost ~1500 s costs
-# ~6000 s. At freq_steps 25 over 500 steps that is 20 passes, about 33 h of
-# evaluation on top of ~33 h of training. 50 halves it to 10 points on the curve,
-# enough to see three series separate -- and the adaptation signature this arm is
-# really for is a TRAINING-side number, available every step.
+# NO EVALUATION IN THIS TRAINING RUN. Disable both the version-0 pass and every
+# periodic trigger; leaving any frequency set enables FrequencyControl again.
+# student_model_names must still override the base's ['qwen3-1.7b'], which is not
+# the name of a configured student in this arm and fails config validation.
 evaluator:
   student_model_names: null
-  freq_steps: 50
+  eval_before_train: false
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
 
 free_chat:
   # Required for the shared per-problem baseline that every gain is read against.
@@ -232,10 +227,8 @@ student_models:
       min_p: 0
       chat_template_kwargs:
         enable_thinking: false
-# Unmasked control at weight 0.0: never sampled during training, but
-# evaluator.student_model_names is null, which evaluates EVERY configured
-# student. So this gives the no-constraint reference curve for free, the same
-# trick the llama and gemma entries use in the base config.
+# Unmasked control at weight 0.0: never sampled during training. It stays in the
+# config so a later, separate evaluation can reuse the same four student views.
 - name: full-control
   weight: 0.0
   mask:
