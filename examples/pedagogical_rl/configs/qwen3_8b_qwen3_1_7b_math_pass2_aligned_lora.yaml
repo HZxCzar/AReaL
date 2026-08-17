@@ -1,0 +1,4 @@
+# Compatibility alias for the original config path.
+defaults:
+  - qwen3_8b_qwen3_1_7b_math_pass2_baseline
+  - _self_

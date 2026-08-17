@@ -1,0 +1,28 @@
+# PedagogicalRL baseline with the teacher's private reasoning section enabled.
+#
+# Without this the two arms are asymmetric in a way that handicaps the ped
+# teacher: the tutor teacher is told to emit <reasoning>...</reasoning> and only
+# <output> reaches the student, so it has a private scratchpad. The ped teacher
+# under use_thinking=false has none -- it must reason in the same text the
+# student reads, while also being told never to reveal the answer.
+#
+# This does NOT switch the model into native thinking mode. _teacher_turn pins
+# chat_template_kwargs.enable_thinking=false, so the teacher stays a
+# non-thinking model and the <think> block is ordinary generated text produced
+# because PedagogicalRL's own teacher prompt asks for it. student_visible_text()
+# strips <think>...</think> before the student or the leak judges see it, which
+# is their native mechanism.
+#
+# Note: this also activates PedagogicalRL's native thinking reward term
+# (+0.5 x fraction of teacher turns that use <think>, -0.5 per turn with
+# unbalanced tags), which is inert when use_thinking=false. That is their
+# intended behaviour and corresponds to the TutorRL-7B-think variant in the
+# paper rather than plain TutorRL-7B.
+defaults:
+  - qwen3_8b_qwen3_1_7b_math_pass2_baseline
+  - _self_
+
+trial_name: qwen3-8b-qwen3-1.7b-math-pass2-thinking
+
+generation:
+  use_thinking: true

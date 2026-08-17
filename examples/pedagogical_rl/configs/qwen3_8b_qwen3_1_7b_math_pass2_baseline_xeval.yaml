@@ -1,0 +1,119 @@
+# THEIR arm of the head-to-head: the PedagogicalRL baseline, plus the eval cross.
+#
+# Training is their published baseline, inherited whole and unchanged --
+# GUIDED/ATTEMPTED classroom, ten teacher turns, both whole-dialogue judges,
+# eight final attempts, all four native reward terms, and teacher_pre off. Each
+# method trains its own way; only the measurement is crossed.
+#
+#     xeval/free_chat/retest/success       our rollout,   our score
+#     xeval/free_chat/interview/success    our rollout,   their score
+#     xeval/classroom/retest/success       their rollout, our score
+#     xeval/classroom/interview/success    their rollout, their score
+#
+# Our arm emits the same four names off its own teacher. Its config is
+# examples/tutor/configs/math/0810/4gpu/leak-local-stable-xeval.yaml, and the
+# cross_eval block below is IDENTICAL to the one there, key for key. Both are
+# read by one shared instrument, examples/pedagogical_rl/cross_eval.py; what
+# differs between the arms is only which teacher drives it.
+#
+# TWO THINGS CHANGE HERE THAT ARE NOT THE CROSS, both to make the eval sets
+# match rather than to change the method:
+#
+#   evaluator.freq_steps 10 -> 25       our arm evaluates every 25 outer steps
+#   evaluator.average_rollouts 3 -> 1   our arm runs 528x1
+#
+# An outer step is 16 problems x 8 rollouts = 128 episodes on both arms, so the
+# W&B x-axis is directly comparable and the two curves can be read against each
+# other without rescaling. average_rollouts 1 also matches the estimator our arm
+# uses -- problems differ from each other far more than repeat rollouts of one
+# problem do, so 528x1 has a smaller standard error than 176x3 and costs a third
+# as much. It does not touch the training method.
+#
+# total_train_steps stays at their 750 against our 500. Neither arm is truncated
+# to the other; read each curve against step and stop comparing where the
+# shorter one ends.
+#
+# WHAT THIS ARM WILL LOOK WORSE AT, FOR REASONS THAT ARE NOT THE METHOD. Its
+# teacher never gets a private solution draft, because their baseline has no
+# such stage. Ours does, plus the row filter that goes with it. The asymmetry is
+# inherent to "each method trains its own way" and is stated rather than
+# corrected; qwen3_8b_qwen3_1_7b_math_pass2_teacher_pre_verified.yaml is the arm
+# that would measure it.
+#
+# COST. See the note in our arm's config: about 50 extra external calls per
+# crossed problem, across the whole 528-problem split. On this arm the student
+# and judge endpoints are the binding constraint --
+# student_model.max_concurrent_calls is 4 here against 32 on the tutor side, so
+# if eval passes stall this is the first number to raise.
+defaults:
+  - qwen3_8b_qwen3_1_7b_math_pass2_baseline
+  - _self_
+
+trial_name: qwen3-8b-qwen3-1.7b-math-pass2-baseline-xeval
+
+evaluator:
+  # Aligned with the tutor arm so both curves have points at the same steps.
+  freq_steps: 25
+  # 528x1, matching the tutor arm's estimator.
+  average_rollouts: 1
+
+# ============================================================================
+# Everything below this line is byte-identical to the tutor arm's cross_eval
+# block. Keep it that way.
+# ============================================================================
+cross_eval:
+  enabled: true
+  # Every eval problem. Below 1.0 it selects on a hash of the problem text, so
+  # both arms would still cross the same subset without agreeing on a seed or an
+  # ordering -- but this is the measurement the comparison is for, so it runs on
+  # the whole split.
+  sample_rate: 1.0
+  # False would keep only the two scorers on this arm's own transcript -- the
+  # cheap half, which answers the scoring question and not the protocol one.
+  run_other_protocol: true
+  free_chat:
+    # The tutor arm's free_chat.budget. Its workflow raises at startup if this
+    # number and its own rollout disagree; nothing can check it from this side,
+    # so it has to be kept in step by hand.
+    budget: 5
+    max_student_tokens: 2048
+    # Must equal the tutor arm's teacher_history_tags, which math/0810 sets to
+    # 'masked' and which the tutor arm validates at startup. Under 'stripped' the
+    # teacher imitates its own untagged replies and malformed turns run 6.3% at
+    # depth 1 rising to 41.7% at depth 5, so a mismatch would compare a teacher
+    # that keeps its format contract against one that loses it.
+    teacher_history_tags: masked
+  classroom:
+    # Their generation block, verbatim.
+    max_teacher_turns: 10
+    max_tokens_in_conversation: 24576
+    max_tokens_per_student_turn: 2048
+    max_tokens_per_student_attempt: 2048
+    include_thinking: false
+  retest:
+    # Matches student_generalize.replays on the tutor arm, so the cell is the
+    # quantity that arm is actually rewarded on.
+    replays: 4
+    max_tokens: 2048
+  interview:
+    # Matches their generation.number_student_attempts.
+    attempts: 8
+    max_tokens: 2048
+    # Their unnamed student variant. The free-chat dialogue never used a name,
+    # so scoring it with a named persona would introduce a stranger at the last
+    # turn.
+    student_name: ''
+    # Null uses the student's own timeout times attempts. One n-choice request
+    # generates eight completions and otherwise times out on every problem,
+    # which scores as a teaching failure rather than as an error.
+    timeout: null
+  leak_judges:
+    # Both judges on both transcripts. We train against the turn-level rawbase
+    # judge and they train against the whole-dialogue one, so each arm read
+    # under its own judge flatters itself. Metrics only: neither terminates a
+    # rollout and neither touches a reward.
+    enabled: true
+    turn_enabled: true
+    native_enabled: true
+    native_attempts: 2
+    native_max_retries: 5
