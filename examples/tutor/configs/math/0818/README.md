@@ -5,17 +5,35 @@ starts from.
 
 ## Layout
 
-    base/default.yaml   every setting. Also launchable, at the 2-GPU allocation.
-    2gpu/base.yaml      GPU count, the two backends, rollout concurrency
-    4gpu/base.yaml      the same three keys
-    8gpu/base.yaml      the same three keys
+Arms live in `base/`. The allocation directories carry GPU numbers and nothing else.
+
+    base/default.yaml        every setting of the default arm
+    base/<arm>.yaml          an arm: inherits default, changes settings only
+    <n>gpu/alloc.yaml        the <n>-GPU allocation, written down once
+    <n>gpu/<arm>.yaml        composition: base/<arm> + alloc, plus the name
+
+So a launchable config is always *an arm plus an allocation*, and neither states the
+other. Adding an arm means one file in `base/` and three three-line wrappers; adding
+a GPU size means one `alloc.yaml` and one wrapper per arm.
 
 `0810` kept its settings in `2gpu/base.yaml` and had the other allocations inherit
-from it, so that file was both the shared configuration and one allocation of it —
-editing a setting there read as editing the 2-GPU arm. Splitting `base/` out makes
-the difference explicit, and `test_tutor_arm_wiring.py` enforces it: each allocation
-file may differ from the base only in the GPU count, the two backends, rollout
-concurrency, and the names derived from `trial_name`. Anything else fails.
+from it, so that file was both the shared configuration and one allocation of it --
+editing a setting there read as editing the 2-GPU arm.
+
+`test_tutor_arm_wiring.py` enforces the split rather than trusting it: every
+`<n>gpu/<arm>.yaml` is diffed against `base/<arm>.yaml` and may differ only in
+`cluster.n_gpus_per_node`, the two backends, `rollout.max_concurrent_rollouts`,
+`ref.backend` (which is `${actor.backend}` and follows by interpolation), and the
+names derived from `trial_name`. Anything else fails the build. `alloc.yaml` is an
+overlay with no `defaults` list, so it is deliberately not loadable on its own and
+the test skips it.
+
+## Arms
+
+| arm | what it changes |
+| --- | --- |
+| `default` | nothing; the settings below |
+| `full-students` | all 8 `(behavior, information)` cells trained, eval off |
 
 ## The defaults
 
@@ -73,3 +91,34 @@ Before launching, and after any config edit:
 Every 0810 arm ran `leak_handling_mode: reward_only`, or `format_handling_mode:
 continue`, or both, and most ran `teacher_history_tags: masked`. Read 0818 against
 0818.
+
+## Eval cost scales with the number of students
+
+The evaluator duplicates the validation set once per student **name**, and
+`evaluator.max_samples` truncates **before** that expansion
+([train.py:464-471](../../../train.py)), so
+
+    eval episodes per pass = min(max_samples, len(valid)) x number of eval students
+
+Every student runs every problem as a full episode. A pass measured 1650-1840 s at
+one student on the 528-problem split:
+
+| eval students | episodes/pass | wall clock |
+| --- | --- | --- |
+| 1 | 528 | ~30 min |
+| 4 | 2112 | ~2 h |
+| 8 | 4224 | ~3.5-4 h |
+
+At `freq_steps: 25` over 500 steps that is twenty passes, so eight students would
+spend more wall clock on evaluation than on the training it measures. Three levers,
+in order of preference:
+
+1. **Turn eval off** and read the training-side per-student series, which is what
+   `full-students` does and what `0810/masked-students` settled on at four students.
+2. **`max_samples`** — a per-student cap, since it applies before expansion.
+   `max_samples: 66` with eight students is 528 episodes, one of today's passes, at
+   a ~6 pp standard error per student instead of ~2 pp.
+3. **`evaluator.student_model_names`** — name a subset to evaluate and leave the rest
+   to training.
+
+Raising `freq_steps` also works and is orthogonal to all three.

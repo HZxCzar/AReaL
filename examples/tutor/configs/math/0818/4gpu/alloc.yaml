@@ -1,0 +1,15 @@
+# 4 GPUs: 2 for generation, 2 for the actor. GPU NUMBERS ONLY.
+#
+# This file is the single place the 4-GPU allocation is written down. Every arm at
+# this allocation composes it, so a change here reaches all of them; nothing else
+# belongs in it, and tests/test_tutor_arm_wiring.py fails the build if an allocation
+# file differs from its base in anything but these keys and the trial name.
+cluster:
+  n_gpus_per_node: 4
+
+rollout:
+  backend: "sglang:d2p1t1"
+  max_concurrent_rollouts: 32
+
+actor:
+  backend: "fsdp:d2p1t1"

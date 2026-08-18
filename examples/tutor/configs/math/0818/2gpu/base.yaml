@@ -1,31 +1,16 @@
-# 0818 at 2 GPUs -- one for generation, one for the actor. Allocation only.
+# The default arm at 2 GPUs. Composition only: the settings come from
+# base/default.yaml and the GPU numbers from alloc.yaml, and this file adds nothing
+# but the name.
 #
-# The same allocation base/default.yaml already carries, so this file exists to be
-# the 2-GPU NAME rather than to change anything: launching base/default.yaml
-# directly works, but its trial name and wandb group say 'base', which then reads as
-# the shared configuration in the output tree.
-#
-# CONCURRENCY 16 is exactly one batch -- a group is one problem's gconfig.n_samples
-# 8 rollouts and train_dataset.batch_size is 16 -- so the rollout has nothing left
-# to do while the actor trains. That is the right trade at 2 GPUs, where generation
-# is the scarce half.
-#
-# BUDGET. Four of these fit an 8-GPU node.
+# Every arm follows this shape -- base/<arm> for what it does, <n>gpu/alloc for how
+# many GPUs it gets -- so an arm never states an allocation and an allocation never
+# states a setting.
 defaults:
   - ../base/default@_global_
+  - alloc@_global_
   - _self_
 
 trial_name: 0818-2gpu
-
-cluster:
-  n_gpus_per_node: 2
-
-rollout:
-  backend: "sglang:d1p1t1"
-  max_concurrent_rollouts: 16
-
-actor:
-  backend: "fsdp:d1p1t1"
 
 stats_logger:
   wandb:

@@ -81,7 +81,10 @@ def main() -> int:
         check(f"train.py forwards {name}", name in passed)
 
     print("\n[3] every arm under configs/math loads")
-    arms = sorted(p for p in ARM_DIR.rglob("*.yaml"))
+    # alloc.yaml is an OVERLAY, not an arm: it carries only the GPU keys and has no
+    # defaults list, so loading it alone is a MissingMandatoryValue by design.
+    OVERLAYS = {"alloc.yaml"}
+    arms = sorted(p for p in ARM_DIR.rglob("*.yaml") if p.name not in OVERLAYS)
     check("there are arms to load", len(arms) > 10, f"{len(arms)}")
     loaded = {}
     for path in arms:
@@ -143,9 +146,8 @@ def main() -> int:
         str([(str(r), n) for r, n in names if len(n) != len(set(n))]),
     )
 
-
     print()
-    print("[6] the 0818 allocation files change the allocation and nothing else")
+    print("[6] an allocation file changes the allocation and nothing else")
     from omegaconf import OmegaConf
 
     ALLOWED = {
@@ -161,44 +163,50 @@ def main() -> int:
         ("stats_logger", "wandb", "group"),
         ("stats_logger", "wandb", "name"),
     }
-    base_path = ARM_DIR / "0818/base/default.yaml"
-    check("0818/base/default.yaml is in the tree", base_path in loaded)
-    if base_path in loaded:
-        base_flat = OmegaConf.to_container(
-            OmegaConf.structured(loaded[base_path]), resolve=False
+
+    def flat(config):
+        return OmegaConf.to_container(OmegaConf.structured(config), resolve=False)
+
+    def differences(left, right):
+        out = set()
+
+        def walk(a, b, path=()):
+            if isinstance(a, dict) and isinstance(b, dict):
+                for key in set(a) | set(b):
+                    walk(a.get(key), b.get(key), path + (key,))
+            elif a != b:
+                out.add(path)
+
+        walk(left, right)
+        return out
+
+    # Every <n>gpu/<arm>.yaml is paired with base/<arm>.yaml -- the arm says what it
+    # does, the allocation says how many GPUs it gets, and neither may leak into the
+    # other. base/default.yaml is the counterpart of <n>gpu/base.yaml.
+    pairs = 0
+    for arm_path in sorted(loaded):
+        parts = arm_path.parts
+        if len(parts) < 3 or not parts[-2].endswith("gpu"):
+            continue
+        stem = arm_path.stem
+        base_name = "default" if stem == "base" else stem
+        base_path = arm_path.parent.parent / "base" / f"{base_name}.yaml"
+        if base_path not in loaded:
+            continue
+        pairs += 1
+        unexpected = sorted(
+            path
+            for path in differences(flat(loaded[base_path]), flat(loaded[arm_path]))
+            - ALLOWED
+            if path and path[-1] != "trial_name"
         )
-        for alloc in ("2gpu", "4gpu", "8gpu"):
-            arm_path = ARM_DIR / f"0818/{alloc}/base.yaml"
-            if arm_path not in loaded:
-                check(f"0818/{alloc}/base.yaml is in the tree", False, "missing")
-                continue
-            arm_flat = OmegaConf.to_container(
-                OmegaConf.structured(loaded[arm_path]), resolve=False
-            )
-            differing = set()
-
-            def walk(left, right, path=()):
-                if isinstance(left, dict) and isinstance(right, dict):
-                    for key in set(left) | set(right):
-                        walk(left.get(key), right.get(key), path + (key,))
-                elif left != right:
-                    differing.add(path)
-
-            walk(base_flat, arm_flat)
-            # trial_name and the names derived from it are the arm identity, not a
-            # setting. Anything else differing means an allocation file has quietly
-            # become a second place where behaviour is configured, which is the whole
-            # thing splitting base/ out of 2gpu/ was meant to prevent.
-            unexpected = sorted(
-                path
-                for path in differing - ALLOWED
-                if path and path[-1] != "trial_name"
-            )
-            check(
-                f"0818/{alloc} differs from base only in allocation and name",
-                not unexpected,
-                f"also differs at: {unexpected}",
-            )
+        rel = arm_path.relative_to(ARM_DIR)
+        check(
+            f"{rel} differs from its base only in allocation and name",
+            not unexpected,
+            f"also differs at: {unexpected}",
+        )
+    check("allocation/base pairs were found at all", pairs >= 6, f"{pairs} pairs")
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILED: {', '.join(FAILURES[:6])}")

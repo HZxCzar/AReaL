@@ -1,30 +1,16 @@
-# 0818 at 4 GPUs -- two for generation, two for the actor. Allocation only.
+# The default arm at 4 GPUs. Composition only: the settings come from
+# base/default.yaml and the GPU numbers from alloc.yaml, and this file adds nothing
+# but the name.
 #
-# CONCURRENCY 32, double the batch, so the rollout can prefetch the next batch while
-# the actor trains on this one. How far ahead it may actually get is bounded by
-# rollout.max_head_offpolicyness, which is 2 and unchanged, so this buys overlap
-# rather than staleness.
-#
-# BUDGET. Two of these are the whole 8-GPU node. Stagger two launches by a minute:
-# forked-worker ports are allocated per run with no coordination between runs, and
-# d2 doubles the forks each run needs. Three concurrent 4-GPU arms is what killed
-# 20260809_1920 -- 12 GPUs requested against 8, all three arms produced 0 metric
-# rows with eval-rollout workers failing to bind.
+# Every arm follows this shape -- base/<arm> for what it does, <n>gpu/alloc for how
+# many GPUs it gets -- so an arm never states an allocation and an allocation never
+# states a setting.
 defaults:
   - ../base/default@_global_
+  - alloc@_global_
   - _self_
 
 trial_name: 0818-4gpu
-
-cluster:
-  n_gpus_per_node: 4
-
-rollout:
-  backend: "sglang:d2p1t1"
-  max_concurrent_rollouts: 32
-
-actor:
-  backend: "fsdp:d2p1t1"
 
 stats_logger:
   wandb:
