@@ -47,7 +47,9 @@ logger = logging.getLogger("TutorApiTeacherEval")
 _T = TypeVar("_T")
 
 DEFAULT_CONFIG_PATH = (
-    "examples/tutor/configs/math/july/pass@2/qwen8b-qwen1.7b-math-pre-aleak.yaml"
+    # Default re-pointed when the answer-attempt config trees were deleted; this
+    # file carries the same endpoint and model blocks the script reads.
+    "examples/tutor/configs/math/0810/2gpu/base.yaml"
 )
 DEFAULT_DEEPSEEK_MODEL = "DeepSeek-V3.2"
 DEEPSEEK_TEMPERATURE = 1.0

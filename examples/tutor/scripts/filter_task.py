@@ -45,7 +45,9 @@ from examples.tutor.prompts import (  # noqa: E402
 
 
 DEFAULT_CONFIG_PATH = (
-    "examples/tutor/configs/math/qwen4&8/"
+    # Default re-pointed when the answer-attempt config trees were deleted; this
+    # file carries the same endpoint and model blocks the script reads.
+    "examples/tutor/configs/math/0810/2gpu/base.yaml"
     "qwen8b-qwen4b-remote-overfit-8-generalize-staged-leak.yaml"
 )
 DEFAULT_STUDENT_BASE_URL_ENV = "QWEN3_1_7B_BASE_URL"

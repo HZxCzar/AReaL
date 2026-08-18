@@ -788,17 +788,17 @@ What does Vieta give you?
               for a in ALLOCATIONS for n in ARMS),
           str({f"{a}/{n}": loaded[(a, n)].actor.num_iterations
                for a in ALLOCATIONS for n in ARMS}))
-    legacy, _ = load_expr_config(
-        ["--config", "examples/tutor/configs/math/0808/full/4gpu/baseline.yaml"],
-        TutorConfig,
-    )
-    check("0808 still takes one pass, so it trains exactly as before",
-          legacy.actor.num_iterations == 1,
-          f"got {legacy.actor.num_iterations}")
+    # The subclass must not drop anything PPOActorConfig had. This used to be
+    # checked against math/0808, which is gone with the answer-attempt loop; the
+    # inheritance it guards is regime-independent, so it now reads a current arm.
+    any_arm = loaded[(ALLOCATIONS[0], ARMS[0])]
     check("the actor config keeps everything PPOActorConfig had",
-          legacy.actor.ppo_n_minibatches == 4
-          and legacy.actor.group_baseline == "episode"
-          and legacy.actor.lora_rank == 16)
+          any_arm.actor.ppo_n_minibatches == 4
+          and any_arm.actor.group_baseline == "episode"
+          and any_arm.actor.lora_rank == 16,
+          f"minibatches={any_arm.actor.ppo_n_minibatches} "
+          f"baseline={any_arm.actor.group_baseline!r} "
+          f"lora={any_arm.actor.lora_rank}")
     try:
         TutorActorConfig(num_iterations=0)
     except ValueError:

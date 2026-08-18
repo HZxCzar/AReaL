@@ -38,7 +38,9 @@ from examples.tutor.prompts import POLARIS_FILTER_SOLVER_USER_TEMPLATE
 
 
 DEFAULT_CONFIG_PATH = (
-    "examples/tutor/configs/polaris/qwen8b-qwen1.7b-polaris-baseline.yaml"
+    # Default re-pointed when the answer-attempt config trees were deleted; this
+    # file carries the same endpoint and model blocks the script reads.
+    "examples/tutor/configs/math/0810/2gpu/base.yaml"
 )
 DEFAULT_OUTPUT_PATH = (
     "examples/tutor/data/polaris_dataset_qwen1.7b_student2_qwen8b_teacher_filter_task"

@@ -1,9 +1,0 @@
-defaults:
-  - qwen8b-train-qwen1.7b-eval3-math-pre-aleak-generated@_global_
-  - _self_
-
-trial_name: qwen8b-train-qwen1.7b-eval3-math-pass@2-pre-aleak-generated-greward0.5
-
-student_generalize:
-  level1_reward: 0.5
-  level2_reward: 0.5
