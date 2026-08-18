@@ -83,7 +83,18 @@ student_axes:
     max_tokens: 2048
     temperature: 0.7
     top_p: 0.8
-    max_concurrent_calls: 32
+    # 4, NOT the 32 every other arm uses, and this is arithmetic rather than
+    # caution. One AsyncLLMCaller is built PER STUDENT ENTRY, each with its own
+    # concurrency semaphore, and all eight cells are the same qwen3-1.7b endpoint.
+    # At 32 each the endpoint could see 8 x 32 = 256 concurrent requests against
+    # the 32 the base tuned it for. A saturated endpoint does not slow down, it
+    # refuses: student_models[*].timeout is 120 s and the symptom is
+    # student/<name>/call_failed, which corrupts an episode's reward rather than
+    # just costing time. 8 x 4 = 32 keeps the endpoint's total where it was.
+    #
+    # Raise it only if the endpoint is measured to tolerate more, and watch
+    # student/*/call_failed when you do.
+    max_concurrent_calls: 4
     request_params:
       seed: 42
       extra_headers:
