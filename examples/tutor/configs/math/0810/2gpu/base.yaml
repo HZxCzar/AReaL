@@ -402,4 +402,30 @@ total_train_steps: 500
 free_chat:
   enabled: true
   budget: 5
-teacher_history_tags: masked
+# THE TEACHER SIDE, and it is a different axis from the student masks below. This
+# is how the teacher sees ITS OWN earlier replies; student_models[*].mask is what
+# the STUDENT sees of the dialogue. They share nothing but the word.
+#
+# 'unmasked' replays each valid prior teacher reply verbatim, private <reasoning>
+# included, in the teacher view only -- the student conversation and the solo
+# re-test still replay the public <output> text, so nothing the teacher thinks
+# privately reaches the learner or the measurement.
+#
+# WAS 'masked' UNTIL 20260817, and runs before that are not continuous with runs
+# after it on the format-error series. 'masked' handed the tag skeleton back with
+# the reasoning replaced by a placeholder, which was itself a fix for 'stripped':
+# under stripped the teacher read its own untagged replies and imitated them,
+# 6.3% malformed at depth 1 rising to 41.7% at depth 5 on 20260810_234129.
+# 'unmasked' is at least as safe on that axis, because the real tags are present
+# verbatim rather than as a skeleton, and a malformed turn stores an empty string
+# and falls back to the skeleton so the stripped failure cannot return.
+#
+# WHAT IT COSTS. The prompt grows with depth faster than under masked -- private
+# reasoning at every round instead of a placeholder. There is a graceful guard
+# (stop/context_limit), so watch that series and ppo_actor/prompt_len; the latter
+# ran avg 2419 / max 6451 under masked.
+#
+# cross_eval.free_chat.teacher_history_tags must equal this or the workflow raises
+# at startup: the ped comparison would otherwise measure the setting, not the
+# teacher.
+teacher_history_tags: unmasked

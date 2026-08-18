@@ -154,7 +154,7 @@ def test_the_history_tags_match_our_own_rollout(tutor_arm):
         tutor_arm.cross_eval.free_chat.teacher_history_tags
         == tutor_arm.teacher_history_tags
     )
-    assert tutor_arm.teacher_history_tags == "masked"
+    assert tutor_arm.teacher_history_tags == "unmasked"
 
 
 def test_the_retest_cell_measures_what_our_arm_is_rewarded_on(tutor_arm):

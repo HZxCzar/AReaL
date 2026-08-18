@@ -167,8 +167,8 @@ def main() -> int:
         check(f"{prefix} the epoch cap does not bind first",
               config.total_train_epochs * 1.0 > 500 * 16 / 759,
               f"epochs_cap={config.total_train_epochs}")
-        check(f"{prefix} teacher history keeps its tag skeleton",
-              config.teacher_history_tags == "masked",
+        check(f"{prefix} teacher history is never handed back stripped",
+              config.teacher_history_tags in {"masked", "unmasked"},
               f"got {config.teacher_history_tags!r}")
 
     print("\n[2] the leak arms differ in exactly one key, at both allocations")

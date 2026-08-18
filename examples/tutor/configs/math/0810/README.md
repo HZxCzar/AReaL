@@ -169,7 +169,7 @@ and the budget or the split is the thing to change.
 message and the episode keeps going, so this shows up as reward noise rather than
 as a stop.
 
-This is the number that forced `teacher_history_tags: masked`. Measured per depth
+This is the number that forced `teacher_history_tags` off `stripped`. Measured per depth
 on 143 episodes of the stripped run:
 
     depth      1      2      3      4      5
@@ -184,6 +184,18 @@ and per episode, same model, three settings:
 The fixed budget is what makes it bite: every episode now reaches the depths where
 the rate is high instead of stopping at 2.1 turns. If masked does not bring this
 under ~0.2 within ten steps, shorten the budget before touching anything else.
+
+**The base has run `unmasked` since 20260817**, not `masked`, and this is the
+TEACHER side -- a different axis from the student masks in `student_models[*].mask`,
+which is what the STUDENT sees of the dialogue. Under `unmasked` each valid prior
+teacher reply is replayed verbatim, private `<reasoning>` included, in the teacher's
+view only; the student's conversation and the solo re-test still replay the public
+`<output>` text. It should be at least as safe as `masked` on format drift, because
+the real tags are present rather than a skeleton, and a malformed turn stores an
+empty string and falls back to that skeleton. What it costs is context: the prompt
+grows with depth faster than under `masked`, so watch `stop/context_limit` and
+`ppo_actor/prompt_len`, which ran avg 2419 / max 6451 under masked. Runs before that
+date are not continuous with runs after it on the format-error series.
 
 Note that `terminate` is now *safe* here in a way it was not in `math/0808/full`:
 there an early format exit dodged `max_turn_penalty -1.0`, which made it a cheap

@@ -102,12 +102,14 @@ cross_eval:
     # unexplained gap in the free_chat column.
     budget: 5
     max_student_tokens: 2048
-    # Must equal the tutor arm's teacher_history_tags, which math/0810 sets to
-    # 'masked' and which the tutor arm validates at startup. Under 'stripped' the
+    # Must equal the tutor arm teacher_history_tags, which math/0810 sets to
+    # 'unmasked' and which the tutor arm validates at startup. Under 'stripped' the
     # teacher imitates its own untagged replies and malformed turns run 6.3% at
     # depth 1 rising to 41.7% at depth 5, so a mismatch would compare a teacher
-    # that keeps its format contract against one that loses it.
-    teacher_history_tags: masked
+    # that keeps its format contract against one that loses it. cross_eval
+    # implements all three modes, and under 'unmasked' only the teacher view
+    # changes -- both arms still score the same public transcript.
+    teacher_history_tags: unmasked
   classroom:
     # Their generation block, verbatim.
     max_teacher_turns: 10

@@ -1,18 +1,17 @@
-# Experimental history-visible variant of leak-local-stable.yaml.
-# The parent remains unchanged. This arm changes only the teacher's observation
-# of its own earlier turns and localizes the existing format penalty just like
-# the already-local leak penalty.
+# 0810fc-pre-unmasked -- NOW A NO-OP relative to its parent, kept for provenance.
+#
+# Both settings this arm existed to turn on are in the 0810 base as of 20260817:
+# teacher_history_tags is 'unmasked' there, and turn_local_components already spells
+# out both components. So this file is leak-local-stable.yaml under a different
+# trial name, and the runs it produced -- 20260817_094430 -- are read as the
+# unmasked arm only because the base was 'masked' when they were launched.
+#
+# It is kept rather than deleted so those runs still have a config in the tree. To
+# recover the original contrast, pin the PARENT to teacher_history_tags: masked
+# rather than editing this file; making the base the odd one out is what turned two
+# arms into aliases in the first place.
 defaults:
   - leak-local-stable@_global_
   - _self_
 
 trial_name: 0810fc-pre-unmasked
-
-# Replay each valid prior teacher reply verbatim, including <reasoning>, only in
-# the teacher view. Student and re-test prompts still use the public <output> text.
-teacher_history_tags: unmasked
-
-reward:
-  # OmegaConf replaces lists rather than merging them, so keep "leak" when adding
-  # the turn-local format penalty inherited from reward.format_error_penalty.
-  turn_local_components: ["leak", "format_error"]

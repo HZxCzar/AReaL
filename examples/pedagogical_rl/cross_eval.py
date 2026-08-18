@@ -115,19 +115,18 @@ class FreeChatSpec:
     teacher_draft: str = ""
     max_student_tokens: int = 2048
     # How the teacher sees ITS OWN earlier turns: 'stripped' hands back the bare
-    # visible text, 'masked' restores the tag skeleton with the reasoning
-    # replaced by a placeholder.
+    # visible text, 'masked' restores the tag skeleton with the reasoning replaced
+    # by a placeholder, 'unmasked' replays the exact prior reply including its
+    # private reasoning. Only the teacher view; the student and the re-test always
+    # get the public visible text.
     #
     # THIS IS NOT COSMETIC AND IT MUST FOLLOW THE TUTOR ARM. Under 'stripped' the
-    # teacher reads one instruction demanding <reasoning>/<output> and then
-    # several examples of itself not using them, and the few-shot wins: malformed
-    # turns measured 6.3% at depth 1 rising to 41.7% at depth 5 on
-    # 20260810_234129, which is why math/0810 runs 'masked'. If the ped arm ran
-    # our protocol under 'stripped' while our arm rolled out under 'masked', the
-    # free_chat column would be comparing a teacher that keeps its format
-    # contract against one that loses it, and the gap would be the setting rather
-    # than the teacher.
-    teacher_history_tags: str = "masked"
+    # teacher imitates its own untagged replies and malformed turns measured 6.3%
+    # at depth 1 rising to 41.7% at depth 5 on 20260810_234129. math/0810 now runs
+    # 'unmasked'. If the ped arm ran our protocol under a different mode than the
+    # arm it is being compared against, the free_chat column would be measuring the
+    # setting rather than the teacher.
+    teacher_history_tags: str = "unmasked"
 
 
 @dataclass(slots=True)
@@ -212,26 +211,48 @@ def as_chat(
     *,
     speaker: str,
     own_turn_template: str | None = None,
+    own_turn_raw_outputs: tuple[str, ...] | None = None,
 ) -> list[dict[str, str]]:
     """The dialogue seen from one side: own turns assistant, the other user.
 
     The same mapping examples/tutor/workflow.py:_render_conversation applies, so
     a transcript scored here is shaped the way the arm that produced it would
-    have shaped it. ``own_turn_template`` re-wraps the speaker's own turns and
-    takes a single ``{visible}`` field -- only the teacher passes it, because the
-    student is never shown the tag protocol.
+    have shaped it -- INCLUDING the three teacher_history_tags modes, because a
+    head-to-head that differed on this would be measuring the setting rather
+    than the teacher.
+
+    ``own_turn_template`` re-wraps the speaker own turns and takes a single
+    ``{visible}`` field. ``own_turn_raw_outputs`` takes precedence when an
+    aligned non-empty raw reply exists; that is the teacher-only unmasked
+    history, where the exact prior reply including its private reasoning is
+    replayed. A malformed turn stores an empty string and falls back to the
+    masked skeleton, so the failure mode stripped had -- the teacher imitating
+    its own untagged output -- cannot come back through this path. Only the
+    teacher passes either argument: the student is never shown the tag protocol.
     """
 
     rendered = []
+    own_turn_idx = 0
     for turn in transcript:
         is_own = turn["role"] == speaker
         content = turn["content"]
-        if is_own and own_turn_template is not None:
-            content = own_turn_template.format(visible=content)
+        if is_own:
+            raw_content = (
+                own_turn_raw_outputs[own_turn_idx]
+                if own_turn_raw_outputs is not None
+                and own_turn_idx < len(own_turn_raw_outputs)
+                else ""
+            )
+            own_turn_idx += 1
+            if raw_content:
+                content = raw_content
+            elif own_turn_template is not None:
+                content = own_turn_template.format(visible=content)
         rendered.append(
             {"role": "assistant" if is_own else "user", "content": content}
         )
     return rendered
+
 
 
 def _free_chat_teacher_system(spec: FreeChatSpec, task: str, ground_truth: str) -> str:
@@ -304,11 +325,19 @@ async def run_free_chat_dialogue(
     system = _free_chat_teacher_system(spec, task, ground_truth)
     preamble = _free_chat_preamble(spec)
     transcript: Transcript = []
+    # All three modes, matching the tutor arm. Under masked the teacher gets its
+    # tag skeleton back with the reasoning replaced; under unmasked it reads its
+    # exact prior replies, reasoning included. Only the teacher view changes --
+    # the student and the re-test always replay the public visible text below.
     own_turn_template = (
         TEACHER_HISTORY_MASKED_TEMPLATE
-        if spec.teacher_history_tags == "masked"
+        if spec.teacher_history_tags in {"masked", "unmasked"}
         else None
     )
+    unmasked_history = spec.teacher_history_tags == "unmasked"
+    # One entry per teacher turn, empty when that turn was malformed, so the
+    # fallback to the masked skeleton lines up with the transcript.
+    own_raw_outputs: tuple[str, ...] = ()
     for turn_idx in range(1, int(spec.budget) + 1):
         teacher_messages = [
             {"role": "system", "content": system},
@@ -317,6 +346,9 @@ async def run_free_chat_dialogue(
                 transcript,
                 speaker="teacher",
                 own_turn_template=own_turn_template,
+                own_turn_raw_outputs=(
+                    own_raw_outputs if unmasked_history else None
+                ),
             ),
         ]
         try:
@@ -333,6 +365,10 @@ async def run_free_chat_dialogue(
             result.format_errors += 1
         transcript.append({"role": "teacher", "content": visible})
         result.teacher_turns += 1
+        own_raw_outputs = (
+            *own_raw_outputs,
+            "" if malformed else raw_output,
+        )
 
         student_messages = [
             {"role": "system", "content": FREE_CHAT_STUDENT_SYSTEM_PROMPT},

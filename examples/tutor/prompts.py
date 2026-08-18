@@ -40,8 +40,8 @@ your message shown to the student
 The student will see only the text inside <output>...</output>. Put all private
 thinking inside <reasoning>...</reasoning>. Do not use JSON or Markdown code fences."""
 
-# How the teacher sees its OWN earlier turns when
-# `teacher_history_tags: masked` is on. `public_history` holds the visible text
+# How the teacher sees its OWN earlier turns under `teacher_history_tags: masked`,
+# and what `unmasked` falls back to on a malformed turn. `public_history` holds the
 # with the tags stripped, which reads as an in-context example that replies do
 # not carry tags -- and the model copies it, at 2.1% malformed on depth 1
 # rising to 73.4% on depth 10. This restores the skeleton and masks what was

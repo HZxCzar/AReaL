@@ -144,6 +144,63 @@ def test_masked_history_hands_the_teacher_its_own_tags_back():
     assert own_turn["content"] == "lesson"
 
 
+def test_unmasked_history_replays_the_exact_reply_reasoning_and_all():
+    """The third mode, and the reason this test exists.
+
+    The selection here used to be binary -- masked, or None -- so a spec asking
+    for 'unmasked' silently got the STRIPPED rendering: the worst mode, 73.4%
+    malformed at depth 10, chosen by asking for the newest one. Nothing raised,
+    and the free_chat column would have compared an unmasked-trained teacher
+    against a stripped replay of its own history.
+    """
+
+    rec = Recorder()
+    asyncio.run(
+        ce.run_free_chat_dialogue(
+            task="2+2?",
+            ground_truth="4",
+            spec=ce.FreeChatSpec(budget=2, teacher_history_tags="unmasked"),
+            teacher_call=rec.teacher,
+            student_call=rec.student,
+        )
+    )
+    own_turn = next(m for m in rec.teacher_calls[-1] if m["role"] == "assistant")
+    # The EXACT reply, not a skeleton: the private reasoning content survives.
+    assert own_turn["content"] == "<reasoning>r</reasoning><output>lesson</output>"
+    # And the student is still shown only the public text, same as under masked.
+    for messages, _n, _rid in rec.student_calls:
+        assert "<reasoning>" not in "".join(m["content"] for m in messages)
+
+
+def test_unmasked_falls_back_to_the_skeleton_on_a_malformed_turn():
+    """A malformed turn stores an empty raw reply, so it renders as the masked
+    skeleton rather than as bare untagged text. Without that fallback the one
+    failure mode 'masked' was introduced to prevent -- the teacher imitating its
+    own untagged output -- comes back through the unmasked path."""
+
+    rec = Recorder(teacher_text="no tags at all")
+    asyncio.run(
+        ce.run_free_chat_dialogue(
+            task="2+2?",
+            ground_truth="4",
+            spec=ce.FreeChatSpec(budget=2, teacher_history_tags="unmasked"),
+            teacher_call=rec.teacher,
+            student_call=rec.student,
+        )
+    )
+    own_turn = next(m for m in rec.teacher_calls[-1] if m["role"] == "assistant")
+    assert "<output>" in own_turn["content"]
+    assert own_turn["content"] != "no tags at all"
+
+
+def test_the_default_history_mode_matches_the_tutor_arm():
+    """The two are validated equal at startup, so the defaults must not drift
+    apart. math/0810 runs 'unmasked'."""
+
+    assert ce.FreeChatSpec(budget=1).teacher_history_tags == "unmasked"
+
+
+
 def test_the_student_never_sees_the_teachers_tag_skeleton():
     """Masking is the teacher's own view. The student is never shown the tag
     protocol, so its side of the same dialogue stays plain text."""
