@@ -2060,19 +2060,35 @@ class TutorFreeChatConfig:
     """
 
     enabled: bool = field(
-        default=False,
+        default=True,
         metadata={
             "help": (
-                "Run the free-chat rollout instead of the answer-attempt loop: "
-                "no student pre-attempt, the teacher speaks first, no per-turn "
-                "answer judge, no early termination on a correct answer, and "
-                "the reward comes from student_generalize's original re-test. "
-                "Requires student_generalize.enabled, retest_original and "
-                "retest_reward > 0; reward.max_turn_penalty must be 0 because "
-                "reaching the budget is now the normal ending."
+                "MUST BE TRUE. Free chat is the only rollout: no student "
+                "pre-attempt, the teacher speaks first, no per-turn answer judge, "
+                "no early termination on a correct answer, and the reward comes "
+                "from student_generalize's original re-test. Requires "
+                "student_generalize.enabled, retest_original and retest_reward > 0; "
+                "reward.max_turn_penalty must be 0 because reaching the budget is "
+                "the normal ending. "
+                "The answer-attempt loop this used to switch off was removed with "
+                "its config trees -- no config in the tree can produce it, its code "
+                "paths in workflow.py are unreachable, and setting this false now "
+                "raises rather than selecting a rollout that is no longer exercised "
+                "or tested. The field survives so a config.yaml saved before the "
+                "removal still loads for --resume."
             )
         },
     )
+
+    def __post_init__(self) -> None:
+        if not self.enabled:
+            raise ValueError(
+                "free_chat.enabled must be true. The answer-attempt loop was "
+                "removed along with the config trees that used it, so false does "
+                "not select a working rollout -- it selects unreachable code. If "
+                "you need that regime, use one of the branches that predates the "
+                "unification rather than this flag."
+            )
     student_has_not_seen_problem: bool = field(
         default=False,
         metadata={
