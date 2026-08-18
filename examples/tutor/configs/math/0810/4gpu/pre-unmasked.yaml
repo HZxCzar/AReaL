@@ -1,17 +1,27 @@
-# 0810fc-pre-unmasked -- NOW A NO-OP relative to its parent, kept for provenance.
+# 0810fc-pre-unmasked -- with the pre-solve, with the teacher reading its own reasoning.
 #
-# Both settings this arm existed to turn on are in the 0810 base as of 20260817:
-# teacher_history_tags is 'unmasked' there, and turn_local_components already spells
-# out both components. So this file is leak-local-stable.yaml under a different
-# trial name, and the runs it produced -- 20260817_094430 -- are read as the
-# unmasked arm only because the base was 'masked' when they were launched.
+# One key differs from leak-local-stable.yaml: teacher_history_tags. Under
+# 'unmasked' each valid prior teacher reply is replayed verbatim, private
+# <reasoning> included, in the TEACHER's view only; the student's conversation
+# and the solo re-test still replay the public <output> text, so nothing the
+# teacher thinks privately reaches the learner or the measurement.
 #
-# It is kept rather than deleted so those runs still have a config in the tree. To
-# recover the original contrast, pin the PARENT to teacher_history_tags: masked
-# rather than editing this file; making the base the odd one out is what turned two
-# arms into aliases in the first place.
+# A malformed turn stores an empty string and falls back to the masked skeleton,
+# so the failure 'stripped' had -- the teacher imitating its own untagged output
+# -- cannot return through this path.
+#
+# WHAT TO WATCH. The prompt grows with depth faster than under the masked base:
+# private reasoning at every round instead of a placeholder. stop/context_limit
+# and ppo_actor/prompt_len (avg 2419 / max 6451 under masked) are the series
+# that say whether that is costing episodes.
+#
+# The turn-local components are inherited from the base and are not restated:
+# omegaconf replaces a list on merge, so a partial restatement here would
+# silently drop one of them.
 defaults:
   - leak-local-stable@_global_
   - _self_
 
 trial_name: 0810fc-pre-unmasked
+
+teacher_history_tags: unmasked

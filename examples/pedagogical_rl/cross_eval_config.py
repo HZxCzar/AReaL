@@ -39,12 +39,12 @@ class CrossEvalFreeChatConfig:
     )
     max_student_tokens: int = field(default=2048)
     teacher_history_tags: str = field(
-        default="unmasked",
+        default="masked",
         metadata={
             "help": (
                 "How the teacher sees its own earlier turns in this protocol: "
                 "'stripped', 'masked' or 'unmasked'. MUST EQUAL the tutor arm "
-                "teacher_history_tags, which math/0810 sets to 'unmasked'. Under "
+                "teacher_history_tags, which the math arms set to 'masked'. Under "
                 "'stripped' the teacher imitates its own untagged replies and "
                 "malformed turns run 6.3% at depth 1 rising to 41.7% at depth 5, so "
                 "a mismatch here would compare a teacher that keeps its format "

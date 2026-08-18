@@ -122,11 +122,11 @@ class FreeChatSpec:
     #
     # THIS IS NOT COSMETIC AND IT MUST FOLLOW THE TUTOR ARM. Under 'stripped' the
     # teacher imitates its own untagged replies and malformed turns measured 6.3%
-    # at depth 1 rising to 41.7% at depth 5 on 20260810_234129. math/0810 now runs
-    # 'unmasked'. If the ped arm ran our protocol under a different mode than the
-    # arm it is being compared against, the free_chat column would be measuring the
-    # setting rather than the teacher.
-    teacher_history_tags: str = "unmasked"
+    # at depth 1 rising to 41.7% at depth 5 on 20260810_234129, which is why the
+    # default is 'masked'. If the ped arm ran our protocol under a different mode
+    # than the arm it is being compared against, the free_chat column would be
+    # measuring the setting rather than the teacher.
+    teacher_history_tags: str = "masked"
 
 
 @dataclass(slots=True)

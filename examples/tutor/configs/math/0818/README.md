@@ -47,7 +47,7 @@ the test skips it.
 | `student_models` | one student, `(text, unmasked)` |
 | `evaluator.freq_steps` | 25 |
 | `free_chat.transfer_prompts` | off — the re-test problem is the dialogue's problem |
-| `teacher_history_tags` | `unmasked` |
+| `teacher_history_tags` | `masked` |
 
 Both terminates are training policy only: `evaluator.leak_terminate` and
 `evaluator.format_terminate` are `false`, so the headline number runs the full budget
@@ -60,8 +60,9 @@ rollout that charged for reaching the budget, terminating early would be the che
 way out of a losing episode; here a format-terminated episode collects `-0.5` and
 loses its re-test, which is strictly worse than the worst honest outcome of `0.0`.
 
-Two axes share the word "unmasked" and are unrelated. `teacher_history_tags:
-unmasked` is how the **teacher** sees its own earlier replies. The student's
+Two axes are easy to confuse and are unrelated. `teacher_history_tags` is how the
+**teacher** sees its own earlier replies -- `masked` here, meaning the tag skeleton
+with the reasoning replaced by a placeholder. The student's
 `mask.mode: full` is the **information** axis — what the student sees of the
 dialogue. The other student axis is `mode: text | code`, the behavior.
 

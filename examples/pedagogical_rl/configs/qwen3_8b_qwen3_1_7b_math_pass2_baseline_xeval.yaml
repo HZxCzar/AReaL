@@ -78,13 +78,13 @@ cross_eval:
     budget: 5
     max_student_tokens: 2048
     # Must equal the tutor arm teacher_history_tags, which math/0810 sets to
-    # 'unmasked' and which the tutor arm validates at startup. Under 'stripped' the
+    # 'masked' and which the tutor arm validates at startup. Under 'stripped' the
     # teacher imitates its own untagged replies and malformed turns run 6.3% at
     # depth 1 rising to 41.7% at depth 5, so a mismatch would compare a teacher
     # that keeps its format contract against one that loses it. cross_eval
     # implements all three modes, and under 'unmasked' only the teacher view
     # changes -- both arms still score the same public transcript.
-    teacher_history_tags: unmasked
+    teacher_history_tags: masked
   classroom:
     # Their generation block, verbatim.
     max_teacher_turns: 10

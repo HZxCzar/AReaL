@@ -2280,12 +2280,16 @@ class TutorConfig(GRPOConfig):
     cross_eval: CrossEvalConfig = field(default_factory=CrossEvalConfig)
     actor: TutorActorConfig = field(default_factory=TutorActorConfig)
     teacher_history_tags: str = field(
-        default="unmasked",
+        default="masked",
         metadata={
             "help": (
-                "How the teacher sees its own earlier turns. 'unmasked' is the "
-                "default: each valid prior reply is replayed verbatim, private "
-                "reasoning included, in the teacher view only. 'stripped' hands "
+                "How the teacher sees its own earlier turns. 'masked' is the "
+                "default: the tag skeleton is restored with the reasoning content "
+                "replaced by a placeholder, so the format is exemplified without "
+                "the private deliberation being replayed or the context growing by "
+                "it. 'unmasked' replays each valid prior reply verbatim, reasoning "
+                "included, in the teacher view only, and costs context that grows "
+                "with depth. 'stripped' hands "
                 "back the visible text with the output tags removed, which the "
                 "model imitates -- malformed turns run 2.1% at depth 1 and 73.4% "
                 "at depth 10 on an untrained teacher, so it is the worst mode and "

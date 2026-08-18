@@ -698,7 +698,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         free_chat: dict[str, Any] | None = None,
         cross_eval: dict[str, Any] | None = None,
         prompt_instruction: dict[str, Any] | None = None,
-        teacher_history_tags: str = "unmasked",
+        teacher_history_tags: str = "masked",
         local_advantage_turn_discount: float = 1.0,
         teacher_system_prompt: str = "",
         teacher_anti_leak_instruction_enabled: bool = False,

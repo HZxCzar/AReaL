@@ -195,9 +195,9 @@ def test_unmasked_falls_back_to_the_skeleton_on_a_malformed_turn():
 
 def test_the_default_history_mode_matches_the_tutor_arm():
     """The two are validated equal at startup, so the defaults must not drift
-    apart. math/0810 runs 'unmasked'."""
+    apart. The math arms run 'masked'."""
 
-    assert ce.FreeChatSpec(budget=1).teacher_history_tags == "unmasked"
+    assert ce.FreeChatSpec(budget=1).teacher_history_tags == "masked"
 
 
 
