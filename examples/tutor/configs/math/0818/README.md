@@ -122,3 +122,47 @@ in order of preference:
    to training.
 
 Raising `freq_steps` also works and is orthogonal to all three.
+
+## Offline evaluation of the checkpoints
+
+An arm with eval off still writes checkpoints: `saver.freq_steps` is 50, so a
+500-step run leaves 10 LoRA adapters (~87 MB each) at
+
+    checkpoints/root/tutor-math-baseline/<trial>/default/epoch*epochstep*globalstep*/
+
+They are under **`default/`**, not `actor/` — `actor/` holds only `initial_lora`,
+the adapter shipped to the rollout engine at startup, which is the untrained one.
+The global step is one *below* the step you would name, because the save fires at the
+end of it: `freq_steps: 50` gives `globalstep49`, `99`, `149`.
+
+`scripts/eval_checkpoints.py` sweeps them. It does not reimplement the protocol — the
+evaluation is `evaluate_api_teacher.py` driving the real `TutorAgentWorkflow` — and
+adds discovery, the sweep, and a liveness probe.
+
+    python examples/tutor/scripts/eval_checkpoints.py \
+        --trial-dir .../checkpoints/root/tutor-math-baseline/<trial> \
+        --base-url http://localhost:30000/v1 --model qwen3-8b \
+        --config examples/tutor/configs/math/0818/base/default.yaml \
+        --output-root .../offline_eval/<trial> --max-samples 128
+
+It attaches to an endpoint you already have; it does not start one. The endpoint must
+serve the **base** model with LoRA enabled (`--enable-lora`, and `--lora-paths` on
+builds that require pre-registration).
+
+**Why the liveness probe is the point of the script.** Serving a checkpoint through
+the `model` field does not work — `model="step199"` silently returns the base model,
+and only `extra_body.lora_path` applies the adapter. Nothing errors, so a whole sweep
+can come back with plausible, internally consistent numbers that are all the
+untrained teacher, with a flat line across checkpoints as the only hint and "training
+did nothing" as the natural misreading. Before spending hours the script therefore
+checks, in this order:
+
+1. the endpoint answers a plain request — first, because a connection error is
+   indistinguishable from a refusal and would otherwise be read as a pass;
+2. a **bogus** `lora_path` is refused — if it is accepted, the field is being ignored;
+3. the first checkpoint differs from the base under greedy decoding;
+4. the earliest and latest checkpoints differ from each other.
+
+Any of those failing aborts rather than warns. `--dry-run` runs discovery and the
+probe and stops; `--steps 49,199` picks a subset; `--skip-liveness` exists but the
+numbers mean nothing without independent proof the adapter applied.
