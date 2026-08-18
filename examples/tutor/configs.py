@@ -1,5 +1,5 @@
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 # The head-to-head cross is configured from one place for both arms; see the
@@ -483,6 +483,109 @@ class TutorStudentGeneralizeConfidenceConfig:
             raise ValueError(
                 "student_generalize.confidence.reward_scale must be in (0, 1)."
             )
+
+
+@dataclass
+class TutorStudentAxesConfig:
+    """One endpoint, expanded into the (behavior, information) students over it.
+
+    A student in this rollout is a PAIR: behavior is its action space (text or
+    code) and information is what it may see of the dialogue (a mask). The two are
+    independent, and both already live on a student_models entry, so the pool can
+    always be written out by hand -- 2 behaviors x 3 informations is six entries.
+
+    WHY THIS EXISTS ANYWAY. Those six entries differ only in `name`, `mode` and
+    `mask`; the endpoint, model, key, timeout and sampling parameters are identical
+    and repeated six times. omegaconf REPLACES a list on merge rather than merging
+    element-wise, so an arm that overrides student_models restates every entry, and
+    a changed endpoint has to be edited in all six or the pool silently splits
+    across two services. Declaring the axes instead keeps one copy of the endpoint
+    and makes the product a property of the config rather than of the typing.
+
+    Expansion happens in TutorConfig.__post_init__, before every student_models
+    check runs, so an expanded pool is validated exactly like a written-out one and
+    nothing downstream can tell the difference.
+
+    Names are f"{template.name}-{behavior}-{information}". They have to be distinct
+    because the evaluator duplicates the validation set once per student NAME, which
+    is also how eval reports the axes separately.
+    """
+
+    behaviors: list[str] = field(
+        default_factory=lambda: ["text"],
+        metadata={
+            "help": (
+                "The behavior axis: which action spaces to build over this "
+                "endpoint. 'text' replies in prose, 'code' is a CodeAct student "
+                "whose every reply is one program run in a persistent session."
+            )
+        },
+    )
+    informations: dict[str, TutorStudentMaskConfig] = field(
+        default_factory=lambda: {"original": TutorStudentMaskConfig()},
+        metadata={
+            "help": (
+                "The information axis, as name -> mask. The name goes into the "
+                "student name, so call the unmasked one 'original' rather than "
+                "'full'. Default is a single unmasked entry, which makes this "
+                "block degrade to plain behavior expansion."
+            )
+        },
+    )
+    # MISSING, not a default_factory: omegaconf builds the schema for a
+    # list[TutorStudentAxesConfig] by CALLING the factory, and
+    # TutorStudentModelConfig refuses to construct without a name, base_url and
+    # model -- so a factory here makes the whole config class unloadable.
+    template: TutorStudentModelConfig = field(
+        default=MISSING,
+        metadata={
+            "help": (
+                "The endpoint every combination shares. Its `weight` is the TOTAL "
+                "mass for this pool and is divided evenly across the combinations, "
+                "so one axes block with weight 1.0 behaves like a single student "
+                "with weight 1.0 however many cells it expands to. Its `name` is "
+                "the stem; its `mode` and `mask` are ignored, because the axes set "
+                "them."
+            )
+        },
+    )
+
+    def expand(self) -> list[TutorStudentModelConfig]:
+        """The student_models entries this block stands for."""
+        behaviors = [str(b).strip() for b in (self.behaviors or []) if str(b).strip()]
+        if not behaviors:
+            raise ValueError("student_axes.behaviors must not be empty.")
+        if len(behaviors) != len(set(behaviors)):
+            raise ValueError(f"student_axes.behaviors has duplicates: {behaviors}.")
+        informations = dict(self.informations or {})
+        if not informations:
+            raise ValueError("student_axes.informations must not be empty.")
+        if self.template is MISSING or self.template is None:
+            raise ValueError("student_axes.template is required.")
+        template = self.template
+        if not isinstance(template, TutorStudentModelConfig):
+            template = TutorStudentModelConfig(**dict(template))
+        stem = str(template.name or "").strip()
+        if not stem:
+            raise ValueError("student_axes.template.name must be non-empty.")
+        cells = len(behaviors) * len(informations)
+        share = float(template.weight) / cells
+        expanded: list[TutorStudentModelConfig] = []
+        for behavior in behaviors:
+            for label, mask in informations.items():
+                label = str(label).strip()
+                if not label:
+                    raise ValueError("student_axes.informations keys must be non-empty.")
+                entry = replace(
+                    template,
+                    name=f"{stem}-{behavior}-{label}",
+                    mode=behavior,
+                    weight=share,
+                    mask=mask if isinstance(mask, TutorStudentMaskConfig)
+                    else TutorStudentMaskConfig(**dict(mask)),
+                )
+                expanded.append(entry)
+        return expanded
 
 
 @dataclass
@@ -2129,6 +2232,18 @@ class TutorConfig(GRPOConfig):
             )
         },
     )
+    student_axes: list[TutorStudentAxesConfig] = field(
+        default_factory=list,
+        metadata={
+            "help": (
+                "Declare the student pool as its two axes instead of writing the "
+                "product out. Each block is one endpoint times behaviors times "
+                "informations, expanded into student_models before any of its "
+                "checks run. Expanded entries are APPENDED, so a config may mix "
+                "the two forms; leave this empty and nothing changes."
+            )
+        },
+    )
     student_generalize: TutorStudentGeneralizeConfig = field(
         default_factory=TutorStudentGeneralizeConfig
     )
@@ -2338,6 +2453,14 @@ class TutorConfig(GRPOConfig):
                 "outside free chat it is appended to the system prompt by a "
                 "different path that this switch does not gate."
             )
+        # The axes blocks become student_models entries HERE, before any check
+        # below runs, so an expanded pool is validated exactly like a written-out
+        # one and nothing downstream can tell which form produced it. Appended
+        # rather than replacing, so the two forms can be mixed.
+        for axes in list(self.student_axes or []):
+            if not isinstance(axes, TutorStudentAxesConfig):
+                axes = TutorStudentAxesConfig(**dict(axes))
+            self.student_models = list(self.student_models) + axes.expand()
         student_names = [student.name for student in self.student_models]
         if len(student_names) != len(set(student_names)):
             raise ValueError("student_models names must be unique.")

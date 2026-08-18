@@ -1,0 +1,106 @@
+# 0810fc-axes-students -- the (behavior, information) product, declared as its axes.
+#
+# The same pool masked-students.yaml writes out by hand, plus the behavior axis, in
+# the form that does not repeat the endpoint. A student is a PAIR: behavior is its
+# action space and information is what it may see of the dialogue. Here that is
+# 2 x 3 = six learners over one frozen model and one endpoint.
+#
+# WHY NOT WRITE THEM OUT. masked-students.yaml says it itself: "THAT MEANS IT CAN
+# DRIFT: if the endpoints, keys or sampling parameters change in the base, they will
+# not follow here." omegaconf REPLACES a list on merge rather than merging
+# element-wise, so every entry has to restate base_url, model, api_key, timeout and
+# the whole request_params block. At six entries a changed endpoint has to be edited
+# six times, and the failure mode is a pool silently split across two services.
+#
+# student_axes expands in TutorConfig.__post_init__ before every student_models
+# check runs, so the result is validated exactly like a written-out pool. Names are
+# {template.name}-{behavior}-{information}, which is what the evaluator keys its
+# per-student expansion on.
+#
+# COST OF THE FULL PRODUCT AT EVAL. The evaluator duplicates the validation set once
+# per named student: six students is 528 -> 3168 problems, roughly 2.5 h a pass. The
+# masked arm already dropped to no eval at four students for this reason, and this
+# arm follows it -- the adaptation signature is a training-side number available
+# every step.
+defaults:
+  - leak-local-stable@_global_
+  - _self_
+
+trial_name: 0810fc-axes-students
+
+# The base names 'qwen3-1.7b', which no student here carries, and configs.py raises
+# on an eval student with no student_models entry.
+evaluator:
+  student_model_names: null
+  eval_before_train: false
+  freq_steps: null
+
+# EXPANSION APPENDS, so this replaces the base pool with the one entry that the
+# axes form cannot express: a cell at weight 0.0. The template weight is divided
+# evenly across the cells, so there is no way to say "this combination exists for
+# eval but is never drawn in training" -- that still wants a written-out entry, and
+# mixing the two forms is supported precisely for this.
+student_models:
+- name: unmasked-control
+  weight: 0.0
+  mode: text
+  mask:
+    mode: full
+  base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+  model: qwen3-1.7b
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+
+student_axes:
+- behaviors: [text, code]
+  informations:
+    # Unmasked. Called 'original' rather than 'full' because the name goes into the
+    # student name and reads better there.
+    original:
+      mode: full
+    # Coverage learner: keeps what it was told, forgets what it said.
+    student_fade:
+      mode: student_fade
+      keep_recent: 0
+    # Generation learner: keeps its own words, forgets the teacher's. keep_recent 0
+    # rather than 1 because at 1 the most recent teacher turn survives into history
+    # and, with the live turn always visible, the student would effectively retain
+    # two teacher turns.
+    teacher_fade:
+      mode: teacher_fade
+      keep_recent: 0
+  # One copy of the endpoint for all six cells. Its weight is the pool total and is
+  # split evenly, so this block draws as often as a single student at weight 1.0.
+  template:
+    name: qwen3-1.7b
+    weight: 1.0
+    base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+    model: qwen3-1.7b
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    max_concurrent_calls: 32
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-qwen17b-student
+      extra_body:
+        top_k: 20
+        min_p: 0
+        chat_template_kwargs:
+          enable_thinking: false
