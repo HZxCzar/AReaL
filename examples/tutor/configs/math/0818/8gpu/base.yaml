@@ -1,0 +1,40 @@
+# 0818 at 8 GPUs -- four for generation, four for the actor. Allocation only.
+#
+# BUDGET -- READ FIRST. This is the WHOLE node, so exactly one arm runs at a time.
+# Every comparison in this group is paired, and an 8-GPU arm cannot be half of a
+# pair that runs concurrently: the two halves would run in sequence and the second
+# would be read against a first that finished a day earlier. Use 4gpu/ for anything
+# paired. This directory is for a single arm that has to finish fast.
+#
+# WHAT IT BUYS. The step is actor-bound -- timeperf/rollout measured 0.0 at 4 GPUs,
+# meaning generation is fully overlapped and the trainer never waits for data -- so
+# d2 -> d4 takes most of the gradient work out. Expect roughly 140-160 s a step, not
+# 120: the gradient work halves, the rest does not.
+#
+# WHAT IT DOES NOT BUY. Evaluation. A pass is set by WAVES of external calls, not by
+# GPUs, so it stays ~1650-1840 s at any allocation. If the eval bill is what hurts,
+# raise evaluator.freq_steps; more GPUs cannot move it.
+#
+# CONCURRENCY 64, four batches in flight. Deeper prefetch is worth having precisely
+# because the actor is what the step waits on. The external callers are at 32, and
+# that is the ceiling this runs into next: if step time stalls well short of 160 s,
+# look there rather than at the allocation.
+defaults:
+  - ../base/default@_global_
+  - _self_
+
+trial_name: 0818-8gpu
+
+cluster:
+  n_gpus_per_node: 8
+
+rollout:
+  backend: "sglang:d4p1t1"
+  max_concurrent_rollouts: 64
+
+actor:
+  backend: "fsdp:d4p1t1"
+
+stats_logger:
+  wandb:
+    group: 0818-8gpu
