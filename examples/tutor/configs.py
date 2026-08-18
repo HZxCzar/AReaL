@@ -2477,6 +2477,16 @@ class TutorConfig(GRPOConfig):
             if not isinstance(axes, TutorStudentAxesConfig):
                 axes = TutorStudentAxesConfig(**dict(axes))
             self.student_models = list(self.student_models) + axes.expand()
+        # CONSUMED, and this is load-bearing rather than tidiness. __post_init__ runs
+        # again every time the config is reconstructed, and the trainer serializes it
+        # to each worker over RPC and rebuilds it there. Leaving the blocks in place
+        # made expansion re-run on top of an already-expanded student_models, which
+        # raised "student_models names must be unique" INSIDE the RPC deserializer --
+        # so the failure surfaced as the worker receiving a plain dict and dying on
+        # `'dict' object has no attribute 'seed'`, several layers from the cause.
+        # Clearing them makes expansion idempotent: the second pass has nothing to do
+        # and the reconstructed config equals the original.
+        self.student_axes = []
         student_names = [student.name for student in self.student_models]
         if len(student_names) != len(set(student_names)):
             raise ValueError("student_models names must be unique.")

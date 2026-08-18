@@ -121,3 +121,52 @@ def test_a_mask_given_as_a_plain_dict_is_accepted():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_expansion_is_idempotent_across_a_round_trip():
+    """The config is rebuilt on every worker, so expansion must not re-run.
+
+    THE REGRESSION THIS PINS. The trainer serializes the config and rebuilds it on
+    each RPC worker, which runs __post_init__ again. Expansion used to leave the
+    axes blocks in place, so the second pass appended the same cells on top of an
+    already-expanded student_models and raised "student_models names must be
+    unique" -- inside the RPC deserializer, which caught it, fell back to handing
+    the worker a plain dict, and died four frames later on
+    `'dict' object has no attribute 'seed'`. Nothing in that message points at
+    student_axes, and a single in-process load cannot reproduce it, which is why
+    this rebuilds the config the way the transport does.
+
+    Consuming the blocks is what makes the second pass a no-op.
+    """
+
+    from omegaconf import OmegaConf
+
+    from areal.api.cli_args import load_expr_config, to_structured_cfg
+    from examples.tutor.configs import TutorConfig
+
+    arm = "examples/tutor/configs/math/0818/4gpu/full-students.yaml"
+    config, _ = load_expr_config(["--config", arm], TutorConfig)
+    assert len(config.student_models) == 8
+    # The blocks are consumed, so a second __post_init__ has nothing to expand.
+    assert list(config.student_axes) == []
+
+    def rebuild(cfg):
+        container = OmegaConf.to_container(OmegaConf.structured(cfg), resolve=True)
+        return OmegaConf.to_object(
+            to_structured_cfg(OmegaConf.create(container), config_cls=TutorConfig)
+        )
+
+    names = [s.name for s in config.student_models]
+    once = rebuild(config)
+    twice = rebuild(once)
+    assert [s.name for s in once.student_models] == names
+    assert [s.name for s in twice.student_models] == names
+    assert len(names) == len(set(names))
+    # And the pool still means what it did: eight cells over the two axes.
+    assert {s.mode for s in twice.student_models} == {"text", "code"}
+    assert {s.mask.mode for s in twice.student_models} == {
+        "full",
+        "student_fade",
+        "teacher_fade",
+        "long_drop",
+    }
