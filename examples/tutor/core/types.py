@@ -163,6 +163,10 @@ class TutorTurnState:
     # student's conversation and re-test views from ever receiving private
     # reasoning. A tuple snapshots the history stored on each training row.
     previous_tutor_raw_outputs: tuple[str, ...] = ()
+    # Privileged facts about the student sampled for this episode. This belongs
+    # to the teacher state rather than PublicHistoryState so it can never enter
+    # the student's masked or unmasked view. Empty is the default-off control.
+    teacher_private_student_profile: str = ""
 
 
 @dataclass(slots=True)

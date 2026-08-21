@@ -326,6 +326,11 @@ def _build_eval_workflow_kwargs(
     eval_workflow_kwargs["teacher_progress_judge"] = {"enabled": False}
     eval_workflow_kwargs["student_request_judge"] = {"enabled": False}
     eval_workflow_kwargs["world_model"] = {"enabled": False}
+    if bool((workflow_kwargs.get("student_type_probe") or {}).get("enabled")):
+        # This experiment pays the probe only during training. If evaluation is
+        # later re-enabled, keep it a plain retest evaluation unless explicitly
+        # redesigned.
+        eval_workflow_kwargs["student_type_probe"] = {"enabled": False}
     return eval_workflow_kwargs
 
 
@@ -494,6 +499,7 @@ def main(args):
         max_concurrent_aux_calls=auxiliary_model.max_concurrent_calls,
         aux_request_params=auxiliary_model.request_params,
         student_models=[asdict(student) for student in config.student_models],
+        student_sampling=asdict(config.student_sampling),
         success_reward=reward.success,
         leak_penalty=reward.leak_penalty,
         leak_penalty_mode=reward.leak_penalty_mode,
@@ -525,8 +531,10 @@ def main(args):
         opd=asdict(config.opd),
         prompt_instruction=asdict(config.prompt_instruction),
         free_chat=asdict(config.free_chat),
+        student_type_probe=asdict(config.student_type_probe),
         cross_eval=asdict(config.cross_eval),
         teacher_history_tags=config.teacher_history_tags,
+        teacher_private_visibility=config.teacher_private_visibility,
         local_advantage_turn_discount=config.actor.turn_discount,
         teacher_system_prompt=config.teacher_system_prompt,
         teacher_anti_leak_instruction_enabled=(

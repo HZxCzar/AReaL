@@ -328,7 +328,8 @@ def resolve_teacher_instruction(text: str | None) -> tuple[str, str]:
 #   system     FREE_CHAT_TEACHER_SYSTEM_PROMPT  (+ the ground-truth key, if on)
 #   user       FREE_CHAT_TEACHER_SOLVE_PROMPT   ) both only when teacher_pre is
 #   assistant  the accepted pre-solve draft     ) on and a draft was accepted
-#   user       FREE_CHAT_TEACHER_OPEN_PROMPT    (+ output format, + anti-leak)
+#   user       FREE_CHAT_TEACHER_OPEN_PROMPT    (+ output format, + anti-leak,
+#                                                + optional private profile)
 #   ...        the conversation itself
 #
 # `_build_tutor_messages` assembles it. The two pre-solve messages are the only
@@ -419,11 +420,18 @@ FREE_CHAT_STUDENT_MASK_NOTE = (
 FREE_CHAT_TEACHER_SYSTEM_PROMPT = """\
 You are a teacher. You have {{ budget }} turn budgets to talk with a student. \
 After the conversation, we will ask the student to solve a problem from scratch \
-to see whether the student understands. Your goal is to teach the student so \
+to see whether the student understands.{{ student_awareness_context }} Your goal \
+is to teach the student so \
 that they can solve it on their own.{{ student_problem_context }}
 
 The math problem is:
 {{ task }}"""
+
+FREE_CHAT_TEACHER_STUDENT_AWARENESS_CONTEXT = (
+    " Different students may behave differently. We will also assess how well "
+    "you understand this student and how effectively you adapt your teaching "
+    "to them."
+)
 
 # The pre-solve is a turn of the conversation, not a block of the system prompt.
 # This is the request; the accepted draft is the assistant turn that answers it.
@@ -470,6 +478,55 @@ Put your final answer in \\boxed{}."""
 # currently 0.000 under teacher_history_tags=masked. Watch it at depth 1.
 FREE_CHAT_TEACHER_OPEN_PROMPT = """\
 Now you can start the conversation with the student."""
+
+# Optional privileged context for the teacher. It is appended to the user turn
+# above, never to the system prompt and never to PublicHistoryState. Consequently
+# it follows an accepted pre-solve exchange but precedes the first teaching reply,
+# and the student cannot receive it through any history mask.
+#
+# The two axes deliberately get separate paragraphs. This makes every sampled
+# (behavior, information) cell a composition of two facts rather than eight
+# hand-written profiles that can drift apart in wording.
+TEACHER_PRIVATE_STUDENT_PROFILE_TEMPLATE = """\
+Private student profile (visible only to you; do not mention or quote it to the student):
+
+Behavior:
+{behavior}
+
+Information access:
+{information}"""
+
+TEACHER_PRIVATE_BEHAVIOR_PARAGRAPHS = {
+    "text": (
+        "The student communicates through natural language and mathematical "
+        "notation."
+    ),
+    "code": (
+        "The student can act only by writing one Python program per reply. The "
+        "program runs in a persistent interpreter, and you see both the program "
+        "and its result."
+    ),
+}
+
+TEACHER_PRIVATE_INFORMATION_PARAGRAPHS = {
+    "full": "The student can see and remember the complete conversation.",
+    "student_fade": (
+        "The student remembers every earlier message from you, but "
+        "{student_reply_memory}. The message from you that it is currently "
+        "answering is always fully visible."
+    ),
+    "teacher_fade": (
+        "The student remembers its own earlier replies, but "
+        "{teacher_message_memory}. Your current message is always fully visible "
+        "when the student answers it."
+    ),
+    "long_drop": (
+        "The student reads at most the first {long_drop_words} words of every "
+        "message from you, including the current message and earlier messages. "
+        "It cannot use anything after that limit."
+    ),
+}
+
 
 # Appended to a replay of the conversation, on an independent branch. This is
 # the first and only time the student is shown the task.
@@ -593,7 +650,7 @@ Here is a math problem:
 
 Your goal is to teach the student and help them understand the underlying \
 concepts. After the conversation, we will test the student with some related \
-questions.{{ student_problem_context }}"""
+questions.{{ student_awareness_context }}{{ student_problem_context }}"""
 
 # The transfer re-test prompt. "this problem" instead of "the problem from
 # scratch": the non-transfer wording says "the problem", a definite reference to
@@ -910,3 +967,54 @@ def _get_template_env():
 
 def render_prompt(template: str, **context: Any) -> str:
     return _get_template_env().from_string(template).render(**context).strip()
+
+
+# Final sidecar questions used to reward whether the teacher inferred the
+# student's behavior and information constraint from the conversation. The
+# options describe observable consequences rather than internal harness names.
+TYPE_PROBE_QUESTIONS = {
+    "behavior": (
+        "Judging only from the conversation above, how does this student work "
+        "when it answers?"
+    ),
+    "information": (
+        "Judging only from the conversation above, what is this student unable "
+        "to use when it answers?"
+    ),
+}
+
+TYPE_PROBE_DESCRIPTIONS = {
+    "behavior": {
+        "text": (
+            "It answers in prose and algebra, writing its reasoning out."
+        ),
+        "code": (
+            "It answers by writing a Python program and running it."
+        ),
+    },
+    "information": {
+        "full": (
+            "Nothing is missing -- it has the whole conversation available and "
+            "reads each of your messages in full."
+        ),
+        "student_fade": (
+            "Its own earlier replies. It keeps what you told it and forgets what "
+            "it said itself."
+        ),
+        "teacher_fade": (
+            "Your earlier messages. It keeps its own earlier replies and forgets "
+            "what you said."
+        ),
+        "long_drop": (
+            "Anything past roughly the first {long_drop_words} words of any "
+            "message you send, including the message it is answering."
+        ),
+    },
+}
+
+TYPE_PROBE_INSTRUCTION_TEMPLATE = (
+    "{question}\n\n"
+    "{options}\n\n"
+    "Reply with the single letter of the best option and nothing else.\n"
+    "Answer:"
+)

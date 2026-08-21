@@ -135,15 +135,18 @@ from examples.common.parsing import parse_json_dict
 # protocols and the two scorers -- the same reason judges.py is shared.
 from examples.pedagogical_rl import cross_eval
 from examples.tutor.configs import (
+    STUDENT_MODE_CODE,
+    STUDENT_MODE_TEXT,
     TUTOR_EVAL_STUDENT_FIELD,
     TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD,
     TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD,
-    STUDENT_MODE_CODE,
-    STUDENT_MODE_TEXT,
+    TUTOR_TRAIN_STUDENT_FIELD,
     TutorStudentModelConfig,
 )
 from examples.tutor.core.attention_mask import (
     DEFAULT_MASK,
+    MASK_FULL,
+    MASK_LONG_DROP,
     apply_student_mask,
     is_identity,
     mask_current_turn,
@@ -166,7 +169,6 @@ from examples.tutor.core.code_exec import (
 )
 from examples.tutor.core.confidence import compute_answer_token_confidence
 from examples.tutor.core.generalization import load_student_generalize_bank
-from examples.tutor.core.repetition import depth_metrics
 from examples.tutor.core.generation_budget import (
     CONTEXT_BUDGET_TERMINATION_REASON,
     ContextBudgetLimitExceeded,
@@ -180,6 +182,7 @@ from examples.tutor.core.parsers import (
     parse_staged_leak_check_result,
     parse_tagged_teacher_output,
 )
+from examples.tutor.core.repetition import depth_metrics
 from examples.tutor.core.rewards import EpisodeRewardComputer, artifact_to_trace
 from examples.tutor.core.scoring import AnswerScorer, get_answer_scorer
 from examples.tutor.core.semantic_similarity import (
@@ -192,6 +195,24 @@ from examples.tutor.core.tensors import (
 )
 from examples.tutor.core.text import (
     strip_reasoning_for_context as _strip_reasoning_for_context,
+)
+from examples.tutor.core.type_probe import (
+    LETTERS as PROBE_LETTERS,
+)
+from examples.tutor.core.type_probe import (
+    ProbeAxis,
+    ProbeReading,
+    StudentTypeProbeReading,
+    average_distributions,
+    build_axis,
+    group_probabilities,
+    joint_distribution,
+    joint_index,
+    option_rotations,
+    render_options,
+    restricted_probabilities,
+    rotation_disagreement,
+    unpermute,
 )
 from examples.tutor.core.types import (
     EpisodeArtifact,
@@ -217,6 +238,9 @@ from examples.tutor.core.types import (
 )
 from examples.tutor.prompts import (
     ANSWER_JUDGE_USER_TEMPLATE,
+    CODE_STUDENT_NO_OUTPUT,
+    CODE_STUDENT_NO_PROGRAM,
+    CODE_STUDENT_TEACHER_VIEW_TEMPLATE,
     DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT,
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
     DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT,
@@ -226,19 +250,18 @@ from examples.tutor.prompts import (
     EMPTY_PLACEHOLDER,
     FILTER_SOLVER_SYSTEM_PROMPT,
     FILTER_SOLVER_USER_TEMPLATE,
-    CODE_STUDENT_NO_OUTPUT,
-    CODE_STUDENT_NO_PROGRAM,
-    CODE_STUDENT_TEACHER_VIEW_TEMPLATE,
     FREE_CHAT_CODE_STUDENT_RETEST_TEMPLATE,
     FREE_CHAT_CODE_STUDENT_SYSTEM_PROMPT,
+    FREE_CHAT_STUDENT_MASK_NOTE,
     FREE_CHAT_STUDENT_RETEST_TEMPLATE,
     FREE_CHAT_STUDENT_RETEST_TEMPLATE_TRANSFER,
-    FREE_CHAT_STUDENT_MASK_NOTE,
     FREE_CHAT_STUDENT_SYSTEM_PROMPT,
     FREE_CHAT_TEACHER_OPEN_PROMPT,
     FREE_CHAT_TEACHER_SOLVE_PROMPT,
+    FREE_CHAT_TEACHER_STUDENT_AWARENESS_CONTEXT,
     FREE_CHAT_TEACHER_SYSTEM_PROMPT,
     FREE_CHAT_TEACHER_SYSTEM_PROMPT_TRANSFER,
+    INITIAL_ATTEMPT_WRAPPER,
     INITIAL_TEACHER_FEEDBACK_PLACEHOLDER,
     LEAK_CHECK_DISABLED_FEEDBACK,
     LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE,
@@ -256,29 +279,34 @@ from examples.tutor.prompts import (
     RAWBASE_LEAK_CHECK_SYSTEM_PROMPT,
     RAWBASE_LEAK_CHECK_USER_TEMPLATE,
     STAGED_LEAK_CHECK_USER_TEMPLATE,
+    STUDENT_FINAL_SOLUTION_TEMPLATE,
     STUDENT_QUESTION_SYSTEM_PROMPT,
     STUDENT_QUESTION_USER_TEMPLATE,
     STUDENT_REQUEST_JUDGE_USER_TEMPLATE,
-    INITIAL_ATTEMPT_WRAPPER,
-    STUDENT_FINAL_SOLUTION_TEMPLATE,
     STUDENT_STATE_USER_TEMPLATE,
     STUDENT_TRANSFER_TURN_TEMPLATE,
     STUDENT_TRANSFER_USER_TEMPLATE,
     TASK_CONTEXT_TEMPLATE,
-    TEACHER_ENV_FEEDBACK_TEMPLATE,
-    TEACHER_GROUND_TRUTH_CONTEXT_TEMPLATE,
     TEACHER_ADAPTIVE_INSTRUCTION,
     TEACHER_ANTI_LEAK_INSTRUCTION,
+    TEACHER_ENV_FEEDBACK_TEMPLATE,
+    TEACHER_GROUND_TRUTH_CONTEXT_TEMPLATE,
     TEACHER_GUIDANCE_TAIL_TEMPLATE,
     TEACHER_HISTORY_MASKED_TEMPLATE,
     TEACHER_MOVE_INSTRUCTIONS,
     TEACHER_PRE_SOLVE_FILTER_CONTEXT_TEMPLATE,
-    TEACHER_REPAIR_INSTRUCTION,
-    resolve_teacher_instruction,
+    TEACHER_PRIVATE_BEHAVIOR_PARAGRAPHS,
+    TEACHER_PRIVATE_INFORMATION_PARAGRAPHS,
+    TEACHER_PRIVATE_STUDENT_PROFILE_TEMPLATE,
     TEACHER_PROGRESS_JUDGE_USER_TEMPLATE,
+    TEACHER_REPAIR_INSTRUCTION,
     TEACHER_STATE_USER_TEMPLATE,
+    TYPE_PROBE_DESCRIPTIONS,
+    TYPE_PROBE_INSTRUCTION_TEMPLATE,
+    TYPE_PROBE_QUESTIONS,
     WORLD_MODEL_USER_TEMPLATE,
     render_prompt,
+    resolve_teacher_instruction,
 )
 
 logger = logging.getLogger("TutorWorkflow")
@@ -666,6 +694,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         max_concurrent_aux_calls: int = 8,
         aux_request_params: dict[str, Any] | None = None,
         student_models: list[dict[str, Any]] | None = None,
+        student_sampling: dict[str, Any] | None = None,
         success_reward: float = 1.0,
         leak_penalty: float | None = -1.0,
         leak_penalty_mode: str = "binary",
@@ -696,9 +725,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         guided_slots: dict[str, Any] | None = None,
         opd: dict[str, Any] | None = None,
         free_chat: dict[str, Any] | None = None,
+        student_type_probe: dict[str, Any] | None = None,
         cross_eval: dict[str, Any] | None = None,
         prompt_instruction: dict[str, Any] | None = None,
         teacher_history_tags: str = "masked",
+        teacher_private_visibility: bool = False,
         local_advantage_turn_discount: float = 1.0,
         teacher_system_prompt: str = "",
         teacher_anti_leak_instruction_enabled: bool = False,
@@ -770,6 +801,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.free_chat_enabled = bool(free_chat_config.get("enabled", False))
         self.free_chat_student_has_not_seen_problem = bool(
             free_chat_config.get("student_has_not_seen_problem", False)
+        )
+        self.free_chat_student_awareness_prompt_enabled = bool(
+            free_chat_config.get("student_awareness_prompt_enabled", False)
         )
         # Transfer datasets only: the dialogue task and the re-test task are
         # different problems, so the teacher must not be told the student will be
@@ -855,6 +889,32 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self._student_model_configs = self._normalize_student_model_configs(
             student_models
         )
+        sampling_config = dict(student_sampling or {})
+        self.student_sampling_strategy = str(
+            sampling_config.get("strategy", "weighted_random")
+            or "weighted_random"
+        ).strip().lower()
+        if self.student_sampling_strategy not in {"weighted_random", "stratified"}:
+            raise ValueError(
+                "student_sampling.strategy must be 'weighted_random' or "
+                f"'stratified', got {self.student_sampling_strategy!r}."
+            )
+        positive_student_configs = [
+            config
+            for config in self._student_model_configs
+            if float(config["weight"]) > 0.0
+        ]
+        if self.student_sampling_strategy == "stratified" and len(
+            positive_student_configs
+        ) < 2:
+            raise ValueError(
+                "student_sampling.strategy='stratified' requires at least two "
+                "student_models with positive weight."
+            )
+        self._stratified_student_scores = {
+            str(config["name"]): 0.0 for config in positive_student_configs
+        }
+        self._stratified_student_batch_index = 0
         self._self_aux_semaphore = asyncio.Semaphore(
             max(1, self.max_concurrent_aux_calls)
         )
@@ -1069,6 +1129,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "teacher_history_tags must be 'stripped', 'masked', or 'unmasked'."
             )
         self.teacher_history_tags = teacher_history_tags
+        self.teacher_private_visibility = bool(teacher_private_visibility)
+        if self.teacher_private_visibility and not self.free_chat_enabled:
+            raise ValueError(
+                "teacher_private_visibility requires free_chat.enabled=True so "
+                "the profile can live in the user turn that starts teaching "
+                "instead of the system prompt."
+            )
         prompt_instr = dict(prompt_instruction or {})
         self.prompt_instruction_enabled = bool(prompt_instr.get("enabled", False))
         self.prompt_instruction_text, self.prompt_instruction_name = (
@@ -1466,6 +1533,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         if masked and self.student_mask_active:
             logger.info("student attention masks: %s", ", ".join(masked))
+        self._configure_student_type_probe(student_type_probe)
         self.tokenizer_path = tokenizer_path
         self.model_context_length = model_context_length
 
@@ -1568,6 +1636,54 @@ class TutorAgentWorkflow(RolloutWorkflow):
         version = int(rollout_version) if rollout_version is not None else -1
         return random.Random(f"{self.prompt_pool_seed}:{role}:{group_key}:{version}")
 
+    def _stratified_student_assignments(self, batch_size: int) -> list[str]:
+        """Return smooth weighted quotas for one input batch.
+
+        The scheduler carries its residual scores between batches. Equal weights
+        therefore differ by at most one when the batch is not divisible by the
+        student count, and are exactly equal when it is divisible.
+        """
+        active = [
+            (str(config["name"]), float(config["weight"]))
+            for config in self._student_model_configs
+            if float(config["weight"]) > 0.0
+        ]
+        total_weight = sum(weight for _name, weight in active)
+        assignments: list[str] = []
+        for _ in range(batch_size):
+            for name, weight in active:
+                self._stratified_student_scores[name] += weight
+            selected_name, _selected_weight = max(
+                active,
+                key=lambda item: self._stratified_student_scores[item[0]],
+            )
+            self._stratified_student_scores[selected_name] -= total_weight
+            assignments.append(selected_name)
+
+        rng = random.Random(
+            f"{self.prompt_pool_seed}:student-stratified:"
+            f"{self._stratified_student_batch_index}"
+        )
+        rng.shuffle(assignments)
+        self._stratified_student_batch_index += 1
+        return assignments
+
+    def prepare_rollout_batch(
+        self, data: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        if self.student_sampling_strategy != "stratified" or not data:
+            return data
+        if any(TUTOR_TRAIN_STUDENT_FIELD in item for item in data):
+            raise ValueError(
+                f"Training dataset contains reserved field "
+                f"{TUTOR_TRAIN_STUDENT_FIELD!r}."
+            )
+        assignments = self._stratified_student_assignments(len(data))
+        return [
+            {**item, TUTOR_TRAIN_STUDENT_FIELD: student_name}
+            for item, student_name in zip(data, assignments, strict=True)
+        ]
+
     def _select_student(
         self,
         data: dict[str, Any],
@@ -1580,9 +1696,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
             is_eval = bool(getattr(workflow_context.get(), "is_eval", False))
         except Exception:
             is_eval = False
-        forced_name = (
+        eval_forced_name = (
             str(data.get(TUTOR_EVAL_STUDENT_FIELD) or "").strip() if is_eval else ""
         )
+        train_forced_name = (
+            str(data.get(TUTOR_TRAIN_STUDENT_FIELD) or "").strip()
+            if not is_eval and self.student_sampling_strategy == "stratified"
+            else ""
+        )
+        forced_name = eval_forced_name or train_forced_name
 
         student_model_runtimes = getattr(self, "student_model_runtimes", {})
         if student_model_runtimes:
@@ -1590,7 +1712,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 runtime = student_model_runtimes.get(forced_name)
                 if runtime is None:
                     raise ValueError(
-                        f"Unknown forced evaluation student {forced_name!r}; expected "
+                        f"Unknown forced student {forced_name!r}; expected "
                         f"one of {sorted(student_model_runtimes)}."
                     )
             else:
@@ -1617,7 +1739,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
 
         if forced_name:
             raise ValueError(
-                "A forced evaluation student requires non-empty student_models."
+                "A forced student requires non-empty student_models."
             )
         legacy_name = (
             getattr(self, "aux_model", "legacy-student")
@@ -1629,6 +1751,64 @@ class TutorAgentWorkflow(RolloutWorkflow):
             model=legacy_name,
             caller=aux_caller,
             confidence_caller=getattr(self, "confidence_aux_caller", None),
+        )
+
+    @staticmethod
+    def _teacher_private_student_profile(student: SelectedStudent) -> str:
+        """Render the two independent facts the sampled student makes private.
+
+        Student configs are normalized at startup, but normalizing once more
+        keeps direct workflow callers and tests on the same validation path.
+        """
+        try:
+            behavior = TEACHER_PRIVATE_BEHAVIOR_PARAGRAPHS[student.mode]
+        except KeyError as exc:
+            raise ValueError(
+                f"no private-profile paragraph for student mode {student.mode!r}."
+            ) from exc
+
+        mask = normalize_mask(student.mask)
+        information_mode = str(mask["mode"])
+        try:
+            information_template = TEACHER_PRIVATE_INFORMATION_PARAGRAPHS[
+                information_mode
+            ]
+        except KeyError as exc:  # defensive; normalize_mask already validates it
+            raise ValueError(
+                "no private-profile paragraph for student mask mode "
+                f"{information_mode!r}."
+            ) from exc
+
+        keep_recent = int(mask["keep_recent"])
+        student_reply_memory = (
+            "forgets all of its own earlier replies"
+            if keep_recent == 0
+            else (
+                "remembers only its most recent earlier reply"
+                if keep_recent == 1
+                else f"remembers only its {keep_recent} most recent earlier replies"
+            )
+        )
+        teacher_message_memory = (
+            "forgets all earlier messages from you"
+            if keep_recent == 0
+            else (
+                "remembers only the most recent earlier message from you"
+                if keep_recent == 1
+                else (
+                    f"remembers only the {keep_recent} most recent earlier "
+                    "messages from you"
+                )
+            )
+        )
+        information = information_template.format(
+            student_reply_memory=student_reply_memory,
+            teacher_message_memory=teacher_message_memory,
+            long_drop_words=int(mask["long_drop_words"]),
+        )
+        return TEACHER_PRIVATE_STUDENT_PROFILE_TEMPLATE.format(
+            behavior=behavior,
+            information=information,
         )
 
     @staticmethod
@@ -2117,6 +2297,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             rollout_version=episode_lora_version,
         )
         student_caller = selected_student.caller
+        teacher_private_student_profile = (
+            self._teacher_private_student_profile(selected_student)
+            if getattr(self, "teacher_private_visibility", False)
+            else ""
+        )
         # One interpreter per episode, so names persist across the conversation's
         # turns. None for a text student, which is what switches _run_student and
         # the re-test over to the prose path.
@@ -2367,6 +2552,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     task=task,
                 ),
                 previous_tutor_raw_outputs=previous_tutor_raw_outputs,
+                teacher_private_student_profile=(
+                    teacher_private_student_profile
+                ),
             )
             try:
                 response, tutor_raw_output = await self._generate_tutor_response(
@@ -2617,6 +2805,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
             _safe_scalar(**cross_eval_metrics)
             episode_artifact.cross_eval_details = cross_eval_details
         await self._annotate_teacher_diversity(turn_artifacts)
+        type_probe_reading = await self._run_final_student_type_probe(
+            turn_artifacts=turn_artifacts,
+            selected_student=selected_student,
+            engine=engine,
+            lora_version=episode_lora_version,
+            trajectory_id=trajectory_id,
+        )
         reward_computer = EpisodeRewardComputer(
             success_reward=self.success_reward,
             leak_penalty=self.leak_penalty,
@@ -2655,6 +2850,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self._apply_teacher_progress_shaping(turn_artifacts, assignments)
         self._apply_student_generalization_rewards(
             turn_artifacts, assignments, student_generalization_results
+        )
+        type_probe_reward = self._apply_student_type_probe_reward(
+            turn_artifacts, assignments, type_probe_reading
+        )
+        self._emit_student_type_probe_metrics(
+            type_probe_reading, reward=type_probe_reward
         )
         traces = [
             artifact_to_trace(artifact, assignment)
@@ -2882,6 +3083,549 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if not results:
             return None
         return concat_padded_tensors(results)
+
+    # ------------------------------------------------------------------
+    # Final student-type probe.
+    #
+    # This is deliberately a sidecar. Its generated token is never appended to
+    # the dialogue and never converted to a training tensor. Behavior and
+    # information are probed separately, then the probability assigned to the
+    # correct cell of their joint distribution is added to the episode reward.
+    # ------------------------------------------------------------------
+    def _configure_student_type_probe(self, config: dict[str, Any] | None) -> None:
+        probe = dict(config or {})
+        self.type_probe_enabled = bool(probe.get("enabled", False))
+        self.type_probe_cyclic = bool(probe.get("cyclic_permutations", True))
+        self.type_probe_reward_scale = float(probe.get("reward_scale", 1.0))
+        self.type_probe_temperature = float(probe.get("temperature", 1.0))
+        self.type_probe_max_new_tokens = int(probe.get("max_new_tokens", 1))
+        self._type_probe_letter_cache: dict[
+            int, tuple[tuple[int, ...], tuple[tuple[int, ...], ...]]
+        ] = {}
+        self.type_probe_axes: dict[str, ProbeAxis] = {}
+        self._type_probe_lora_honored: bool | None = None
+        self._type_probe_lora_check_lock: asyncio.Lock | None = None
+        if not self.type_probe_enabled:
+            return
+        if self.teacher_private_visibility:
+            raise ValueError(
+                "student_type_probe cannot be enabled with "
+                "teacher_private_visibility: the private profile states the "
+                "answer instead of requiring the teacher to infer it."
+            )
+        if self.type_probe_reward_scale < 0.0:
+            raise ValueError("student_type_probe.reward_scale must be non-negative.")
+        if self.type_probe_temperature <= 0.0:
+            raise ValueError("student_type_probe.temperature must be positive.")
+        if self.type_probe_max_new_tokens < 1:
+            raise ValueError("student_type_probe.max_new_tokens must be at least 1.")
+        self._type_probe_lora_check_lock = asyncio.Lock()
+        self.type_probe_axes = {
+            "behavior": self._build_student_behavior_probe_axis(),
+            "information": self._build_student_information_probe_axis(),
+        }
+        logger.info(
+            "student type probe: final axes %s, reward_scale=%g",
+            {
+                name: [option.value for option in axis.options]
+                for name, axis in self.type_probe_axes.items()
+            },
+            self.type_probe_reward_scale,
+        )
+
+    def _build_student_behavior_probe_axis(self) -> ProbeAxis:
+        runtimes = list(getattr(self, "student_model_runtimes", {}).values())
+        values = [str(runtime.mode) for runtime in runtimes]
+        if len(set(values)) < 2:
+            raise ValueError(
+                "student_type_probe.enabled=true requires at least two student "
+                "behavior modes in the configured pool."
+            )
+        return build_axis(
+            "behavior",
+            TYPE_PROBE_QUESTIONS["behavior"],
+            values,
+            TYPE_PROBE_DESCRIPTIONS["behavior"],
+        )
+
+    def _build_student_information_probe_axis(self) -> ProbeAxis:
+        runtimes = list(getattr(self, "student_model_runtimes", {}).values())
+        values = [
+            str((runtime.mask or {}).get("mode", MASK_FULL)) for runtime in runtimes
+        ]
+        if len(set(values)) < 2:
+            raise ValueError(
+                "student_type_probe.enabled=true requires at least two student "
+                "information modes in the configured pool."
+            )
+        return build_axis(
+            "information",
+            TYPE_PROBE_QUESTIONS["information"],
+            values,
+            TYPE_PROBE_DESCRIPTIONS["information"],
+            fields={
+                "long_drop_words": self._student_type_probe_long_drop_words(runtimes)
+            },
+        )
+
+    @staticmethod
+    def _student_type_probe_long_drop_words(runtimes: list[Any]) -> int:
+        widths = sorted(
+            {
+                int((runtime.mask or {}).get("long_drop_words", 0) or 0)
+                for runtime in runtimes
+                if str((runtime.mask or {}).get("mode", "")) == MASK_LONG_DROP
+            }
+        )
+        if not widths:
+            return 0
+        if len(widths) > 1:
+            raise ValueError(
+                "student_type_probe cannot describe long_drop because the pool "
+                f"uses several thresholds: {widths}."
+            )
+        return widths[0]
+
+    def _type_probe_letter_ids(
+        self, size: int
+    ) -> tuple[tuple[int, ...], tuple[tuple[int, ...], ...]]:
+        cached = self._type_probe_letter_cache.get(size)
+        if cached is not None:
+            return cached
+        if self.tokenizer is None:
+            raise ValueError(
+                "student_type_probe needs a tokenizer to resolve answer letters."
+            )
+        ids: list[int] = []
+        groups: list[tuple[int, ...]] = []
+        for letter in PROBE_LETTERS[:size]:
+            group: list[int] = []
+            for spelling in (f" {letter}", letter):
+                encoded = self.tokenizer.encode(spelling, add_special_tokens=False)
+                if len(encoded) != 1:
+                    continue
+                token_id = int(encoded[0])
+                if token_id not in ids and token_id not in group:
+                    group.append(token_id)
+            if not group:
+                raise ValueError(
+                    f"answer letter {letter!r} has no single-token spelling under "
+                    f"{getattr(self, 'tokenizer_path', 'the tokenizer')}."
+                )
+            groups.append(tuple(len(ids) + offset for offset in range(len(group))))
+            ids.extend(group)
+        resolved = (tuple(ids), tuple(groups))
+        self._type_probe_letter_cache[size] = resolved
+        return resolved
+
+    def _type_probe_gconfig(self) -> Any:
+        base = self.gconfig
+        if base is None or not hasattr(base, "new"):
+            return base
+        gconfig = base.new(
+            n_samples=1,
+            temperature=self.type_probe_temperature,
+            top_p=1.0,
+            max_new_tokens=self.type_probe_max_new_tokens,
+        )
+        if hasattr(gconfig, "top_k"):
+            gconfig = replace(gconfig, top_k=-1)
+        return gconfig
+
+    async def _verify_type_probe_lora_honored(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        chat_caller: AReaLEngineChatCaller,
+        lora_version: int | None,
+    ) -> bool:
+        """Require a nonexistent adapter to be rejected before paying the probe.
+
+        A server that silently ignores ``lora_path`` returns a valid probability
+        distribution from the base model, so ordinary response validation cannot
+        detect this failure. A bogus adapter name has an unambiguous outcome: the
+        request must fail. The check never raises into the episode.
+        """
+        gconfig = self._type_probe_gconfig()
+        lora_name = str(getattr(gconfig, "lora_name", "") or "")
+        if not lora_name or lora_version is None:
+            return True
+        bogus = replace(
+            gconfig,
+            lora_name=f"tutor-type-probe-no-such-adapter-{uuid.uuid4().hex}",
+        )
+        try:
+            await chat_caller.generate(
+                messages,
+                gconfig=bogus,
+                max_completion_tokens=self.type_probe_max_new_tokens,
+                max_train_sample_tokens=None,
+                metadata={"lora_version": int(lora_version)},
+                rid_prefix="typeprobe-lora-check",
+            )
+        except Exception:  # noqa: BLE001 - refusal is the passing outcome
+            return True
+        return False
+
+    async def _ensure_type_probe_lora_honored(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        chat_caller: AReaLEngineChatCaller,
+        lora_version: int | None,
+    ) -> bool:
+        """Run the liveness check once for this concurrent workflow instance."""
+        lock = self._type_probe_lora_check_lock
+        if lock is None:
+            raise RuntimeError("student_type_probe liveness lock is not configured.")
+        async with lock:
+            if self._type_probe_lora_honored is None:
+                self._type_probe_lora_honored = (
+                    await self._verify_type_probe_lora_honored(
+                        messages=messages,
+                        chat_caller=chat_caller,
+                        lora_version=lora_version,
+                    )
+                )
+            return self._type_probe_lora_honored
+
+    @staticmethod
+    def _append_type_probe_to_last_user(
+        messages: list[dict[str, str]], text: str
+    ) -> list[dict[str, str]]:
+        result = [dict(message) for message in messages]
+        for message in reversed(result):
+            if message.get("role") == "user":
+                content = str(message.get("content", "")).rstrip()
+                message["content"] = f"{content}\n\n{text}" if content else text
+                return result
+        result.append({"role": "user", "content": text})
+        return result
+
+    def _build_final_type_probe_messages(
+        self, artifact: TurnArtifact
+    ) -> list[dict[str, str]]:
+        turns = list(artifact.public_history_after)
+        state = replace(
+            artifact.tutor_state,
+            public_history=PublicHistoryState(
+                summary=artifact.tutor_state.public_history.summary,
+                turn_count=len(turns),
+                turns=turns,
+            ),
+            previous_tutor_raw_outputs=(
+                *artifact.tutor_state.previous_tutor_raw_outputs,
+                artifact.tutor_raw_output if not artifact.tutor_format_error else "",
+            ),
+        )
+        return self._build_tutor_messages(state, include_guidance=False)
+
+    async def _read_student_type_probe_axis(
+        self,
+        *,
+        axis: ProbeAxis,
+        messages: list[dict[str, str]],
+        chat_caller: AReaLEngineChatCaller,
+        correct_index: int,
+        lora_version: int | None,
+        rid_prefix: str,
+    ) -> ProbeReading:
+        ids, groups = self._type_probe_letter_ids(axis.size)
+        orders = option_rotations(axis.size, cyclic=self.type_probe_cyclic)
+        gconfig = self._type_probe_gconfig()
+
+        async def read(index: int, order: tuple[int, ...]) -> list[float]:
+            prompt = TYPE_PROBE_INSTRUCTION_TEMPLATE.format(
+                question=axis.question,
+                options=render_options(axis, order),
+            )
+            metadata: dict[str, Any] = {"token_ids_logprob": list(ids)}
+            if lora_version is not None:
+                metadata["lora_version"] = int(lora_version)
+            result = await chat_caller.generate(
+                self._append_type_probe_to_last_user(messages, prompt),
+                gconfig=gconfig,
+                max_completion_tokens=self.type_probe_max_new_tokens,
+                max_train_sample_tokens=None,
+                metadata=metadata,
+                rid_prefix=f"{rid_prefix}-r{index}",
+            )
+            positions = result.response.output_token_ids_logprobs
+            if not positions or not positions[0]:
+                raise RuntimeError(
+                    "student_type_probe received no token_ids_logprob response."
+                )
+            by_id = {int(tid): float(logprob) for logprob, tid in positions[0]}
+            logprobs = [by_id.get(int(tid), float("-inf")) for tid in ids]
+            slot_probabilities = group_probabilities(
+                restricted_probabilities(logprobs), groups
+            )
+            return unpermute(slot_probabilities, order, axis.size)
+
+        outcomes = await asyncio.gather(
+            *(read(index, order) for index, order in enumerate(orders)),
+            return_exceptions=True,
+        )
+        failures = [
+            outcome for outcome in outcomes if isinstance(outcome, BaseException)
+        ]
+        if failures:
+            raise RuntimeError(
+                f"{len(failures)} of {len(outcomes)} cyclic probe calls failed: "
+                f"{failures[0]!r}"
+            )
+        distributions = [list(outcome) for outcome in outcomes]
+        averaged = average_distributions(distributions)
+        return ProbeReading(
+            distribution=tuple(averaged),
+            correct_index=correct_index,
+            disagreement=rotation_disagreement(distributions),
+            calls=len(outcomes),
+        )
+
+    async def _run_final_student_type_probe(
+        self,
+        *,
+        turn_artifacts: list[TurnArtifact],
+        selected_student: SelectedStudent,
+        engine: Any | None,
+        lora_version: int | None,
+        trajectory_id: int,
+    ) -> StudentTypeProbeReading | None:
+        if not self.type_probe_enabled:
+            return None
+        axis_names = ("behavior", "information")
+        axes = getattr(self, "type_probe_axes", {})
+        expected_calls = {
+            name: (
+                axes[name].size
+                if self.type_probe_cyclic and name in axes
+                else float(name in axes)
+            )
+            for name in axis_names
+        }
+        completed = next(
+            (
+                artifact
+                for artifact in reversed(turn_artifacts)
+                if artifact.student_state is not None
+            ),
+            None,
+        )
+        axes_ready = all(name in axes for name in axis_names)
+        if engine is None or completed is None or not axes_ready:
+            logger.warning(
+                "student_type_probe skipped: engine=%s, completed_round=%s, "
+                "axes=%s",
+                engine is not None,
+                completed is not None,
+                sorted(axes),
+            )
+            metrics = {
+                "type_probe/joint/calls": 0.0,
+                "type_probe/joint/failures": 1.0,
+                "type_probe/reward": 0.0,
+            }
+            for name in axis_names:
+                metrics[f"type_probe/{name}/calls"] = 0.0
+                metrics[f"type_probe/{name}/failures"] = 1.0
+            _safe_scalar(**metrics)
+            return None
+        try:
+            correct_indices = {
+                "behavior": axes["behavior"].index_of(str(selected_student.mode)),
+                "information": axes["information"].index_of(
+                    str((selected_student.mask or {}).get("mode", MASK_FULL))
+                ),
+            }
+            messages = self._build_final_type_probe_messages(completed)
+            chat_caller = self._make_engine_chat_caller(engine, enable_thinking=False)
+            lora_honored = await self._ensure_type_probe_lora_honored(
+                messages=messages,
+                chat_caller=chat_caller,
+                lora_version=lora_version,
+            )
+            if not lora_honored:
+                logger.error(
+                    "student_type_probe disabled: SGLang accepted a nonexistent "
+                    "LoRA adapter, so lora_path is not being honored."
+                )
+                metrics = {
+                    "type_probe/joint/calls": 0.0,
+                    "type_probe/joint/failures": 1.0,
+                    "type_probe/reward": 0.0,
+                    "type_probe/unverified": 1.0,
+                }
+                for name in axis_names:
+                    metrics[f"type_probe/{name}/calls"] = 0.0
+                    metrics[f"type_probe/{name}/failures"] = 1.0
+                _safe_scalar(**metrics)
+                return None
+            axis_results = await asyncio.gather(
+                *(
+                    self._read_student_type_probe_axis(
+                        axis=axes[name],
+                        messages=messages,
+                        chat_caller=chat_caller,
+                        correct_index=correct_indices[name],
+                        lora_version=lora_version,
+                        rid_prefix=f"typeprobe-{trajectory_id}-{name}",
+                    )
+                    for name in axis_names
+                ),
+                return_exceptions=True,
+            )
+            axis_failures = {
+                name: result
+                for name, result in zip(axis_names, axis_results, strict=True)
+                if isinstance(result, BaseException)
+            }
+            if axis_failures:
+                logger.warning(
+                    "student_type_probe failed; reward omitted: %s",
+                    ", ".join(
+                        f"{name}={failure!r}"
+                        for name, failure in axis_failures.items()
+                    ),
+                )
+                metrics = {
+                    "type_probe/joint/calls": float(sum(expected_calls.values())),
+                    "type_probe/joint/failures": 1.0,
+                    "type_probe/reward": 0.0,
+                    "type_probe/unverified": 0.0,
+                }
+                for name, result in zip(axis_names, axis_results, strict=True):
+                    metrics[f"type_probe/{name}/calls"] = float(
+                        expected_calls[name]
+                        if isinstance(result, BaseException)
+                        else result.calls
+                    )
+                    metrics[f"type_probe/{name}/failures"] = float(
+                        isinstance(result, BaseException)
+                    )
+                _safe_scalar(**metrics)
+                return None
+
+            behavior_reading, information_reading = axis_results
+            if not isinstance(behavior_reading, ProbeReading) or not isinstance(
+                information_reading, ProbeReading
+            ):
+                raise RuntimeError("student_type_probe returned an invalid axis read.")
+            combined = joint_distribution(
+                (
+                    behavior_reading.distribution,
+                    information_reading.distribution,
+                )
+            )
+            return StudentTypeProbeReading(
+                behavior=behavior_reading,
+                information=information_reading,
+                joint_distribution=tuple(combined),
+                correct_joint_index=joint_index(
+                    (
+                        correct_indices["behavior"],
+                        correct_indices["information"],
+                    ),
+                    (axes["behavior"].size, axes["information"].size),
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - never drop a teaching episode
+            logger.warning("student_type_probe failed; reward omitted: %s", exc)
+            metrics = {
+                "type_probe/joint/calls": 0.0,
+                "type_probe/joint/failures": 1.0,
+                "type_probe/reward": 0.0,
+                "type_probe/unverified": float(
+                    self._type_probe_lora_honored is False
+                ),
+            }
+            for name in axis_names:
+                metrics[f"type_probe/{name}/calls"] = 0.0
+                metrics[f"type_probe/{name}/failures"] = 1.0
+            _safe_scalar(**metrics)
+            return None
+
+    def _apply_student_type_probe_reward(
+        self,
+        turn_artifacts: list[TurnArtifact],
+        assignments: list[RewardAssignment],
+        reading: StudentTypeProbeReading | None,
+    ) -> float:
+        if reading is None or self.type_probe_reward_scale <= 0.0:
+            return 0.0
+        reward = self.type_probe_reward_scale * reading.correct_probability
+        for artifact, assignment in reversed(
+            list(zip(turn_artifacts, assignments, strict=True))
+        ):
+            if artifact.student_state is None:
+                continue
+            assignment.reward_components["student_type_probe"] = (
+                assignment.reward_components.get("student_type_probe", 0.0) + reward
+            )
+            assignment.reward += reward
+            return reward
+        return 0.0
+
+    def _emit_student_type_probe_metrics(
+        self, reading: StudentTypeProbeReading | None, *, reward: float
+    ) -> None:
+        if not self.type_probe_enabled or reading is None:
+            return
+        axes = self.type_probe_axes
+        if "behavior" not in axes or "information" not in axes:
+            return
+        metrics = {
+            "type_probe/joint/correct_probability": reading.correct_probability,
+            "type_probe/joint/argmax_correct": reading.is_argmax_correct,
+            "type_probe/joint/calls": float(reading.calls),
+            "type_probe/joint/failures": 0.0,
+            "type_probe/reward": float(reward),
+            "type_probe/unverified": 0.0,
+        }
+        for name, axis_reading in (
+            ("behavior", reading.behavior),
+            ("information", reading.information),
+        ):
+            axis = axes[name]
+            metrics.update(
+                {
+                    f"type_probe/{name}/correct_probability": (
+                        axis_reading.correct_probability
+                    ),
+                    f"type_probe/{name}/argmax_correct": (
+                        axis_reading.is_argmax_correct
+                    ),
+                    f"type_probe/{name}/rotation_disagreement": (
+                        axis_reading.disagreement
+                    ),
+                    f"type_probe/{name}/calls": float(axis_reading.calls),
+                    f"type_probe/{name}/failures": 0.0,
+                }
+            )
+            metrics.update(
+                {
+                    f"type_probe/{name}/probability/{option.value}": float(
+                        axis_reading.distribution[index]
+                    )
+                    for index, option in enumerate(axis.options)
+                }
+            )
+
+        behavior_axis = axes["behavior"]
+        information_axis = axes["information"]
+        for behavior_index, behavior_option in enumerate(behavior_axis.options):
+            for information_index, information_option in enumerate(
+                information_axis.options
+            ):
+                index = joint_index(
+                    (behavior_index, information_index),
+                    (behavior_axis.size, information_axis.size),
+                )
+                metrics[
+                    "type_probe/joint/probability/"
+                    f"{behavior_option.value}/{information_option.value}"
+                ] = float(reading.joint_distribution[index])
+        _safe_scalar(**metrics)
 
     def _make_engine_chat_caller(
         self,
@@ -5689,6 +6433,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
             else FREE_CHAT_TEACHER_SYSTEM_PROMPT,
             budget=int(getattr(self, "free_chat_budget", 0) or self.max_turns),
             task=task,
+            student_awareness_context=(
+                FREE_CHAT_TEACHER_STUDENT_AWARENESS_CONTEXT
+                if getattr(
+                    self,
+                    "free_chat_student_awareness_prompt_enabled",
+                    False,
+                )
+                else ""
+            ),
             student_problem_context=(
                 "\n\nThe student has not seen the math problem yet."
                 if getattr(
@@ -5704,11 +6457,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         return system
 
-    def _free_chat_open_prompt(self) -> str:
+    def _free_chat_open_prompt(
+        self, teacher_private_student_profile: str = ""
+    ) -> str:
         """The user turn that starts the conversation and carries its directives.
 
         Same blocks in the same order they had at the end of the system prompt,
-        so the only thing that changed is which turn they are in.
+        so the only thing that changed is which turn they are in. An enabled
+        private profile comes last, closest to the first teaching generation.
         """
         parts = [FREE_CHAT_TEACHER_OPEN_PROMPT]
         if not self.enable_thinking:
@@ -5717,6 +6473,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             parts.append(TEACHER_ANTI_LEAK_INSTRUCTION)
         if getattr(self, "teacher_adaptive_instruction_enabled", False):
             parts.append(TEACHER_ADAPTIVE_INSTRUCTION)
+        private_profile = str(teacher_private_student_profile or "").strip()
+        if private_profile:
+            parts.append(private_profile)
         return "\n\n".join(parts)
 
     def _free_chat_preamble(
@@ -5761,7 +6520,17 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     {"role": "user", "content": FREE_CHAT_TEACHER_SOLVE_PROMPT}
                 )
                 messages.append({"role": "assistant", "content": raw_output})
-        messages.append({"role": "user", "content": self._free_chat_open_prompt()})
+        private_profile = (
+            tutor_state.teacher_private_student_profile
+            if getattr(self, "teacher_private_visibility", False)
+            else ""
+        )
+        messages.append(
+            {
+                "role": "user",
+                "content": self._free_chat_open_prompt(private_profile),
+            }
+        )
         return messages
 
     def _teacher_system_for_state(
@@ -6605,6 +7374,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         # deliberately ran past the leak; absent otherwise, so the series is never
         # padded with zeros that mean "not measured".
         baseline = no_teaching_baseline
+        in_the_wild = None
         if baseline is not None:
             in_the_wild = self._level_retest_score(
                 student_generalization_results, ORIGINAL_RETEST_LEVEL
@@ -6733,6 +7503,20 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 metrics[f"{prefix}/reward"] = float(total_reward)
                 metrics[f"{prefix}/turns"] = float(len(traces))
                 metrics[f"{prefix}/call_failed"] = float(student_call_failed)
+                if baseline is not None:
+                    metrics[f"{prefix}/retest/no_teaching_baseline"] = float(
+                        baseline
+                    )
+                    if in_the_wild is not None:
+                        metrics[f"{prefix}/retest/improvement"] = float(
+                            in_the_wild - baseline
+                        )
+                        metrics[f"{prefix}/retest/improved"] = float(
+                            in_the_wild > baseline
+                        )
+                        metrics[f"{prefix}/retest/made_it_worse"] = float(
+                            in_the_wild < baseline
+                        )
 
         student_prompt_pools = {
             "seen": getattr(self, "student_prompt_pool", ()),
@@ -6995,6 +7779,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
             keys.append("teacher_progress_shaping")
         if getattr(self, "student_request_judge_enabled", False):
             keys.append("student_request_fulfillment")
+        if getattr(self, "type_probe_enabled", False) and getattr(
+            self, "type_probe_reward_scale", 0.0
+        ):
+            keys.append("student_type_probe")
         return keys
 
     def _reward_component_metrics(self, traces: list[TurnTrace]) -> dict[str, float]:

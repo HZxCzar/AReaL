@@ -28,6 +28,7 @@ _ANSWER_SCORERS = {"auto", "aime", "math", "polaris"}
 _STUDENT_GENERALIZE_MODES = {"only_success", "always"}
 _STUDENT_GENERALIZE_SOURCES = {"generated", "sidecar", "train"}
 _STUDENT_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_STUDENT_SAMPLING_STRATEGIES = {"weighted_random", "stratified"}
 
 STUDENT_MODE_TEXT = "text"
 STUDENT_MODE_CODE = "code"
@@ -35,6 +36,7 @@ STUDENT_MODE_CODE = "code"
 STUDENT_MODES = frozenset({STUDENT_MODE_TEXT, STUDENT_MODE_CODE})
 
 TUTOR_EVAL_STUDENT_FIELD = "__tutor_student_name"
+TUTOR_TRAIN_STUDENT_FIELD = "__tutor_train_student_name"
 TUTOR_EVAL_STUDENT_PROMPT_GROUP_FIELD = "__tutor_student_prompt_group"
 TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD = "__tutor_student_prompt_index"
 
@@ -454,6 +456,31 @@ class TutorStudentModelConfig:
         self.max_concurrent_calls = int(self.max_concurrent_calls)
         if self.max_concurrent_calls <= 0:
             raise ValueError("student_models.max_concurrent_calls must be positive.")
+
+
+@dataclass
+class TutorStudentSamplingConfig:
+    strategy: str = field(
+        default="weighted_random",
+        metadata={
+            "help": (
+                "How training assigns configured students to problem groups. "
+                "'weighted_random' preserves the historical independent weighted "
+                "draw. 'stratified' assigns per-batch quotas proportional to each "
+                "positive student weight; equal weights therefore give equal counts. "
+                "Evaluation is unchanged."
+            ),
+            "choices": sorted(_STUDENT_SAMPLING_STRATEGIES),
+        },
+    )
+
+    def __post_init__(self) -> None:
+        self.strategy = str(self.strategy or "weighted_random").strip().lower()
+        if self.strategy not in _STUDENT_SAMPLING_STRATEGIES:
+            raise ValueError(
+                "student_sampling.strategy must be one of "
+                f"{sorted(_STUDENT_SAMPLING_STRATEGIES)}, got {self.strategy!r}."
+            )
 
 
 @dataclass
@@ -2100,6 +2127,18 @@ class TutorFreeChatConfig:
             )
         },
     )
+    student_awareness_prompt_enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Tell the teacher that students differ and that its knowledge "
+                "of this student and ability to adapt its teaching will also be "
+                "assessed. This prompt switch is independent of "
+                "student_type_probe and defaults off so existing prompts are "
+                "unchanged."
+            )
+        },
+    )
     transfer_prompts: bool = field(
         default=False,
         metadata={
@@ -2150,6 +2189,67 @@ class TutorFreeChatConfig:
             )
         },
     )
+
+
+@dataclass
+class TutorStudentTypeProbeConfig:
+    """Final sidecar read of the teacher's belief about the joint student type."""
+
+    enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "After the dialogue, separately probe the sampled student's "
+                "behavior and information constraint, then score the correct cell "
+                "of their joint distribution. Disabled is a complete no-op."
+            )
+        },
+    )
+    cyclic_permutations: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Show every semantic option in every answer-letter position, map "
+                "the probabilities back to option order, and average them."
+            )
+        },
+    )
+    reward_scale: float = field(
+        default=1.0,
+        metadata={
+            "help": (
+                "Multiplier on the probability assigned to the correct joint "
+                "behavior-information type. The resulting reward is added to "
+                "retest reward."
+            )
+        },
+    )
+    temperature: float = field(
+        default=1.0,
+        metadata={
+            "help": (
+                "Temperature for the one-token probability read. top_p is forced "
+                "to 1 and top_k is disabled for this sidecar call."
+            )
+        },
+    )
+    max_new_tokens: int = field(
+        default=1,
+        metadata={"help": "Generated tokens per cyclic probe call."},
+    )
+
+    def __post_init__(self) -> None:
+        self.reward_scale = float(self.reward_scale)
+        self.temperature = float(self.temperature)
+        self.max_new_tokens = int(self.max_new_tokens)
+        if not self.enabled:
+            return
+        if self.reward_scale < 0.0:
+            raise ValueError("student_type_probe.reward_scale must be non-negative.")
+        if self.temperature <= 0.0:
+            raise ValueError("student_type_probe.temperature must be positive.")
+        if self.max_new_tokens < 1:
+            raise ValueError("student_type_probe.max_new_tokens must be at least 1.")
 
 
 @dataclass
@@ -2248,6 +2348,9 @@ class TutorConfig(GRPOConfig):
             )
         },
     )
+    student_sampling: TutorStudentSamplingConfig = field(
+        default_factory=TutorStudentSamplingConfig
+    )
     student_axes: list[TutorStudentAxesConfig] = field(
         default_factory=list,
         metadata={
@@ -2277,6 +2380,9 @@ class TutorConfig(GRPOConfig):
         default_factory=TutorInstructionPromptConfig
     )
     free_chat: TutorFreeChatConfig = field(default_factory=TutorFreeChatConfig)
+    student_type_probe: TutorStudentTypeProbeConfig = field(
+        default_factory=TutorStudentTypeProbeConfig
+    )
     cross_eval: CrossEvalConfig = field(default_factory=CrossEvalConfig)
     actor: TutorActorConfig = field(default_factory=TutorActorConfig)
     teacher_history_tags: str = field(
@@ -2297,6 +2403,17 @@ class TutorConfig(GRPOConfig):
                 "the tag skeleton with the reasoning replaced by a placeholder, "
                 "and is what a malformed turn falls back to under 'unmasked'. "
                 "Observation side only: reward and sampling are untouched."
+            )
+        },
+    )
+    teacher_private_visibility: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether the user turn that starts teaching receives a private "
+                "description of the sampled student's behavior and information "
+                "access. The profile is never put in the teacher system prompt "
+                "or the student's public history."
             )
         },
     )
@@ -2336,6 +2453,17 @@ class TutorConfig(GRPOConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.teacher_private_visibility and not self.free_chat.enabled:
+            raise ValueError(
+                "teacher_private_visibility requires free_chat.enabled=true so "
+                "the profile can be attached to the first teaching user turn."
+            )
+        if self.teacher_private_visibility and self.student_type_probe.enabled:
+            raise ValueError(
+                "student_type_probe cannot be enabled with "
+                "teacher_private_visibility: the private profile states the "
+                "probe answer instead of requiring the teacher to infer it."
+            )
         if (
             self.reward.student_request_judge.enabled
             and not self.prompt_pool.student_turn_behavior.enabled
@@ -2508,6 +2636,15 @@ class TutorConfig(GRPOConfig):
             raise ValueError(
                 "student_models must contain at least one student with positive weight."
             )
+        if self.student_sampling.strategy == "stratified":
+            positive_students = [
+                student for student in self.student_models if student.weight > 0.0
+            ]
+            if len(positive_students) < 2:
+                raise ValueError(
+                    "student_sampling.strategy='stratified' requires at least two "
+                    "student_models with positive weight."
+                )
         if self.dataset_type is MISSING or str(self.dataset_type) == "???":
             raise ValueError("dataset_type must be one of: 'aime', 'math', 'polaris'.")
         self.dataset_type = str(self.dataset_type).strip().lower()
