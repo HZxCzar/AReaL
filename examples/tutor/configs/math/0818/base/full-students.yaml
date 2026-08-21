@@ -65,11 +65,11 @@ student_axes:
     teacher_fade:
       mode: teacher_fade
       keep_recent: 0
-    # Brevity: teacher text past 75 words is never read, in history AND in the turn
+    # Brevity: teacher text past 50 words is never read, in history AND in the turn
     # being answered, because this is an attention limit rather than a memory one.
     long_drop:
       mode: long_drop
-      long_drop_words: 75
+      long_drop_words: 50
   # One copy of the endpoint for all eight cells. weight is the total for the block
   # and is split evenly, so each cell is drawn an eighth of the time and the block
   # draws as often as a single student would.

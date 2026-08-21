@@ -44,13 +44,13 @@ experiment_name: tutor-math-baseline
 trial_name: 0818-base
 seed: 42
 enable_offload: false
-total_train_epochs: 150
+total_train_epochs: 200
 tokenizer_path: ${actor.path}
 workflow: examples.tutor.workflow.TutorAgentWorkflow
 eval_workflow: ${workflow}
 dataset_type: math
 answer_scorer: math
-max_turns: 5
+max_turns: 10
 enable_thinking: false
 # BOTH TERMINATE, and this is the leak half. A leak ends the conversation at the
 # leaking turn and the re-test runs on the transcript WITHOUT it, so the teacher
@@ -61,6 +61,9 @@ enable_thinking: false
 leak_handling_mode: terminate
 teacher_show_ground_truth: false
 teacher_anti_leak_instruction_enabled: true
+# Default-off: only the private-visibility intervention tells the teacher which
+# sampled (behavior, information) student it is about to teach.
+teacher_private_visibility: false
 student_generalize:
   enabled: true
   source: sidecar
@@ -68,7 +71,7 @@ student_generalize:
   level2_reward: 0.0
   mode: always
   path: ''
-  replays: 4
+  replays: 8
   retest_original: true
   level1_enabled: false
   level2_enabled: false
@@ -80,7 +83,7 @@ teacher_pre:
   max_tokens: 0
   verify: true
 auxiliary_model:
-  mode: api
+  mode: self
   enable_thinking: false
   base_url: ${oc.env:TUTOR_QWEN3_8B_BASE_URL}
   model: qwen3-8b
@@ -120,6 +123,10 @@ auxiliary_model:
 #
 # One student, one at positive weight: the per-group draw has nothing to choose, so
 # every rollout of a GRPO group faces the same learner.
+student_sampling:
+  # Historical path. Set strategy: stratified in an arm to coordinate the
+  # configured student weights across each rollout input batch.
+  strategy: weighted_random
 student_models:
 - name: qwen3-1.7b
   weight: 1.0
@@ -201,7 +208,7 @@ gconfig:
   max_new_tokens: 4096
   max_tokens: 24576
   greedy: false
-  temperature: 0.7
+  temperature: 1.0
   top_p: 1.0
   lora_name: default_lora
 eval_gconfig:
@@ -303,6 +310,8 @@ actor:
     env_vars: {}
   group_baseline: episode
   group_baseline_leave1out: true
+  # All components in reward.turn_local_components enter the baseline by default.
+  group_baseline_local_reward_mode: exclude
   episode_loss_weighting: false
   num_iterations: 2
 ref:
@@ -327,6 +336,20 @@ sglang:
   skip_tokenizer_init: true
   dtype: ${actor.dtype}
   max_running_requests: 32
+  # PREFIX CACHING ON. AReaL's default is disable_radix_cache=true
+  # (areal/api/cli_args.py), which makes every turn re-prefill the whole
+  # transcript: the teacher re-sends the dialogue on each turn, and consecutive
+  # turn prompts were measured to share 85% of their tokens over a ten-turn
+  # episode (2890/4019 at turn 1->2, rising to 17507/18899 at turn 9->10).
+  #
+  # Safe with weight updates: sglang flushes the radix cache itself on the two
+  # paths AReaL uses, /load_lora_adapter and /update_weights_from_disk, where
+  # flush_cache defaults to true and the scheduler asserts the flush succeeded.
+  # Within a step every rollout shares one weight version, so the reuse is sound.
+  #
+  # Worth ~1.1x on its own and no more, because generation is not the critical
+  # path -- see 4gpu/alloc.yaml for where the step time actually goes.
+  disable_radix_cache: false
   context_length: 40960
   mem_fraction_static: 0.75
   enable_lora: ${actor.use_lora}
@@ -361,33 +384,47 @@ recover:
   freq_epochs: 10
   freq_steps: null
   freq_secs: 3600
+# evaluator:
+#   experiment_name: ${experiment_name}
+#   trial_name: ${trial_name}
+#   fileroot: ${cluster.fileroot}
+#   freq_epochs: null
+#   freq_steps: 25
+#   freq_secs: null
+#   max_samples: null
+#   average_rollouts: 1
+#   student_model_names:
+#   - qwen3-1.7b
+#   # EVAL USES THE PRE-SOLVE BUT DOES NOT VERIFY IT. Training verifies, which keeps
+#   # the training support clean; in use nothing checks the teacher's own solution
+#   # before it starts teaching, so leaving verification on at eval would measure a
+#   # setting that does not exist. Both lines are stated rather than left to follow
+#   # training, because "pre-solve on, unverified" is a deliberate pair and the
+#   # default for teacher_pre_enabled is to follow training.
+#   teacher_pre_enabled: true
+#   teacher_pre_verify: false
+#   leak_terminate: false
+#   # Same argument, for the same reason: terminating on a malformed turn is a
+#   # training policy, and nothing cuts a real conversation short because the
+#   # teacher mis-tagged a reply. The rate is still reported by format_errors.
+#   # Under terminate the step-0 eval of 20260814_053136 ended 83.5% of episodes
+#   # on a format error and only 16.5% reached the budget -- and that pass is the
+#   # baseline every later point is read against.
+#   format_terminate: false
 evaluator:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
+  # NOT OPTIONAL. base/default.yaml names 'qwen3-1.7b', which no longer exists once
+  # the pool is the eight qwen3-1.7b-<behavior>-<information> cells, and configs.py
+  # raises on an eval student with no student_models entry -- so the run would fail
+  # at startup rather than at the first eval.
+  student_model_names: null
+  eval_before_train: false
   freq_epochs: null
-  freq_steps: 25
+  freq_steps: null
   freq_secs: null
-  max_samples: null
-  average_rollouts: 1
-  student_model_names:
-  - qwen3-1.7b
-  # EVAL USES THE PRE-SOLVE BUT DOES NOT VERIFY IT. Training verifies, which keeps
-  # the training support clean; in use nothing checks the teacher's own solution
-  # before it starts teaching, so leaving verification on at eval would measure a
-  # setting that does not exist. Both lines are stated rather than left to follow
-  # training, because "pre-solve on, unverified" is a deliberate pair and the
-  # default for teacher_pre_enabled is to follow training.
-  teacher_pre_enabled: true
-  teacher_pre_verify: false
-  leak_terminate: false
-  # Same argument, for the same reason: terminating on a malformed turn is a
-  # training policy, and nothing cuts a real conversation short because the
-  # teacher mis-tagged a reply. The rate is still reported by format_errors.
-  # Under terminate the step-0 eval of 20260814_053136 ended 83.5% of episodes
-  # on a format error and only 16.5% reached the budget -- and that pass is the
-  # baseline every later point is read against.
-  format_terminate: false
+
 stats_logger:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
@@ -410,10 +447,11 @@ stats_logger:
 # continue arms, and their malformed rate climbed 0.61 -> 0.90 while the continue
 # arms fell to 0.00 by step 9.
 format_handling_mode: terminate
-total_train_steps: 500
+total_train_steps: 250
 free_chat:
   enabled: true
-  budget: 5
+  budget: 10
+  no_teaching_baseline: true
 # THE TEACHER SIDE, and it is a different axis from the student masks below. This
 # is how the teacher sees ITS OWN earlier replies; student_models[*].mask is what
 # the STUDENT sees of the dialogue. They share nothing but the word.
