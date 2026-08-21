@@ -1,0 +1,12 @@
+# Code-only LIFE Clip-Higher at the existing 2-GPU allocation:
+# one GPU for rollout generation and one GPU for the actor.
+defaults:
+  - ../base/life-code@_global_
+  - alloc@_global_
+  - _self_
+
+trial_name: 0818-life-code-2gpu
+
+stats_logger:
+  wandb:
+    group: 0818-2gpu

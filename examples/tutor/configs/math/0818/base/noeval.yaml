@@ -1,0 +1,16 @@
+defaults:
+  - default@_global_
+  - _self_
+
+trial_name: 0818-default-noeval
+
+evaluator:
+  # NOT OPTIONAL. base/default.yaml names 'qwen3-1.7b', which no longer exists once
+  # the pool is the eight qwen3-1.7b-<behavior>-<information> cells, and configs.py
+  # raises on an eval student with no student_models entry -- so the run would fail
+  # at startup rather than at the first eval.
+  student_model_names: null
+  eval_before_train: false
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null

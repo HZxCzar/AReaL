@@ -1,0 +1,15 @@
+# LIFE with the standard, conservative DAPO-style asymmetric PPO clip.
+#
+# This gives a policy-ratio window of [0.8, 1.28]. It is deliberately milder
+# than the earlier 0818 explore arm, which used [0.8, 1.4]. Everything else,
+# including local-reward baseline exclusion and disabled evaluation, is inherited
+# unchanged from life.yaml.
+defaults:
+  - life@_global_
+  - _self_
+
+trial_name: 0818-life-clip-higher
+
+actor:
+  eps_clip: 0.2
+  eps_clip_higher: 0.28

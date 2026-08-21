@@ -1,0 +1,11 @@
+# Four-GPU wrapper for the stratified life joint-probe arm.
+defaults:
+  - ../base/full-10turns-info-probe-stratified@_global_
+  - alloc@_global_
+  - _self_
+
+trial_name: 0818-life-joint-probe-stratified-4gpu
+
+stats_logger:
+  wandb:
+    group: 0818-4gpu

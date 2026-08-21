@@ -1,0 +1,12 @@
+# Private student visibility at 4 GPUs. The experiment lives in the base arm;
+# this wrapper changes allocation and naming only.
+defaults:
+  - ../base/private-visibility@_global_
+  - alloc@_global_
+  - _self_
+
+trial_name: 0818-private-visibility-4gpu
+
+stats_logger:
+  wandb:
+    group: 0818-4gpu

@@ -1,0 +1,11 @@
+# Original-to-numeric-variant transfer arm at the 4-GPU allocation.
+defaults:
+  - ../base/transfer@_global_
+  - alloc@_global_
+  - _self_
+
+trial_name: 0818-transfer-4gpu
+
+stats_logger:
+  wandb:
+    group: 0818-4gpu

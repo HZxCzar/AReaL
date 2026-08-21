@@ -1,0 +1,11 @@
+# Exclude turn-local rewards from the baseline at the 4-GPU allocation.
+defaults:
+  - ../base/repro-0813-exclude-local-baseline@_global_
+  - alloc@_global_
+  - _self_
+
+trial_name: 0818-repro-0813-exclude-local-baseline-4gpu
+
+stats_logger:
+  wandb:
+    group: 0818-4gpu

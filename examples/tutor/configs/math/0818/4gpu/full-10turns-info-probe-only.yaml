@@ -1,0 +1,13 @@
+# The probe-only ablation at the 4-GPU allocation. Composition only: what the arm
+# does comes from base/full-10turns-info-probe-only.yaml, how many GPUs it gets
+# from alloc.yaml.
+defaults:
+  - ../base/full-10turns-info-probe-only@_global_
+  - alloc@_global_
+  - _self_
+
+trial_name: 0818-life-joint-probe-only-4gpu
+
+stats_logger:
+  wandb:
+    group: 0818-4gpu

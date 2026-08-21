@@ -1,0 +1,13 @@
+# code/teacher-fade at 4 GPUs. Composition only: what the arm does comes from
+# base/life-t10-r8-single-student/code-teacher-fade.yaml, how many GPUs it gets from
+# alloc.yaml.
+defaults:
+  - ../../base/life-t10-r8-single-student/code-teacher-fade@_global_
+  - ../alloc@_global_
+  - _self_
+
+trial_name: 0818-life-t10-r8-code-teacher-fade-4gpu
+
+stats_logger:
+  wandb:
+    group: 0818-life-t10-r8-single-student-4gpu

@@ -1,0 +1,48 @@
+# LIFE transfer arm: teach each original problem, then re-test its accepted
+# numeric-only variant.
+#
+# The data is the reverse view of the 0814 numeric-variant arm referenced by
+# 0810/4gpu/numeric-variant-r8-from50.yaml.  It contains one accepted variant per
+# source_id: 388 train + 293 test = 681 pairs.  task/ground_truth and the full
+# metadata.solution stay on the untouched source problem for the tutoring
+# dialogue; retest_task/retest_ground_truth hold the paired numeric variant.
+# Therefore the free-chat reward, no-teaching baseline, rollout outcome, and
+# solved metric all measure the NEW variant rather than the taught problem.
+#
+# The accepted variants passed the synthesis pipeline's mechanical checks,
+# semantic audit, two independent Qwen3-8B solves, and answer audit.  The
+# Qwen3-1.7B attempt was a bonus measurement, not an acceptance gate.
+#
+# All method settings now come directly from default; this arm changes only the
+# dataset, run identifiers, and transfer-specific prompt wording.
+defaults:
+  - default@_global_
+  - _self_
+
+experiment_name: tutor-math-transfer
+trial_name: 0818-transfer
+
+# A worked solution (including the source answer) is valid teaching here: the
+# rewarded re-test is a different numeric variant. Skip the leak judge entirely
+# and do not tell the teacher to withhold the source answer.
+leak_handling_mode: disabled
+teacher_anti_leak_instruction_enabled: false
+
+train_dataset:
+  path: examples/tutor/data/math_1.7b_8b/original_dialogue_numeric_variant_retest_0814
+
+valid_dataset:
+  path: ${train_dataset.path}
+
+evaluator:
+  # The current default disables all evaluation schedules but its partial block
+  # omits these three mandatory _Timer identity fields. Keep the evaluator off
+  # and supply only the schema-required identities locally.
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+
+free_chat:
+  # Teach general concepts for related questions and present the re-test as an
+  # unseen problem, matching the transfer wording used by the referenced arm.
+  transfer_prompts: true

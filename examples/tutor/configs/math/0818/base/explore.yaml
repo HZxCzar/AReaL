@@ -1,0 +1,81 @@
+# 0818-explore-noeval -- sampling temperature 1.0 and an asymmetric PPO clip.
+#
+# WHY. 20260818_180509_0818-default-noeval-4gpu peaks around step 85 and then loses
+# 0.063 +- 0.012 on generalize/train/student_original_success (t = -5.14, steps
+# 75-94 against 95-114). None of the earlier failure modes are present: format
+# errors sit at 0.001/episode, the pre-solve filter rejects 8%, turns hold at 4.5,
+# grad_norm is flat at 0.13, and dual clipping binds 0.03% of tokens. What is absent
+# is exploration -- entropy falls 0.146 -> 0.066 by step 50 and never recovers,
+# holding 0.060-0.077 straight through the decline.
+#
+# 20260813_053934_0810fc-leak-local, the closest pre-fix run, gained +0.043 +- 0.019
+# over the SAME steps and was still climbing at 150, and its entropy moved the other
+# way: 0.080 -> 0.134. It ran without the turn-local baseline gather that f3ac572d
+# added, so its leak penalties entered turn returns but never the group baseline,
+# leaving a residual negative advantage (mean -0.074 -> -0.099, against -0.050 ->
+# -0.030 here). The gather is correct and is NOT being reverted. This arm buys the
+# exploration on purpose instead of inheriting it from an accounting error.
+#
+# There is no entropy coefficient to turn on: areal/api/cli_args.py has no such
+# field, so the two levers below are what exists without a code change.
+#
+# WHAT IT CHANGES. Both are free -- no extra calls, no extra tokens.
+#
+# gconfig.temperature 0.7 -> 1.0. base/default.yaml sets actor.temperature to
+# gconfig.temperature by interpolation, so the trainer tempers its recomputed
+# logprobs to match and this remains one self-consistent policy. There was no
+# sampling/update mismatch to fix. top_p is 1.0 and top_k is unset, so temperature
+# is the only sampling constraint that binds.
+#
+# actor.eps_clip 0.4 -> 0.2 with eps_clip_higher 0.4. functional.py clamps the ratio
+# to [1 - eps_clip, 1 + eps_clip_higher], so the range goes [0.6, 1.4] -> [0.8, 1.4]:
+# the room a token has to GROW is untouched and the room to push one DOWN halves. A
+# token already at 0.8x its old probability stops receiving gradient instead of being
+# driven to 0.6x, which is the entropy-preserving direction.
+#
+# c_clip 3.0 is untouched and still bounds the negative branch -- see the note in
+# base/default.yaml. It acts on ratios above 1 + eps_clip_higher, so it does not
+# overlap with the lower bound this file tightens.
+#
+# TWO FACTORS ON PURPOSE. Both are free and both act on the same failure, and a
+# 0.063 regression needs a fix before it needs attribution. If the arm works and you
+# want to know which half did it, split it into two files -- one line each.
+#
+# PAIRED WITH noeval, NOT default. Inheriting base/noeval makes this differ from
+# 20260818_180509_0818-default-noeval-4gpu in exactly the three keys below, so the
+# control is a run that already exists rather than one that has to be launched.
+# Point the first default at default@_global_ for eval passes; eval_gconfig
+# temperature is deliberately left at 0.7 so such a pass stays comparable with every
+# other 0818 arm.
+#
+# WHAT TO WATCH, in order.
+#
+#   ppo_actor/update/entropy/avg   The point of the arm. If it is still 0.07 at step
+#                                  30, neither lever bit, and the next thing to try
+#                                  is teacher_pre.share_per_group: false, which
+#                                  f3ac572d turned on and which collapsed 8 distinct
+#                                  pre-solve drafts per group down to one.
+#   rollout/format_errors          The risk. T=1.0 makes malformed output likelier,
+#                                  and format_handling_mode is 'terminate' here, so
+#                                  a malformed turn ends its episode. Past
+#                                  0.05/episode and still climbing, stop: that is
+#                                  the cascade that killed 20260813_053934 at step
+#                                  162 and 20260817_094430 at 227.
+#   generalize/train/student_original_success
+#                                  The objective. Read it against the 0.556 that
+#                                  20260818_180509 held over steps 75-94, not
+#                                  against this run's own step 0.
+#   ppo_actor/update/clip_ratio/avg It ran 0.007. A tighter lower clip should raise
+#                                  it; if it does not move, eps_clip did nothing.
+defaults:
+  - noeval@_global_
+  - _self_
+
+trial_name: 0818-explore-noeval
+
+gconfig:
+  temperature: 1.0
+
+actor:
+  eps_clip: 0.2
+  eps_clip_higher: 0.4

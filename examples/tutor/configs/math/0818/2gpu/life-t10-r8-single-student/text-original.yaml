@@ -1,0 +1,35 @@
+# LIFE with one text/full-information student at the 2-GPU allocation.
+defaults:
+  - ../../base/default@_global_
+  - ../alloc@_global_
+  - _self_
+
+trial_name: 0818-life-t10-r8-text-original-2gpu
+
+student_models:
+- name: qwen3-1.7b-text-original
+  weight: 1.0
+  mode: text
+  mask:
+    mode: full
+  base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+  model: qwen3-1.7b
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+
+stats_logger:
+  wandb:
+    group: 0818-life-t10-r8-single-student-2gpu

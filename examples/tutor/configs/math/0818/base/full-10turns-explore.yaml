@@ -1,0 +1,12 @@
+defaults:
+  - full-10turns@_global_
+  - _self_
+
+trial_name: 0818-full-10turns-explore
+
+gconfig:
+  temperature: 1.0
+
+actor:
+  eps_clip: 0.2
+  eps_clip_higher: 0.4

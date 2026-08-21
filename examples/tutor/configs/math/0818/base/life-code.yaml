@@ -1,0 +1,38 @@
+# LIFE Clip-Higher with exactly one teaching student:
+# behavior=code and information=original (the default full-information mask).
+defaults:
+  - life@_global_
+  - _self_
+
+trial_name: 0818-life-code
+
+# student_axes appends to student_models during config construction, so clear the
+# inherited text/original student before adding the single code/original cell.
+student_models: []
+
+student_axes:
+- behaviors: [code]
+  informations:
+    original:
+      mode: full
+  template:
+    name: qwen3-1.7b
+    weight: 1.0
+    base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+    model: qwen3-1.7b
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    # There is only one expanded student, so retain the default endpoint budget.
+    max_concurrent_calls: 32
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-qwen17b-student
+      extra_body:
+        top_k: 20
+        min_p: 0
+        chat_template_kwargs:
+          enable_thinking: false

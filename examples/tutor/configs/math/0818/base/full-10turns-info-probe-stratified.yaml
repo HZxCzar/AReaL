@@ -1,0 +1,11 @@
+# Joint-probe life arm with per-rollout-batch student stratification.
+# With train_dataset.batch_size=16 and eight equal-weight joint student types,
+# every input batch assigns exactly two problem groups to each type.
+defaults:
+  - full-10turns-info-probe@_global_
+  - _self_
+
+trial_name: 0818-life-joint-probe-stratified
+
+student_sampling:
+  strategy: stratified

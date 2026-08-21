@@ -1,0 +1,44 @@
+# LIFE with one text/full-information student. SETTINGS ONLY: the allocation comes from
+# <n>gpu/alloc.yaml, so this file never says how many GPUs it wants.
+#
+# The student block is the whole arm. One entry at weight 1.0, so the per-group
+# draw has nothing to choose and every rollout of a GRPO group faces the same
+# learner -- which is the point of these arms: eight separate policies, one per
+# (behavior, information) cell, read against the one joint policy trained on all
+# eight.
+#
+# max_concurrent_calls stays at 32 and must NOT be raised for a larger
+# allocation. One AsyncLLMCaller is built per student entry and the endpoint was
+# tuned for 32 concurrent student requests in total; a saturated endpoint does
+# not slow down, it refuses, and the symptom is student/<name>/call_failed
+# corrupting an episode reward rather than merely costing time.
+defaults:
+  - ../default@_global_
+  - _self_
+
+trial_name: 0818-life-t10-r8-text-original
+
+student_models:
+- name: qwen3-1.7b-text-original
+  weight: 1.0
+  mode: text
+  mask:
+    mode: full
+  base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+  model: qwen3-1.7b
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+

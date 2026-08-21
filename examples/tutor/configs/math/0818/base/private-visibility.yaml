@@ -1,0 +1,36 @@
+# 0818 private-visibility -- tell the teacher the sampled student's two traits.
+#
+# This is the observability intervention for
+# 20260820_081455_0818-probe-measure-4gpu. That run established that behavior is
+# readable but the information mask is not: information accuracy stayed at chance,
+# while the behavior positive control stayed above 0.93. It cannot distinguish
+# "the teacher would adapt if it knew" from "knowing would not change teaching".
+# This arm removes only that uncertainty by stating the sampled behavior and
+# information access directly in the first teaching user turn.
+#
+# The profile is NOT in the system prompt, pre-solve prompt, public dialogue, or
+# student prompt. With pre-solve enabled, the message order is:
+#
+#   system -> solve request -> accepted draft -> open-teaching user + profile
+#
+# The four non-probe settings below reproduce probe-measure's training conditions.
+# There is deliberately no student_type_probe block or code dependency: the old
+# run is the hidden-profile baseline, and this run spends no calls measuring a
+# probe we have already decided not to use.
+defaults:
+  - full-10turns@_global_
+  - _self_
+
+trial_name: 0818-private-visibility
+
+teacher_private_visibility: true
+
+gconfig:
+  temperature: 1.0
+
+actor:
+  optimizer:
+    lr_scheduler_type: cosine
+
+student_generalize:
+  replays: 16
