@@ -24,6 +24,7 @@ import torch
 try:
     from areal import workflow_context
     from areal.api import ModelResponse, RolloutWorkflow
+    from areal.infra.utils.http import HTTPRequestError
     from areal.utils import logging, stats_tracker
     from areal.utils.data import concat_padded_tensors
     from areal.utils.hf_utils import load_hf_tokenizer
@@ -50,6 +51,9 @@ except Exception:  # pragma: no cover - lightweight local test environments
         @staticmethod
         def getLogger(name: str):
             return py_logging.getLogger(name)
+
+    class HTTPRequestError(RuntimeError):  # type: ignore[no-redef]
+        status: int | None = None
 
     @dataclass
     class ModelRequest:  # type: ignore[no-redef]
@@ -665,6 +669,12 @@ class SelectedStudent:
     @property
     def is_code(self) -> bool:
         return self.mode == STUDENT_MODE_CODE
+
+
+@dataclass(slots=True)
+class _TypeProbeLoraCheckState:
+    addresses: tuple[str, ...]
+    task: asyncio.Task[bool] | None = None
 
 
 class TutorAgentWorkflow(RolloutWorkflow):
@@ -3235,7 +3245,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
     async def _verify_type_probe_lora_honored(
         self,
         *,
-        messages: list[dict[str, str]],
         chat_caller: AReaLEngineChatCaller,
         lora_version: int | None,
     ) -> bool:
@@ -3243,8 +3252,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
 
         A server that silently ignores ``lora_path`` returns a valid probability
         distribution from the base model, so ordinary response validation cannot
-        detect this failure. A bogus adapter name has an unambiguous outcome: the
-        request must fail. The check never raises into the episode.
+        detect this failure. A bogus adapter name on a fixed minimal prompt has an
+        unambiguous outcome: HTTP 400 passes this check. Transient failures propagate
+        so the episode omits probe reward and a later episode can retry.
         """
         gconfig = self._type_probe_gconfig()
         lora_name = str(getattr(gconfig, "lora_name", "") or "")
@@ -3256,25 +3266,91 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         try:
             await chat_caller.generate(
-                messages,
+                [{"role": "user", "content": "Reply with A."}],
                 gconfig=bogus,
                 max_completion_tokens=self.type_probe_max_new_tokens,
                 max_train_sample_tokens=None,
-                metadata={"lora_version": int(lora_version)},
+                metadata={
+                    "lora_version": int(lora_version),
+                    "_request_max_attempts": 1,
+                },
                 rid_prefix="typeprobe-lora-check",
             )
-        except Exception:  # noqa: BLE001 - refusal is the passing outcome
-            return True
+        except HTTPRequestError as exc:
+            if exc.status == 400:
+                return True
+            raise
         return False
+
+    def _shared_type_probe_lora_check_state(
+        self,
+        chat_caller: AReaLEngineChatCaller,
+    ) -> _TypeProbeLoraCheckState | None:
+        """Return one liveness state shared by workflows using the same engine."""
+        engine = getattr(chat_caller, "engine", None)
+        if engine is None:
+            return None
+        attr = "_tutor_type_probe_lora_check_state"
+        raw_addresses = getattr(engine, "addresses", ()) or ()
+        if isinstance(raw_addresses, str):
+            addresses = (raw_addresses,)
+        else:
+            addresses = tuple(str(address) for address in raw_addresses)
+        state = getattr(engine, attr, None)
+        if state is not None:
+            if not isinstance(state, _TypeProbeLoraCheckState):
+                raise RuntimeError(f"Unexpected {attr} type: {type(state).__name__}.")
+            if state.addresses == addresses:
+                return state
+        state = _TypeProbeLoraCheckState(addresses=addresses)
+        try:
+            # Workflow construction and execution share one event-loop thread, so
+            # no task can interleave between this lookup and assignment.
+            setattr(engine, attr, state)
+        except (AttributeError, TypeError):
+            return None
+        return state
 
     async def _ensure_type_probe_lora_honored(
         self,
         *,
-        messages: list[dict[str, str]],
         chat_caller: AReaLEngineChatCaller,
         lora_version: int | None,
     ) -> bool:
-        """Run the liveness check once for this concurrent workflow instance."""
+        """Run the liveness check once for each shared inference engine."""
+        gconfig = self._type_probe_gconfig()
+        lora_name = str(getattr(gconfig, "lora_name", "") or "")
+        if not lora_name or lora_version is None:
+            return True
+
+        shared_state = self._shared_type_probe_lora_check_state(chat_caller)
+        if shared_state is not None:
+            task = shared_state.task
+            if task is None:
+
+                async def run_check() -> bool:
+                    try:
+                        return await self._verify_type_probe_lora_honored(
+                            chat_caller=chat_caller,
+                            lora_version=lora_version,
+                        )
+                    except BaseException:
+                        if shared_state.task is asyncio.current_task():
+                            shared_state.task = None
+                        raise
+
+                task = asyncio.create_task(run_check())
+                shared_state.task = task
+
+                def consume_exception(done: asyncio.Task[bool]) -> None:
+                    if not done.cancelled():
+                        done.exception()
+
+                task.add_done_callback(consume_exception)
+            return await asyncio.shield(task)
+
+        # Engine-less callers are used by lightweight tests and custom integrations.
+        # Retain the original per-workflow fallback for those callers.
         lock = self._type_probe_lora_check_lock
         if lock is None:
             raise RuntimeError("student_type_probe liveness lock is not configured.")
@@ -3282,7 +3358,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if self._type_probe_lora_honored is None:
                 self._type_probe_lora_honored = (
                     await self._verify_type_probe_lora_honored(
-                        messages=messages,
                         chat_caller=chat_caller,
                         lora_version=lora_version,
                     )
@@ -3441,7 +3516,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             messages = self._build_final_type_probe_messages(completed)
             chat_caller = self._make_engine_chat_caller(engine, enable_thinking=False)
             lora_honored = await self._ensure_type_probe_lora_honored(
-                messages=messages,
                 chat_caller=chat_caller,
                 lora_version=lora_version,
             )

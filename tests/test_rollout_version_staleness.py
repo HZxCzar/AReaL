@@ -732,6 +732,60 @@ def make_remote_engine_for_pause_tests() -> tuple[
     return engine, executor
 
 
+def test_agenerate_supports_a_private_per_request_attempt_limit(monkeypatch):
+    engine, _ = make_remote_engine_for_pause_tests()
+    attempt_limits = []
+
+    async def fake_request(**kwargs):
+        attempt_limits.append(kwargs["max_retries"])
+        return {"ok": True}
+
+    monkeypatch.setattr(remote_inf_engine_module, "arequest_with_retry", fake_request)
+
+    ordinary = ModelRequest(
+        rid="ordinary-retries",
+        input_ids=[1, 2],
+        gconfig=GenerationHyperparameters(max_new_tokens=1, max_tokens=8),
+    )
+    one_attempt = ModelRequest(
+        rid="one-attempt",
+        input_ids=[1, 2],
+        gconfig=GenerationHyperparameters(max_new_tokens=1, max_tokens=8),
+        metadata={"_request_max_attempts": 1},
+    )
+
+    asyncio.run(engine.agenerate(ordinary))
+    asyncio.run(engine.agenerate(one_attempt))
+
+    assert attempt_limits == [engine.config.request_retries, 1]
+    assert one_attempt.metadata == {"_request_max_attempts": 1}
+
+
+@pytest.mark.parametrize("invalid_limit", [True, 0, -1, "1"])
+def test_agenerate_rejects_invalid_per_request_attempt_limits(
+    monkeypatch, invalid_limit
+):
+    engine, _ = make_remote_engine_for_pause_tests()
+    requests = []
+
+    async def fake_request(**kwargs):
+        requests.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(remote_inf_engine_module, "arequest_with_retry", fake_request)
+    req = ModelRequest(
+        rid="invalid-attempt-limit",
+        input_ids=[1, 2],
+        gconfig=GenerationHyperparameters(max_new_tokens=1, max_tokens=8),
+        metadata={"_request_max_attempts": invalid_limit},
+    )
+
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        asyncio.run(engine.agenerate(req))
+
+    assert requests == []
+
+
 def test_rollout_submission_pause_aliases_do_not_hard_pause_generation(monkeypatch):
     engine, executor = make_remote_engine_for_pause_tests()
     requests = []

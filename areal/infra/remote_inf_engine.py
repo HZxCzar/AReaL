@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     from areal.experimental.openai import InteractionWithTokenLogpReward
 
 RID_CACHE_SIZE = 128
+_REQUEST_MAX_ATTEMPTS_METADATA_KEY = "_request_max_attempts"
 
 logger = logging.getLogger("RemoteInfEngine")
 
@@ -922,6 +923,21 @@ class RemoteInfEngine(InferenceEngine):
         # we are going to modify it in-place
         req = req.copy()
 
+        request_max_attempts = req.metadata.pop(
+            _REQUEST_MAX_ATTEMPTS_METADATA_KEY, None
+        )
+        if request_max_attempts is None:
+            request_max_attempts = self.config.request_retries
+        elif (
+            isinstance(request_max_attempts, bool)
+            or not isinstance(request_max_attempts, int)
+            or request_max_attempts < 1
+        ):
+            raise ValueError(
+                f"ModelRequest.metadata[{_REQUEST_MAX_ATTEMPTS_METADATA_KEY!r}] "
+                "must be a positive integer."
+            )
+
         # Populate return_routed_experts from config to metadata
         if self.config.return_routed_experts:
             req.metadata["return_routed_experts"] = True
@@ -1021,7 +1037,7 @@ class RemoteInfEngine(InferenceEngine):
                     endpoint=http_req.endpoint,
                     payload=http_req.payload,
                     method=http_req.method,
-                    max_retries=self.config.request_retries,
+                    max_retries=request_max_attempts,
                     timeout=self.config.request_timeout,
                 )
             self._raise_if_rollout_stale()

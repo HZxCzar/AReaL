@@ -24,6 +24,7 @@ from examples.tutor.workflow import TutorAgentWorkflow
 from areal.api.cli_args import GenerationHyperparameters
 from areal.api.io_struct import ModelRequest, get_versioned_lora_name
 from areal.engine.sglang_remote import SGLangBackend
+from areal.infra.utils.http import HTTPRequestError
 
 FAILURES: list[str] = []
 
@@ -58,15 +59,47 @@ class _ExplodingEngine:
         raise AssertionError(f"disabled probe touched engine attribute {name!r}")
 
 
+class _LoraEngine:
+    def __init__(self, *addresses: str) -> None:
+        self.addresses = list(addresses or ("127.0.0.1:1",))
+
+
 class _LoraCaller:
-    def __init__(self, *, refuses_unknown_adapter: bool) -> None:
-        self.refuses_unknown_adapter = refuses_unknown_adapter
+    def __init__(
+        self,
+        *,
+        outcomes: list[int | str] | None = None,
+        engine: object | None = None,
+        entered: asyncio.Event | None = None,
+        release: asyncio.Event | None = None,
+    ) -> None:
+        self.outcomes = list(outcomes or ["success"])
+        self.engine = engine
+        self.entered = entered
+        self.release = release
         self.calls: list[dict[str, object]] = []
 
     async def generate(self, messages, **kwargs):
         self.calls.append({"messages": messages, **kwargs})
-        if self.refuses_unknown_adapter:
-            raise RuntimeError("unknown adapter")
+        if self.entered is not None:
+            self.entered.set()
+        if self.release is not None:
+            await self.release.wait()
+        outcome = self.outcomes.pop(0) if self.outcomes else "success"
+        if isinstance(outcome, int):
+            raise HTTPRequestError(
+                f"test HTTP {outcome}",
+                attempts=1,
+                status=outcome,
+                last_exception=None,
+            )
+        if outcome == "timeout":
+            raise HTTPRequestError(
+                "test timeout",
+                attempts=1,
+                status=None,
+                last_exception=TimeoutError(),
+            )
         return object()
 
 
@@ -78,26 +111,95 @@ class _LoraProbe:
     _verify_type_probe_lora_honored = (
         TutorAgentWorkflow._verify_type_probe_lora_honored
     )
+    _shared_type_probe_lora_check_state = (
+        TutorAgentWorkflow._shared_type_probe_lora_check_state
+    )
 
 
-async def check_lora_liveness_cache() -> tuple[bool, bool, int]:
+def _new_lora_probe() -> _LoraProbe:
     probe = _LoraProbe()
     probe._type_probe_lora_honored = None
     probe._type_probe_lora_check_lock = asyncio.Lock()
-    caller = _LoraCaller(refuses_unknown_adapter=False)
-    first = await TutorAgentWorkflow._ensure_type_probe_lora_honored(
+    return probe
+
+
+async def _ensure_lora(
+    probe: _LoraProbe,
+    caller: _LoraCaller,
+    lora_version: int | None = 7,
+) -> bool:
+    return await TutorAgentWorkflow._ensure_type_probe_lora_honored(
         probe,
-        messages=[{"role": "user", "content": "probe"}],
         chat_caller=caller,
-        lora_version=7,
+        lora_version=lora_version,
     )
-    second = await TutorAgentWorkflow._ensure_type_probe_lora_honored(
-        probe,
-        messages=[{"role": "user", "content": "probe"}],
-        chat_caller=caller,
-        lora_version=7,
+
+
+async def check_lora_liveness_cache(
+    outcome: int | str,
+) -> tuple[bool, bool, int]:
+    engine = _LoraEngine()
+    first_caller = _LoraCaller(outcomes=[outcome], engine=engine)
+    first = await _ensure_lora(_new_lora_probe(), first_caller)
+    second_caller = _LoraCaller(outcomes=[outcome], engine=engine)
+    second = await _ensure_lora(_new_lora_probe(), second_caller)
+    return first, second, len(first_caller.calls) + len(second_caller.calls)
+
+
+async def check_lora_engine_scoping() -> tuple[bool, bool, int]:
+    first_caller = _LoraCaller(outcomes=[400], engine=_LoraEngine("server-a:1"))
+    second_caller = _LoraCaller(outcomes=[400], engine=_LoraEngine("server-a:1"))
+    first = await _ensure_lora(_new_lora_probe(), first_caller)
+    second = await _ensure_lora(_new_lora_probe(), second_caller)
+    return first, second, len(first_caller.calls) + len(second_caller.calls)
+
+
+async def check_lora_version_none_does_not_poison_cache() -> tuple[bool, bool, int]:
+    caller = _LoraCaller(outcomes=[400], engine=_LoraEngine())
+    skipped = await _ensure_lora(_new_lora_probe(), caller, lora_version=None)
+    verified = await _ensure_lora(_new_lora_probe(), caller, lora_version=7)
+    return skipped, verified, len(caller.calls)
+
+
+async def check_lora_transient_failure_is_not_cached() -> tuple[bool, bool, int]:
+    caller = _LoraCaller(outcomes=[500, 400], engine=_LoraEngine())
+    transient_raised = False
+    try:
+        await _ensure_lora(_new_lora_probe(), caller)
+    except HTTPRequestError as exc:
+        transient_raised = exc.status == 500
+    verified = await _ensure_lora(_new_lora_probe(), caller)
+    return transient_raised, verified, len(caller.calls)
+
+
+async def check_lora_waiter_cancellation() -> tuple[bool, bool, int]:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    engine = _LoraEngine()
+    first_caller = _LoraCaller(
+        outcomes=[400],
+        engine=engine,
+        entered=entered,
+        release=release,
     )
-    return first, second, len(caller.calls)
+    first_waiter = asyncio.create_task(
+        _ensure_lora(_new_lora_probe(), first_caller)
+    )
+    await entered.wait()
+    first_waiter.cancel()
+    cancelled = False
+    try:
+        await first_waiter
+    except asyncio.CancelledError:
+        cancelled = True
+
+    second_caller = _LoraCaller(outcomes=[400], engine=engine)
+    second_waiter = asyncio.create_task(
+        _ensure_lora(_new_lora_probe(), second_caller)
+    )
+    release.set()
+    verified = await second_waiter
+    return cancelled, verified, len(first_caller.calls) + len(second_caller.calls)
 
 
 def main() -> int:
@@ -277,12 +379,11 @@ def main() -> int:
     )
     check("disabled probe returns without touching the engine", skipped is None)
 
-    print("\n[6] LoRA liveness fails closed and is cached")
-    refusing = _LoraCaller(refuses_unknown_adapter=True)
+    print("\n[6] LoRA liveness fails closed and is cached per engine")
+    refusing = _LoraCaller(outcomes=[400])
     verified = asyncio.run(
         TutorAgentWorkflow._verify_type_probe_lora_honored(
             _LoraProbe(),
-            messages=[{"role": "user", "content": "probe"}],
             chat_caller=refusing,
             lora_version=7,
         )
@@ -294,15 +395,60 @@ def main() -> int:
         and refusing.calls[0]["gconfig"].lora_name.startswith(
             "tutor-type-probe-no-such-adapter-"
         )
-        and refusing.calls[0]["metadata"] == {"lora_version": 7},
+        and refusing.calls[0]["messages"]
+        == [{"role": "user", "content": "Reply with A."}]
+        and refusing.calls[0]["metadata"]
+        == {"lora_version": 7, "_request_max_attempts": 1},
         str(refusing.calls),
     )
-    first, second, calls = asyncio.run(check_lora_liveness_cache())
+    first, second, calls = asyncio.run(check_lora_liveness_cache("success"))
     check(
         "accepting a bogus adapter disables probe reward",
         first is False and second is False,
     )
-    check("the liveness result is checked only once", calls == 1, str(calls))
+    check(
+        "the liveness result is checked once across workflow instances",
+        calls == 1,
+        str(calls),
+    )
+    first, second, calls = asyncio.run(check_lora_liveness_cache(400))
+    check(
+        "rejecting a bogus adapter is also cached across workflow instances",
+        first is True and second is True and calls == 1,
+        str((first, second, calls)),
+    )
+
+    first, second, calls = asyncio.run(check_lora_engine_scoping())
+    check(
+        "separate inference engines verify independently",
+        first is True and second is True and calls == 2,
+        str((first, second, calls)),
+    )
+
+    skipped, verified, calls = asyncio.run(
+        check_lora_version_none_does_not_poison_cache()
+    )
+    check(
+        "an unavailable LoRA version neither probes nor poisons the cache",
+        skipped is True and verified is True and calls == 1,
+        str((skipped, verified, calls)),
+    )
+
+    transient_raised, verified, calls = asyncio.run(
+        check_lora_transient_failure_is_not_cached()
+    )
+    check(
+        "transient HTTP failures propagate and a later episode retries",
+        transient_raised and verified is True and calls == 2,
+        str((transient_raised, verified, calls)),
+    )
+
+    cancelled, verified, calls = asyncio.run(check_lora_waiter_cancellation())
+    check(
+        "cancelling one waiter does not cancel the shared verification task",
+        cancelled and verified is True and calls == 1,
+        str((cancelled, verified, calls)),
+    )
 
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s): {', '.join(FAILURES)}")

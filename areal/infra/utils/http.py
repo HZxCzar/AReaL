@@ -16,6 +16,23 @@ DEFAULT_REQUEST_TIMEOUT = 3600
 logger = logging.getLogger("HTTPUtils")
 
 
+class HTTPRequestError(RuntimeError):
+    """HTTP request failure with structured status and attempt metadata."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        attempts: int,
+        status: int | None,
+        last_exception: BaseException | None,
+    ) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+        self.status = status
+        self.last_exception = last_exception
+
+
 def get_default_connector():
     return aiohttp.TCPConnector(limit=0, use_dns_cache=False, force_close=True)
 
@@ -56,7 +73,9 @@ async def arequest_with_retry(
     else:
         _session = session
 
+    attempts_made = 0
     for attempt in range(max_retries):
+        attempts_made = attempt + 1
         try:
             if verbose:
                 logger.info("enter client session, start sending requests")
@@ -112,11 +131,23 @@ async def arequest_with_retry(
             continue
     if session is None:
         await _session.close()
-    raise RuntimeError(
-        f"Failed after {max_retries} retries each. "
+    attempt_word = "attempt" if attempts_made == 1 else "attempts"
+    status = (
+        int(last_exception.status)
+        if isinstance(last_exception, aiohttp.ClientResponseError)
+        else None
+    )
+    message = (
+        f"Failed after {attempts_made} {attempt_word}. "
         f"Payload: {payload}. Addr: {addr}. Endpoint: {endpoint}. "
         f"Last error: {repr(last_exception)}"
     )
+    raise HTTPRequestError(
+        message,
+        attempts=attempts_made,
+        status=status,
+        last_exception=last_exception,
+    ) from last_exception
 
 
 def response_ok(http_code: int) -> bool:
