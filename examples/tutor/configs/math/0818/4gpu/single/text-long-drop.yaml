@@ -1,0 +1,13 @@
+# text/long-drop at 4 GPUs. Composition only: what the arm does comes from
+# base/life-t10-r8-single-student/text-long-drop.yaml, how many GPUs it gets from
+# alloc.yaml.
+defaults:
+  - ../../base/single/text-long-drop@_global_
+  - ../alloc@_global_
+  - _self_
+
+trial_name: 0818-text-long-drop-4gpu
+
+stats_logger:
+  wandb:
+    group: 0818-single-student-4gpu

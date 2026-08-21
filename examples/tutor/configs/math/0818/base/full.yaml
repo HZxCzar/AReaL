@@ -1,20 +1,21 @@
-# LIFE Clip-Higher with exactly one teaching student:
-# behavior=code and information=original (the default full-information mask).
 defaults:
-  - life@_global_
+  - default@_global_
   - _self_
 
-trial_name: 0818-life-code
+trial_name: 0818-full
 
-# student_axes appends to student_models during config construction, so clear the
-# inherited text/original student before adding the single code/original cell.
 student_models: []
-
 student_axes:
-- behaviors: [code]
+- behaviors: [text, code]
   informations:
     original:
       mode: full
+    student_fade:
+      mode: student_fade
+      keep_recent: 0
+    long_drop:
+      mode: long_drop
+      long_drop_words: 50
   template:
     name: qwen3-1.7b
     weight: 1.0
@@ -25,8 +26,7 @@ student_axes:
     max_tokens: 2048
     temperature: 0.7
     top_p: 0.8
-    # There is only one expanded student, so retain the default endpoint budget.
-    max_concurrent_calls: 32
+    max_concurrent_calls: 4
     request_params:
       seed: 42
       extra_headers:
@@ -36,3 +36,12 @@ student_axes:
         min_p: 0
         chat_template_kwargs:
           enable_thinking: false
+
+
+student_type_probe:
+  enabled: true
+  cyclic_permutations: true
+  reward_scale: 0
+  temperature: 1.0
+  max_new_tokens: 1
+

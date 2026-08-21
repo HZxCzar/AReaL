@@ -2,12 +2,12 @@
 # base/life-t10-r8-single-student/text-long-drop.yaml, how many GPUs it gets from
 # alloc.yaml.
 defaults:
-  - ../../base/life-t10-r8-single-student/text-long-drop@_global_
-  - ../alloc@_global_
+  - ../../../base/single/text-long-drop@_global_
+  - ../../alloc@_global_
   - _self_
 
-trial_name: 0818-life-t10-r8-text-long-drop-4gpu
+trial_name: 0818-text-long-drop-8gpu
 
 stats_logger:
   wandb:
-    group: 0818-life-t10-r8-single-student-4gpu
+    group: 0818-single-student-8gpu

@@ -1,0 +1,20 @@
+# Life arm with one final joint student-type probability reward.
+# The teacher is asked separate behavior (2-way) and information (4-way) questions
+# only after the dialogue. Each axis is cyclically rotated, mapped back, and
+# averaged. Their outer product is an eight-type distribution, and the reward is
+#
+#   existing retest reward + P(correct behavior, correct information).
+#
+# The probe completion is a sidecar: it is neither appended to the dialogue nor
+# included in PPO tensors.
+defaults:
+  - full@_global_
+  - _self_
+
+trial_name: 0818-full-probe-only
+
+student_type_probe:
+  reward_scale: 1.0
+
+student_generalize:
+  retest_reward: 1.0e-6

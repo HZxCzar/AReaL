@@ -428,9 +428,9 @@ The math problem is:
 {{ task }}"""
 
 FREE_CHAT_TEACHER_STUDENT_AWARENESS_CONTEXT = (
-    " Different students may behave differently. We will also assess how well "
-    "you understand this student and how effectively you adapt your teaching "
-    "to them."
+    " Different students may behave differently and have different learning needs. "
+    "Infer the student's characteristics from the interaction and adapt your "
+    "teaching accordingly."
 )
 
 # The pre-solve is a turn of the conversation, not a block of the system prompt.

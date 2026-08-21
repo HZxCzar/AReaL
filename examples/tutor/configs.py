@@ -2636,15 +2636,6 @@ class TutorConfig(GRPOConfig):
             raise ValueError(
                 "student_models must contain at least one student with positive weight."
             )
-        if self.student_sampling.strategy == "stratified":
-            positive_students = [
-                student for student in self.student_models if student.weight > 0.0
-            ]
-            if len(positive_students) < 2:
-                raise ValueError(
-                    "student_sampling.strategy='stratified' requires at least two "
-                    "student_models with positive weight."
-                )
         if self.dataset_type is MISSING or str(self.dataset_type) == "???":
             raise ValueError("dataset_type must be one of: 'aime', 'math', 'polaris'.")
         self.dataset_type = str(self.dataset_type).strip().lower()

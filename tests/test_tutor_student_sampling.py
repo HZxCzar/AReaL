@@ -6,7 +6,12 @@ from types import SimpleNamespace
 import pytest
 
 from examples.tutor import workflow as workflow_module
-from examples.tutor.configs import TUTOR_TRAIN_STUDENT_FIELD
+from examples.tutor.configs import (
+    TUTOR_TRAIN_STUDENT_FIELD,
+    TutorConfig,
+    TutorStudentModelConfig,
+    TutorStudentSamplingConfig,
+)
 from examples.tutor.workflow import TutorAgentWorkflow
 
 from areal.api import RolloutWorkflow
@@ -25,7 +30,8 @@ class _BatchHookWorkflow(RolloutWorkflow):
 
 
 def _sampler(*, weights: list[float] | None = None) -> TutorAgentWorkflow:
-    weights = weights or [1.0] * 8
+    if weights is None:
+        weights = [1.0] * 8
     workflow = object.__new__(TutorAgentWorkflow)
     workflow.student_sampling_strategy = "stratified"
     workflow._student_model_configs = [
@@ -80,6 +86,37 @@ def test_weighted_random_default_is_identity() -> None:
     batch = [{"id": "one"}]
 
     assert workflow.prepare_rollout_batch(batch) is batch
+
+
+@pytest.mark.parametrize("weights", [[], [1.0]])
+def test_stratified_is_identity_without_multiple_students(
+    weights: list[float],
+) -> None:
+    workflow = _sampler(weights=weights)
+    batch = [{"id": "one"}]
+
+    assert workflow.prepare_rollout_batch(batch) is batch
+    assert TUTOR_TRAIN_STUDENT_FIELD not in batch[0]
+
+
+def test_config_allows_stratified_single_student() -> None:
+    config = TutorConfig(
+        experiment_name="test",
+        trial_name="test",
+        dataset_type="math",
+        answer_scorer="math",
+        student_sampling=TutorStudentSamplingConfig(strategy="stratified"),
+        student_models=[
+            TutorStudentModelConfig(
+                name="only",
+                base_url="http://student",
+                model="model",
+            )
+        ],
+    )
+
+    assert config.student_sampling.strategy == "stratified"
+    assert [student.name for student in config.student_models] == ["only"]
 
 
 def test_reserved_training_field_is_rejected() -> None:

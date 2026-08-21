@@ -124,9 +124,9 @@ auxiliary_model:
 # One student, one at positive weight: the per-group draw has nothing to choose, so
 # every rollout of a GRPO group faces the same learner.
 student_sampling:
-  # Historical path. Set strategy: stratified in an arm to coordinate the
-  # configured student weights across each rollout input batch.
-  strategy: weighted_random
+  # A no-op with zero or one positive student. With multiple students, coordinate
+  # their configured weights across each rollout input batch.
+  strategy: stratified
 student_models:
 - name: qwen3-1.7b
   weight: 1.0
@@ -447,11 +447,12 @@ stats_logger:
 # continue arms, and their malformed rate climbed 0.61 -> 0.90 while the continue
 # arms fell to 0.00 by step 9.
 format_handling_mode: terminate
-total_train_steps: 250
+total_train_steps: 200
 free_chat:
   enabled: true
   budget: 10
   no_teaching_baseline: true
+  student_awareness_prompt_enabled: true
 # THE TEACHER SIDE, and it is a different axis from the student masks below. This
 # is how the teacher sees ITS OWN earlier replies; student_models[*].mask is what
 # the STUDENT sees of the dialogue. They share nothing but the word.

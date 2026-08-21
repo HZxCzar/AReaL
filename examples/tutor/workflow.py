@@ -914,13 +914,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
             for config in self._student_model_configs
             if float(config["weight"]) > 0.0
         ]
-        if self.student_sampling_strategy == "stratified" and len(
-            positive_student_configs
-        ) < 2:
-            raise ValueError(
-                "student_sampling.strategy='stratified' requires at least two "
-                "student_models with positive weight."
-            )
         self._stratified_student_scores = {
             str(config["name"]): 0.0 for config in positive_student_configs
         }
@@ -1681,7 +1674,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
     def prepare_rollout_batch(
         self, data: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        if self.student_sampling_strategy != "stratified" or not data:
+        if (
+            self.student_sampling_strategy != "stratified"
+            or len(self._stratified_student_scores) < 2
+            or not data
+        ):
             return data
         if any(TUTOR_TRAIN_STUDENT_FIELD in item for item in data):
             raise ValueError(
@@ -1711,7 +1708,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         train_forced_name = (
             str(data.get(TUTOR_TRAIN_STUDENT_FIELD) or "").strip()
-            if not is_eval and self.student_sampling_strategy == "stratified"
+            if (
+                not is_eval
+                and self.student_sampling_strategy == "stratified"
+                and len(self._stratified_student_scores) >= 2
+            )
             else ""
         )
         forced_name = eval_forced_name or train_forced_name
