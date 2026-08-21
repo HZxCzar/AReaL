@@ -1430,21 +1430,29 @@ class PPOActor:
                 local_masked = local_reward_score * valid_turn_mask.to(
                     turn_returns.dtype
                 )
-                # The local part rides on its own turn only. That is the point: a
-                # leak on the last turn must not discount the good turns before
-                # it.
+                # Local rewards always stay on the turn that earned them. The mode
+                # below changes only the control variate used as the group baseline.
                 turn_returns = turn_returns + local_masked
-                if self.config.group_baseline == "episode":
-                    # The legacy episode baseline needs the episode TOTAL.
-                    # Gather local terms onto turn one for that baseline only;
-                    # the returns above keep their per-turn placement. The turn
-                    # baseline instead compares the final return at each depth.
-                    baseline_source = baseline_source + _episode_local_at_first_turn(
-                        local_masked,
-                        data["trajectory_id"].to(reward_score.device),
-                        data["turn_idx"].to(reward_score.device),
-                        valid_turn_mask,
-                    )
+                local_baseline_mode = self.config.group_baseline_local_reward_mode
+                if local_baseline_mode == "include":
+                    if self.config.group_baseline == "episode":
+                        # The episode baseline reads the first turn, so gather the
+                        # complete local total there for the baseline only.
+                        baseline_source = (
+                            baseline_source
+                            + _episode_local_at_first_turn(
+                                local_masked,
+                                data["trajectory_id"].to(reward_score.device),
+                                data["turn_idx"].to(reward_score.device),
+                                valid_turn_mask,
+                            )
+                        )
+                    else:
+                        # A turn baseline compares the local reward only with peers
+                        # at the same depth.
+                        baseline_source = turn_returns
+                # In "exclude" mode baseline_source intentionally remains the
+                # propagating return with every local component removed.
             if self.config.group_baseline is not None:
                 if "group_id" not in data:
                     raise ValueError(
@@ -1459,13 +1467,8 @@ class PPOActor:
                     if self.config.group_baseline == "episode"
                     else _compute_turn_group_baseline
                 )
-                baseline_returns = (
-                    baseline_source
-                    if self.config.group_baseline == "episode"
-                    else turn_returns
-                )
                 group_baseline = baseline_fn(
-                    baseline_returns,
+                    baseline_source,
                     data["trajectory_id"].to(reward_score.device),
                     data["turn_idx"].to(reward_score.device),
                     data["group_id"].to(reward_score.device),

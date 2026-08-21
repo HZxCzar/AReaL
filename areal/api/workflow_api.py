@@ -13,6 +13,18 @@ if TYPE_CHECKING:
 
 
 class RolloutWorkflow(ABC):
+    def prepare_rollout_batch(
+        self, data: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Optionally prepare one dataloader batch before episode submission.
+
+        The default is an exact identity operation. Workflows may override this
+        synchronous hook when an episode-level choice must be coordinated across
+        a whole input batch, for example stratified sampling of environments.
+        Implementations must return one item for every input item.
+        """
+        return data
+
     def get_lora_versions_for_episode(
         self,
         engine: InferenceEngine,

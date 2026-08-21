@@ -73,6 +73,13 @@ class SGLangBackend:
             "stream": False,
         }
 
+        # Ask SGLang for the probability of every supplied answer-label token.
+        # This stays on /generate so the request keeps the current LoRA adapter;
+        # /v1/score does not carry lora_path.
+        token_ids_logprob = req.metadata.get("token_ids_logprob") or None
+        if token_ids_logprob:
+            payload["token_ids_logprob"] = [int(tid) for tid in token_ids_logprob]
+
         # Add return_routed_experts to payload if set
         if req.metadata.get("return_routed_experts", False):
             payload["return_routed_experts"] = True
@@ -118,11 +125,22 @@ class SGLangBackend:
         output_tokens = [x[1] for x in meta_info["output_token_logprobs"]]
         output_logprobs = [x[0] for x in meta_info["output_token_logprobs"]]
 
+        raw_token_ids_logprobs = meta_info.get("output_token_ids_logprobs")
+        output_token_ids_logprobs = (
+            [
+                [(float(entry[0]), int(entry[1])) for entry in position]
+                for position in raw_token_ids_logprobs
+            ]
+            if raw_token_ids_logprobs
+            else None
+        )
+
         return HttpGenerationResult(
             output_tokens=output_tokens,
             output_logprobs=output_logprobs,
             stop_reason=stop_reason,
             routed_experts=routed_experts,
+            output_token_ids_logprobs=output_token_ids_logprobs,
         )
 
     def build_disk_weight_update_requests(

@@ -1442,6 +1442,25 @@ class WorkflowExecutor:
         self.dispatcher.submit_task_input(task_input)
         return task_id
 
+    @staticmethod
+    def _prepare_rollout_batch(
+        data: list[dict[str, Any]], workflow: RolloutWorkflow
+    ) -> list[dict[str, Any]]:
+        prepared = workflow.prepare_rollout_batch(data)
+        if not isinstance(prepared, list):
+            raise TypeError(
+                "prepare_rollout_batch must return a list, got "
+                f"{type(prepared).__name__}."
+            )
+        if len(prepared) != len(data):
+            raise ValueError(
+                "prepare_rollout_batch must preserve batch length: "
+                f"got {len(prepared)}, expected {len(data)}."
+            )
+        if any(not isinstance(item, dict) for item in prepared):
+            raise TypeError("prepare_rollout_batch must return a list of dictionaries.")
+        return prepared
+
     def wait(
         self, count: int, timeout: float | None = None, raise_timeout: bool = True
     ) -> list[dict[str, Any] | None]:
@@ -1528,6 +1547,7 @@ class WorkflowExecutor:
             category="scheduler",
             args={"data": len(data)},
         )
+        data = self._prepare_rollout_batch(data, workflow)
         for item in data:
             self.submit(
                 data=item,
@@ -1574,6 +1594,7 @@ class WorkflowExecutor:
 
         def task_input_generator():
             for data in cycle_dataloader(dataloader):
+                data = self._prepare_rollout_batch(data, workflow)
                 for item in data:
                     # Workflow is already resolved by RemoteInfEngine
                     task_id = self._task_id_generator.next()

@@ -1316,6 +1316,19 @@ class PPOActorConfig(TrainEngineConfig):
             "actor.group_baseline is 'episode' or 'turn'."
         },
     )
+    group_baseline_local_reward_mode: str = field(
+        default="include",
+        metadata={
+            "help": "Which turn-local rewards enter the group-baseline statistic. "
+            "'include' preserves the current complete-return baseline: episode mode "
+            "gathers every local reward into the episode scalar, while turn mode "
+            "compares it at the same depth. 'exclude' computes the baseline from "
+            "non-local returns, but still leaves each local reward on its own turn. "
+            "This applies to every component in reward.turn_local_components, "
+            "including leak and format_error.",
+            "choices": ["include", "exclude"],
+        },
+    )
     episode_loss_weighting: bool = field(
         default=False,
         metadata={
@@ -1452,6 +1465,13 @@ class PPOActorConfig(TrainEngineConfig):
             raise ValueError(
                 "actor.group_baseline must be 'episode', 'turn', or None, "
                 f"got {self.group_baseline!r}."
+            )
+        local_reward_modes = {"include", "exclude"}
+        if self.group_baseline_local_reward_mode not in local_reward_modes:
+            raise ValueError(
+                "actor.group_baseline_local_reward_mode must be 'include', "
+                "or 'exclude', got "
+                f"{self.group_baseline_local_reward_mode!r}."
             )
         if self.group_baseline is not None and self.advantage_estimator != "rebn":
             raise ValueError(

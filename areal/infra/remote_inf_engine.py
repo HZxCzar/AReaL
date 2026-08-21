@@ -83,6 +83,12 @@ class GroupedRolloutWorkflow(RolloutWorkflow):
         self.group_size = group_size
         self.logger = logger
 
+    def prepare_rollout_batch(
+        self, data: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Keep batch-level workflow hooks visible through group expansion."""
+        return self.workflow.prepare_rollout_batch(data)
+
     def get_lora_versions_for_episode(
         self,
         engine: InferenceEngine,
@@ -948,6 +954,7 @@ class RemoteInfEngine(InferenceEngine):
         accumulated_output_logprobs = []
         accumulated_versions = []
         accumulated_routed_experts: list[np.ndarray] = []
+        accumulated_token_ids_logprobs: list[list[tuple[float, int]]] = []
         request_lora_version = None
         request_disable_lora = bool(req.metadata.get("disable_lora", False))
         if self.config.use_lora and "lora_version" in req.metadata:
@@ -1049,6 +1056,10 @@ class RemoteInfEngine(InferenceEngine):
             # Accumulate routed_experts for MoE models
             if gen_result.routed_experts is not None:
                 accumulated_routed_experts.append(gen_result.routed_experts)
+            if gen_result.output_token_ids_logprobs:
+                accumulated_token_ids_logprobs.extend(
+                    gen_result.output_token_ids_logprobs
+                )
 
             # Update request for next iteration
             req.input_ids += gen_result.output_tokens
@@ -1088,6 +1099,7 @@ class RemoteInfEngine(InferenceEngine):
             tokenizer=req.tokenizer,
             processor=req.processor,
             routed_experts=accumulated_routed_experts,
+            output_token_ids_logprobs=accumulated_token_ids_logprobs or None,
         )
         return response
 

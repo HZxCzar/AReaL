@@ -82,6 +82,12 @@ class ModelResponse:
     # MoE routing (only populated when return_routed_experts=True)
     routed_experts: np.ndarray | None = None
 
+    # Logprobs of a caller-specified token set at each output position, in the
+    # order the ids were requested: one list per position, each holding
+    # (logprob, token_id) pairs. Only populated when the request carried
+    # metadata[token_ids_logprob].
+    output_token_ids_logprobs: list[list[tuple[float, int]]] | None = None
+
     @property
     def input_len(self) -> int:
         return len(self.input_tokens)
@@ -285,6 +291,7 @@ class HttpGenerationResult:
     output_logprobs: list[float]
     stop_reason: str
     routed_experts: np.ndarray | None = None
+    output_token_ids_logprobs: list[list[tuple[float, int]]] | None = None
 
 
 @dataclass
