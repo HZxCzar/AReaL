@@ -39,6 +39,7 @@ USAGE
         --output-root .../offline_eval/<trial>
         --max-samples 128
 """
+
 from __future__ import annotations
 
 import argparse
@@ -47,6 +48,7 @@ import os
 import re
 import subprocess
 import sys
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,6 +78,28 @@ class Checkpoint:
         return "step%04d" % self.step
 
 
+def merge_request_params(
+    base: dict[str, object], update: dict[str, object]
+) -> dict[str, object]:
+    merged = deepcopy(base)
+    for key, value in update.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_request_params(merged[key], value)  # type: ignore[arg-type]
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def checkpoint_request_params(raw: str, checkpoint: Checkpoint) -> dict[str, object]:
+    parsed = json.loads(raw or "{}")
+    if not isinstance(parsed, dict):
+        raise ValueError("--teacher-request-params must be a JSON object.")
+    return merge_request_params(
+        parsed,
+        {"extra_body": {"lora_path": str(checkpoint.path)}},
+    )
+
+
 def discover(trial_dir: Path) -> list[Checkpoint]:
     """The step checkpoints a run wrote, in step order.
 
@@ -100,7 +124,10 @@ def discover(trial_dir: Path) -> list[Checkpoint]:
         if not match:
             continue
         if not (child / "adapter_model.safetensors").is_file():
-            print("  skipping %s: no adapter_model.safetensors" % child.name, file=sys.stderr)
+            print(
+                "  skipping %s: no adapter_model.safetensors" % child.name,
+                file=sys.stderr,
+            )
             continue
         found.append(Checkpoint(step=int(match.group(1)), path=child.resolve()))
     if not found:
@@ -115,7 +142,9 @@ def probe(
     try:
         from openai import OpenAI
     except ImportError as exc:  # pragma: no cover
-        raise SystemExit("the openai package is required for the liveness probe") from exc
+        raise SystemExit(
+            "the openai package is required for the liveness probe"
+        ) from exc
 
     client = OpenAI(base_url=base_url, api_key=api_key or "EMPTY", timeout=timeout)
     extra_body: dict[str, object] = {}
@@ -168,7 +197,13 @@ def verify_adapter_is_live(
     #    ignoring lora_path altogether -- the exact silent failure, where every
     #    checkpoint returns the base model and the sweep looks flat.
     try:
-        probe(base_url, model, api_key, "/nonexistent/adapter/definitely-not-here", timeout)
+        probe(
+            base_url,
+            model,
+            api_key,
+            "/nonexistent/adapter/definitely-not-here",
+            timeout,
+        )
     except Exception as exc:  # noqa: BLE001 - the KIND of failure decides the verdict
         if type(exc).__name__ == "APIConnectionError":
             # Reachable a moment ago, unreachable now: that is an endpoint problem,
@@ -225,7 +260,7 @@ def run_one(checkpoint: Checkpoint, args: argparse.Namespace) -> Path:
     """Delegate to evaluate_api_teacher with this checkpoint as the adapter."""
     out_dir = Path(args.output_root).expanduser().resolve() / checkpoint.label
     out_dir.mkdir(parents=True, exist_ok=True)
-    request_params = {"extra_body": {"lora_path": str(checkpoint.path)}}
+    request_params = checkpoint_request_params(args.teacher_request_params, checkpoint)
     cmd = [
         sys.executable,
         str(EVAL_SCRIPT),
@@ -298,20 +333,34 @@ def parse_args() -> argparse.Namespace:
     )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument(
-        "--trial-dir", type=Path, help="checkpoints/.../<trial>; sweeps its default/ dir"
+        "--trial-dir",
+        type=Path,
+        help="checkpoints/.../<trial>; sweeps its default/ dir",
     )
     source.add_argument(
-        "--checkpoint", type=Path, action="append", help="one checkpoint dir, repeatable"
+        "--checkpoint",
+        type=Path,
+        action="append",
+        help="one checkpoint dir, repeatable",
     )
     parser.add_argument(
         "--base-url",
         required=True,
         help="OpenAI-compatible endpoint serving the BASE model with LoRA enabled",
     )
-    parser.add_argument("--model", required=True, help="base model name the endpoint reports")
+    parser.add_argument(
+        "--model", required=True, help="base model name the endpoint reports"
+    )
     parser.add_argument("--api-key", default=os.environ.get("INF_API_KEY", "EMPTY"))
     parser.add_argument(
-        "--config", default=DEFAULT_CONFIG, help="the arm whose settings the eval runs under"
+        "--config",
+        default=DEFAULT_CONFIG,
+        help="the arm whose settings the eval runs under",
+    )
+    parser.add_argument(
+        "--teacher-request-params",
+        default="{}",
+        help=("Base JSON request parameters merged with each checkpoint's lora_path."),
     )
     parser.add_argument("--output-root", required=True)
     parser.add_argument(
@@ -322,7 +371,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument(
-        "--steps", default="", help="comma-separated global steps to keep, e.g. 49,199,499"
+        "--steps",
+        default="",
+        help="comma-separated global steps to keep, e.g. 49,199,499",
     )
     parser.add_argument("--probe-timeout", type=float, default=120.0)
     parser.add_argument("--resume", action="store_true")
@@ -331,7 +382,9 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="skip the adapter probe; only with independent proof it is applied",
     )
-    parser.add_argument("--dry-run", action="store_true", help="discover and probe, then stop")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="discover and probe, then stop"
+    )
     parser.add_argument(
         "passthrough", nargs="*", help="extra args forwarded to evaluate_api_teacher"
     )
@@ -356,14 +409,18 @@ def main() -> int:
         wanted = {int(s) for s in args.steps.split(",") if s.strip()}
         checkpoints = [c for c in checkpoints if c.step in wanted]
         if not checkpoints:
-            raise SystemExit("--steps %s matched none of the discovered checkpoints." % args.steps)
+            raise SystemExit(
+                "--steps %s matched none of the discovered checkpoints." % args.steps
+            )
 
     print("%d checkpoint(s):" % len(checkpoints))
     for c in checkpoints:
         print("  %s  %s" % (c.label, c.path))
 
     if args.skip_liveness:
-        print("[liveness] SKIPPED -- numbers mean nothing unless the adapter is applied")
+        print(
+            "[liveness] SKIPPED -- numbers mean nothing unless the adapter is applied"
+        )
     else:
         verify_adapter_is_live(
             checkpoints, args.base_url, args.model, args.api_key, args.probe_timeout
@@ -381,12 +438,17 @@ def main() -> int:
             results[c.label] = run_one(c, args)
         except subprocess.CalledProcessError as exc:
             # One bad checkpoint must not cost the rest of the sweep.
-            print("[%s] FAILED with exit %d" % (c.label, exc.returncode), file=sys.stderr)
+            print(
+                "[%s] FAILED with exit %d" % (c.label, exc.returncode), file=sys.stderr
+            )
             failures.append(c.label)
 
     summarize(results, output_root)
     if failures:
-        print("\n%d checkpoint(s) failed: %s" % (len(failures), ", ".join(failures)), file=sys.stderr)
+        print(
+            "\n%d checkpoint(s) failed: %s" % (len(failures), ", ".join(failures)),
+            file=sys.stderr,
+        )
         return 1
     return 0
 

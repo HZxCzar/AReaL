@@ -125,6 +125,11 @@ class EpisodeResult:
     duration_seconds: float
     student_prompt_pool: str = ""
     student_prompt_index: int | None = None
+    free_chat_enabled: bool = False
+    outcome_score: float | None = None
+    final_correct_score: float | None = None
+    no_teaching_baseline: float | None = None
+    code_stats: dict[str, int] | None = None
 
 
 class RecordingTutorWorkflow(TutorAgentWorkflow):
@@ -386,6 +391,102 @@ def load_experiment_config(
     return config, students
 
 
+def select_student_models(
+    student_models: list[dict[str, Any]], requested_names: list[str] | None
+) -> list[dict[str, Any]]:
+    """Keep an explicit eval subset without mutating the source config."""
+
+    if not requested_names:
+        return deepcopy(student_models)
+    names = list(dict.fromkeys(str(name) for name in requested_names))
+    available = {str(student["name"]): student for student in student_models}
+    missing = [name for name in names if name not in available]
+    if missing:
+        raise ValueError(
+            "Unknown --student-name value(s): "
+            f"{missing}. Available students: {sorted(available)}"
+        )
+    return [deepcopy(available[name]) for name in names]
+
+
+def effective_eval_presolve_enabled(config: TutorConfig) -> bool:
+    override = config.evaluator.teacher_pre_enabled
+    return bool(config.teacher_pre.enabled if override is None else override)
+
+
+def configured_generalization_levels(
+    workflow_kwargs: dict[str, Any],
+) -> tuple[str, ...]:
+    levels: list[str] = []
+    if workflow_kwargs.get("student_generalize_retest_original"):
+        levels.append("original")
+    if workflow_kwargs.get("eval_preleak_retest"):
+        levels.append("original_preleak")
+    if workflow_kwargs.get("student_generalize_level1_enabled"):
+        levels.append("level1")
+    if workflow_kwargs.get("student_generalize_level2_enabled"):
+        levels.append("level2")
+    return tuple(levels)
+
+
+def validate_effective_eval_semantics(
+    *,
+    config: TutorConfig,
+    workflow_kwargs: dict[str, Any],
+    student_models: list[dict[str, Any]],
+) -> None:
+    """Fail before API calls if offline eval drifted from regular validation."""
+
+    if not student_models:
+        raise ValueError("Evaluation needs at least one selected student.")
+    configured_names = [str(student["name"]) for student in student_models]
+    effective_names = [
+        str(student["name"]) for student in workflow_kwargs["student_models"]
+    ]
+    if effective_names != configured_names:
+        raise ValueError(
+            "Effective eval students differ from the requested subset: "
+            f"requested={configured_names}, effective={effective_names}."
+        )
+
+    if not config.free_chat.enabled:
+        return
+    free_chat = dict(workflow_kwargs.get("free_chat") or {})
+    errors: list[str] = []
+    if not free_chat.get("enabled"):
+        errors.append("free_chat.enabled is false")
+    if int(free_chat.get("budget", 0) or 0) != int(config.free_chat.budget):
+        errors.append(
+            "free_chat.budget is "
+            f"{free_chat.get('budget')}, expected {config.free_chat.budget}"
+        )
+    if not workflow_kwargs.get("student_generalize_enabled"):
+        errors.append("student_generalize is disabled")
+    if not workflow_kwargs.get("student_generalize_retest_original"):
+        errors.append("student_generalize.retest_original is false")
+    if int(workflow_kwargs.get("student_generalize_replays", 0)) != int(
+        config.student_generalize.replays
+    ):
+        errors.append(
+            "student_generalize.replays is "
+            f"{workflow_kwargs.get('student_generalize_replays')}, expected "
+            f"{config.student_generalize.replays}"
+        )
+    if bool(workflow_kwargs.get("student_generalize_level1_enabled")) != bool(
+        config.student_generalize.level1_enabled
+    ):
+        errors.append("student_generalize.level1_enabled drifted")
+    if bool(workflow_kwargs.get("student_generalize_level2_enabled")) != bool(
+        config.student_generalize.level2_enabled
+    ):
+        errors.append("student_generalize.level2_enabled drifted")
+    if errors:
+        raise ValueError(
+            "Offline evaluator does not match the regular free-chat evaluation: "
+            + "; ".join(errors)
+        )
+
+
 def build_eval_workflow_kwargs(
     *,
     config: TutorConfig,
@@ -402,7 +503,7 @@ def build_eval_workflow_kwargs(
     eval_gconfig = base_eval_gconfig.new(
         n_samples=1,
         temperature=float(args.teacher_temperature),
-        top_p=float(args.teacher_top_p),
+        top_p=args.teacher_top_p,
         max_new_tokens=int(args.teacher_max_tokens),
     )
     presolve_attempts = (
@@ -416,13 +517,13 @@ def build_eval_workflow_kwargs(
         else int(teacher_pre.max_tokens)
     )
 
-    return {
-        "gconfig": eval_gconfig,
+    workflow_kwargs = {
+        "gconfig": config.gconfig,
         "tokenizer": tokenizer,
         "dataset_type": config.dataset_type,
         "answer_scorer": config.answer_scorer,
         "max_turns": config.max_turns,
-        "enable_thinking": False,
+        "enable_thinking": config.enable_thinking,
         "leak_handling_mode": config.leak_handling_mode,
         "aux_mode": auxiliary_model.mode,
         "aux_enable_thinking": auxiliary_model.enable_thinking,
@@ -443,6 +544,7 @@ def build_eval_workflow_kwargs(
         "leak_penalty_compute": reward.leak_penalty_compute,
         "leak_penalty_formula": reward.leak_penalty_formula,
         "leak_penalty_aggregation": reward.leak_penalty_aggregation,
+        "turn_local_reward_components": tuple(reward.turn_local_components),
         "format_error_penalty": reward.format_error_penalty,
         "leaked_success_reward_scale": reward.leaked_success_reward_scale,
         "assign_success_reward": reward.assign_success_reward,
@@ -457,6 +559,20 @@ def build_eval_workflow_kwargs(
         "length_penalty_per_100_chars": reward.length_penalty_per_100_chars,
         "length_penalty_min": reward.length_penalty_min,
         "zero_reward_on_length_stop": reward.zero_reward_on_length_stop,
+        "teacher_diversity_reward": asdict(reward.teacher_diversity),
+        "teacher_context_reward": asdict(reward.teacher_context),
+        "teacher_progress_judge": asdict(reward.teacher_progress_judge),
+        "student_request_judge": asdict(reward.student_request_judge),
+        "world_model": asdict(config.world_model),
+        "guided_slots": asdict(config.guided_slots),
+        "opd": asdict(config.opd),
+        "prompt_instruction": asdict(config.prompt_instruction),
+        "free_chat": asdict(config.free_chat),
+        "student_type_probe": asdict(config.student_type_probe),
+        "cross_eval": asdict(config.cross_eval),
+        "teacher_history_tags": config.teacher_history_tags,
+        "teacher_private_visibility": config.teacher_private_visibility,
+        "local_advantage_turn_discount": config.actor.turn_discount,
         "teacher_system_prompt": config.teacher_system_prompt,
         "teacher_anti_leak_instruction_enabled": (
             config.teacher_anti_leak_instruction_enabled
@@ -464,37 +580,39 @@ def build_eval_workflow_kwargs(
         "teacher_adaptive_instruction_enabled": (
             config.teacher_adaptive_instruction_enabled
         ),
-        # Evaluation never samples teacher prompts. Student prompts are loaded only
-        # when the config explicitly requests exhaustive prompt coverage.
-        "teacher_prompt_pool_path": "",
-        "teacher_warmup_enabled": False,
-        "teacher_warmup_prompt_path": "",
-        "teacher_warmup_steps": 0,
+        "teacher_prompt_pool_path": config.prompt_pool.teacher_path,
+        "teacher_warmup_enabled": config.prompt_pool.teacher_warmup.enabled,
+        "teacher_warmup_prompt_path": (config.prompt_pool.teacher_warmup.prompt_path),
+        "teacher_warmup_steps": config.prompt_pool.teacher_warmup.steps,
         "teacher_user_prompt_template": config.teacher_user_prompt_template,
         "teacher_show_ground_truth": config.teacher_show_ground_truth,
-        "teacher_pre_enabled": presolve_enabled,
+        "format_handling_mode": config.format_handling_mode,
+        "teacher_pre_enabled": teacher_pre.enabled,
         "teacher_pre_mode": teacher_pre.mode,
         "teacher_pre_verify": teacher_pre.verify,
-        "teacher_pre_attempts": presolve_attempts,
-        "teacher_pre_max_tokens": presolve_max_tokens,
+        "teacher_pre_attempts": teacher_pre.attempts,
+        "teacher_pre_max_tokens": teacher_pre.max_tokens,
+        "teacher_pre_visibility": teacher_pre.visibility,
+        "teacher_pre_on_reject": teacher_pre.on_reject,
+        "teacher_pre_share_per_group": teacher_pre.share_per_group,
         "student_system_prompt": config.student_system_prompt,
-        "student_prompt_pool_path": config.prompt_pool.student_eval_paths.get(
-            "seen", ""
-        ),
-        "student_heldout_prompt_pool_path": (
-            config.prompt_pool.student_eval_paths.get("heldout", "")
-        ),
+        "student_prompt_pool_path": config.prompt_pool.student_train_path,
+        "student_heldout_prompt_pool_path": "",
         "student_prompt_include_base": config.prompt_pool.include_base,
-        "student_turn_behavior_enabled": False,
-        "student_turn_behavior_path": "",
+        "student_turn_behavior_enabled": (
+            config.prompt_pool.student_turn_behavior.enabled
+        ),
+        "student_turn_behavior_path": config.prompt_pool.student_turn_behavior.path,
+        "student_turn_behavior_separate_call_behavior_names": (
+            config.prompt_pool.student_turn_behavior.separate_call_behavior_names
+        ),
         "prompt_pool_seed": config.seed,
         "leak_check_system_prompt": config.leak_check_system_prompt,
         "answer_judge_enabled": auxiliary_model.answer_judge_enabled,
         "answer_judge_max_tokens": auxiliary_model.answer_judge_max_tokens,
         "answer_judge_system_prompt": config.answer_judge_system_prompt,
-        # Keep the original experiment's total sample and context budgets.
-        "debug_trace_dir": None,
-        "debug_trace_every_n_rollouts": 1,
+        "debug_trace_dir": config.debug_trace_dir or None,
+        "debug_trace_every_n_rollouts": config.debug_trace_every_n_rollouts,
         "max_train_sample_tokens": config.gconfig.max_tokens,
         "tokenizer_path": config.tokenizer_path,
         "model_context_length": config.sglang.context_length,
@@ -502,8 +620,17 @@ def build_eval_workflow_kwargs(
         "student_generalize_mode": student_generalize.mode,
         "student_generalize_source": student_generalize.source,
         "student_generalize_path": student_generalize.path,
+        "student_generalize_replays": student_generalize.replays,
+        "student_generalize_turn_credit": student_generalize.turn_credit,
+        "student_generalize_turn_credit_replays": (
+            student_generalize.turn_credit_replays
+        ),
+        "student_generalize_retest_original": student_generalize.retest_original,
+        "student_generalize_level1_enabled": student_generalize.level1_enabled,
+        "student_generalize_level2_enabled": student_generalize.level2_enabled,
         "student_generalize_level1_reward": student_generalize.level1_reward,
         "student_generalize_level2_reward": student_generalize.level2_reward,
+        "student_generalize_retest_reward": student_generalize.retest_reward,
         "student_generalize_confidence_enabled": (
             student_generalize.confidence.enabled
         ),
@@ -511,6 +638,24 @@ def build_eval_workflow_kwargs(
             student_generalize.confidence.reward_scale
         ),
     }
+    # This is the canonical conversion used by TutorPPOTrainer for its regular
+    # validation pass. Keeping it here prevents the API evaluator from silently
+    # falling back to answer-attempt defaults for free-chat experiments.
+    eval_workflow_kwargs = tutor_train._build_eval_workflow_kwargs(
+        workflow_kwargs, config
+    )
+    eval_workflow_kwargs["gconfig"] = eval_gconfig
+    eval_workflow_kwargs["teacher_pre_enabled"] = bool(presolve_enabled)
+    eval_workflow_kwargs["teacher_pre_attempts"] = presolve_attempts
+    eval_workflow_kwargs["teacher_pre_max_tokens"] = presolve_max_tokens
+    # Traces are owned by this standalone evaluator's --save-traces path.
+    eval_workflow_kwargs["debug_trace_dir"] = None
+    validate_effective_eval_semantics(
+        config=config,
+        workflow_kwargs=eval_workflow_kwargs,
+        student_models=student_models,
+    )
+    return eval_workflow_kwargs
 
 
 def prepare_test_dataset(
@@ -597,12 +742,24 @@ def serialize_generalization(
     payload: dict[str, dict[str, Any]] = {}
     for result in workflow.last_student_generalization_results:
         judge_result = result.judge_result
+        replay_count = int(result.replay_count or 0)
+        replay_correct = int(result.replay_correct or 0)
+        score = None
+        if result.attempted and not result.skipped:
+            score = (
+                replay_correct / replay_count
+                if replay_count > 0
+                else float(bool(judge_result is not None and judge_result.correct))
+            )
         payload[str(result.level)] = {
             "attempted": bool(result.attempted),
             "skipped": bool(result.skipped),
             "skip_reason": str(result.skip_reason or ""),
             "correct": bool(judge_result.correct) if judge_result is not None else None,
             "student_error": result.student_error,
+            "replay_count": replay_count,
+            "replay_correct": replay_correct,
+            "score": score,
             "confidence": float(result.confidence),
         }
     return payload
@@ -665,7 +822,20 @@ def result_from_workflow(
         and len(teacher_pre_errors) == len(teacher_pre.attempts)
     )
     pre_solved = bool(stats.get("pre_success"))
-    taught_success = termination_reason == "success"
+    free_chat_enabled = bool(getattr(workflow, "free_chat_enabled", False))
+    outcome_score = (
+        float(
+            workflow._free_chat_outcome_score(
+                workflow.last_student_generalization_results
+            )
+        )
+        if free_chat_enabled
+        else float(termination_reason == "success")
+    )
+    taught_success = bool(outcome_score > 0.0)
+    final_correct_score = max(float(pre_solved), outcome_score)
+    no_teaching_baseline = stats.get("no_teaching_baseline")
+    code_stats = stats.get("code_stats")
     return EpisodeResult(
         key=spec.key,
         mode=spec.mode.name,
@@ -684,7 +854,7 @@ def result_from_workflow(
         ),
         pre_solved=pre_solved,
         taught_success=taught_success,
-        final_correct=pre_solved or taught_success,
+        final_correct=bool(final_correct_score > 0.0),
         num_turns=len(traces),
         solve_turn=solve_turn,
         leak_count=int(stats.get("leak_count") or 0),
@@ -716,6 +886,17 @@ def result_from_workflow(
         student_prompt_index=(
             int(spec.row[TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD])
             if spec.row.get(TUTOR_EVAL_STUDENT_PROMPT_INDEX_FIELD) is not None
+            else None
+        ),
+        free_chat_enabled=free_chat_enabled,
+        outcome_score=outcome_score,
+        final_correct_score=final_correct_score,
+        no_teaching_baseline=(
+            float(no_teaching_baseline) if no_teaching_baseline is not None else None
+        ),
+        code_stats=(
+            {str(key): int(value) for key, value in code_stats.items()}
+            if isinstance(code_stats, dict)
             else None
         ),
     )
@@ -916,11 +1097,28 @@ def aggregate_mode(
     *,
     expected: int,
     generalization_enabled: bool = False,
+    generalization_levels: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     results = latest_results(results)
     completed = [result for result in results if result.error is None]
     pre_solved = sum(result.pre_solved for result in completed)
     taught_success = sum(result.taught_success for result in completed)
+    outcome_scores = [
+        float(
+            result.outcome_score
+            if result.outcome_score is not None
+            else result.taught_success
+        )
+        for result in completed
+    ]
+    final_correct_scores = [
+        float(
+            result.final_correct_score
+            if result.final_correct_score is not None
+            else result.final_correct
+        )
+        for result in completed
+    ]
     clean_taught_success = sum(
         result.taught_success and not result.student_call_failed for result in completed
     )
@@ -962,7 +1160,9 @@ def aggregate_mode(
     presolve_enabled = any(result.presolve_enabled for result in results)
     generalization: dict[str, dict[str, Any]] = {}
     levels = {level for result in completed for level in result.generalization}
-    if generalization_enabled:
+    if generalization_levels is not None:
+        levels.update(generalization_levels)
+    elif generalization_enabled:
         levels.update(("level1", "level2"))
     levels = sorted(levels)
     for level in levels:
@@ -982,12 +1182,34 @@ def aggregate_mode(
         student_errors = sum(
             bool(item.get("student_error")) for _, item in level_results
         )
+        replay_count = sum(int(item.get("replay_count") or 0) for _, item in attempted)
+        replay_correct = sum(
+            int(item.get("replay_correct") or 0) for _, item in attempted
+        )
+
+        def _score(item: dict[str, Any]) -> float:
+            if item.get("score") is not None:
+                return float(item["score"])
+            item_replays = int(item.get("replay_count") or 0)
+            if item_replays > 0:
+                return int(item.get("replay_correct") or 0) / item_replays
+            return float(item.get("correct") is True)
+
+        attempted_score = sum(_score(item) for _, item in attempted)
+        evaluable_score = sum(_score(item) for _, item in evaluable)
+        taught_score = sum(_score(item) for _, item in taught_attempted)
         generalization[level] = {
             "present_episode_count": len(level_results),
             "attempted": len(attempted),
             "evaluable": len(evaluable),
             "correct": correct,
             "student_error_count": student_errors,
+            "replay_attempt_count": replay_count,
+            "replay_correct_count": replay_correct,
+            "accuracy_on_replays": _rate(replay_correct, replay_count),
+            "mean_episode_score_on_attempted": _rate(attempted_score, len(attempted)),
+            "mean_episode_score_on_evaluable": _rate(evaluable_score, len(evaluable)),
+            "mean_episode_score_full_set": _rate(attempted_score, expected),
             "conditional_accuracy_on_attempted": _rate(correct, len(attempted)),
             "conditional_accuracy_on_evaluable": _rate(
                 evaluable_correct, len(evaluable)
@@ -1000,7 +1222,44 @@ def aggregate_mode(
                 taught_correct, taught_success
             ),
             "end_to_end_correct_rate_full_set": _rate(correct, expected),
+            "end_to_end_score_on_taught_success": _rate(taught_score, taught_success),
         }
+
+    code_results = [
+        result for result in completed if isinstance(result.code_stats, dict)
+    ]
+    code_stat_names = sorted(
+        {name for result in code_results for name in (result.code_stats or {})}
+    )
+    code_totals = {
+        name: sum(
+            int((result.code_stats or {}).get(name, 0)) for result in code_results
+        )
+        for name in code_stat_names
+    }
+    code_turns = sum(result.num_turns for result in code_results)
+    code_channel = {
+        "episode_count": len(code_results),
+        "turn_count": code_turns,
+        "totals": code_totals,
+        "per_turn": {
+            name: _rate(value, code_turns) for name, value in code_totals.items()
+        },
+    }
+    if code_results:
+        unproductive = sum(
+            code_totals.get(name, 0)
+            for name in ("crashes", "silent_cells", "no_program")
+        )
+        code_channel["productive_rate_per_turn"] = _rate(
+            max(0, code_turns - unproductive), code_turns
+        )
+
+    baseline_pairs = [
+        (float(result.no_teaching_baseline), outcome_score)
+        for result, outcome_score in zip(completed, outcome_scores, strict=True)
+        if result.no_teaching_baseline is not None
+    ]
 
     return {
         "expected_attempts": int(expected),
@@ -1028,9 +1287,30 @@ def aggregate_mode(
             taught_success, max(0, expected - pre_solved)
         ),
         "teaching_lift_full_set": _rate(taught_success, expected),
+        "outcome_score_sum": sum(outcome_scores),
+        "outcome_score_mean_completed": _rate(sum(outcome_scores), len(completed)),
+        "outcome_score_mean_full_set": _rate(sum(outcome_scores), expected),
         "final_correct_count": final_correct,
         "full_set_final_correct_rate": _rate(final_correct, expected),
         "completed_final_correct_rate": _rate(final_correct, len(completed)),
+        "final_correct_score_sum": sum(final_correct_scores),
+        "regular_eval_score_mean_completed": _rate(
+            sum(final_correct_scores), len(completed)
+        ),
+        "regular_eval_score_mean_full_set": _rate(sum(final_correct_scores), expected),
+        "no_teaching_baseline_mean": (
+            _rate(sum(pair[0] for pair in baseline_pairs), len(baseline_pairs))
+            if baseline_pairs
+            else None
+        ),
+        "improvement_over_no_teaching_baseline_mean": (
+            _rate(
+                sum(outcome - baseline for baseline, outcome in baseline_pairs),
+                len(baseline_pairs),
+            )
+            if baseline_pairs
+            else None
+        ),
         "workflow_covered_count": covered,
         "workflow_coverage_rate_full_set": _rate(covered, expected),
         "presolve_covered_count": covered if presolve_enabled else None,
@@ -1079,6 +1359,10 @@ def aggregate_mode(
         "avg_solve_turn": (
             sum(solve_turns) / len(solve_turns) if solve_turns else None
         ),
+        "free_chat_episode_count": sum(
+            result.free_chat_enabled for result in completed
+        ),
+        "code_channel": code_channel,
         "generalization": generalization,
     }
 
@@ -1196,6 +1480,7 @@ def aggregate_report(
     dataset_size: int,
     attempts: int,
     generalization_enabled: bool = False,
+    generalization_levels: tuple[str, ...] | None = None,
     student_prompt_rows: dict[tuple[str, int], int] | None = None,
 ) -> dict[str, Any]:
     results = latest_results(results)
@@ -1223,6 +1508,7 @@ def aggregate_report(
                 mode_results,
                 expected=expected_per_mode,
                 generalization_enabled=generalization_enabled,
+                generalization_levels=generalization_levels,
             ),
             **aggregate_items(mode_results, expected_items=base_prompt_rows),
             "repeat": aggregate_repeat_metrics(
@@ -1246,6 +1532,7 @@ def aggregate_report(
                         prompt_results,
                         expected=row_count * attempts,
                         generalization_enabled=generalization_enabled,
+                        generalization_levels=generalization_levels,
                     ),
                     **aggregate_items(prompt_results, expected_items=row_count),
                     "repeat": aggregate_repeat_metrics(
@@ -1350,31 +1637,26 @@ def build_run_signature(
     attempts: int,
     teacher_base_url: str,
     teacher_request_params: dict[str, Any],
+    workflow_kwargs_by_mode: dict[str, dict[str, Any]],
     student_prompts: tuple[tutor_train.EvalStudentPrompt, ...] = (),
 ) -> dict[str, Any]:
     config_path = Path(args.config).resolve()
     config_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    effective_kwargs = next(iter(workflow_kwargs_by_mode.values()))
     return redact_sensitive(
         {
             "config": str(config_path),
             "config_sha256": config_hash,
+            "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "overrides": list(args.overrides),
             "dataset_size": dataset_size,
             "dataset_sha256": dataset_hash,
             "attempts": attempts,
             "modes": [asdict(mode) for mode in modes],
             "presolve": {
-                "verify": bool(config.teacher_pre.verify),
-                "attempts": (
-                    int(args.presolve_attempts)
-                    if int(args.presolve_attempts) > 0
-                    else int(config.teacher_pre.attempts)
-                ),
-                "max_tokens": (
-                    int(args.presolve_max_tokens)
-                    if args.presolve_max_tokens is not None
-                    else int(config.teacher_pre.max_tokens)
-                ),
+                "verify": bool(effective_kwargs["teacher_pre_verify"]),
+                "attempts": int(effective_kwargs["teacher_pre_attempts"]),
+                "max_tokens": int(effective_kwargs["teacher_pre_max_tokens"]),
             },
             "teacher": {
                 "base_url": teacher_base_url,
@@ -1408,8 +1690,11 @@ def build_run_signature(
             "test_semantics": {
                 "dataset_type": config.dataset_type,
                 "answer_scorer": config.answer_scorer,
-                "max_turns": config.max_turns,
-                "leak_handling_mode": config.leak_handling_mode,
+                "max_turns": effective_kwargs["max_turns"],
+                "leak_handling_mode": effective_kwargs["leak_handling_mode"],
+                "format_handling_mode": effective_kwargs["format_handling_mode"],
+                "free_chat": effective_kwargs["free_chat"],
+                "teacher_history_tags": effective_kwargs["teacher_history_tags"],
                 "teacher_show_ground_truth": config.teacher_show_ground_truth,
                 "teacher_anti_leak_instruction_enabled": (
                     config.teacher_anti_leak_instruction_enabled
@@ -1417,8 +1702,28 @@ def build_run_signature(
                 "teacher_adaptive_instruction_enabled": (
                     config.teacher_adaptive_instruction_enabled
                 ),
-                "student_generalize_enabled": config.student_generalize.enabled,
-                "student_generalize_source": config.student_generalize.source,
+                "student_generalize_enabled": effective_kwargs[
+                    "student_generalize_enabled"
+                ],
+                "student_generalize_mode": effective_kwargs["student_generalize_mode"],
+                "student_generalize_source": effective_kwargs[
+                    "student_generalize_source"
+                ],
+                "student_generalize_replays": effective_kwargs[
+                    "student_generalize_replays"
+                ],
+                "student_generalize_retest_original": effective_kwargs[
+                    "student_generalize_retest_original"
+                ],
+                "student_generalize_level1_enabled": effective_kwargs[
+                    "student_generalize_level1_enabled"
+                ],
+                "student_generalize_level2_enabled": effective_kwargs[
+                    "student_generalize_level2_enabled"
+                ],
+                "generalization_levels": list(
+                    configured_generalization_levels(effective_kwargs)
+                ),
                 **(
                     {
                         "student_prompt_pools": {
@@ -1683,10 +1988,23 @@ def parse_args() -> argparse.Namespace:
         help="Prefer the DEEPSEEK_API_KEY environment variable over this option.",
     )
     parser.add_argument(
-        "--teacher-temperature", type=float, default=DEEPSEEK_TEMPERATURE
+        "--teacher-temperature",
+        type=float,
+        default=None,
+        help="Defaults to eval_gconfig.temperature from --config.",
     )
-    parser.add_argument("--teacher-top-p", type=float, default=DEEPSEEK_TOP_P)
-    parser.add_argument("--teacher-max-tokens", type=int, default=4096)
+    parser.add_argument(
+        "--teacher-top-p",
+        type=float,
+        default=None,
+        help="Defaults to eval_gconfig.top_p from --config.",
+    )
+    parser.add_argument(
+        "--teacher-max-tokens",
+        type=int,
+        default=None,
+        help="Defaults to eval_gconfig.max_new_tokens from --config.",
+    )
     parser.add_argument("--teacher-timeout", type=float, default=300.0)
     parser.add_argument("--teacher-request-params", default="")
     parser.add_argument("--teacher-request-params-file", type=Path, default=None)
@@ -1701,7 +2019,16 @@ def parse_args() -> argparse.Namespace:
         "--student-generalization",
         choices=["config", "off", "on"],
         default="config",
-        help="'config' preserves the original two transfer probes after success.",
+        help="'config' preserves the configured original retest and transfer probes.",
+    )
+    parser.add_argument(
+        "--student-name",
+        action="append",
+        default=[],
+        help=(
+            "Evaluate only this configured student; repeat for multiple students. "
+            "By default all configured students are evaluated."
+        ),
     )
     parser.add_argument(
         "--attempts",
@@ -1771,16 +2098,34 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--presolve-attempts must be non-negative.")
     if args.presolve_max_tokens is not None and args.presolve_max_tokens < 0:
         raise ValueError("--presolve-max-tokens must be non-negative.")
+    if float(args.teacher_temperature) < 0.0:
+        raise ValueError("--teacher-temperature must be non-negative.")
+    if args.teacher_top_p is not None and not 0.0 < float(args.teacher_top_p) <= 1.0:
+        raise ValueError("--teacher-top-p must be in (0, 1].")
+
+
+def resolve_teacher_generation_args(
+    args: argparse.Namespace, config: TutorConfig
+) -> None:
+    eval_gconfig = config.eval_gconfig or config.gconfig
+    if args.teacher_temperature is None:
+        args.teacher_temperature = float(eval_gconfig.temperature)
+    if args.teacher_top_p is None:
+        args.teacher_top_p = eval_gconfig.top_p
+    if args.teacher_max_tokens is None:
+        args.teacher_max_tokens = int(eval_gconfig.max_new_tokens)
 
 
 async def main_async(args: argparse.Namespace) -> None:
-    validate_args(args)
     teacher_base_url = normalize_base_url(args.teacher_base_url)
     env_api_key = os.getenv("DEEPSEEK_API_KEY", "")
     teacher_api_key = env_api_key or args.api_key or "EMPTY"
 
     config, student_models = load_experiment_config(args.config, args.overrides)
     tutor_train._apply_eval_average_rollouts(config)
+    resolve_teacher_generation_args(args, config)
+    validate_args(args)
+    student_models = select_student_models(student_models, args.student_name)
     config.student_generalize.enabled = resolve_generalization(
         args.student_generalization,
         config.student_generalize.enabled,
@@ -1804,7 +2149,7 @@ async def main_async(args: argparse.Namespace) -> None:
     prompt_row_counts = student_prompt_row_counts(dataset)
     modes = resolve_presolve_modes(
         args.teacher_presolve,
-        config.teacher_pre.enabled,
+        effective_eval_presolve_enabled(config),
     )
     attempts = (
         int(args.attempts)
@@ -1813,12 +2158,12 @@ async def main_async(args: argparse.Namespace) -> None:
     )
 
     teacher_request_params = merge_dicts(
+        deepseek_non_thinking_params(config.seed),
         load_request_params(
             args.teacher_request_params,
             args.teacher_request_params_file,
             label="--teacher-request-params",
         ),
-        deepseek_non_thinking_params(config.seed),
     )
 
     workflow_kwargs_by_mode = {
@@ -1841,6 +2186,7 @@ async def main_async(args: argparse.Namespace) -> None:
         attempts=attempts,
         teacher_base_url=teacher_base_url,
         teacher_request_params=teacher_request_params,
+        workflow_kwargs_by_mode=workflow_kwargs_by_mode,
         student_prompts=student_prompts,
     )
     output_dir = resolve_output_dir(args, config)
@@ -1907,6 +2253,9 @@ async def main_async(args: argparse.Namespace) -> None:
         dataset_size=len(dataset),
         attempts=attempts,
         generalization_enabled=config.student_generalize.enabled,
+        generalization_levels=configured_generalization_levels(
+            next(iter(workflow_kwargs_by_mode.values()))
+        ),
         student_prompt_rows=prompt_row_counts,
     )
     if prompt_row_counts:

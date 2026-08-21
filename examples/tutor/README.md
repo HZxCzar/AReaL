@@ -168,6 +168,19 @@ configured student; `evaluator.average_rollouts` is applied independently to eac
 student. An empty `student_models` list preserves the legacy behavior where
 `auxiliary_model` is also the student.
 
+The historical selector draws each problem group independently. To make every rollout
+input batch follow the configured student proportions, enable stratification:
+
+```yaml
+student_sampling:
+  strategy: stratified
+```
+
+Quotas follow positive `student_models[].weight` values. Equal weights give equal
+counts whenever the batch size is divisible by the number of students; otherwise the
+remainder rotates across batches. All `gconfig.n_samples` rollouts of a problem still
+share one student, and evaluation remains unchanged.
+
 Repeated online evaluation reports `eval-rollout/solved` and
 `eval-rollout/final_correct` as separate test scores. Per-task stability is logged
 only for `final_correct`:

@@ -17,11 +17,9 @@ worktree the editable install points at).
 from __future__ import annotations
 
 import asyncio
-
 import sys
 from dataclasses import asdict
 
-from areal.api.cli_args import load_expr_config
 import examples.tutor.train  # noqa: F401  (imported so [16] can read its source)
 from examples.tutor.configs import TutorConfig
 from examples.tutor.core.types import (
@@ -32,8 +30,10 @@ from examples.tutor.core.types import (
     TutorTurnState,
 )
 from examples.tutor.prompts import FREE_CHAT_STUDENT_SYSTEM_PROMPT
+from examples.tutor.workflow import SelectedStudent, TutorAgentWorkflow
+
+from areal.api.cli_args import load_expr_config
 from areal.infra.workflow_context import _current_context
-from examples.tutor.workflow import TutorAgentWorkflow
 
 FAILURES: list[str] = []
 BASE = "examples/tutor/configs/math/0810"
@@ -97,12 +97,14 @@ def make_workflow(**attrs: object) -> TutorAgentWorkflow:
         "free_chat_budget": 5,
         "max_turns": 5,
         "free_chat_student_has_not_seen_problem": False,
+        "free_chat_student_awareness_prompt_enabled": False,
         "enable_thinking": False,
         "teacher_show_ground_truth": False,
         "teacher_anti_leak_instruction_enabled": True,
         "teacher_adaptive_instruction_enabled": False,
         "teacher_pre_enabled": False,
         "teacher_history_tags": "stripped",
+        "teacher_private_visibility": False,
         "dataset_type": "math",
     }
     defaults.update(attrs)
@@ -117,6 +119,7 @@ def tutor_state(
     turn_idx: int = 1,
     pre_solve: TeacherPreSolveResult | None = None,
     raw_outputs: tuple[str, ...] = (),
+    private_profile: str = "",
 ) -> TutorTurnState:
     return TutorTurnState(
         task=TASK,
@@ -128,6 +131,7 @@ def tutor_state(
         max_turns=5,
         teacher_pre_solve_result=pre_solve,
         previous_tutor_raw_outputs=raw_outputs,
+        teacher_private_student_profile=private_profile,
     )
 
 
@@ -233,6 +237,49 @@ def main() -> int:
     check("carries the task", TASK in system)
     check("says the student is tested alone afterwards",
           "solve a problem from scratch" in system)
+    awareness_sentence = (
+        "Different students may behave differently. We will also assess how well "
+        "you understand this student and how effectively you adapt your teaching "
+        "to them."
+    )
+    check("does not add student-awareness framing by default",
+          awareness_sentence not in system)
+    awareness_system = make_workflow(
+        free_chat_student_awareness_prompt_enabled=True
+    )._build_tutor_messages(tutor_state())[0]["content"]
+    expected_awareness_system = system.replace(
+        "to see whether the student understands.",
+        f"to see whether the student understands. {awareness_sentence}",
+        1,
+    )
+    check("student-awareness switch adds only the agreed sentence",
+          awareness_system == expected_awareness_system, awareness_system)
+    for prompt_enabled in (False, True):
+        for probe_enabled in (False, True):
+            combination_system = make_workflow(
+                free_chat_student_awareness_prompt_enabled=prompt_enabled,
+                type_probe_enabled=probe_enabled,
+            )._build_tutor_messages(tutor_state())[0]["content"]
+            check(
+                "student-awareness prompt and type probe are independent "
+                f"({prompt_enabled=}, {probe_enabled=})",
+                (awareness_sentence in combination_system) is prompt_enabled,
+            )
+    transfer_system = make_workflow(
+        free_chat_transfer_prompts=True
+    )._build_tutor_messages(tutor_state())[0]["content"]
+    transfer_awareness_system = make_workflow(
+        free_chat_transfer_prompts=True,
+        free_chat_student_awareness_prompt_enabled=True,
+    )._build_tutor_messages(tutor_state())[0]["content"]
+    check(
+        "the transfer teacher prompt supports the same independent switch",
+        transfer_awareness_system
+        == transfer_system.replace(
+            "questions.", f"questions. {awareness_sentence}", 1
+        ),
+        transfer_awareness_system,
+    )
     unseen_sentence = "The student has not seen the math problem yet."
     check("does not add student problem awareness state by default",
           unseen_sentence not in system)
@@ -406,6 +453,109 @@ What does Vieta give you?
           and "nonsense" not in "".join(m["content"] for m in rejected),
           f"got {[m['role'] for m in rejected]}")
 
+    print("\n[6b] sampled student traits are private and compose by axis")
+
+    def private_profile(mode: str, mask: dict[str, object]) -> str:
+        return TutorAgentWorkflow._teacher_private_student_profile(
+            SelectedStudent(
+                name="sampled-student",
+                model="student-model",
+                caller=object(),  # type: ignore[arg-type]
+                mode=mode,
+                mask=mask,
+            )
+        )
+
+    text_profile = private_profile("text", {"mode": "full"})
+    code_profile = private_profile("code", {"mode": "full"})
+    check("text behavior gets its own paragraph",
+          "natural language and mathematical notation" in text_profile)
+    check("code behavior gets its own paragraph",
+          "one Python program per reply" in code_profile
+          and "persistent interpreter" in code_profile)
+    check("the behavior paragraphs differ", text_profile != code_profile)
+
+    information_cases = (
+        ({"mode": "full"}, "see and remember the complete conversation"),
+        (
+            {"mode": "student_fade", "keep_recent": 0},
+            "forgets all of its own earlier replies",
+        ),
+        (
+            {"mode": "teacher_fade", "keep_recent": 0},
+            "forgets all earlier messages from you",
+        ),
+        (
+            {"mode": "long_drop", "long_drop_words": 75},
+            "at most the first 75 words",
+        ),
+    )
+    information_profiles = []
+    for mask, expected in information_cases:
+        profile = private_profile("text", mask)
+        information_profiles.append(profile)
+        check(f"{mask['mode']} gets its own information paragraph",
+              expected in profile, profile)
+    check("the four information paragraphs differ",
+          len(set(information_profiles)) == 4)
+
+    private = make_workflow(
+        teacher_private_visibility=True,
+        teacher_pre_enabled=True,
+    )
+    profile = private_profile(
+        "code", {"mode": "long_drop", "long_drop_words": 75}
+    )
+    private_drafted = private._build_tutor_messages(
+        tutor_state(
+            pre_solve=TeacherPreSolveResult(
+                enabled=True, mode="filter_solver", accepted=True,
+                raw_output="Complete the square: f(x) = (x-2)^2 + 3.",
+            ),
+            private_profile=profile,
+        )
+    )
+    check("private profile follows the pre-solve in the opening user turn",
+          [m["role"] for m in private_drafted]
+          == ["system", "user", "assistant", "user"]
+          and profile in private_drafted[3]["content"])
+    check("private profile is absent from system and pre-solve messages",
+          all(profile not in message["content"] for message in private_drafted[:3]))
+    check("private profile occurs once in a teacher prompt",
+          sum(message["content"].count("Private student profile")
+              for message in private_drafted) == 1)
+    later_private = private._build_tutor_messages(
+        tutor_state(
+            turns=[
+                {"role": "teacher", "content": "First teaching reply."},
+                {"role": "student", "content": "First student reply."},
+            ],
+            turn_idx=2,
+            private_profile=profile,
+        )
+    )
+    later_profile_indices = [
+        index
+        for index, message in enumerate(later_private)
+        if "Private student profile" in message["content"]
+    ]
+    first_history_index = next(
+        index
+        for index, message in enumerate(later_private)
+        if "First teaching reply." in message["content"]
+    )
+    check("later teacher calls retain one initial private-profile user turn",
+          len(later_profile_indices) == 1
+          and later_private[later_profile_indices[0]]["role"] == "user"
+          and later_profile_indices[0] < first_history_index)
+    hidden = make_workflow(teacher_private_visibility=False)
+    hidden_messages = hidden._build_tutor_messages(
+        tutor_state(private_profile=profile)
+    )
+    check("switch off keeps the profile out even if state carries one",
+          all("Private student profile" not in message["content"]
+              for message in hidden_messages))
+
     print("\n[7] the student is told nothing")
     student_messages = workflow._build_student_messages(
         StudentTurnState(
@@ -424,6 +574,10 @@ What does Vieta give you?
     check("the teacher's opening is the first user turn",
           [m["role"] for m in student_messages] == ["system", "user"]
           and "What does the graph look like?" in student_messages[1]["content"])
+    check("the teacher's private profile never enters the student prompt",
+          all("Private student profile" not in message["content"]
+              and "at most the first 75 words" not in message["content"]
+              for message in student_messages))
 
     print("\n[8] the re-test replays the conversation and then shows the task")
     conversation = [

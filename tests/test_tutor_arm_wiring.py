@@ -70,10 +70,13 @@ def main() -> int:
     for name in (
         "free_chat",
         "student_models",
+        "student_sampling",
         "student_generalize_turn_credit",
         "teacher_pre_share_per_group",
         "teacher_pre_visibility",
         "teacher_history_tags",
+        "teacher_private_visibility",
+        "student_type_probe",
         "turn_local_reward_components",
         "opd",
         "cross_eval",

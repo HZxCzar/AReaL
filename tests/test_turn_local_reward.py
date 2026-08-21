@@ -32,7 +32,7 @@ def _leak(leaked: bool) -> LeakCheckResult:
     )
 
 
-def _turn(turn_idx: int, *, leaked: bool) -> TurnArtifact:
+def _turn(turn_idx: int, *, leaked: bool, format_error: bool = False) -> TurnArtifact:
     return TurnArtifact(
         turn_idx=turn_idx,
         tutor_state=SimpleNamespace(max_turns=5),
@@ -43,6 +43,7 @@ def _turn(turn_idx: int, *, leaked: bool) -> TurnArtifact:
         leak_result=_leak(leaked),
         public_history_before=[],
         public_history_after=[],
+        tutor_format_error=format_error,
     )
 
 
@@ -80,6 +81,21 @@ def test_leak_penalty_is_reported_as_turn_local_when_configured():
     # The scalar total is untouched, so total_reward and the
     # reward_component/* metrics keep their previous meaning.
     assert [a.reward for a in assignments] == [0.0, -1.0]
+
+
+def test_format_penalty_is_reported_as_turn_local_when_configured():
+    computer = EpisodeRewardComputer(
+        success_reward=0.0,
+        leak_penalty=-1.0,
+        leak_penalty_mode="rawbase",
+        format_error_penalty=-0.5,
+        turn_local_components=("format_error",),
+    )
+    episode = _episode([_turn(1, leaked=False, format_error=True)])
+    assignments = asyncio.run(computer.compute(episode))
+
+    assert [a.local_reward for a in assignments] == [-0.5]
+    assert [a.reward for a in assignments] == [-0.5]
 
 
 def test_local_reward_defaults_to_zero_so_behaviour_is_unchanged():
@@ -169,7 +185,7 @@ def _group_data(**extra):
     return base
 
 
-def _group_actor():
+def _group_actor(**config_overrides):
     return _make_actor(
         PPOActorConfig(
             advantage_estimator="rebn",
@@ -178,6 +194,7 @@ def _group_actor():
             adv_norm=None,
             group_baseline="episode",
             group_baseline_leave1out=True,
+            **config_overrides,
         )
     )
 
@@ -199,7 +216,7 @@ def _turn_group_data(**extra):
     return base
 
 
-def _turn_group_actor():
+def _turn_group_actor(**config_overrides):
     return _make_actor(
         PPOActorConfig(
             advantage_estimator="rebn",
@@ -208,6 +225,7 @@ def _turn_group_actor():
             adv_norm=None,
             group_baseline="turn",
             group_baseline_leave1out=True,
+            **config_overrides,
         )
     )
 
@@ -217,6 +235,21 @@ def test_turn_group_baseline_keeps_local_penalty_at_its_depth():
     torch.testing.assert_close(
         result["turn_advantage"],
         torch.tensor([0.0, 0.5, 0.0, 0.5, 0.0, -1.0]),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_turn_group_baseline_can_exclude_all_local_rewards():
+    actor = _turn_group_actor(group_baseline_local_reward_mode="exclude")
+    result = actor._compute_advantages(_turn_group_data())
+
+    torch.testing.assert_close(
+        result["group_baseline"], torch.full((6,), 0.5), rtol=0.0, atol=0.0
+    )
+    torch.testing.assert_close(
+        result["turn_advantage"],
+        torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, -1.0]),
         rtol=0.0,
         atol=0.0,
     )
@@ -267,6 +300,31 @@ def test_only_the_leaking_turn_keeps_the_penalty():
     # The leaker is charged exactly as much as before; only the innocent turn in
     # front of it is relieved.
     assert split["turn_advantage"][3] == plain["turn_advantage"][3]
+
+
+def test_episode_group_baseline_can_exclude_all_local_rewards():
+    actor = _group_actor(group_baseline_local_reward_mode="exclude")
+    result = actor._compute_advantages(
+        _group_data(local_rewards=torch.tensor([0.0, 0.0, 0.0, -1.0]))
+    )
+
+    torch.testing.assert_close(
+        result["group_baseline"], torch.full((4,), 0.5), rtol=0.0, atol=0.0
+    )
+    torch.testing.assert_close(
+        result["turn_advantage"],
+        torch.tensor([0.0, 0.0, 0.0, -1.0]),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_group_baseline_local_reward_mode_rejects_unknown_value():
+    with pytest.raises(ValueError, match="must be 'include', or 'exclude'"):
+        PPOActorConfig(
+            advantage_estimator="rebn",
+            group_baseline_local_reward_mode="unknown",
+        )
 
 
 def test_local_rewards_require_rebn():
