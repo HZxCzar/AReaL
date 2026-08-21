@@ -14,6 +14,10 @@ usage() {
     '  bash examples/tutor/run_offline.sh 2 examples/tutor/configs/math/0818/2gpu/base.yaml' \
     '  DRY_RUN=1 bash examples/tutor/run_offline.sh 2 CONFIG.yaml total_train_steps=2' \
     '' \
+    'The generation/training GPU split is NOT a launcher option. It is read out' \
+    'of the config backends, sglang:d<gen>p1t1 and fsdp:d<actor>p1t1, which must' \
+    'sum to <n>; the allocation file is where the split is written down.' \
+    '' \
     'Main environment overrides:' \
     '  CONFIG                         Fallback when positional CONFIG.yaml is omitted.' \
     '  CUDA_VISIBLE_DEVICES           At least <n> integer GPU ids; first <n> are used.' \
@@ -163,9 +167,6 @@ if (( ${#GPU_IDS[@]} < GPU_COUNT )); then
 fi
 
 SELECTED_GPU_IDS=("${GPU_IDS[@]:0:GPU_COUNT}")
-GEN_GPU_COUNT=$((GPU_COUNT / 2))
-ACTOR_GPU_IDS=("${SELECTED_GPU_IDS[@]:0:GEN_GPU_COUNT}")
-ROLLOUT_GPU_IDS=("${SELECTED_GPU_IDS[@]:GEN_GPU_COUNT:GEN_GPU_COUNT}")
 
 join_by_comma() {
   local IFS=,
@@ -173,8 +174,6 @@ join_by_comma() {
 }
 
 SELECTED_GPU_SPEC="$(join_by_comma "${SELECTED_GPU_IDS[@]}")"
-ACTOR_GPU_SPEC="$(join_by_comma "${ACTOR_GPU_IDS[@]}")"
-ROLLOUT_GPU_SPEC="$(join_by_comma "${ROLLOUT_GPU_IDS[@]}")"
 export CUDA_VISIBLE_DEVICES="$SELECTED_GPU_SPEC"
 
 if [[ "$DRY_RUN" != "1" ]]; then
@@ -242,10 +241,13 @@ export TUTOR_QWEN3_1_7B_BASE_URL="$STUDENT_BASE_URL"
 export TUTOR_QWEN3_8B_BASE_URL="http://127.0.0.1:1/v1"
 export STUDENT_MEM_FRACTION_STATIC
 
-# Resolve the final config before reserving GPU memory.
-"$PYTHON" -B - "$CONFIG" "$GPU_COUNT" "$GEN_GPU_COUNT" "$STUDENT_BASE_URL" \
+# Resolve the final config before reserving GPU memory. The generation/training
+# split is read OUT of the config's backends rather than imposed on them, so the
+# allocation file stays the single place the split is written down.
+CONFIG_SUMMARY="$("$PYTHON" -B - "$CONFIG" "$GPU_COUNT" "$STUDENT_BASE_URL" \
   "$STUDENT_MODEL" "${USER_OVERRIDES[@]}" <<'PY'
 import json
+import re
 import sys
 from urllib.parse import urlparse
 
@@ -257,7 +259,6 @@ from examples.tutor.configs import TutorConfig
 (
     config_path,
     gpu_count,
-    gen_gpu_count,
     student_url,
     served_model,
     *overrides,
@@ -268,7 +269,37 @@ config = OmegaConf.to_object(structured_config)
 if not isinstance(config, TutorConfig):
     raise SystemExit(f"Expected TutorConfig, got {type(config).__name__}.")
 gpu_count = int(gpu_count)
-gen_gpu_count = int(gen_gpu_count)
+
+
+def _backend_devices(role, backend, prefix):
+    """The device count a d<N>p1t1 backend string asks for."""
+    match = re.fullmatch(rf"{prefix}:d(\d+)p(\d+)t(\d+)", backend)
+    if match is None:
+        raise SystemExit(
+            f"{role} backend must look like {prefix}:d<N>p1t1, got {backend!r}."
+        )
+    devices, pipeline, tensor = (int(part) for part in match.groups())
+    if pipeline != 1 or tensor != 1:
+        raise SystemExit(
+            f"{role} backend must be p1t1 for the offline launcher, got {backend!r}."
+        )
+    return devices
+
+
+# THE SPLIT COMES FROM THE CONFIG, and half-and-half is no longer assumed. The
+# trainer is the critical path at every allocation measured -- timeperf/rollout,
+# the time the trainer waits on generated data, is 0.0 at 2 and 4 GPUs -- so the
+# 4- and 8-GPU allocations hand generation one and two cards and give the rest to
+# the actor. Reading the counts out of the backends keeps the allocation file the
+# only place the split is stated.
+gen_gpu_count = _backend_devices("rollout", config.rollout.backend, "sglang")
+actor_gpu_count = _backend_devices("actor", config.actor.backend, "fsdp")
+if gen_gpu_count + actor_gpu_count != gpu_count:
+    raise SystemExit(
+        f"Config splits {actor_gpu_count} actor + {gen_gpu_count} generation GPUs "
+        f"= {actor_gpu_count + gen_gpu_count}, but the launcher was asked for "
+        f"{gpu_count}. Fix the allocation file or the GPU count."
+    )
 
 if int(config.cluster.n_nodes) != 1:
     raise SystemExit(
@@ -283,17 +314,7 @@ if config.scheduler.type != "local":
     raise SystemExit(
         f"Offline launcher requires scheduler.type=local, got {config.scheduler.type}."
     )
-expected_actor_backend = f"fsdp:d{gen_gpu_count}p1t1"
-expected_rollout_backend = f"sglang:d{gen_gpu_count}p1t1"
-if (
-    config.actor.backend != expected_actor_backend
-    or config.rollout.backend != expected_rollout_backend
-):
-    raise SystemExit(
-        "Expected exact half-GPU backends "
-        f"actor={expected_actor_backend}, rollout={expected_rollout_backend}; got "
-        f"actor={config.actor.backend}, rollout={config.rollout.backend}."
-    )
+expected_actor_backend = f"fsdp:d{actor_gpu_count}p1t1"
 if config.actor.scheduling_strategy.type != "separation":
     raise SystemExit("Actor scheduling_strategy must be separation.")
 if config.rollout.scheduling_strategy.type != "separation":
@@ -366,6 +387,8 @@ print(
             "experiment_name": config.experiment_name,
             "trial_name": config.trial_name,
             "gpus": gpu_count,
+            "generation_gpus": gen_gpu_count,
+            "actor_gpus": actor_gpu_count,
             "actor_backend": config.actor.backend,
             "rollout_backend": config.rollout.backend,
             "auxiliary": "self (rollout base model, LoRA disabled)",
@@ -384,6 +407,31 @@ print(
     )
 )
 PY
+)"
+printf '%s\n' "$CONFIG_SUMMARY"
+
+GEN_GPU_COUNT="$(printf '%s\n' "$CONFIG_SUMMARY" \
+  | sed -n 's/^[[:space:]]*"generation_gpus":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+ACTOR_GPU_COUNT="$(printf '%s\n' "$CONFIG_SUMMARY" \
+  | sed -n 's/^[[:space:]]*"actor_gpus":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+if [[ ! "$GEN_GPU_COUNT" =~ ^[1-9][0-9]*$ ]] \
+  || [[ ! "$ACTOR_GPU_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'Could not read the GPU split out of the config summary above.\n' >&2
+  exit 1
+fi
+
+# WHICH ids go to which role is not this script's choice -- it has to match what
+# AReaL's scheduler does, or the student server reserves memory on a card the
+# rollout engine is not on. _allocate_gpus hands ids out with a monotonic counter
+# in role-creation order and the actor role is created before the rollout role,
+# so the actor takes the leading ACTOR_GPU_COUNT ids and the rollout engine the
+# trailing GEN_GPU_COUNT. The student is pinned to that same tail on purpose:
+# sglang's mem_fraction_static and the student's have to land on one card
+# together, or each of them collides with the actor instead of with each other.
+ACTOR_GPU_IDS=("${SELECTED_GPU_IDS[@]:0:ACTOR_GPU_COUNT}")
+ROLLOUT_GPU_IDS=("${SELECTED_GPU_IDS[@]:ACTOR_GPU_COUNT:GEN_GPU_COUNT}")
+ACTOR_GPU_SPEC="$(join_by_comma "${ACTOR_GPU_IDS[@]}")"
+ROLLOUT_GPU_SPEC="$(join_by_comma "${ROLLOUT_GPU_IDS[@]}")"
 
 if [[ "$(basename "$(dirname "$ROOT_DIR")")" == "AReaL.worktrees" ]]; then
   PROJECT_ROOT="$(cd "$ROOT_DIR/../.." && pwd)"
