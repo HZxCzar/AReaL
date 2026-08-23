@@ -856,6 +856,54 @@ def _compute_episode_loss_weights(
     return weights
 
 
+def _compute_turn_loss_weights(
+    valid_mask: torch.Tensor,
+    token_counts: torch.Tensor,
+) -> torch.Tensor:
+    """Per-row weight equalizing each turn's gradient mass.
+
+    The same identity the episode version rests on -- the loss is a token mean, so
+    scaling a row's advantage scales its loss contribution exactly -- applied one
+    level down: every turn contributes the mean turn's worth of gradient however
+    long it is.
+
+    THIS IS THE LEVEL THAT BOUNDS ONE DEGENERATE GENERATION. Under 'token' a turn's
+    share of the batch is its length, and a teacher that falls into a repetition
+    loop runs to gconfig.max_new_tokens before anything stops it. On
+    20260822_133603 those capped 4096-token turns took 1.7% of the batch gradient,
+    then 14.1%, then 47.7% over two steps, each carrying an advantage near -4 sigma,
+    and the policy did not come back. Recomputed at 'turn' the same three batches
+    put them at 0.1%, 0.9% and 4.9%.
+
+    The episode level does not reach this. It normalizes by an episode's total
+    tokens, and a repetition that terminates its own episode on turn one carries
+    4096 of them against a mean episode roughly half that -- so it is scaled by
+    about a half, and still held 28.7% of that same batch.
+    """
+    weights = torch.ones_like(token_counts, dtype=torch.float32)
+    valid_rows = torch.nonzero(valid_mask, as_tuple=False).flatten()
+    if valid_rows.numel() == 0:
+        return weights
+
+    turn_tokens = token_counts[valid_rows].to(torch.float32).clamp_min(1.0)
+    weights[valid_rows] = turn_tokens.mean() / turn_tokens
+    return weights
+
+
+def _compute_loss_weights(
+    level: str,
+    trajectory_ids: torch.Tensor,
+    valid_mask: torch.Tensor,
+    token_counts: torch.Tensor,
+) -> torch.Tensor:
+    """Dispatch actor.loss_weighting. 'token' is the identity and never gets here."""
+    if level == "episode":
+        return _compute_episode_loss_weights(trajectory_ids, valid_mask, token_counts)
+    if level == "turn":
+        return _compute_turn_loss_weights(valid_mask, token_counts)
+    raise ValueError(f"unknown actor.loss_weighting level {level!r}")
+
+
 def _compute_batch_centered_penalties(
     scores: torch.Tensor,
     weights: torch.Tensor,
@@ -1513,14 +1561,18 @@ class PPOActor:
                     normalized_turn_returns
                 )
                 data["world_model_rl_weight"] = world_model_rl_weights
-            if self.config.episode_loss_weighting:
-                episode_loss_weights = _compute_episode_loss_weights(
+            if self.config.loss_weighting != "token":
+                loss_weights = _compute_loss_weights(
+                    self.config.loss_weighting,
                     data["trajectory_id"].to(reward_score.device),
                     valid_turn_mask,
                     loss_mask.sum(dim=-1),
                 )
-                normalized_turn_returns = normalized_turn_returns * episode_loss_weights
-                data["episode_loss_weight"] = episode_loss_weights
+                normalized_turn_returns = normalized_turn_returns * loss_weights
+                # The column keeps its name across all levels so the series, the
+                # drop list below and the tests reading it stay put; it carries
+                # whichever level actor.loss_weighting names.
+                data["episode_loss_weight"] = loss_weights
             if batch_centered_penalties is not None:
                 normalized_turn_returns = (
                     normalized_turn_returns + batch_centered_penalties

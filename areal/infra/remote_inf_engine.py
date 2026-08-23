@@ -1811,7 +1811,18 @@ class RemoteInfEngine(InferenceEngine):
     def launch_server(self, server_args: dict[str, Any]) -> LocalInfServerInfo:
         """Launch a local inference server."""
         server_args["host"] = gethostip()
-        server_args["port"] = find_free_ports(1)[0]
+        # PORT DRAWN BELOW THE KERNEL'S EPHEMERAL FLOOR, not from the default
+        # 1024-65535. find_free_ports probes a port and releases it, and the
+        # server binds it only after model load and CUDA-graph capture -- a ~15 s
+        # window. This host's ip_local_port_range is 32768-60999, so a default
+        # draw can be handed to any outbound socket inside that window, and a
+        # d4 rollout backend has four servers drawing at once against a busy
+        # container: two of three 8-GPU launches on 20260822 died with
+        # 'address already in use' (ports 51126 and 58316, both ephemeral) on
+        # one of their four servers. 20000-32000 cannot collide that way.
+        # Explicit ranges are already the pattern here -- see infra/utils/ray.py
+        # and infra/launcher/local.py.
+        server_args["port"] = find_free_ports(1, port_range=(20000, 32000))[0]
         process = self.backend.launch_server(server_args)
         address = format_hostport(server_args["host"], server_args["port"])
         server_info = LocalInfServerInfo(

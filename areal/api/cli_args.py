@@ -1329,14 +1329,27 @@ class PPOActorConfig(TrainEngineConfig):
             "choices": ["include", "exclude"],
         },
     )
+    loss_weighting: str = field(
+        default="token",
+        metadata={
+            "help": "The level at which the PPO loss weights a row against the rest "
+            "of the batch. 'token': no reweighting -- the loss is a token mean, so a "
+            "row's gradient share is proportional to its length. 'episode': scale "
+            "each turn by (mean episode tokens / this episode's tokens), so every "
+            "episode counts the same however many turns it ran. 'turn': scale each "
+            "turn by (mean turn tokens / this turn's tokens), so every turn counts "
+            "the same however long it is. Anything but 'token' requires "
+            "advantage_estimator='rebn'.",
+            "choices": ["token", "episode", "turn"],
+        },
+    )
     episode_loss_weighting: bool = field(
         default=False,
         metadata={
-            "help": "Scale each turn's advantage by (mean episode token count / this "
-            "episode's token count) so every episode contributes equal gradient mass "
-            "regardless of how many turns it ran. Counteracts long failing episodes "
-            "dominating the token-level PPO loss average. Requires "
-            "advantage_estimator='rebn'."
+            "help": "DEPRECATED alias for loss_weighting='episode', kept so existing "
+            "configs keep loading. True is folded into loss_weighting during "
+            "validation; setting both to conflicting values raises rather than "
+            "picking a winner silently."
         },
     )
 
@@ -1477,9 +1490,28 @@ class PPOActorConfig(TrainEngineConfig):
             raise ValueError(
                 "actor.group_baseline requires advantage_estimator='rebn'."
             )
-        if self.episode_loss_weighting and self.advantage_estimator != "rebn":
+        loss_weighting_levels = {"token", "episode", "turn"}
+        if self.loss_weighting not in loss_weighting_levels:
             raise ValueError(
-                "actor.episode_loss_weighting requires advantage_estimator='rebn'."
+                "actor.loss_weighting must be one of "
+                f"{sorted(loss_weighting_levels)}, got {self.loss_weighting!r}."
+            )
+        if self.episode_loss_weighting:
+            # Fold the deprecated bool into the enum. A real disagreement between
+            # the two is an error: either precedence rule would leave a config that
+            # does not do what it says.
+            if self.loss_weighting == "token":
+                self.loss_weighting = "episode"
+            elif self.loss_weighting != "episode":
+                raise ValueError(
+                    "actor.episode_loss_weighting=True conflicts with "
+                    f"actor.loss_weighting={self.loss_weighting!r}. Drop the "
+                    "deprecated bool and set actor.loss_weighting alone."
+                )
+        if self.loss_weighting != "token" and self.advantage_estimator != "rebn":
+            raise ValueError(
+                f"actor.loss_weighting={self.loss_weighting!r} requires "
+                "advantage_estimator='rebn'."
             )
         if self.advantage_estimator == "rebn" and self.reward_norm is not None:
             raise ValueError(
