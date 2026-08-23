@@ -169,15 +169,15 @@ reward:
   # Lists replace on merge; spelling out both components preserves leak-local.
   turn_local_components: ["leak", "format_error"]
 
-debug_trace_dir: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/debug_traces/${experiment_name}/${trial_name}
+debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor/debug_traces/${experiment_name}/${trial_name}
 debug_trace_every_n_rollouts: 10
 cluster:
   n_nodes: 1
   n_gpus_per_node: 2
-  fileroot: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor
+  fileroot: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor
   name_resolve:
     type: nfs
-    nfs_record_root: /inspire/qb-ilm/project/qproject-fundationmodel/public/wxxu/TAgent/output/tutor/name_resolve
+    nfs_record_root: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor/name_resolve
 scheduler:
   type: local
 rollout:
@@ -202,10 +202,44 @@ rollout:
     chat_template_type: concat
     export_style: concat
     turn_discount: 1.0
+# THE GENERATION CAP AND WHAT HAPPENS AT IT. The two belong together.
+#
+# A draft that stops on 'length' closed no tags, so it is a format error whatever
+# else it says, and under the token-mean PPO loss it also brings its whole length
+# into the gradient. That pair ended 20260822_133603, _133237 and _072948: a
+# teacher fell into a repetition loop, ran to the cap, and those capped turns took
+# 1.7% of the batch gradient, then 14.1%, then 47.7% over two steps, each at about
+# -4 sigma. Entropy left its floor, malformed output followed within three steps,
+# and none of the three came back. The leak penalty is TWICE the format penalty
+# with the same un-baselined, episode-terminating shape and sat at 3-4% for 130
+# steps without doing anything -- the length is what differs, not the reward.
+#
+# 1024 RATHER THAN 4096. Over ~32k healthy turns the median generation is 172-221
+# tokens, p99 is 440-551, and the longest seen at all is 992. 1024 therefore clips
+# nothing real, every length stop at it is pathological by construction, and a
+# survivor costs 5x a normal turn instead of 20x.
+#
+# LENGTH_RETRY resamples the turn instead of training on it, which is the only
+# remedy that removes the sample rather than making it count for less: the
+# discarded draft reaches nothing and the episode is not terminated, so it keeps
+# the re-test a format termination would have forfeited. Recomputed on the batch
+# that ignited 20260822_133603, three attempts take the capped share from 14.1% to
+# 0.3%.
+#
+# Attempts are CORRELATED, so this is not p^3. Repetition is prompt-locked: one
+# step after ignition, 8 of the 49 affected problems had 6 of their 8 samples
+# capping and 2 had all 8, and retry's effectiveness there falls from 93% to 56%.
+# Watch rollout/length_retry/exhausted. Near zero means the token-level loss is
+# safe; climbing means the repetition is locking and actor.loss_weighting: turn --
+# which bounds the share at the count share regardless of correlation -- is the
+# next lever.
+length_retry:
+  enabled: true
+  attempts: 3
 gconfig:
   n_samples: 8
   min_new_tokens: 0
-  max_new_tokens: 4096
+  max_new_tokens: 1024
   max_tokens: 24576
   greedy: false
   temperature: 1.0
@@ -214,7 +248,11 @@ gconfig:
 eval_gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 4096
+  # Matched to gconfig deliberately. Eval also runs the pre-solve, and at eval
+  # teacher_pre_verify is false, so its attempts collapse to one and a truncated
+  # draft is accepted as-is -- leaving 4096 here would measure a generation regime
+  # training no longer has.
+  max_new_tokens: 1024
   max_tokens: 24576
   greedy: false
   temperature: 0.7
@@ -381,9 +419,9 @@ recover:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
-  freq_epochs: 10
-  freq_steps: null
-  freq_secs: 3600
+  freq_epochs: null
+  freq_steps: 25
+  freq_secs: null
 # evaluator:
 #   experiment_name: ${experiment_name}
 #   trial_name: ${trial_name}

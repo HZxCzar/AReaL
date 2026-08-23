@@ -1,11 +1,11 @@
 # full-students at 4 GPUs. Composition only: what the arm does comes from
 # base/full-students.yaml, how many GPUs it gets from alloc.yaml.
 defaults:
-  - ../base/full-10turns@_global_
+  - ../base/full-probe@_global_
   - alloc@_global_
   - _self_
 
-trial_name: 0818-full-10turns-4gpu
+trial_name: 0818-full-probe-4gpu
 
 stats_logger:
   wandb:

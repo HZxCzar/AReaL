@@ -6,12 +6,15 @@ trial_name: 0818-full
 
 student_models: []
 student_axes:
-- behaviors: [text, code]
+- behaviors: [text]
   informations:
     original:
       mode: full
     student_fade:
       mode: student_fade
+      keep_recent: 0
+    teacher_fade:
+      mode: teacher_fade
       keep_recent: 0
     long_drop:
       mode: long_drop
@@ -44,4 +47,3 @@ student_type_probe:
   reward_scale: 0
   temperature: 1.0
   max_new_tokens: 1
-
