@@ -2,11 +2,12 @@
 
 The probe is a sidecar: its prompt and sampled answer never enter the teaching
 trajectory or the tensors trained by PPO. Behavior and information are read as
-separate multiple-choice axes. Each answer option is shown in every letter
-position, the label-token probabilities are mapped back to semantic option
-order, and the rotations are averaged. The two distributions are combined into
-an eight-way joint distribution before the correct student's probability is
-used as reward.
+separate axes. Non-singleton axes are probed as multiple-choice questions: each
+answer option is shown in every letter position, the label-token probabilities
+are mapped back to semantic option order, and the rotations are averaged. A
+singleton axis is deterministic and requires no model call. The axis
+distributions are combined before the correct student's probability is used as
+reward.
 """
 
 from __future__ import annotations
@@ -31,9 +32,9 @@ class ProbeAxis:
     options: tuple[ProbeOption, ...]
 
     def __post_init__(self) -> None:
-        if len(self.options) < 2:
+        if not self.options:
             raise ValueError(
-                f"probe axis {self.name!r} needs at least two options, "
+                f"probe axis {self.name!r} needs at least one option, "
                 f"got {len(self.options)}."
             )
         if len(self.options) > len(LETTERS):

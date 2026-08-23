@@ -888,6 +888,48 @@ class TutorPolarisProcessingConfig:
 
 
 @dataclass
+class TutorLengthRetryConfig:
+    """Resample a teacher turn that ran to the generation cap.
+
+    A turn that stops on 'length' never closed its tags, so it is a format error by
+    construction. Under a token-mean loss it also carries its whole length into the
+    gradient: on 20260822_133603 the capped 4096-token turns took 1.7% of the batch
+    gradient, then 14.1%, then 47.7% over two steps, each at roughly -4 sigma, and
+    the policy did not come back.
+
+    Retrying is the only remedy that removes the sample instead of shrinking it.
+    The discarded draft never reaches the batch, and the episode is not terminated,
+    so it keeps the re-test that a format termination would have forfeited --
+    actor.loss_weighting and gconfig.max_new_tokens can only make the sample count
+    for less. When every attempt still hits the cap the last one is kept and the
+    normal format handling applies, so this lowers the rate and never changes what
+    happens once it is exhausted.
+    """
+
+    enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Resample a teacher turn whose generation stopped on the token "
+                "limit, up to `attempts` times. Discarded drafts never enter "
+                "training. Off keeps the first draft, whatever it is."
+            )
+        },
+    )
+    attempts: int = field(
+        default=3,
+        metadata={
+            "help": (
+                "Total teacher generations allowed for one turn, the first "
+                "included. 1 disables retrying even with enabled true. Each "
+                "attempt is a full generation at gconfig.max_new_tokens, so this "
+                "is wall clock spent on exactly the turns that need it."
+            )
+        },
+    )
+
+
+@dataclass
 class TutorTeacherPreConfig:
     enabled: bool = field(
         default=False,
@@ -2336,6 +2378,9 @@ class TutorConfig(GRPOConfig):
     )
     prompt_pool: TutorPromptPoolConfig = field(default_factory=TutorPromptPoolConfig)
     teacher_pre: TutorTeacherPreConfig = field(default_factory=TutorTeacherPreConfig)
+    length_retry: TutorLengthRetryConfig = field(
+        default_factory=TutorLengthRetryConfig
+    )
     auxiliary_model: TutorAuxiliaryModelConfig = field(
         default_factory=TutorAuxiliaryModelConfig
     )

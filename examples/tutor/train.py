@@ -550,6 +550,8 @@ def main(args):
         teacher_user_prompt_template=config.teacher_user_prompt_template,
         teacher_show_ground_truth=config.teacher_show_ground_truth,
         format_handling_mode=config.format_handling_mode,
+        length_retry_enabled=config.length_retry.enabled,
+        length_retry_attempts=config.length_retry.attempts,
         teacher_pre_enabled=teacher_pre.enabled,
         teacher_pre_mode=teacher_pre.mode,
         teacher_pre_verify=teacher_pre.verify,

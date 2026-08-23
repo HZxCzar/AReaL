@@ -789,6 +789,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_generalize_turn_credit: bool = False,
         student_generalize_turn_credit_replays: int = 0,
         format_handling_mode: str = "continue",
+        length_retry_enabled: bool = False,
+        length_retry_attempts: int = 3,
         student_generalize_retest_original: bool = False,
         student_generalize_level1_enabled: bool = True,
         student_generalize_level2_enabled: bool = True,
@@ -1403,6 +1405,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "S(t) - S(t-1) and S(0) is that baseline."
             )
         self.format_handling_mode = str(format_handling_mode or "continue")
+        self.length_retry_enabled = bool(length_retry_enabled)
+        self.length_retry_attempts = max(1, int(length_retry_attempts))
         self.student_generalize_retest_original = bool(
             student_generalize_retest_original
         )
@@ -3147,11 +3151,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
     def _build_student_behavior_probe_axis(self) -> ProbeAxis:
         runtimes = list(getattr(self, "student_model_runtimes", {}).values())
         values = [str(runtime.mode) for runtime in runtimes]
-        if len(set(values)) < 2:
-            raise ValueError(
-                "student_type_probe.enabled=true requires at least two student "
-                "behavior modes in the configured pool."
-            )
         return build_axis(
             "behavior",
             TYPE_PROBE_QUESTIONS["behavior"],
@@ -3164,11 +3163,6 @@ class TutorAgentWorkflow(RolloutWorkflow):
         values = [
             str((runtime.mask or {}).get("mode", MASK_FULL)) for runtime in runtimes
         ]
-        if len(set(values)) < 2:
-            raise ValueError(
-                "student_type_probe.enabled=true requires at least two student "
-                "information modes in the configured pool."
-            )
         return build_axis(
             "information",
             TYPE_PROBE_QUESTIONS["information"],
@@ -3406,6 +3400,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
         lora_version: int | None,
         rid_prefix: str,
     ) -> ProbeReading:
+        if axis.size == 1:
+            if correct_index != 0:
+                raise ValueError(
+                    f"singleton probe axis {axis.name!r} has invalid correct "
+                    f"index {correct_index}."
+                )
+            return ProbeReading(
+                distribution=(1.0,),
+                correct_index=0,
+                disagreement=0.0,
+                calls=0,
+            )
         ids, groups = self._type_probe_letter_ids(axis.size)
         orders = option_rotations(axis.size, cyclic=self.type_probe_cyclic)
         gconfig = self._type_probe_gconfig()
@@ -3474,9 +3480,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         axes = getattr(self, "type_probe_axes", {})
         expected_calls = {
             name: (
-                axes[name].size
-                if self.type_probe_cyclic and name in axes
-                else float(name in axes)
+                0.0
+                if name not in axes or axes[name].size == 1
+                else float(axes[name].size if self.type_probe_cyclic else 1)
             )
             for name in axis_names
         }
@@ -4078,12 +4084,40 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         if actor_caller is None:
             actor_caller = self._make_actor_caller(engine, external_client)
-        result = await actor_caller.generate(
-            messages,
-            lora_version=lora_version,
-            rid_prefix=f"{rid_prefix}-{tutor_state.turn_idx}",
-            input_token_reserve=input_token_reserve,
-        )
+        # A draft that stops on 'length' closed no tags, so it is a format error
+        # whatever else it says, and it brings its full length into the gradient.
+        # Resampling is what keeps it out of the batch entirely; the fallback after
+        # the last attempt is exactly the behaviour from before this existed.
+        attempts = 1
+        if getattr(self, "length_retry_enabled", False):
+            attempts = max(1, int(getattr(self, "length_retry_attempts", 1)))
+        for attempt in range(1, attempts + 1):
+            result = await actor_caller.generate(
+                messages,
+                lora_version=lora_version,
+                # Attempt 1 keeps the original rid, so a run with retries off is
+                # indistinguishable from one made before this branch.
+                rid_prefix=(
+                    f"{rid_prefix}-{tutor_state.turn_idx}"
+                    if attempt == 1
+                    else f"{rid_prefix}-{tutor_state.turn_idx}-len{attempt - 1}"
+                ),
+                input_token_reserve=input_token_reserve,
+            )
+            if getattr(result.response, "stop_reason", None) != "length":
+                break
+        if attempts > 1:
+            # Only reported when the feature is on, so the series never carries
+            # zeros that mean "not measured".
+            _safe_scalar(
+                **{
+                    "length_retry/attempts": float(attempt),
+                    "length_retry/retried": float(attempt > 1),
+                    "length_retry/exhausted": float(
+                        getattr(result.response, "stop_reason", None) == "length"
+                    ),
+                }
+            )
         return result.response, result.raw_text
 
     async def _run_student(
@@ -4398,6 +4432,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         """
         raw = ""
         error: str | None = None
+        received_response = False
         for attempt in range(max(1, retries)):
             result = await self._call_auxiliary_messages(
                 messages,
@@ -4407,12 +4442,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if result.error:
                 error = result.error
                 continue
+            received_response = True
             raw = result.raw_text or result.text or ""
             error = None
             program = extract_program(raw)
             if program is not None:
                 return program, raw, attempt + 1, None
-        return None, raw, max(1, retries), error
+        return None, raw, max(1, retries), None if received_response else error
 
     async def _code_student_answer(
         self,
@@ -4437,7 +4473,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             messages, aux_caller=aux_caller, rid_prefix=rid_prefix
         )
         if program is None:
-            return "", "", "crash", error or "no parseable program"
+            # A response that contains no parseable Python is a student failure,
+            # not an evaluation failure: count the replay and score its empty
+            # output as incorrect. Only API failures that produced no response
+            # remain infrastructure errors.
+            return "", "", "crash", error
         result = await (session.run(program) if keep else session.peek(program))
         return result.output, program, result.status, None
 
@@ -5599,9 +5639,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
             replays = max(1, int(getattr(self, "student_generalize_replays", 1)))
             if code_session is not None:
-                # The re-test runs on a branch: `peek` so the conversation's
-                # namespace is visible to the program but nothing the re-test does
-                # is written back, and the replays stay independent of each other.
+                # The transcript stays visible, but "from scratch" also means a
+                # fresh interpreter: a re-test must not succeed by reading names
+                # left in the tutoring notebook. Each replay gets its own empty
+                # session, while inheriting only the executor configuration.
+                # `peek` keeps even that disposable branch unmodified.
                 # What gets judged is the program's OUTPUT, so the code student's
                 # score is the same quantity as the text student's boxed answer
                 # through the same judge.
@@ -5609,7 +5651,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     *[
                         self._code_student_answer(
                             probe_messages,
-                            session=code_session,
+                            session=CodeSession(
+                                timeout_s=code_session.timeout_s,
+                                python=code_session.python,
+                            ),
                             aux_caller=aux_caller,
                             rid_prefix=(
                                 f"student-transfer-{level}-"
@@ -7221,9 +7266,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     answer for answer, _program, status, _err in answers
                     if status == "ok"
                 ]
-                attempted = sum(
-                    1 for _a, _p, _s, err in answers if err != "no parseable program"
-                )
+                attempted = sum(1 for _a, _p, _s, err in answers if err is None)
                 if not attempted:
                     return None
                 judged = await asyncio.gather(
