@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from examples.tutor import train as tutor_train
+from examples.tutor.scripts import evaluate_api_teacher as api_eval
 from examples.tutor.scripts.eval_checkpoints import (
     Checkpoint,
     checkpoint_request_params,
@@ -87,6 +90,49 @@ def test_api_eval_uses_regular_free_chat_semantics(
     assert args.teacher_temperature == config.eval_gconfig.temperature
     assert args.teacher_top_p == config.eval_gconfig.top_p
     assert args.teacher_max_tokens == config.eval_gconfig.max_new_tokens
+
+
+def test_self_auxiliary_needs_an_explicit_external_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, students = _load_free_chat_config(monkeypatch)
+    config.auxiliary_model.mode = "self"
+    args = _args()
+    resolve_teacher_generation_args(args, config)
+    text_student = select_student_models(students, ["qwen3-1.7b"])
+
+    with pytest.raises(ValueError, match="has no AReaL inference engine"):
+        build_eval_workflow_kwargs(
+            config=config,
+            student_models=text_student,
+            tokenizer=object(),
+            args=args,
+            presolve_enabled=effective_eval_presolve_enabled(config),
+        )
+
+    kwargs = build_eval_workflow_kwargs(
+        config=config,
+        student_models=text_student,
+        tokenizer=object(),
+        args=args,
+        presolve_enabled=effective_eval_presolve_enabled(config),
+        external_self_aux={
+            "base_url": "http://127.0.0.1:30000/v1",
+            "model": "qwen3-8b",
+            "api_key": "EMPTY",
+            "request_params": {
+                "seed": 42,
+                "extra_body": {"lora_path": "/checkpoints/step49"},
+            },
+        },
+    )
+
+    assert kwargs["aux_mode"] == "api"
+    assert kwargs["aux_base_url"] == "http://127.0.0.1:30000/v1"
+    assert kwargs["aux_model"] == "qwen3-8b"
+    assert kwargs["aux_request_params"]["extra_body"]["lora_path"] == (
+        "/checkpoints/step49"
+    )
 
 
 def test_select_student_models_rejects_unknown_student() -> None:
@@ -191,3 +237,205 @@ def test_checkpoint_request_params_keeps_qwen_template_and_adds_lora() -> None:
     assert isinstance(extra_body, dict)
     assert extra_body["chat_template_kwargs"] == {"enable_thinking": False}
     assert extra_body["lora_path"] == "/checkpoints/step299"
+
+
+def _retry_spec() -> api_eval.EpisodeSpec:
+    return api_eval.EpisodeSpec(
+        mode=api_eval.PresolveMode(name="presolve_on", enabled=True),
+        dataset_index=7,
+        attempt=1,
+        row={"id": "test-7"},
+    )
+
+
+def test_run_all_retries_three_times_then_keeps_only_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    spec = _retry_spec()
+    calls = 0
+
+    async def fake_run_episode(**_: object) -> EpisodeResult:
+        nonlocal calls
+        calls += 1
+        result = api_eval.error_result(
+            spec, RuntimeError(f"transient-{calls}"), duration_seconds=0.1
+        )
+        if calls == 4:
+            result.error = None
+            result.termination_reason = "max_turns"
+        return result
+
+    monkeypatch.setattr(api_eval, "run_episode", fake_run_episode)
+    results = asyncio.run(
+        api_eval.run_all(
+            specs=[spec],
+            completed_keys=set(),
+            workflow_kwargs_by_mode={"presolve_on": {}},
+            teacher_client=object(),
+            output_dir=tmp_path,
+            save_traces="none",
+            concurrency=1,
+            log_every=1,
+            keep_env_proxy=False,
+            error_retries=3,
+            retry_backoff_seconds=0,
+        )
+    )
+
+    assert calls == 4
+    assert results[0].error is None
+    stored = [
+        json.loads(line)
+        for line in (tmp_path / "results.jsonl").read_text().splitlines()
+    ]
+    retry_events = [
+        json.loads(line)
+        for line in (tmp_path / "retry_events.jsonl").read_text().splitlines()
+    ]
+    assert len(stored) == 1
+    assert stored[0]["error"] is None
+    assert [event["execution_try"] for event in retry_events] == [1, 2, 3]
+    assert all(event["will_retry"] for event in retry_events)
+
+
+def test_run_all_records_permanent_error_without_raising(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    spec = _retry_spec()
+    calls = 0
+
+    async def fake_run_episode(**_: object) -> EpisodeResult:
+        nonlocal calls
+        calls += 1
+        return api_eval.error_result(
+            spec, ConnectionError("still down"), duration_seconds=0.1
+        )
+
+    monkeypatch.setattr(api_eval, "run_episode", fake_run_episode)
+    results = asyncio.run(
+        api_eval.run_all(
+            specs=[spec],
+            completed_keys=set(),
+            workflow_kwargs_by_mode={"presolve_on": {}},
+            teacher_client=object(),
+            output_dir=tmp_path,
+            save_traces="none",
+            concurrency=1,
+            log_every=1,
+            keep_env_proxy=False,
+            error_retries=3,
+            retry_backoff_seconds=0,
+        )
+    )
+
+    retry_events = [
+        json.loads(line)
+        for line in (tmp_path / "retry_events.jsonl").read_text().splitlines()
+    ]
+    assert calls == 4
+    assert results[0].error == "ConnectionError: still down"
+    assert len(retry_events) == 4
+    assert retry_events[-1]["will_retry"] is False
+
+
+def test_run_all_retries_diagnostic_call_failures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    spec = _retry_spec()
+    calls = 0
+
+    async def fake_run_episode(**_: object) -> EpisodeResult:
+        nonlocal calls
+        calls += 1
+        result = api_eval.error_result(
+            spec, RuntimeError("placeholder"), duration_seconds=0.1
+        )
+        result.error = None
+        result.termination_reason = "max_turns"
+        result.student_call_failed = calls == 1
+        return result
+
+    monkeypatch.setattr(api_eval, "run_episode", fake_run_episode)
+    results = asyncio.run(
+        api_eval.run_all(
+            specs=[spec],
+            completed_keys=set(),
+            workflow_kwargs_by_mode={"presolve_on": {}},
+            teacher_client=object(),
+            output_dir=tmp_path,
+            save_traces="none",
+            concurrency=1,
+            log_every=1,
+            keep_env_proxy=False,
+            error_retries=3,
+            retry_backoff_seconds=0,
+            retry_diagnostic_failures=True,
+        )
+    )
+
+    assert calls == 2
+    assert results[0].student_call_failed is False
+    retry_events = [
+        json.loads(line)
+        for line in (tmp_path / "retry_events.jsonl").read_text().splitlines()
+    ]
+    assert retry_events[0]["reasons"] == ["student_call_failed"]
+
+
+def test_run_all_retries_incomplete_generalization_replays(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    spec = _retry_spec()
+    calls = 0
+
+    async def fake_run_episode(**_: object) -> EpisodeResult:
+        nonlocal calls
+        calls += 1
+        replay_count = 7 if calls == 1 else 8
+        result = api_eval.error_result(
+            spec, RuntimeError("placeholder"), duration_seconds=0.1
+        )
+        result.error = None
+        result.termination_reason = "max_turns"
+        result.generalization = {
+            level: {
+                "replay_count": replay_count,
+                "score": 0.5,
+                "student_error": None,
+            }
+            for level in ("original", "original_preleak")
+        }
+        return result
+
+    monkeypatch.setattr(api_eval, "run_episode", fake_run_episode)
+    results = asyncio.run(
+        api_eval.run_all(
+            specs=[spec],
+            completed_keys=set(),
+            workflow_kwargs_by_mode={
+                "presolve_on": {
+                    "student_generalize_retest_original": True,
+                    "eval_preleak_retest": True,
+                    "student_generalize_replays": 8,
+                }
+            },
+            teacher_client=object(),
+            output_dir=tmp_path,
+            save_traces="none",
+            concurrency=1,
+            log_every=1,
+            keep_env_proxy=False,
+            error_retries=3,
+            retry_backoff_seconds=0,
+            retry_diagnostic_failures=True,
+        )
+    )
+
+    assert calls == 2
+    assert results[0].generalization["original"]["replay_count"] == 8
+    retry_events = [
+        json.loads(line)
+        for line in (tmp_path / "retry_events.jsonl").read_text().splitlines()
+    ]
+    assert "original_replays=7/8" in retry_events[0]["reasons"]
+    assert "original_preleak_replays=7/8" in retry_events[0]["reasons"]

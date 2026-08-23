@@ -437,6 +437,14 @@ def validate_effective_eval_semantics(
 ) -> None:
     """Fail before API calls if offline eval drifted from regular validation."""
 
+    if workflow_kwargs.get("aux_mode") != "api":
+        raise ValueError(
+            "The standalone API evaluator has no AReaL inference engine, so "
+            "auxiliary_model.mode='self' cannot run here. Use "
+            "--self-aux-via-teacher when the external teacher endpoint serves the "
+            "same actor checkpoint, or evaluate with an explicit API auxiliary "
+            "model."
+        )
     if not student_models:
         raise ValueError("Evaluation needs at least one selected student.")
     configured_names = [str(student["name"]) for student in student_models]
@@ -494,6 +502,7 @@ def build_eval_workflow_kwargs(
     tokenizer: Any,
     args: argparse.Namespace,
     presolve_enabled: bool,
+    external_self_aux: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     auxiliary_model = config.auxiliary_model
     reward = config.reward
@@ -638,6 +647,31 @@ def build_eval_workflow_kwargs(
             student_generalize.confidence.reward_scale
         ),
     }
+    if external_self_aux is not None:
+        if auxiliary_model.mode != "self":
+            raise ValueError(
+                "--self-aux-via-teacher requires auxiliary_model.mode='self'; "
+                f"the loaded config uses {auxiliary_model.mode!r}."
+            )
+        required = {"base_url", "model", "api_key", "request_params"}
+        missing = sorted(required - set(external_self_aux))
+        if missing:
+            raise ValueError(
+                "external self-auxiliary bridge is missing: " + ", ".join(missing)
+            )
+        # Regular validation's 'self' auxiliary uses the current actor adapter.
+        # A standalone evaluator has no AReaL engine, so reproduce that path with
+        # the same OpenAI endpoint and the same per-request lora_path as the
+        # external teacher. Keeping the source auxiliary sampling settings while
+        # merging the teacher request body preserves its judge/leak-call semantics.
+        workflow_kwargs["aux_mode"] = "api"
+        workflow_kwargs["aux_base_url"] = str(external_self_aux["base_url"])
+        workflow_kwargs["aux_model"] = str(external_self_aux["model"])
+        workflow_kwargs["aux_api_key"] = str(external_self_aux["api_key"])
+        workflow_kwargs["aux_request_params"] = merge_dicts(
+            deepcopy(auxiliary_model.request_params),
+            dict(external_self_aux["request_params"]),
+        )
     # This is the canonical conversion used by TutorPPOTrainer for its regular
     # validation pass. Keeping it here prevents the API evaluator from silently
     # falling back to answer-attempt defaults for free-chat experiments.
@@ -974,7 +1008,10 @@ async def close_workflow_api_clients(workflow: RecordingTutorWorkflow) -> None:
         try:
             result = close()
             if asyncio.iscoroutine(result):
-                await result
+                async with asyncio.timeout(10.0):
+                    await result
+        except TimeoutError:
+            logger.warning("Timed out closing an episode API client after 10s.")
         except Exception as exc:  # pragma: no cover - transport-specific cleanup
             logger.warning("Failed to close an episode API client: %s", exc)
 
@@ -1077,19 +1114,63 @@ def result_needs_retry(
     *,
     retry_errors: bool = True,
     retry_diagnostic_failures: bool = False,
+    generalization_levels: tuple[str, ...] = (),
+    expected_generalization_replays: int = 0,
 ) -> bool:
     """Return whether resume should replace an unreliable episode record."""
 
-    if result.error is not None:
-        return retry_errors
-    if not retry_diagnostic_failures:
-        return False
     return bool(
-        result.student_call_failed
-        or result.leak_check_failed_count
-        or result.answer_judge_failed_count
-        or result.teacher_pre_error_count
+        result_retry_reasons(
+            result,
+            retry_errors=retry_errors,
+            retry_diagnostic_failures=retry_diagnostic_failures,
+            generalization_levels=generalization_levels,
+            expected_generalization_replays=expected_generalization_replays,
+        )
     )
+
+
+def result_retry_reasons(
+    result: EpisodeResult,
+    *,
+    retry_errors: bool = True,
+    retry_diagnostic_failures: bool = False,
+    generalization_levels: tuple[str, ...] = (),
+    expected_generalization_replays: int = 0,
+) -> list[str]:
+    """Describe infrastructure failures that make an episode unsafe to score."""
+
+    reasons: list[str] = []
+    if retry_errors and result.error is not None:
+        reasons.append(f"error={result.error}")
+    if not retry_diagnostic_failures:
+        return reasons
+    if result.student_call_failed:
+        reasons.append("student_call_failed")
+    if result.leak_check_failed_count:
+        reasons.append(f"leak_check_failed={result.leak_check_failed_count}")
+    if result.answer_judge_failed_count:
+        reasons.append(f"answer_judge_failed={result.answer_judge_failed_count}")
+    if result.teacher_pre_error_count:
+        reasons.append(f"teacher_pre_errors={result.teacher_pre_error_count}")
+    expected_replays = max(0, int(expected_generalization_replays))
+    if expected_replays:
+        generalization = result.generalization or {}
+        for level in generalization_levels:
+            replay = generalization.get(level)
+            if not isinstance(replay, dict):
+                reasons.append(f"{level}_retest=missing")
+                continue
+            actual_replays = int(replay.get("replay_count", -1) or 0)
+            if actual_replays != expected_replays:
+                reasons.append(
+                    f"{level}_replays={actual_replays}/{expected_replays}"
+                )
+            if replay.get("score") is None:
+                reasons.append(f"{level}_score=missing")
+            if replay.get("student_error"):
+                reasons.append(f"{level}_student_error={replay['student_error']}")
+    return reasons
 
 
 def aggregate_mode(
@@ -1676,15 +1757,26 @@ def build_run_signature(
                     ),
                 },
             },
+            "reliability": {
+                "episode_error_retries": int(args.episode_error_retries),
+                "episode_error_retry_backoff_seconds": float(
+                    args.episode_error_retry_backoff_seconds
+                ),
+                "retry_diagnostic_failures": bool(
+                    args.retry_diagnostic_failures
+                ),
+            },
             "auxiliary": {
-                "base_url": config.auxiliary_model.base_url,
-                "model": config.auxiliary_model.model,
+                "source_mode": config.auxiliary_model.mode,
+                "effective_mode": effective_kwargs["aux_mode"],
+                "base_url": effective_kwargs["aux_base_url"],
+                "model": effective_kwargs["aux_model"],
                 "temperature": config.auxiliary_model.temperature,
                 "top_p": config.auxiliary_model.top_p,
                 "max_tokens": config.auxiliary_model.max_tokens,
                 "timeout": config.auxiliary_model.timeout,
-                "max_concurrent_calls": (config.auxiliary_model.max_concurrent_calls),
-                "request_params": config.auxiliary_model.request_params,
+                "max_concurrent_calls": effective_kwargs["max_concurrent_aux_calls"],
+                "request_params": effective_kwargs["aux_request_params"],
             },
             "students": student_models,
             "test_semantics": {
@@ -1764,6 +1856,7 @@ def prepare_output_dir(
     *,
     signature: dict[str, Any],
     resume: bool,
+    allow_evaluator_code_change: bool = False,
 ) -> None:
     signature_path = output_dir / "run_config.json"
     if output_dir.exists() and any(output_dir.iterdir()):
@@ -1775,9 +1868,30 @@ def prepare_output_dir(
         if not signature_path.exists():
             raise ValueError(f"Resume directory is missing {signature_path.name}.")
         previous = json.loads(signature_path.read_text(encoding="utf-8"))
-        if previous.get("signature") != signature:
-            raise ValueError(
-                "Resume settings differ from the existing run_config.json."
+        previous_signature = previous.get("signature")
+        if previous_signature != signature:
+            compatible_code_change = False
+            if allow_evaluator_code_change and isinstance(previous_signature, dict):
+                previous_without_code = dict(previous_signature)
+                current_without_code = dict(signature)
+                previous_hash = previous_without_code.pop("evaluator_sha256", None)
+                current_hash = current_without_code.pop("evaluator_sha256", None)
+                compatible_code_change = (
+                    previous_hash is not None
+                    and current_hash is not None
+                    and previous_hash != current_hash
+                    and previous_without_code == current_without_code
+                )
+            if not compatible_code_change:
+                raise ValueError(
+                    "Resume settings differ from the existing run_config.json."
+                )
+            logger.warning(
+                "Resuming across an explicitly allowed evaluator code change; "
+                "all other run signature fields match exactly (old_sha256=%s, "
+                "new_sha256=%s).",
+                previous_hash,
+                current_hash,
             )
         return
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1798,6 +1912,10 @@ async def run_episode(
     output_dir: Path,
     save_traces: str,
     keep_env_proxy: bool,
+    execution_try: int = 1,
+    generalization_levels: tuple[str, ...] = (),
+    expected_generalization_replays: int = 0,
+    episode_timeout_seconds: float = 300.0,
 ) -> EpisodeResult:
     started = time.monotonic()
     workflow: RecordingTutorWorkflow | None = None
@@ -1812,10 +1930,15 @@ async def run_episode(
                 lora_version=None,
             )
         )
-        await workflow._run_episode(
-            dict(spec.row),
-            external_client=teacher_client,
-        )
+        # Client-level timeouts do not protect the whole workflow: one episode
+        # fans out into teacher, student, judge, replay, and code-execution calls.
+        # Keep a hard outer deadline so one transport task can never hold a cell
+        # (and the other GPU pair at its barrier) indefinitely.
+        async with asyncio.timeout(float(episode_timeout_seconds)):
+            await workflow._run_episode(
+                dict(spec.row),
+                external_client=teacher_client,
+            )
         result = result_from_workflow(
             workflow=workflow,
             spec=spec,
@@ -1832,16 +1955,26 @@ async def run_episode(
             await close_workflow_api_clients(workflow)
 
     should_trace = save_traces == "all" or (
-        save_traces == "errors" and result.error is not None
+        save_traces == "errors"
+        and result_needs_retry(
+            result,
+            retry_errors=True,
+            retry_diagnostic_failures=True,
+            generalization_levels=generalization_levels,
+            expected_generalization_replays=expected_generalization_replays,
+        )
     )
     if should_trace:
+        retry_suffix = (
+            "" if execution_try <= 1 else f"_retry_{execution_try - 1:02d}"
+        )
         trace_path = (
             output_dir
             / "traces"
             / spec.mode.name
             / (
                 f"row_{spec.dataset_index:05d}_id_{safe_path_token(result.item_id)}_"
-                f"attempt_{spec.attempt:02d}.json"
+                f"attempt_{spec.attempt:02d}{retry_suffix}.json"
             )
         )
         if result.error is None and workflow is not None:
@@ -1882,6 +2015,10 @@ async def run_all(
     concurrency: int,
     log_every: int,
     keep_env_proxy: bool,
+    error_retries: int = 0,
+    retry_backoff_seconds: float = 1.0,
+    retry_diagnostic_failures: bool = False,
+    episode_timeout_seconds: float = 300.0,
 ) -> list[EpisodeResult]:
     pending = [spec for spec in specs if spec.key not in completed_keys]
     if not pending:
@@ -1893,6 +2030,7 @@ async def run_all(
     semaphore = asyncio.Semaphore(max(1, int(concurrency)))
     write_lock = asyncio.Lock()
     results_path = output_dir / "results.jsonl"
+    retry_events_path = output_dir / "retry_events.jsonl"
     previous_results = (
         [
             result
@@ -1923,15 +2061,77 @@ async def run_all(
 
     async def _run(spec: EpisodeSpec) -> EpisodeResult:
         nonlocal diagnostic_failure_count, error_count, processed
+        result: EpisodeResult | None = None
+        total_execution_tries = max(0, int(error_retries)) + 1
+        workflow_kwargs = workflow_kwargs_by_mode[spec.mode.name]
+        generalization_levels = configured_generalization_levels(workflow_kwargs)
+        expected_generalization_replays = int(
+            workflow_kwargs.get("student_generalize_replays", 0) or 0
+        )
         async with semaphore:
-            result = await run_episode(
-                spec=spec,
-                workflow_kwargs=workflow_kwargs_by_mode[spec.mode.name],
-                teacher_client=teacher_client,
-                output_dir=output_dir,
-                save_traces=save_traces,
-                keep_env_proxy=keep_env_proxy,
-            )
+            for execution_try in range(1, total_execution_tries + 1):
+                result = await run_episode(
+                    spec=spec,
+                    workflow_kwargs=workflow_kwargs,
+                    teacher_client=teacher_client,
+                    output_dir=output_dir,
+                    save_traces=save_traces,
+                    keep_env_proxy=keep_env_proxy,
+                    execution_try=execution_try,
+                    generalization_levels=generalization_levels,
+                    expected_generalization_replays=expected_generalization_replays,
+                    episode_timeout_seconds=episode_timeout_seconds,
+                )
+                reasons = result_retry_reasons(
+                    result,
+                    retry_errors=True,
+                    retry_diagnostic_failures=retry_diagnostic_failures,
+                    generalization_levels=generalization_levels,
+                    expected_generalization_replays=expected_generalization_replays,
+                )
+                if not reasons:
+                    break
+
+                will_retry = execution_try < total_execution_tries
+                retry_event = {
+                    "attempt": spec.attempt,
+                    "dataset_index": spec.dataset_index,
+                    "episode_key": spec.key,
+                    "execution_try": execution_try,
+                    "item_id": result.item_id,
+                    "max_execution_tries": total_execution_tries,
+                    "reasons": reasons,
+                    "recorded_at": datetime.now(UTC).isoformat(),
+                    "will_retry": will_retry,
+                }
+                async with write_lock:
+                    await asyncio.to_thread(
+                        append_jsonl, retry_events_path, retry_event
+                    )
+                if not will_retry:
+                    logger.error(
+                        "Episode %s exhausted %s execution tries; recording it for "
+                        "later backfill and continuing: %s",
+                        spec.key,
+                        total_execution_tries,
+                        "; ".join(reasons),
+                    )
+                    break
+
+                delay = max(0.0, float(retry_backoff_seconds)) * (
+                    2 ** (execution_try - 1)
+                )
+                logger.warning(
+                    "Episode %s failed execution try %s/%s; retrying in %.1fs: %s",
+                    spec.key,
+                    execution_try,
+                    total_execution_tries,
+                    delay,
+                    "; ".join(reasons),
+                )
+                if delay:
+                    await asyncio.sleep(delay)
+        assert result is not None
         async with write_lock:
             await asyncio.to_thread(append_jsonl, results_path, asdict(result))
             processed += 1
@@ -2009,6 +2209,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--teacher-request-params", default="")
     parser.add_argument("--teacher-request-params-file", type=Path, default=None)
     parser.add_argument(
+        "--self-aux-via-teacher",
+        action="store_true",
+        help=(
+            "For a source config with auxiliary_model.mode=self, reproduce regular "
+            "validation by routing auxiliary calls to this external teacher "
+            "endpoint with the same request params (including lora_path). Required "
+            "when evaluating an actor checkpoint whose self judges must use that "
+            "same checkpoint."
+        ),
+    )
+    parser.add_argument(
         "--teacher-presolve",
         choices=["config", "off", "on", "both"],
         default="config",
@@ -2044,8 +2255,42 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--max-retries", type=int, default=0)
+    parser.add_argument(
+        "--episode-error-retries",
+        type=int,
+        default=0,
+        help=(
+            "Retry a whole episode this many additional times after an API or "
+            "diagnostic infrastructure failure."
+        ),
+    )
+    parser.add_argument(
+        "--episode-error-retry-backoff-seconds",
+        type=float,
+        default=1.0,
+        help="Initial whole-episode retry delay; subsequent delays double.",
+    )
+    parser.add_argument(
+        "--episode-timeout-seconds",
+        type=float,
+        default=300.0,
+        help=(
+            "Hard wall-clock limit for one whole episode, including teaching, "
+            "judging, and replays. A timeout is handled by the normal whole-episode "
+            "retry/backfill policy."
+        ),
+    )
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--allow-evaluator-code-change-on-resume",
+        action="store_true",
+        help=(
+            "Allow --resume only when evaluator_sha256 is the sole run-signature "
+            "difference. All dataset, model, prompt, and generation settings must "
+            "still match exactly."
+        ),
+    )
     parser.add_argument(
         "--retry-errors",
         action=argparse.BooleanOptionalAction,
@@ -2060,9 +2305,10 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help=(
-            "On resume, optionally rerun whole episodes with student, leak-check, "
-            "answer-judge, or teacher-presolve call failures. Disabled by default "
-            "to avoid conditional resampling."
+            "Retry whole episodes with student, leak-check, answer-judge, or "
+            "teacher-presolve call failures, and incomplete generalization "
+            "replays, both within a run and on resume. Disabled by default to "
+            "avoid conditional resampling."
         ),
     )
     parser.add_argument(
@@ -2094,6 +2340,16 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"--{label.replace('_', '-')} must be positive.")
     if args.attempts < 0:
         raise ValueError("--attempts must be non-negative.")
+    if args.max_retries < 0:
+        raise ValueError("--max-retries must be non-negative.")
+    if args.episode_error_retries < 0:
+        raise ValueError("--episode-error-retries must be non-negative.")
+    if args.episode_error_retry_backoff_seconds < 0:
+        raise ValueError(
+            "--episode-error-retry-backoff-seconds must be non-negative."
+        )
+    if args.episode_timeout_seconds <= 0:
+        raise ValueError("--episode-timeout-seconds must be positive.")
     if args.presolve_attempts < 0:
         raise ValueError("--presolve-attempts must be non-negative.")
     if args.presolve_max_tokens is not None and args.presolve_max_tokens < 0:
@@ -2166,6 +2422,16 @@ async def main_async(args: argparse.Namespace) -> None:
         ),
     )
 
+    external_self_aux = (
+        {
+            "base_url": teacher_base_url,
+            "model": args.teacher_model,
+            "api_key": teacher_api_key,
+            "request_params": teacher_request_params,
+        }
+        if args.self_aux_via_teacher
+        else None
+    )
     workflow_kwargs_by_mode = {
         mode.name: build_eval_workflow_kwargs(
             config=config,
@@ -2173,9 +2439,17 @@ async def main_async(args: argparse.Namespace) -> None:
             tokenizer=tokenizer,
             args=args,
             presolve_enabled=mode.enabled,
+            external_self_aux=external_self_aux,
         )
         for mode in modes
     }
+    retry_workflow_kwargs = next(iter(workflow_kwargs_by_mode.values()))
+    retry_generalization_levels = configured_generalization_levels(
+        retry_workflow_kwargs
+    )
+    retry_generalization_replays = int(
+        retry_workflow_kwargs.get("student_generalize_replays", 0) or 0
+    )
     signature = build_run_signature(
         args=args,
         config=config,
@@ -2190,7 +2464,12 @@ async def main_async(args: argparse.Namespace) -> None:
         student_prompts=student_prompts,
     )
     output_dir = resolve_output_dir(args, config)
-    prepare_output_dir(output_dir, signature=signature, resume=args.resume)
+    prepare_output_dir(
+        output_dir,
+        signature=signature,
+        resume=args.resume,
+        allow_evaluator_code_change=args.allow_evaluator_code_change_on_resume,
+    )
     results_path = output_dir / "results.jsonl"
     existing_results = load_existing_results(results_path) if args.resume else []
     completed_keys = {
@@ -2200,6 +2479,8 @@ async def main_async(args: argparse.Namespace) -> None:
             result,
             retry_errors=args.retry_errors,
             retry_diagnostic_failures=args.retry_diagnostic_failures,
+            generalization_levels=retry_generalization_levels,
+            expected_generalization_replays=retry_generalization_replays,
         )
     }
 
@@ -2237,6 +2518,10 @@ async def main_async(args: argparse.Namespace) -> None:
                 concurrency=args.concurrency,
                 log_every=args.log_every,
                 keep_env_proxy=args.keep_env_proxy,
+                error_retries=args.episode_error_retries,
+                retry_backoff_seconds=args.episode_error_retry_backoff_seconds,
+                retry_diagnostic_failures=args.retry_diagnostic_failures,
+                episode_timeout_seconds=args.episode_timeout_seconds,
             )
         finally:
             await teacher_client.close()
@@ -2247,6 +2532,19 @@ async def main_async(args: argparse.Namespace) -> None:
     )
 
     all_results = latest_results([*existing_results, *new_results])
+    pending_backfill = [
+        result
+        for result in all_results
+        if result_needs_retry(
+            result,
+            retry_errors=True,
+            retry_diagnostic_failures=True,
+            generalization_levels=retry_generalization_levels,
+            expected_generalization_replays=retry_generalization_replays,
+        )
+    ]
+    pending_backfill_path = output_dir / "pending_backfill.jsonl"
+    rewrite_results_jsonl(pending_backfill_path, pending_backfill)
     report = aggregate_report(
         all_results,
         modes=modes,
@@ -2268,6 +2566,10 @@ async def main_async(args: argparse.Namespace) -> None:
             "prompts": [asdict(prompt) for prompt in student_prompts],
         }
     report["output_dir"] = str(output_dir)
+    report["pending_backfill"] = {
+        "count": len(pending_backfill),
+        "path": str(pending_backfill_path),
+    }
     report["finished_at"] = datetime.now(UTC).isoformat()
     write_json(output_dir / "summary.json", report)
     logger.info("API teacher evaluation complete: %s", output_dir)

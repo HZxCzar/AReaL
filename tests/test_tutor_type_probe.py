@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 from examples.tutor.configs import TutorStudentTypeProbeConfig
 from examples.tutor.core.type_probe import (
@@ -239,6 +240,39 @@ def main() -> int:
     check(
         "identical semantic reads have zero rotation disagreement",
         close(rotation_disagreement(recovered), 0.0),
+    )
+
+    singleton_behavior_axis = TutorAgentWorkflow._build_student_behavior_probe_axis(
+        SimpleNamespace(
+            student_model_runtimes={
+                "text-full": SimpleNamespace(mode="text"),
+                "text-long-drop": SimpleNamespace(mode="text"),
+            }
+        )
+    )
+    check(
+        "a singleton behavior axis remains valid",
+        singleton_behavior_axis.size == 1
+        and singleton_behavior_axis.options[0].value == "text",
+    )
+    singleton_reading = asyncio.run(
+        TutorAgentWorkflow._read_student_type_probe_axis(
+            object(),
+            axis=singleton_behavior_axis,
+            messages=[],
+            chat_caller=_ExplodingEngine(),
+            correct_index=0,
+            lora_version=7,
+            rid_prefix="singleton",
+        )
+    )
+    check(
+        "a singleton axis is deterministic without a model call",
+        singleton_reading.distribution == (1.0,)
+        and singleton_reading.correct_probability == 1.0
+        and singleton_reading.is_argmax_correct == 1.0
+        and singleton_reading.calls == 0,
+        str(singleton_reading),
     )
 
     print("\n[2] reward is the correct cell of the eight-type distribution")

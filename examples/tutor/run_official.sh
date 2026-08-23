@@ -32,8 +32,13 @@ export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 
+# Everything after the trial name is forwarded to hydra untouched, so a one-off
+# override -- a warm start, a shorter run -- does not need a config file of its own.
+# NOTE that passing a trial name suppresses the automatic timestamp prefix
+# (train.py), so reusing one means recover.mode=auto finds that run's own state.
+EXTRA=("${@:3}")
 if [[ -n "$TRIAL_NAME" ]]; then
-  python examples/tutor/train.py --config "$CONFIG" "trial_name=$TRIAL_NAME"
+  python examples/tutor/train.py --config "$CONFIG" "trial_name=$TRIAL_NAME"     ${EXTRA[@]+"${EXTRA[@]}"}
 else
-  python examples/tutor/train.py --config "$CONFIG"
+  python examples/tutor/train.py --config "$CONFIG" ${EXTRA[@]+"${EXTRA[@]}"}
 fi

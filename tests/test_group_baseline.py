@@ -1,4 +1,4 @@
-"""Tests for the episode-weighted group baseline and per-episode loss weighting.
+"""Tests for the episode-weighted group baseline and the loss-weighting levels.
 
 The point of these two helpers is that rollout groups are *ragged*: one group holds
 G episodes and each episode contributes a different number of turn rows, so nothing
@@ -10,7 +10,9 @@ import torch
 from areal.trainer.ppo.actor import (
     _compute_episode_group_baseline,
     _compute_episode_loss_weights,
+    _compute_loss_weights,
     _compute_turn_group_baseline,
+    _compute_turn_loss_weights,
     _episode_scalars,
 )
 
@@ -256,3 +258,115 @@ def test_turn_baseline_excludes_masked_rows_and_is_permutation_invariant():
         leave_one_out=True,
     )
     assert torch.allclose(baseline[perm], permuted)
+
+
+# The turn level exists for ragged TURN LENGTHS, which the fixture above does not
+# have -- every row there is 10 tokens. These rows vary length instead.
+#
+#   ep A: turns of 200 and 400 tokens
+#   ep B: one turn of 4096 -- a teacher that fell into a repetition loop and ran to
+#         gconfig.max_new_tokens, which is the shape that took 47.7% of the batch
+#         gradient on 20260822_133603 and did not come back
+#   ep C: turns of 200 and 200
+RAGGED = [
+    (1001, 1, 0, 1.0, 200),
+    (2002, 1, 0, -1.0, 4096),
+    (1001, 2, 0, 1.0, 400),
+    (3003, 1, 0, 1.0, 200),
+    (3003, 2, 0, 1.0, 200),
+]
+
+
+def test_turn_loss_weights_equalize_turn_gradient_mass():
+    traj, _turn, _group, _ret, tok, mask = _tensors(RAGGED)
+    weights = _compute_turn_loss_weights(mask, tok)
+
+    # mean turn = (200 + 4096 + 400 + 200 + 200) / 5 = 1019.2
+    mass = weights * tok.float()
+    assert mass.max().item() - mass.min().item() < 1e-3, mass
+
+    # Total gradient mass is unchanged, same invariant the episode level holds.
+    assert abs(mass.sum().item() - tok.sum().item()) < 1e-3
+
+    # Invalid rows keep weight 1 and stay out of the mean.
+    partial = mask.clone()
+    partial[1] = False  # drop the runaway row
+    w = _compute_turn_loss_weights(partial, tok)
+    assert w[1].item() == 1.0
+    kept = (w * tok.float())[partial]
+    assert kept.max().item() - kept.min().item() < 1e-3
+
+
+def test_turn_loss_weights_bound_one_runaway_generation():
+    """The regression this level was added for.
+
+    Under a token mean a row's share of the batch gradient is its length, so a
+    single generation that runs to the token cap can own most of a step. At the
+    turn level it owns exactly one turn's worth, whatever it wrote.
+    """
+    _traj, _turn, _group, _ret, tok, mask = _tensors(RAGGED)
+    runaway = 1
+
+    token_level = tok[runaway].item() / tok.sum().item()
+    weights = _compute_turn_loss_weights(mask, tok)
+    mass = weights * tok.float()
+    turn_level = (mass[runaway] / mass.sum()).item()
+
+    assert token_level > 0.79, token_level
+    assert abs(turn_level - 1 / len(RAGGED)) < 1e-4, turn_level
+
+
+def test_turn_loss_weights_ignore_row_order():
+    _traj, _turn, _group, _ret, tok, mask = _tensors(RAGGED)
+    w_a = _compute_turn_loss_weights(mask, tok)
+    perm = torch.randperm(len(RAGGED))
+    w_b = _compute_turn_loss_weights(mask[perm], tok[perm])
+    assert torch.allclose(w_a[perm], w_b, atol=1e-6)
+
+
+def test_loss_weights_dispatch_by_level():
+    traj, _turn, _group, _ret, tok, mask = _tensors(RAGGED)
+
+    assert torch.allclose(
+        _compute_loss_weights("episode", traj, mask, tok),
+        _compute_episode_loss_weights(traj, mask, tok),
+    )
+    assert torch.allclose(
+        _compute_loss_weights("turn", traj, mask, tok),
+        _compute_turn_loss_weights(mask, tok),
+    )
+    # 'token' is the identity and is filtered out before the dispatch, so reaching
+    # here with it is a bug rather than a no-op to be swallowed.
+    for level in ("token", "sequence"):
+        try:
+            _compute_loss_weights(level, traj, mask, tok)
+        except ValueError:
+            continue
+        raise AssertionError(f"{level!r} should not dispatch")
+
+
+def test_episode_and_turn_levels_differ_on_a_runaway():
+    """Why the episode level is not a substitute for the turn level.
+
+    The episode level normalizes by an episode's TOTAL tokens, and a repetition
+    that terminates its own episode on turn one IS that total -- so it is scaled
+    against the mean episode rather than against a normal turn, and keeps strictly
+    more of the batch than the turn level leaves it.
+
+    The gap widens with the number of turns per batch, which is why it is worth
+    having: five rows here put the runaway at 33% under 'episode' against 20% under
+    'turn', while the ~3600-row batch that killed 20260822_133603 put it at 28.7%
+    against 4.9%.
+    """
+    traj, _turn, _group, _ret, tok, mask = _tensors(RAGGED)
+    runaway = 1
+
+    ep = _compute_episode_loss_weights(traj, mask, tok) * tok.float()
+    tu = _compute_turn_loss_weights(mask, tok) * tok.float()
+    ep_share = (ep[runaway] / ep.sum()).item()
+    tu_share = (tu[runaway] / tu.sum()).item()
+
+    assert ep_share > tu_share, (ep_share, tu_share)
+    # The turn level's share is fixed at one row's worth by construction; the
+    # episode level's is not bounded by anything the runaway does not control.
+    assert abs(tu_share - 1 / len(RAGGED)) < 1e-4, tu_share
