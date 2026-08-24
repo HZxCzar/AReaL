@@ -8,6 +8,7 @@ from typing import Any
 from examples.common.chat_budget import ChatContextBudget
 from examples.common.openai_utils import AsyncLLMCaller, TokenLogprob
 from examples.tutor.core.generation_budget import (
+    with_max_new_tokens,
     ContextBudgetLimitExceeded,
     ensure_response_within_train_sample_budget,
     prepare_train_sample_generation_config,
@@ -338,9 +339,19 @@ class AReaLEngineActorCaller:
         train_sample_budget = self.max_train_sample_tokens
         if train_sample_budget is not None:
             train_sample_budget -= max(0, int(input_token_reserve))
+        # The budget resolver prefers gconfig.max_new_tokens whenever a gconfig is
+        # given, so a per-call budget larger than the shared one would be dropped
+        # silently. Widen the gconfig for this call when that happens. Only when it
+        # is LARGER: a caller asking for fewer tokens keeps the shared cap, which is
+        # what every caller but the pre-solve does today.
+        gconfig = self.gconfig
+        if gconfig is not None:
+            shared = getattr(gconfig, "max_new_tokens", None)
+            if shared is not None and completion_budget > int(shared):
+                gconfig = with_max_new_tokens(gconfig, completion_budget)
         result = await self.chat_caller.generate(
             messages,
-            gconfig=self.gconfig,
+            gconfig=gconfig,
             max_completion_tokens=completion_budget,
             max_train_sample_tokens=train_sample_budget,
             metadata=metadata,

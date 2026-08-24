@@ -40,7 +40,7 @@ def prepare_train_sample_generation_config(
             max_train_sample_tokens=None,
             remaining_tokens=None,
             max_new_tokens=requested_max_new_tokens,
-            gconfig=_with_max_new_tokens(gconfig, requested_max_new_tokens),
+            gconfig=with_max_new_tokens(gconfig, requested_max_new_tokens),
             over_budget=False,
         )
 
@@ -61,7 +61,7 @@ def prepare_train_sample_generation_config(
         max_train_sample_tokens=int(max_train_sample_tokens),
         remaining_tokens=remaining_tokens,
         max_new_tokens=max_new_tokens,
-        gconfig=_with_max_new_tokens(gconfig, max_new_tokens),
+        gconfig=with_max_new_tokens(gconfig, max_new_tokens),
         over_budget=False,
     )
 
@@ -106,7 +106,8 @@ def _requested_max_new_tokens(
     return max(1, int(raw_max_new_tokens))
 
 
-def _with_max_new_tokens(gconfig: Any | None, max_new_tokens: int) -> Any | None:
+def with_max_new_tokens(gconfig: Any | None, max_new_tokens: int) -> Any | None:
+    """A copy of gconfig with a different generation cap, or None if there is none."""
     if gconfig is None:
         return None
     if hasattr(gconfig, "new"):
