@@ -80,7 +80,20 @@ teacher_pre:
   enabled: true
   mode: filter_solver
   attempts: 3
-  max_tokens: 0
+  # 4096 STATED, not 0. Zero means inherit gconfig.max_new_tokens, which 8a60a2cb
+  # cut from 4096 to 1024 to stop a repetition loop dominating the gradient. That
+  # cap was measured on TEACHING turns, where the median generation is 172-221
+  # tokens and p99 is 551, so 1024 clips nothing real. The pre-solve is not a
+  # teaching turn: it is the teacher working a competition problem end to end, and
+  # 1024 truncates it mid-derivation. A truncated solution reaches no final answer,
+  # verification fails, and the episode is skipped -- which took
+  # rollout/stop/teacher_pre_skipped from 5-12% to 29-38% across every arm,
+  # including one with no personality gate at all.
+  #
+  # Setting it here restores the pre-solve budget without touching the teaching-turn
+  # cap that commit exists to enforce. If gconfig.max_new_tokens moves again this
+  # stays put, which is the point of stating it.
+  max_tokens: 4096
   verify: true
 auxiliary_model:
   mode: self
