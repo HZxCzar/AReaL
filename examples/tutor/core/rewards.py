@@ -317,4 +317,6 @@ def artifact_to_trace(
         teacher_progress_judge_result=artifact.teacher_progress_judge_result,
         student_request_judge_result=artifact.student_request_judge_result,
         student_question_generation=artifact.student_question_generation,
+        personality_gate_result=artifact.personality_gate_result,
+        personality_gated=artifact.personality_gated,
     )

@@ -1,0 +1,12 @@
+# the example_first personality at 8gpu. Composition only: what the arm does comes from
+# base/personality/OOD/example_first.yaml, how many GPUs it gets from alloc.yaml.
+defaults:
+  - ../../../base/personality/OOD/example_first@_global_
+  - ../../alloc@_global_
+  - _self_
+
+trial_name: 0818-personality-example-first-8gpu
+
+stats_logger:
+  wandb:
+    group: 0818-personality-8gpu

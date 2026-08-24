@@ -1,0 +1,12 @@
+# the analogy personality at 4gpu. Composition only: what the arm does comes from
+# base/personality/OOD/analogy.yaml, how many GPUs it gets from alloc.yaml.
+defaults:
+  - ../../../base/personality/OOD/analogy@_global_
+  - ../../alloc@_global_
+  - _self_
+
+trial_name: 0818-personality-analogy-4gpu
+
+stats_logger:
+  wandb:
+    group: 0818-personality-4gpu

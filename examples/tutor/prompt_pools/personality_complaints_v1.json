@@ -1,0 +1,88 @@
+{
+  "bare": [
+    "I don't get it.",
+    "I'm lost.",
+    "That didn't help, sorry.",
+    "I still don't understand.",
+    "Hmm, no, that's not landing.",
+    "Sorry, I'm not following.",
+    "I don't know what to do with that.",
+    "That went over my head.",
+    "Still stuck.",
+    "I read that twice and I'm still confused."
+  ],
+  "explain": {
+    "analogy": [
+      "This doesn't look like anything to me. Is it like something I've seen before?",
+      "Can you show me a different problem that works the same way?",
+      "I need something to compare this to. What is it similar to?",
+      "Relate this to something familiar and tell me which parts match up.",
+      "Give me a problem I already understand that has the same shape.",
+      "I can't see the structure on its own. What's the analogy?"
+    ],
+    "contrasting_cases": [
+      "One case doesn't tell me what matters. Show me two and what differs.",
+      "Compare it with a case where it doesn't work, so I can see the difference.",
+      "I need a contrast: two versions, and what changes between them.",
+      "Put another case next to this one and point at the difference.",
+      "Show me the version that fails too, then I'll see the point.",
+      "Which feature actually matters? Show two cases that differ in it."
+    ],
+    "deep": [
+      "I can follow the step but I don't know why it's that one. Tell me the reason.",
+      "Why that step? Without the reason I can't use it again.",
+      "Say why it works, not just what the rule is.",
+      "Don't ask me to explain it -- you tell me why it's right.",
+      "Tell me why this works, otherwise it won't stick.",
+      "Give me the reason along with the step, please."
+    ],
+    "error_focused": [
+      "You've moved on, but I don't know what I got wrong. Point at the mistake first.",
+      "Which part of what I did is wrong? Tell me that before anything else.",
+      "I can't use a new method until I know where mine broke.",
+      "Show me the step where I went wrong, please.",
+      "Don't start over. Find my error and name it.",
+      "What exactly did I do wrong? I need that before we go on."
+    ],
+    "example_first": [
+      "That's too abstract for me. Show me with real numbers first.",
+      "Can you do a small case with actual numbers before the rule?",
+      "The general version loses me. Give me a concrete example.",
+      "I need something I can picture. Start with an actual instance.",
+      "Rules on their own don't land. Show me one worked out.",
+      "Can we start from a specific case? The rule after."
+    ],
+    "executive": [
+      "I don't know what to do with a question right now. Just tell me the next step.",
+      "Please stop asking me and say what I should do next.",
+      "I need an instruction, not a question. What's the next move?",
+      "Questions make me freeze. Tell me plainly what to do.",
+      "Skip the asking, please -- just give me the step.",
+      "I can't guess my way there. Tell me what comes next."
+    ],
+    "instrumental": [
+      "You keep telling me which bit to work on. Ask me what I think comes next instead.",
+      "Don't point me at the next part. Ask me where I'd start and let me pick.",
+      "I need to choose the step myself. What would you ask to get me thinking?",
+      "Stop naming the numbers to use. Ask me what I notice and I'll take it from there.",
+      "Even as a question, you're deciding the move for me. Leave that to me.",
+      "Ask me something open. If you name the operation I've nothing left to work out."
+    ],
+    "rule_first": [
+      "Numbers alone don't help me. What's the general rule here?",
+      "State the rule you're using first, then I can follow the example.",
+      "I need the principle before the arithmetic.",
+      "What's the actual property being applied? Say that first.",
+      "Give me the general statement, then the instance.",
+      "Examples don't transfer for me unless I know the rule behind them."
+    ],
+    "surface": [
+      "That was too much at once. Give me one thing to do.",
+      "One step only, please, and nothing after it.",
+      "Too long -- I stopped reading. Just the next bit.",
+      "Skip the praise and the summary. One instruction is all I can take.",
+      "I can't hold all that. Give me the smallest next step and stop.",
+      "One request, then stop. Anything more and I lose it."
+    ]
+  }
+}

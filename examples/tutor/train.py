@@ -531,6 +531,11 @@ def main(args):
         opd=asdict(config.opd),
         prompt_instruction=asdict(config.prompt_instruction),
         free_chat=asdict(config.free_chat),
+        # Reaches eval too: eval_workflow_kwargs is a copy of this dict, and the gate
+        # is not training policy the way the two terminates are -- it is what makes a
+        # student that student, so switching it off at eval would measure a different
+        # learner.
+        personality=asdict(config.personality),
         student_type_probe=asdict(config.student_type_probe),
         cross_eval=asdict(config.cross_eval),
         teacher_history_tags=config.teacher_history_tags,

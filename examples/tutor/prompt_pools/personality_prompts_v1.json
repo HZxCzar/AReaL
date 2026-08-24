@@ -1,0 +1,40 @@
+{
+  "personalities": {
+    "analogy": {
+      "source": "Analogical transfer (Gick & Holyoak 1983): a structurally similar problem the learner already understands is what makes the present one tractable, where restating the present problem does not.",
+      "preference": "This student needs the problem connected to a different one they already\nunderstand. Working inside the problem as posed leaves them unable to see its\nshape.\n\nPASS if the message presents a different problem or situation sharing the structure\nof this one, and indicates what corresponds to what.\n\nFAIL if the message stays entirely inside the problem as posed. FAIL if it offers a\ncomparison without saying which parts correspond. FAIL if the other situation is\ndecorative and carries none of the structure."
+    },
+    "contrasting_cases": {
+      "source": "Contrasting cases (Schwartz & Bransford 1998; Marton's variation theory): the relevant distinction becomes visible when two cases differing in one respect are set side by side, and stays invisible when either is presented alone.",
+      "preference": "This student needs two cases side by side. A single case, however well chosen,\nleaves them unable to tell which feature matters.\n\nPASS if the message presents two cases together and points at the difference\nbetween them that carries the lesson.\n\nFAIL if the message presents a single case only. FAIL if it presents two without\nnaming what differs. FAIL if the difference it names is incidental rather than the\none the step turns on."
+    },
+    "deep": {
+      "source": "Marton & Saljo (1976): deep approach -- intent to grasp the underlying meaning, seeking the reason behind a procedure rather than the procedure alone. Developed by Entwistle and Biggs.",
+      "preference": "This student is after the reason, not just the move. A step with no reason behind\nit teaches them nothing, because they cannot tell when it would apply again.\n\nFind the clause in this message that says why something is true, or why it is the\nright thing to do: a clause turning on because, since, so that, the reason is, this\nworks because, or similar.\n\nPASS only if such a clause is present and what it justifies is a mathematical claim\nor move in this problem.\n\nFAIL if no such clause is present. Stating a rule, naming a property, or giving an\nexample is not a justification. A clause about why the teacher is asking a question\nis not a justification. Asking the student to explain is not a justification."
+    },
+    "error_focused": {
+      "source": "Learning from errors (Metcalfe 2017; VanLehn's repair theory), and the Error Flagging strategy in the TACT tutor-strategy taxonomy: the mistake has to be located before a correction can land, or the learner repeats it.",
+      "preference": "This student needs their own mistake named before anything else. A correction\nthat does not first say what went wrong leaves them repeating it.\n\nPASS if the message identifies the specific step, line or value in the student's\nwork that is wrong, before offering any further instruction.\n\nFAIL if the message offers new instruction without locating an error in what the\nstudent did. FAIL if it reports that something is wrong without saying which part.\nFAIL if it treats the student's work as sound and simply carries on from it."
+    },
+    "example_first": {
+      "source": "Worked-example effect and expertise reversal (Sweller; Kalyuga, Ayres, Chandler & Sweller): a worked instance before the general rule helps the less expert learner, where the same sequencing is redundant or harmful for the more expert one.",
+      "preference": "This student needs something concrete before anything general. A rule stated in\nthe abstract does not land for them.\n\nPASS if the message presents a concrete instance before any general rule appears: a\nparticular case carrying specific values, or a smaller version of the problem\nwalked through.\n\nFAIL if the message opens with a rule, formula, identity or definition, or if it\noffers no instance at all. Restating the problem, naming its structure, introducing\na symbol, defining a variable, or announcing that an example follows are all\ndescriptions rather than instances, and none of them satisfy this student."
+    },
+    "executive": {
+      "source": "Nelson-Le Gall (1981, 1985): executive (expedient) help-seeking -- seeking to have the problem solved rather than to learn to solve it. Tied to dependency orientation.",
+      "preference": "This student wants the next step handed to them. They are here to get the problem\nmoving, and a message that hands the decision back to them stalls them.\n\nPASS if the message states the next step plainly enough for the student to act on\nit.\n\nFAIL if the next step is left for the student to work out, decide or supply. A\nclosing request for confirmation does not by itself cause a FAIL when the step\nitself was stated."
+    },
+    "instrumental": {
+      "source": "Nelson-Le Gall (1981, 1985): instrumental help-seeking -- seeking the minimum assistance needed to succeed independently, e.g. a hint or the principle behind a step, rather than the solution itself. Tied to mastery orientation.",
+      "preference": "This student asks for help in order to do the work themselves. They want the\nsmallest push that lets them find the next step, and they disengage when the step is\nhanded to them.\n\nIdentify what the message tells the student to work with: the operation to perform,\nthe quantity to use, or the sub-goal to reach.\n\nPASS only if the message names none of those, so that deciding what to work with is\nstill the student's to do.\n\nFAIL if the message names the operation, the quantity, or the sub-goal, even when it\nis phrased as a question, and even when the student must still carry out the\narithmetic."
+    },
+    "rule_first": {
+      "source": "Expertise reversal effect (Kalyuga, Ayres, Chandler & Sweller 2003), the other pole of the worked-example interaction: for the more expert learner an instance without the stated principle is redundant, and the general rule is what makes the instance reusable.",
+      "preference": "This student wants the governing rule stated first, and finds a worked instance\nhard to reuse when the principle behind it is left unsaid.\n\nPASS if the message opens by stating the general rule, identity, definition or\nproperty it relies on, before any specific numbers.\n\nFAIL if it opens with specific numbers or an informal analogy, or if it never\nstates the general rule it is using."
+    },
+    "surface": {
+      "source": "Marton & Saljo (1976): surface approach -- intent to reproduce the procedure with the minimum engagement necessary, treating the task as something to get through.",
+      "preference": "This student wants only what is needed to proceed, one piece at a time, and stops\nreading long messages.\n\nCount the things this message asks the student to do or think about.\n\nPASS only if that count is exactly one, and the message ends after it.\n\nFAIL if the count is two or more. FAIL if the message continues past the single\nrequest with praise, a summary, an invitation, or anything else."
+    }
+  }
+}

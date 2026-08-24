@@ -80,6 +80,7 @@ def main() -> int:
         "turn_local_reward_components",
         "opd",
         "cross_eval",
+        "personality",
     ):
         check(f"train.py forwards {name}", name in passed)
 
@@ -124,6 +125,65 @@ def main() -> int:
             config.teacher_history_tags in {"masked", "unmasked"},
             f"got {config.teacher_history_tags!r}",
         )
+        # The personality gate is defined over prose manner, and it withholds the
+        # student's engagement rather than changing what the student saw. Pairing it
+        # with a code student or a mask would mean something else, so configs.py
+        # refuses both -- and this is the tree-wide version of that refusal.
+        personalities = sorted(
+            {
+                student.personality
+                for student in config.student_models
+                if student.personality and student.personality != "none"
+            }
+        )
+        if personalities:
+            offenders = [
+                student.name
+                for student in config.student_models
+                if student.personality
+                and student.personality != "none"
+                and (
+                    str(student.mode) != "text"
+                    or str(getattr(student.mask, "mode", "")) != "full"
+                )
+            ]
+            check(
+                f"{rel}: personality implies text and an unmasked student",
+                not offenders,
+                f"offenders: {offenders}",
+            )
+            check(
+                f"{rel}: personality names a prompt file",
+                bool(config.personality.prompts_path),
+                "the gate has no preference prompt to ask",
+            )
+            check(
+                f"{rel}: personality names a complaint file",
+                bool(config.personality.complaints_path),
+                "a closed gate has nothing to put in the student's slot",
+            )
+            # Every category is a learner type from prior work, and the citation has
+            # to reach the compiled file or the provenance is lost by the time it is
+            # written up.
+            from examples.tutor.workflow import load_personality_prompts
+
+            prompts = load_personality_prompts(config.personality.prompts_path)
+            missing = [p for p in personalities if p not in prompts]
+            check(
+                f"{rel}: every personality has a prompt",
+                not missing,
+                f"missing: {missing}",
+            )
+            unsourced = [
+                name
+                for name in personalities
+                if name in prompts and not prompts[name].get("source")
+            ]
+            check(
+                f"{rel}: every personality cites its source",
+                not unsourced,
+                f"unsourced: {unsourced}",
+            )
 
     print("\n[5] the (behavior, information) axes reach every student entry")
     for path, config in loaded.items():

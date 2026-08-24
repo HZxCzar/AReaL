@@ -276,6 +276,111 @@ class TutorPromptPoolConfig:
         return paths
 
 
+NO_PERSONALITY = "none"
+
+
+@dataclass
+class TutorPersonalityConfig:
+    """The personality gate: files, sampling rate, and the failure policy.
+
+    A personality is ONE PROMPT. On a sampled teacher turn an auxiliary model is
+    asked that prompt about the teacher's message and answers PASS or FAIL; FAIL
+    means the student does not answer and a complaint takes its slot. Nothing else
+    defines a personality and nothing else gates a turn.
+
+    The gate runs AFTER the format parse and the leak check, so a turn that already
+    terminated costs no call. It runs at eval as well as training -- the two
+    terminates are training policy, but the gate is what makes a student that
+    student, so switching it off would evaluate a different learner. It never runs
+    during the re-test, where the student answers alone and there is no teacher turn
+    to check.
+    """
+
+    prompts_path: str = field(
+        default="",
+        metadata={
+            "help": (
+                "JSON of the preference prompts: {personalities: {name: {source, "
+                "preference}}}. `source` is the paper the category comes from and is "
+                "carried for the writeup, never shown to the model. Required as soon "
+                "as any student names a personality."
+            )
+        },
+    )
+    complaints_path: str = field(
+        default="",
+        metadata={
+            "help": (
+                "JSON of the student's replies to a failed turn: {bare: [...], "
+                "explain: {name: [...]}}. 'explain' names the remedy and is "
+                "per-personality; 'bare' names nothing, so it carries no personality "
+                "information and one shared list serves every cell."
+            )
+        },
+    )
+    gate_sample_rate: float = field(
+        default=0.5,
+        metadata={
+            "help": (
+                "Probability a surviving teacher turn is checked at all, drawn "
+                "i.i.d. per turn. Below 1.0 the teacher cannot know which turns are "
+                "audited, so the pressure to comply still applies to every turn "
+                "while the conversation always progresses -- an episode is never "
+                "fully blocked -- and the auxiliary cost falls proportionally. "
+                "Compliance is therefore a rate over SAMPLED turns, not over turns."
+            )
+        },
+    )
+    explain_ratio: float = field(
+        default=1.0,
+        metadata={
+            "help": (
+                "Probability a gated turn draws the remedy-naming complaint rather "
+                "than the bare one, i.i.d. per gated turn. At 1.0 the teacher is "
+                "always told what was wanted. Lower values model a learner who "
+                "knows they are lost but not what would help, and force the teacher "
+                "to carry a remedy heard once across later turns. At 0.0 it learns "
+                "only that the turn failed."
+            )
+        },
+    )
+    gate_retries: int = field(
+        default=3,
+        metadata={
+            "help": (
+                "Retries before an unclean verdict becomes FAIL. Anything that is "
+                "not a loadable object with verdict exactly PASS or FAIL -- missing "
+                "key, prose outside the object, truncation, API error, timeout -- "
+                "takes this path. FAIL is the conservative default: it never lets "
+                "through a message that may violate the personality."
+            )
+        },
+    )
+    # No gate_max_tokens: the reply is bounded by auxiliary_model.max_tokens, and
+    # _call_auxiliary_prompt takes no per-call override, so such a field would
+    # configure nothing. The reply carries its reasoning before the verdict, so the
+    # budget has to leave room for both -- the arm's 1024 is ample.
+    def __post_init__(self) -> None:
+        self.prompts_path = str(self.prompts_path or "").strip()
+        self.complaints_path = str(self.complaints_path or "").strip()
+        self.gate_sample_rate = float(self.gate_sample_rate)
+        if not 0.0 <= self.gate_sample_rate <= 1.0:
+            raise ValueError(
+                "personality.gate_sample_rate must be in [0, 1], got "
+                f"{self.gate_sample_rate}."
+            )
+        self.explain_ratio = float(self.explain_ratio)
+        if not 0.0 <= self.explain_ratio <= 1.0:
+            raise ValueError(
+                f"personality.explain_ratio must be in [0, 1], got {self.explain_ratio}."
+            )
+        self.gate_retries = int(self.gate_retries)
+        if self.gate_retries < 1:
+            raise ValueError(
+                f"personality.gate_retries must be at least 1, got {self.gate_retries}."
+            )
+
+
 @dataclass
 class TutorStudentMaskConfig:
     """What this student is allowed to see of the dialogue it is having.
@@ -404,6 +509,32 @@ class TutorStudentModelConfig:
     # intended way to define several students over one served endpoint, and it is
     # why `name` rather than `model` keys the per-student metrics.
     mask: TutorStudentMaskConfig = field(default_factory=TutorStudentMaskConfig)
+    personality: str = field(
+        default="",
+        metadata={
+            "help": (
+                "What this student requires of the TEACHER'S MANNER before it will "
+                "engage. A third axis, independent of mode (behavior) and mask "
+                "(information): the name keys a preference prompt in "
+                "personality.prompts_path, and on a sampled turn an auxiliary model "
+                "is asked that prompt about the teacher's message. FAIL means the "
+                "student does not answer at all -- an injected complaint takes its "
+                "slot and the turn is spent. Empty or 'none' leaves the gate open "
+                "and costs no call.\n\n"
+                "Each value is a learner type from prior work rather than a style "
+                "chosen here; see personality.prompts_path for the per-value "
+                "citation. This is NOT a prompted persona: nothing asks the student "
+                "to act a certain way, because a 1.7B student ignores a "
+                "self-description. The requirement is enforced structurally, by "
+                "withholding the student's engagement.\n\n"
+                "Requires mode 'text' and mask.mode 'full'. The gate is defined over "
+                "prose manner, and a code student's every reply is a program, so the "
+                "criteria would not apply; a mask would additionally change what the "
+                "student could have read. Both are refused rather than silently "
+                "combined."
+            )
+        },
+    )
     request_params: dict[str, Any] = field(
         default_factory=dict,
         metadata={
@@ -456,6 +587,28 @@ class TutorStudentModelConfig:
         self.max_concurrent_calls = int(self.max_concurrent_calls)
         if self.max_concurrent_calls <= 0:
             raise ValueError("student_models.max_concurrent_calls must be positive.")
+        self.personality = str(self.personality or "").strip()
+        if self.personality and self.personality != NO_PERSONALITY:
+            # Refused rather than combined: see the field help. mask may still be a
+            # DictConfig here, so read the mode off either shape.
+            mask_mode = getattr(self.mask, "mode", None)
+            if mask_mode is None and self.mask is not None:
+                try:
+                    mask_mode = dict(self.mask).get("mode")
+                except (TypeError, ValueError):
+                    mask_mode = None
+            if self.mode != "text":
+                raise ValueError(
+                    f"student_models.personality {self.personality!r} requires "
+                    f"mode 'text', got {self.mode!r}. The gate criteria are about "
+                    "prose manner and a code student's every reply is a program."
+                )
+            if str(mask_mode) != "full":
+                raise ValueError(
+                    f"student_models.personality {self.personality!r} requires "
+                    f"mask.mode 'full', got {mask_mode!r}. A mask would change what "
+                    "the student could have read on top of what the gate withholds."
+                )
 
 
 @dataclass
@@ -559,6 +712,19 @@ class TutorStudentAxesConfig:
             )
         },
     )
+    personalities: list[str] = field(
+        default_factory=lambda: [NO_PERSONALITY],
+        metadata={
+            "help": (
+                "The personality axis: which teaching manners this pool demands. "
+                "Each name keys a preference prompt in personality.prompts_path. "
+                f"{NO_PERSONALITY!r} is the open gate and is the default, so a "
+                "block that says nothing about personalities expands exactly as "
+                "before -- and, because the open-gate value contributes no name "
+                "segment, the cell names of existing arms are unchanged."
+            )
+        },
+    )
     # MISSING, not a default_factory: omegaconf builds the schema for a
     # list[TutorStudentAxesConfig] by CALLING the factory, and
     # TutorStudentModelConfig refuses to construct without a name, base_url and
@@ -595,7 +761,16 @@ class TutorStudentAxesConfig:
         stem = str(template.name or "").strip()
         if not stem:
             raise ValueError("student_axes.template.name must be non-empty.")
-        cells = len(behaviors) * len(informations)
+        personalities = [
+            str(p).strip() for p in (self.personalities or []) if str(p).strip()
+        ]
+        if not personalities:
+            raise ValueError("student_axes.personalities must not be empty.")
+        if len(personalities) != len(set(personalities)):
+            raise ValueError(
+                f"student_axes.personalities has duplicates: {personalities}."
+            )
+        cells = len(behaviors) * len(informations) * len(personalities)
         share = float(template.weight) / cells
         expanded: list[TutorStudentModelConfig] = []
         for behavior in behaviors:
@@ -603,15 +778,25 @@ class TutorStudentAxesConfig:
                 label = str(label).strip()
                 if not label:
                     raise ValueError("student_axes.informations keys must be non-empty.")
-                entry = replace(
-                    template,
-                    name=f"{stem}-{behavior}-{label}",
-                    mode=behavior,
-                    weight=share,
-                    mask=mask if isinstance(mask, TutorStudentMaskConfig)
-                    else TutorStudentMaskConfig(**dict(mask)),
-                )
-                expanded.append(entry)
+                for personality in personalities:
+                    # The open gate contributes NO name segment, which keeps every
+                    # existing arm's cell names byte-identical and avoids the
+                    # unreadable "-original-none" tail on the reference cell.
+                    suffix = (
+                        "" if personality == NO_PERSONALITY else f"-{personality}"
+                    )
+                    entry = replace(
+                        template,
+                        name=f"{stem}-{behavior}-{label}{suffix}",
+                        mode=behavior,
+                        weight=share,
+                        personality=(
+                            "" if personality == NO_PERSONALITY else personality
+                        ),
+                        mask=mask if isinstance(mask, TutorStudentMaskConfig)
+                        else TutorStudentMaskConfig(**dict(mask)),
+                    )
+                    expanded.append(entry)
         return expanded
 
 
@@ -2430,6 +2615,9 @@ class TutorConfig(GRPOConfig):
     )
     cross_eval: CrossEvalConfig = field(default_factory=CrossEvalConfig)
     actor: TutorActorConfig = field(default_factory=TutorActorConfig)
+    personality: TutorPersonalityConfig = field(
+        default_factory=TutorPersonalityConfig
+    )
     teacher_history_tags: str = field(
         default="masked",
         metadata={

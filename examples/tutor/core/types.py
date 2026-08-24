@@ -71,6 +71,28 @@ class StudentRequestJudgeResult:
 
 
 @dataclass(slots=True)
+class PersonalityGateResult:
+    """One personality gate check on one teacher message.
+
+    `passed` is what routes the turn: True calls the student, False replaces its
+    reply with a complaint. `reason` is the model's own analysis, kept for the debug
+    trace and never read by the reward path. `error` is set only when every retry
+    came back unclean, in which case `passed` is False -- the conservative default,
+    so a broken check never lets through a message that may violate the preference.
+    """
+
+    raw_output: str
+    passed: bool
+    reason: str
+    error: str | None = None
+    attempts: int = 1
+    # False when gate_sample_rate did not select this turn. A turn that was never
+    # checked is not evidence of compliance, so it must not land in the numerator or
+    # the denominator of the compliance rate.
+    sampled: bool = True
+
+
+@dataclass(slots=True)
 class StudentQuestionGenerationResult:
     prompt: str
     raw_output: str
@@ -187,6 +209,11 @@ class StudentTurnState:
     # rather than read off the workflow because one workflow instance serves every
     # concurrent episode, so anything per-episode has to travel with the episode.
     student_mode: str = "text"
+    # What this student demands of the teacher's manner, or "" for the open gate.
+    # Here for the same reason as the two above: one workflow, many concurrent
+    # episodes, so per-episode state travels with the episode rather than sitting on
+    # the workflow where a neighbouring episode would read it.
+    student_personality: str = ""
 
 
 @dataclass(slots=True)
@@ -214,6 +241,14 @@ class TurnArtifact:
     teacher_progress_judge_result: TeacherProgressJudgeResult | None = None
     student_request_judge_result: StudentRequestJudgeResult | None = None
     student_question_generation: StudentQuestionGenerationResult | None = None
+    # None when this student has no personality, or when the turn ended on a format
+    # error or a leak before the gate could run.
+    personality_gate_result: PersonalityGateResult | None = None
+    # True when the gate closed and the student never answered: `student_output` holds
+    # the injected complaint instead of a student reply. Such a turn is NOT a student
+    # attempt -- it contributes to neither solved nor final_correct -- but it does
+    # consume one of the turn budget, which is the whole cost of failing the gate.
+    personality_gated: bool = False
     # Set when this turn was selected for on-policy distillation. Holds the
     # instructed-teacher prompt tokens; the output tokens are appended by
     # ``response_to_tensordict``.
@@ -282,3 +317,11 @@ class TurnTrace:
     teacher_progress_judge_result: TeacherProgressJudgeResult | None = None
     student_request_judge_result: StudentRequestJudgeResult | None = None
     student_question_generation: StudentQuestionGenerationResult | None = None
+    # None when this student has no personality, or when the turn ended on a format
+    # error or a leak before the gate could run.
+    personality_gate_result: PersonalityGateResult | None = None
+    # True when the gate closed and the student never answered: `student_output` holds
+    # the injected complaint instead of a student reply. Such a turn is NOT a student
+    # attempt -- it contributes to neither solved nor final_correct -- but it does
+    # consume one of the turn budget, which is the whole cost of failing the gate.
+    personality_gated: bool = False

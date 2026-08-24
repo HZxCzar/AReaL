@@ -1,0 +1,76 @@
+# One policy trained against a single personality: the surface approach, Marton & Saljo (1976).
+#
+# SETTINGS ONLY: the allocation comes from <n>gpu/alloc.yaml, so this file never says
+# how many GPUs it wants.
+#
+# The student block is the whole arm. One entry at weight 1.0, so the per-group draw
+# has nothing to choose and every rollout of a GRPO group faces the same demand.
+# Read against the joint policy in base/personality/ID/all.yaml: a specialist that
+# beats the generalist on its own personality, where the generalist cannot tell the
+# personalities apart, is the signature this axis exists to find.
+#
+# In a single-personality arm the demand is CONSTANT, so the policy can learn it as a
+# prior and satisfy it at turn 1 without being told -- which the joint policy cannot
+# do, since nothing in its prompt names the student. Turn-1 compliance rising here is
+# therefore the specialist result, and it is unavailable jointly.
+defaults:
+  - ../../default@_global_
+  - _self_
+
+trial_name: 0818-personality-surface
+
+student_models:
+- name: qwen3-1.7b-text-original-surface
+  weight: 1.0
+  mode: text
+  mask:
+    mode: full
+  personality: surface
+  base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+  model: qwen3-1.7b
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  # 32, as in base/single/*.yaml, and it must NOT be raised for a larger allocation.
+  # One AsyncLLMCaller is built per student entry and the endpoint is tuned for 32
+  # concurrent student requests in total; a saturated endpoint refuses rather than
+  # slows, and the symptom is student/<name>/call_failed corrupting an episode's
+  # reward rather than merely costing time.
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+
+personality:
+  prompts_path: examples/tutor/prompt_pools/personality_prompts_v1.json
+  complaints_path: examples/tutor/prompt_pools/personality_complaints_v1.json
+  # STATED, not inherited. All three match the dataclass defaults except
+  # explain_ratio, and an arm that relies on a default silently changes meaning when
+  # the default moves -- which has already happened once in 0818.
+  #
+  # Not every turn is audited. The teacher cannot know which ones are, so the
+  # pressure to comply applies to every turn while the conversation still progresses,
+  # and an episode can never be blocked end to end. Compliance is therefore a rate
+  # over SAMPLED turns: personality/<p>/gate_calls is the denominator, and dividing
+  # gated turns by all turns would report roughly the sample rate as the failure rate.
+  gate_sample_rate: 0.5
+  # 0.5, NOT 1.0. Half of gated turns name the remedy and half say only that the
+  # student is lost, drawn i.i.d. per gated turn. That models a learner who knows
+  # they are stuck but not what would help, and it forces the teacher to carry a
+  # remedy heard once across the turns where it is withheld -- which is the thing
+  # worth learning. At 1.0 the teacher is told every time and the task collapses to
+  # instruction following.
+  explain_ratio: 0.5
+  # Anything that is not a clean PASS or FAIL is retried this many times and then
+  # counts as FAIL: conservative, so a broken check never lets through a message that
+  # may violate the preference. Watch personality/<p>/gate_error, which separates an
+  # endpoint problem from the teacher having got worse.
+  gate_retries: 3

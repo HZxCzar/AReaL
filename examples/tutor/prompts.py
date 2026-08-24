@@ -196,6 +196,49 @@ backslashes:
 {"score": 1, "reason": "brief explanation"}
 """
 
+# THE PERSONALITY GATE. One question about the manner of one teacher message: does
+# it match what this student needs? The same kind of call as the leak check, and NOT
+# a judge of correctness -- it never sees the ground truth, never sees a student
+# answer, and free chat scores nothing mid-episode anyway.
+#
+# The preference text substituted into {preference} is data, not a constant: it lives
+# in prompt_pools/personality_prompts_v1.json, one entry per personality, each with
+# the citation for the learner type it comes from in its  field.
+# A TEMPLATE, not a constant: {task} carries the problem under discussion. Several
+# criteria are undecidable without it -- whether a message restates the problem,
+# whether it gives a smaller version of it, whether an analogy is to a genuinely
+# different problem -- and a judge that cannot see the problem cannot tell a
+# restatement from an instance.
+PERSONALITY_GATE_SYSTEM_PROMPT = """You check whether a teacher's message matches \
+one student's stated preference for
+how they want to be taught.
+You will be given the student's preference and the tutor's message. Judge the
+manner of the message against that preference. Do not judge whether the
+details are correct, only the preference matters.
+
+The problem under discussion is:
+{task}"""
+
+# REASONING FIRST, verdict second, and the order is the point: asked for the verdict
+# alone the model commits before it has looked, and asked for it first the analysis
+# becomes a rationalisation of a choice already made. Only `verdict` is read.
+PERSONALITY_GATE_USER_TEMPLATE = """<student_preference>
+{preference}
+</student_preference>
+
+<teacher_message>
+{teacher_message}
+</teacher_message>
+
+Work through the teacher's message against the student's preference, then give
+your verdict. Reply with JSON only, in this order:
+
+{{"reasoning": "<your analysis in 1-3 sentences>", "verdict": "PASS"}}
+
+verdict is "PASS" if the message matches the preference and "FAIL" if it does
+not. Nothing outside the JSON object."""
+
+
 # Guidance instructions appended to the END of the teacher prompt, immediately
 # before generation. Placement is load-bearing: the identical text placed in the
 # system prompt is followed far less often. See analysis/hazard_20260806.

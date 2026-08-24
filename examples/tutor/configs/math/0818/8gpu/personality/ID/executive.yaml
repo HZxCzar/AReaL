@@ -1,0 +1,12 @@
+# the executive personality at 8gpu. Composition only: what the arm does comes from
+# base/personality/ID/executive.yaml, how many GPUs it gets from alloc.yaml.
+defaults:
+  - ../../../base/personality/ID/executive@_global_
+  - ../../alloc@_global_
+  - _self_
+
+trial_name: 0818-personality-executive-8gpu
+
+stats_logger:
+  wandb:
+    group: 0818-personality-8gpu

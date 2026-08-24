@@ -1,0 +1,147 @@
+# 0818 personalities -- the personality axis, six demanded manners plus the open gate.
+#
+# A personality is what the student requires of the TEACHER'S MANNER before it will
+# engage. On a sampled teacher turn an auxiliary model is asked that personality's
+# prompt about the teacher's message and answers PASS or FAIL. FAIL means the student
+# does not answer at all: a complaint takes its slot, the turn is spent, and whatever
+# that turn would have taught is lost.
+#
+# WHY A GATE AND NOT A PROMPTED PERSONA. A student axis is worth training over only
+# if the students genuinely need different teaching and genuinely behave differently.
+# A prompted persona delivers neither -- this student ignores a self-description, and
+# prompted style compliance collapses after the first turn. The gate is structural:
+# the requirement is enforced by withholding the student's engagement, and the
+# withholding is visible in the transcript as the student's own stated demand.
+#
+# WHAT THIS ARM CAN CLAIM. That the teacher forms a student-conditional policy when
+# the student's need is observable and enforced. NOT that personalization helps: the
+# differential need is constructed by fiat, since the student does not learn better
+# from questions -- we refuse to let it engage without them. That is the prerequisite
+# question. Adaptive teaching has measured -0.06 against a +0.3 teaching main effect,
+# no student's best transcript was its own, and the joint run's adaptation signature
+# stayed flat through step 125 because it could not tell the students apart. Here the
+# student says what it wants.
+#
+# THE PERSONALITIES ARE FROM PRIOR WORK, not styles chosen here. Each carries its
+# citation in the source field of its entry in personality_prompts_v1.json, so the
+# provenance travels with the prompt rather than living only in a design document:
+#
+#   instrumental   Nelson-Le Gall (1981, 1985), instrumental help-seeking: the
+#                  minimum assistance needed to succeed independently -- a hint, or
+#                  the principle -- rather than the solution. Mastery-oriented.
+#   executive      Nelson-Le Gall (1981, 1985), executive help-seeking: to have the
+#                  problem solved rather than to learn to solve it. Dependency-
+#                  oriented.
+#   deep           Marton & Saljo (1976), deep approach: the reason behind the
+#                  procedure, not the procedure alone. Developed by Entwistle, Biggs.
+#   surface        Marton & Saljo (1976), surface approach: reproduce the procedure
+#                  with minimum engagement.
+#   example_first  Worked-example effect / expertise reversal (Sweller; Kalyuga,
+#                  Ayres, Chandler & Sweller 2003): the instance before the rule.
+#   rule_first     The same interaction's other pole: the rule before the instance.
+#
+# Overall motivation is Cronbach & Snow (1977), aptitude-treatment interaction. Snow's
+# own summary of that handbook is the more useful half -- ATIs are common in education
+# but none is understood well enough to guide practice -- which is the gap this arm
+# addresses. Deliberately NOT anchored on VARK, Kolb or Felder-Silverman: those rest
+# on the meshing hypothesis, which has no empirical support (Pashler, McDaniel, Rohrer
+# & Bjork 2008). Nothing here needs it, because nothing here claims the student learns
+# better under its preference.
+#
+# EVAL IS OFF, as in full-students. The quantity this arm exists to produce is the
+# adaptation signature -- whether the teacher's behaviour differs by which learner it
+# drew -- and that is a training-side number available every step from the per-
+# personality compliance and reward series.
+defaults:
+  - default@_global_
+  - _self_
+
+trial_name: 0818-personalities
+
+# REQUIRED, not tidiness. base/default.yaml carries one student at weight 1.0 and
+# student_axes expansion APPENDS, so without this the default student stays in the
+# pool and is drawn alongside the seven cells.
+student_models: []
+
+student_axes:
+- behaviors: [text]
+  informations:
+    original:
+      mode: full
+  # 'none' is the open gate and contributes no name segment, so its cell is
+  # 'qwen3-1.7b-text-original' -- byte-identical to the reference cell of every other
+  # arm, which is what makes it readable as the control rather than as a seventh
+  # variant. The other six append their name.
+  #
+  # TEXT AND ORIGINAL ARE FORCED, not chosen here: configs.py raises if a personality
+  # is paired with mode 'code' or any mask. The criteria are about prose manner, a
+  # code student's every reply is a program, and a mask would change what the student
+  # could have read on top of what the gate already withholds.
+  personalities:
+  - none
+  - instrumental
+  - executive
+  - surface
+  - deep
+  - example_first
+  - rule_first
+  # The three added from the literature, all OOD: error flagging (Metcalfe;
+  # VanLehn), analogical transfer (Gick & Holyoak 1983), and contrasting cases
+  # (Schwartz & Bransford 1998; Marton). This arm carries every personality plus the
+  # open gate, so it is the one to smoke a prompt change on.
+  - error_focused
+  - analogy
+  - contrasting_cases
+  template:
+    name: qwen3-1.7b
+    weight: 1.0
+    base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+    model: qwen3-1.7b
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    # 32, as in base/single/*.yaml and the default, and it must NOT be raised for a
+    # larger allocation. One AsyncLLMCaller is built per student entry and the
+    # endpoint is tuned for 32 concurrent student requests in total; a saturated
+    # endpoint refuses rather than slows, and the symptom is
+    # student/<name>/call_failed corrupting an episode's reward rather than merely
+    # costing time.
+    max_concurrent_calls: 32
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-qwen17b-student
+      extra_body:
+        top_k: 20
+        min_p: 0
+        chat_template_kwargs:
+          enable_thinking: false
+
+personality:
+  prompts_path: examples/tutor/prompt_pools/personality_prompts_v1.json
+  complaints_path: examples/tutor/prompt_pools/personality_complaints_v1.json
+  # STATED, not inherited. All three match the dataclass defaults except
+  # explain_ratio, and an arm that relies on a default silently changes meaning when
+  # the default moves -- which has already happened once in 0818.
+  #
+  # Not every turn is audited. The teacher cannot know which ones are, so the
+  # pressure to comply applies to every turn while the conversation still
+  # progresses, and an episode can never be blocked end to end. Compliance is
+  # therefore a rate over SAMPLED turns: personality/<p>/gate_calls is the
+  # denominator, and dividing gated turns by all turns would report roughly the
+  # sample rate as the failure rate.
+  gate_sample_rate: 0.5
+  # 0.5, NOT 1.0. Half of gated turns name the remedy and half say only that the
+  # student is lost, drawn i.i.d. per gated turn. That models a learner who knows
+  # they are stuck but not what would help, and it forces the teacher to carry a
+  # remedy heard once across the turns where it is withheld -- which is the thing
+  # worth learning. At 1.0 the teacher is told every time and the task collapses to
+  # instruction following.
+  explain_ratio: 0.5
+  # Anything that is not a clean PASS or FAIL is retried this many times and then
+  # counts as FAIL: conservative, so a broken check never lets through a message
+  # that may violate the preference. Watch personality/<p>/gate_error, which
+  # separates an endpoint problem from the teacher having got worse.
+  gate_retries: 3

@@ -139,6 +139,7 @@ from examples.common.parsing import parse_json_dict
 # protocols and the two scorers -- the same reason judges.py is shared.
 from examples.pedagogical_rl import cross_eval
 from examples.tutor.configs import (
+    NO_PERSONALITY,
     STUDENT_MODE_CODE,
     STUDENT_MODE_TEXT,
     TUTOR_EVAL_STUDENT_FIELD,
@@ -223,6 +224,7 @@ from examples.tutor.core.types import (
     JudgeResult,
     LeakCheckResult,
     LeakHandlingMode,
+    PersonalityGateResult,
     PromptPoolSelection,
     PublicHistoryState,
     RewardAssignment,
@@ -278,6 +280,8 @@ from examples.tutor.prompts import (
     NONE_YET_PLACEHOLDER,
     POLARIS_FILTER_SOLVER_USER_TEMPLATE,
     POLARIS_INSTRUCTION,
+    PERSONALITY_GATE_SYSTEM_PROMPT,
+    PERSONALITY_GATE_USER_TEMPLATE,
     PUBLIC_HISTORY_ENTRY_TEMPLATE,
     RAWBASE_LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE,
     RAWBASE_LEAK_CHECK_SYSTEM_PROMPT,
@@ -453,6 +457,153 @@ def load_student_turn_behaviors(path: str) -> tuple[StudentTurnBehavior, ...]:
             f"got {probability_sum:.12g}: {file_path}"
         )
     return tuple(behaviors)
+
+
+
+def load_personality_prompts(path: str) -> dict[str, dict[str, str]]:
+    """{name: {"source": citation, "preference": prompt}} from a JSON file.
+
+    `source` is required, not decorative. Every personality is a learner type taken
+    from prior work rather than a style invented here, and the citation has to travel
+    with the prompt or the provenance is lost by the time anyone writes it up. It is
+    never shown to the model.
+    """
+    normalized_path = str(path or "").strip()
+    if not normalized_path:
+        return {}
+
+    file_path = Path(normalized_path)
+    try:
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"personality prompt file not found: {file_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"personality prompts must be valid JSON: {file_path}: {exc.msg}"
+        ) from exc
+
+    entries = payload.get("personalities") if isinstance(payload, dict) else None
+    if not isinstance(entries, dict) or not entries:
+        raise ValueError(
+            "personality prompts must be an object with a non-empty "
+            f"'personalities' mapping: {file_path}"
+        )
+
+    prompts: dict[str, dict[str, str]] = {}
+    for name, entry in entries.items():
+        clean_name = str(name or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", clean_name):
+            raise ValueError(
+                f"personality name {name!r} is not a valid name segment, and it "
+                f"becomes part of a student name: {file_path}"
+            )
+        if clean_name == NO_PERSONALITY:
+            raise ValueError(
+                f"{NO_PERSONALITY!r} is the open gate and must not have a prompt: "
+                f"{file_path}"
+            )
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"personality {clean_name!r} must be an object with 'source' and "
+                f"'preference': {file_path}"
+            )
+        preference = str(entry.get("preference") or "").strip()
+        source = str(entry.get("source") or "").strip()
+        if not preference:
+            raise ValueError(
+                f"personality {clean_name!r} has an empty preference: {file_path}"
+            )
+        if not source:
+            raise ValueError(
+                f"personality {clean_name!r} has no 'source'. Each category is a "
+                "learner type from prior work and the citation is required so the "
+                f"provenance survives to the writeup: {file_path}"
+            )
+        prompts[clean_name] = {"source": source, "preference": preference}
+    return prompts
+
+
+def _parse_personality_gate_reply(text: str) -> tuple[bool, str, str | None]:
+    """(passed, reason, parse_error) from the gate's JSON reply.
+
+    Strict on purpose. Anything other than a loadable object whose verdict is
+    exactly PASS or FAIL is a parse error, which the caller retries and then treats
+    as FAIL.
+    """
+    body = _strip_reasoning_for_context(str(text or "")).strip()
+    if not body:
+        return False, "", "personality gate returned an empty response."
+    # A fenced block is the one deviation worth tolerating: the content inside is
+    # still exactly the object that was asked for.
+    if body.startswith("```"):
+        body = re.sub(r"^```[a-zA-Z]*\n?", "", body)
+        body = re.sub(r"\n?```$", "", body).strip()
+    start, end = body.find("{"), body.rfind("}")
+    if start < 0 or end <= start:
+        return False, "", "personality gate reply contained no JSON object."
+    try:
+        payload = json.loads(body[start : end + 1])
+    except json.JSONDecodeError as exc:
+        return False, "", f"personality gate reply was not valid JSON: {exc.msg}"
+    if not isinstance(payload, dict):
+        return False, "", "personality gate reply was not a JSON object."
+    verdict = str(payload.get("verdict") or "").strip().upper()
+    reason = str(payload.get("reasoning") or "").strip()
+    if verdict == "PASS":
+        return True, reason, None
+    if verdict == "FAIL":
+        return False, reason, None
+    return False, reason, f"personality gate verdict was {verdict!r}, not PASS/FAIL."
+
+
+def load_personality_complaints(
+    path: str,
+) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
+    """(bare, {name: explain}) from a JSON file.
+
+    'explain' names the remedy and is per-personality. 'bare' names nothing, so it
+    carries no personality information and one shared list serves every cell.
+    """
+    normalized_path = str(path or "").strip()
+    if not normalized_path:
+        return (), {}
+
+    file_path = Path(normalized_path)
+    try:
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"personality complaint file not found: {file_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"personality complaints must be valid JSON: {file_path}: {exc.msg}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"personality complaints must be an object: {file_path}")
+
+    def clean_list(raw: Any, label: str) -> tuple[str, ...]:
+        if not isinstance(raw, list) or not raw:
+            raise ValueError(
+                f"personality complaints {label} must be a non-empty array: "
+                f"{file_path}"
+            )
+        lines = tuple(str(line).strip() for line in raw if str(line).strip())
+        if not lines:
+            raise ValueError(
+                f"personality complaints {label} has no non-empty lines: {file_path}"
+            )
+        return lines
+
+    bare = clean_list(payload.get("bare"), "bare")
+    raw_explain = payload.get("explain")
+    if not isinstance(raw_explain, dict) or not raw_explain:
+        raise ValueError(
+            f"personality complaints need a non-empty 'explain' mapping: {file_path}"
+        )
+    explain = {
+        str(name).strip(): clean_list(lines, f"explain.{name}")
+        for name, lines in raw_explain.items()
+    }
+    return bare, explain
 
 
 def load_prompt_text(path: str, *, role: str) -> str:
@@ -655,6 +806,9 @@ class StudentModelRuntime:
     # 'text' or 'code'. See TutorStudentModelConfig.mode. Carried on the runtime
     # rather than looked up by name so every downstream branch reads one field.
     mode: str = STUDENT_MODE_TEXT
+    # What this student demands of the teacher's manner, or "" for the open gate.
+    # See TutorStudentModelConfig.personality.
+    personality: str = ""
 
 
 @dataclass(slots=True)
@@ -665,6 +819,7 @@ class SelectedStudent:
     confidence_caller: ApiAuxiliaryCaller | None = None
     mask: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_MASK))
     mode: str = STUDENT_MODE_TEXT
+    personality: str = ""
 
     @property
     def is_code(self) -> bool:
@@ -735,6 +890,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         guided_slots: dict[str, Any] | None = None,
         opd: dict[str, Any] | None = None,
         free_chat: dict[str, Any] | None = None,
+        personality: dict[str, Any] | None = None,
         student_type_probe: dict[str, Any] | None = None,
         cross_eval: dict[str, Any] | None = None,
         prompt_instruction: dict[str, Any] | None = None,
@@ -1540,9 +1696,194 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         if masked and self.student_mask_active:
             logger.info("student attention masks: %s", ", ".join(masked))
+        self._configure_personality_gate(personality)
         self._configure_student_type_probe(student_type_probe)
         self.tokenizer_path = tokenizer_path
         self.model_context_length = model_context_length
+
+    def _configure_personality_gate(self, personality: dict[str, Any] | None) -> None:
+        """Load the preference prompts and complaints, and check the pool against them.
+
+        Everything is checked at construction rather than at the first gated turn,
+        because a missing prompt would otherwise surface as a mid-run exception on
+        whichever rollout first drew that cell.
+        """
+        settings = dict(personality or {})
+        self.personality_gate_sample_rate = float(
+            settings.get("gate_sample_rate", 0.5)
+        )
+        self.personality_explain_ratio = float(settings.get("explain_ratio", 1.0))
+        self.personality_gate_retries = max(1, int(settings.get("gate_retries", 3)))
+        self.personality_prompts = load_personality_prompts(
+            str(settings.get("prompts_path", "") or "")
+        )
+        (
+            self.personality_complaints_bare,
+            self.personality_complaints_explain,
+        ) = load_personality_complaints(
+            str(settings.get("complaints_path", "") or "")
+        )
+        self._personality_fallback_rng = random.Random(
+            f"{self.prompt_pool_seed}:personality"
+        )
+
+        demanded = sorted(
+            {
+                runtime.personality
+                for runtime in getattr(self, "student_model_runtimes", {}).values()
+                if runtime.personality and runtime.personality != NO_PERSONALITY
+            }
+        )
+        self.personality_active = bool(demanded)
+        if not demanded:
+            return
+        if not self.personality_prompts:
+            raise ValueError(
+                "personality.prompts_path is required: students demand "
+                f"{demanded} and no preference prompts were loaded."
+            )
+        missing_prompts = [p for p in demanded if p not in self.personality_prompts]
+        if missing_prompts:
+            raise ValueError(
+                f"no preference prompt for personalities {missing_prompts}; "
+                f"the file defines {sorted(self.personality_prompts)}."
+            )
+        if not self.personality_complaints_bare:
+            raise ValueError(
+                "personality.complaints_path is required: a closed gate has to put "
+                "something in the student's slot."
+            )
+        missing_explain = [
+            p for p in demanded if p not in self.personality_complaints_explain
+        ]
+        # Only when the remedy can actually be drawn: at explain_ratio 0.0 the
+        # per-personality lists are never read, and requiring them would refuse a
+        # legitimate arm.
+        if missing_explain and self.personality_explain_ratio > 0.0:
+            raise ValueError(
+                f"no explain complaints for personalities {missing_explain}; "
+                f"the file defines {sorted(self.personality_complaints_explain)}."
+            )
+        logger.info(
+            "personality gate active: %s (sample_rate=%.2f, explain_ratio=%.2f)",
+            ", ".join(
+                f"{name}[{self.personality_prompts[name]['source'].split(':')[0]}]"
+                for name in demanded
+            ),
+            self.personality_gate_sample_rate,
+            self.personality_explain_ratio,
+        )
+
+    def _personality_rng(self, *, kind: str, turn_idx: int) -> random.Random:
+        """Task-scoped, so every rollout of one task shares the audit schedule.
+
+        The teacher still cannot know which turns are audited -- nothing about the
+        schedule reaches its prompt -- but within a GRPO group the comparison is not
+        confounded by which rollouts happened to be checked. Falls back to a shared
+        stream when there is no task id, matching _select_student_turn_behavior.
+        """
+        try:
+            task_id = getattr(workflow_context.get(), "task_id", None)
+        except Exception:
+            task_id = None
+        if task_id is None:
+            return self._personality_fallback_rng
+        return random.Random(
+            f"{self.prompt_pool_seed}:personality-{kind}:{int(task_id)}:{int(turn_idx)}"
+        )
+
+    def _personality_complaint(self, personality: str, *, turn_idx: int) -> str:
+        """The student's reply to a message that failed the gate.
+
+        Drawn from a file, never generated at rollout time. A degenerate or off-spec
+        generation here would mislabel the demand and punish a teacher that had
+        complied, and this line is the only channel carrying the personality to the
+        teacher.
+        """
+        rng = self._personality_rng(kind="complaint", turn_idx=turn_idx)
+        explain = self.personality_complaints_explain.get(personality, ())
+        if explain and rng.random() < self.personality_explain_ratio:
+            return rng.choice(explain)
+        return rng.choice(self.personality_complaints_bare)
+
+    async def _run_personality_gate(
+        self,
+        personality: str,
+        teacher_message: str,
+        *,
+        task: str,
+        turn_idx: int,
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
+    ) -> PersonalityGateResult | None:
+        """PASS/FAIL for one teacher message, or None when no gate applies.
+
+        Sampling: below 1.0 not every turn is checked, so the conversation always
+        progresses and an episode is never fully blocked, while the teacher -- unable
+        to tell which turns are audited -- is still pressed to comply on all of them.
+        An unsampled turn returns a result with sampled=False so it lands in neither
+        side of the compliance rate.
+        """
+        if not personality or personality == NO_PERSONALITY:
+            return None
+        entry = self.personality_prompts.get(personality)
+        if entry is None:
+            raise ValueError(f"no preference prompt for personality {personality!r}.")
+
+        if self.personality_gate_sample_rate < 1.0:
+            rng = self._personality_rng(kind="sample", turn_idx=turn_idx)
+            if rng.random() >= self.personality_gate_sample_rate:
+                return PersonalityGateResult(
+                    raw_output="",
+                    passed=True,
+                    reason="",
+                    error=None,
+                    attempts=0,
+                    sampled=False,
+                )
+
+        user_prompt = PERSONALITY_GATE_USER_TEMPLATE.format(
+            preference=entry["preference"],
+            teacher_message=teacher_message.strip(),
+        )
+        last_error = "personality gate produced no verdict."
+        raw_output = ""
+        for attempt in range(1, self.personality_gate_retries + 1):
+            result = await self._call_auxiliary_prompt(
+                # str.format touches the template only, so braces inside the problem
+                # -- LaTeX is full of them -- are substituted verbatim.
+                system_prompt=PERSONALITY_GATE_SYSTEM_PROMPT.format(
+                    task=str(task or "").strip()
+                ),
+                user_prompt=user_prompt,
+                aux_caller=aux_caller,
+                rid_prefix=f"personality-gate-{personality}-{turn_idx}",
+            )
+            raw_output = result.raw_text or result.text
+            if result.error:
+                last_error = str(result.error)
+                continue
+            verdict, reason, parse_error = _parse_personality_gate_reply(result.text)
+            if parse_error:
+                last_error = parse_error
+                continue
+            return PersonalityGateResult(
+                raw_output=raw_output,
+                passed=verdict,
+                reason=reason,
+                error=None,
+                attempts=attempt,
+            )
+        # FAIL, deliberately. An unclean verdict is a bug, and closing the gate is the
+        # conservative reading: it never lets through a message that may violate the
+        # preference. The rate is reported so an endpoint problem is visible as a
+        # spike rather than as the teacher having got worse.
+        return PersonalityGateResult(
+            raw_output=raw_output,
+            passed=False,
+            reason="",
+            error=last_error,
+            attempts=self.personality_gate_retries,
+        )
 
     @staticmethod
     def _normalize_student_model_configs(
@@ -1614,6 +1955,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     else None
                 ),
                 mode=str(student.get("mode", STUDENT_MODE_TEXT)),
+                personality=str(student.get("personality", "") or ""),
             )
         return runtimes
 
@@ -1750,6 +2092,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 confidence_caller=runtime.confidence_caller,
                 mask=runtime.mask,
                 mode=runtime.mode,
+                personality=runtime.personality,
             )
 
         if forced_name:
@@ -2654,20 +2997,50 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_turn_behavior=student_turn_behavior,
                 student_mask=selected_student.mask,
                 student_mode=selected_student.mode,
+                student_personality=selected_student.personality,
             )
-            student_prompt = self._build_student_prompt_from_state(student_state)
-            student_answer_raw, student_error = await self._run_student(
-                student_state,
-                aux_caller=student_caller,
-                code_session=code_session,
+            # THE PERSONALITY GATE, and it sits here for two reasons. After the
+            # format parse and the leak check, so a turn that already ended costs no
+            # auxiliary call -- worth most when the policy is worst, since both rates
+            # start high. And before the student call, because a message that fails
+            # the preference means the student does not answer at all.
+            personality_gate_result = await self._run_personality_gate(
+                selected_student.personality,
+                tutor_visible_output,
+                task=task,
+                turn_idx=turn_idx,
+                aux_caller=aux_caller,
             )
+            personality_gated = (
+                personality_gate_result is not None
+                and not personality_gate_result.passed
+            )
+            if personality_gated:
+                # No student call: the complaint IS the student's turn. It stays in
+                # the transcript afterwards because it is what the student said, so
+                # the re-test reads it like any other turn.
+                student_prompt = ""
+                student_answer_raw = self._personality_complaint(
+                    selected_student.personality, turn_idx=turn_idx
+                )
+                student_error = None
+            else:
+                student_prompt = self._build_student_prompt_from_state(student_state)
+                student_answer_raw, student_error = await self._run_student(
+                    student_state,
+                    aux_caller=student_caller,
+                    code_session=code_session,
+                )
             student_answer = _strip_reasoning_for_context(student_answer_raw)
             # Free chat scores nothing mid-episode. A per-turn judge would buy
             # only metrics here, and it is also the thing that ends the episode
             # early, which is exactly what this rollout removes.
+            # A gated turn is not a student attempt, so there is nothing to score:
+            # judging the complaint as an answer would count a refusal to engage as a
+            # wrong answer.
             judge_result = (
                 self._unscored_judge_result()
-                if free_chat
+                if (free_chat or personality_gated)
                 else await self._score_answer_async(
                     task,
                     ground_truth,
@@ -2684,6 +3057,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 student_answer,
                 should_generate=(
                     not free_chat
+                    and not personality_gated
                     and not judge_result.correct
                     and not student_error
                     and turn_idx < self.max_turns
@@ -2723,6 +3097,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     student_error=student_error,
                     judge_result=judge_result,
                     student_question_generation=student_question_generation,
+                    personality_gate_result=personality_gate_result,
+                    personality_gated=personality_gated,
                 )
             )
 
@@ -7445,6 +7821,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 termination_reason == TEACHER_PRE_SKIPPED_TERMINATION_REASON
             ),
         }
+        metrics.update(self._personality_metrics(traces, student_name=student_name))
         # The code student's channel health. Present only for a code student, so
         # the series is never padded with zeros that mean "not measured".
         #
@@ -7902,6 +8279,70 @@ class TutorAgentWorkflow(RolloutWorkflow):
         ):
             keys.append("student_type_probe")
         return keys
+
+    def _personality_metrics(
+        self, traces: list[TurnTrace], *, student_name: str = ""
+    ) -> dict[str, float]:
+        """Gate metrics for the drawn cell, keyed by personality.
+
+        COMPLIANCE IS A RATE OVER SAMPLED TURNS, not over turns. Below a sample rate
+        of 1.0 most turns are never checked, and dividing by all of them would report
+        roughly the sample rate itself as the failure rate. Unsampled turns are in
+        neither the numerator nor the denominator.
+        """
+        if not getattr(self, "personality_active", False):
+            return {}
+        results = [
+            trace.personality_gate_result
+            for trace in traces
+            if trace.personality_gate_result is not None
+        ]
+        if not results:
+            return {}
+        personality = ""
+        for runtime in getattr(self, "student_model_runtimes", {}).values():
+            if runtime.name == student_name:
+                personality = runtime.personality
+                break
+        if not personality:
+            return {}
+        prefix = f"personality/{self._student_metric_name(personality)}"
+        sampled = [result for result in results if result.sampled]
+        gated = [result for result in results if not result.passed]
+        metrics: dict[str, float] = {
+            f"{prefix}/gated_turns": float(len(gated)),
+            f"{prefix}/gate_calls": float(len(sampled)),
+            f"{prefix}/gate_error": float(
+                sum(1 for result in sampled if result.error)
+            ),
+            "personality/sampled_share": (
+                float(len(sampled)) / float(len(results)) if results else 0.0
+            ),
+        }
+        if sampled:
+            metrics[f"{prefix}/compliance"] = float(
+                sum(1 for result in sampled if result.passed)
+            ) / float(len(sampled))
+        # Turn 1 is the blind guess: nothing in the teacher's prompt names the
+        # student, and the initial attempt is identical across personalities, so a
+        # teacher converging on one generic opener shows up here and nowhere else.
+        first = next(
+            (
+                trace.personality_gate_result
+                for trace in traces
+                if trace.turn_idx == 1
+                and trace.personality_gate_result is not None
+                and trace.personality_gate_result.sampled
+            ),
+            None,
+        )
+        if first is not None:
+            metrics[f"{prefix}/compliance_turn1"] = float(first.passed)
+        # Teaching quality at matched compliance. Once the gate binds, the episode
+        # reward is largely a count of turns that got through, so the re-test has to
+        # be readable on the episodes where nothing was withheld.
+        metrics[f"{prefix}/clean_episode"] = float(not gated)
+        return metrics
 
     def _reward_component_metrics(self, traces: list[TurnTrace]) -> dict[str, float]:
         component_totals = dict.fromkeys(self._enabled_reward_component_keys(), 0.0)

@@ -1,0 +1,96 @@
+# The joint in-domain policy: one teacher, all four ID personalities, drawn one per
+# GRPO group.
+#
+# This is the arm the four ID specialists are read against. A specialist beating it
+# on its own personality is the adaptation signature; the joint policy matching every
+# specialist would mean the personalities make no differential demand at all.
+#
+# OOD is deliberately absent. The sequencing axis (example_first / rule_first) is
+# held out whole, so an out-of-domain personality is a demand along a dimension this
+# policy never trained on rather than the opposite pole of one it did.
+#
+# student_axes rather than four written-out entries: one copy of the endpoint, so a
+# changed endpoint cannot reach three cells and miss the fourth. omegaconf replaces a
+# list on merge rather than merging element-wise, which is how that happens.
+defaults:
+  - ../../default@_global_
+  - _self_
+
+trial_name: 0818-personality-all-id
+
+# REQUIRED, not tidiness: base/default.yaml carries one student at weight 1.0 and
+# student_axes expansion APPENDS, so without this the default student stays in the
+# pool and is drawn alongside the four.
+student_models: []
+
+student_axes:
+- behaviors: [text]
+  informations:
+    original:
+      mode: full
+  # The open gate IS in this list: it is the fifth in-domain cell, the student that
+  # demands nothing. It contributes no name segment, so it expands to
+  # qwen3-1.7b-text-original -- byte-identical to the reference cell of every other
+  # arm, which is what makes the per-student series comparable across them.
+  personalities:
+  # EXACTLY the cells that have a matching single-personality run, and no others.
+  # The comparison this arm exists for is specialist versus generalist on the same
+  # cell, so a cell trained jointly with no specialist to read it against
+  # contributes nothing, and a specialist with no joint counterpart cannot be placed.
+  #
+  # instrumental is left out because it passes 100% blind: alone it gives the gate no
+  # gradient, so there is no specialist to compare. deep is left out because its
+  # criterion was only fixed after these runs started, so a joint policy trained on
+  # the new wording would be read against specialists that never saw it.
+  - none
+  - executive
+  - surface
+  - contrasting_cases
+  template:
+    name: qwen3-1.7b
+    weight: 1.0
+    base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+    model: qwen3-1.7b
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    # 32, matching the single-personality arms and the default. See base/single.
+    max_concurrent_calls: 32
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-qwen17b-student
+      extra_body:
+        top_k: 20
+        min_p: 0
+        chat_template_kwargs:
+          enable_thinking: false
+
+personality:
+  prompts_path: examples/tutor/prompt_pools/personality_prompts_v1.json
+  complaints_path: examples/tutor/prompt_pools/personality_complaints_v1.json
+  # STATED, not inherited. All three match the dataclass defaults except
+  # explain_ratio, and an arm that relies on a default silently changes meaning when
+  # the default moves -- which has already happened once in 0818.
+  #
+  # Not every turn is audited. The teacher cannot know which ones are, so the
+  # pressure to comply applies to every turn while the conversation still
+  # progresses, and an episode can never be blocked end to end. Compliance is
+  # therefore a rate over SAMPLED turns: personality/<p>/gate_calls is the
+  # denominator, and dividing gated turns by all turns would report roughly the
+  # sample rate as the failure rate.
+  gate_sample_rate: 0.5
+  # 0.5, NOT 1.0. Half of gated turns name the remedy and half say only that the
+  # student is lost, drawn i.i.d. per gated turn. That models a learner who knows
+  # they are stuck but not what would help, and it forces the teacher to carry a
+  # remedy heard once across the turns where it is withheld -- which is the thing
+  # worth learning. At 1.0 the teacher is told every time and the task collapses to
+  # instruction following.
+  explain_ratio: 0.5
+  # Anything that is not a clean PASS or FAIL is retried this many times and then
+  # counts as FAIL: conservative, so a broken check never lets through a message
+  # that may violate the preference. Watch personality/<p>/gate_error, which
+  # separates an endpoint problem from the teacher having got worse.
+  gate_retries: 3
