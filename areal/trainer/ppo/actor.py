@@ -2105,6 +2105,11 @@ class PPOActorController(TrainController):
             "compute_logp", *args, rpc_meta={"broadcast": True}, **kwargs
         )
 
+    def compute_base_logp(self, *args, **kwargs):
+        return self._custom_function_call(
+            "compute_base_logp", *args, rpc_meta={"broadcast": True}, **kwargs
+        )
+
     def compute_world_model_logp(self, *args, **kwargs):
         return self._custom_function_call(
             "compute_world_model_logp",

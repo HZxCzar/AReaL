@@ -1,9 +1,8 @@
-# 8 GPUs: 4 for generation, 4 for the actor. GPU NUMBERS ONLY.
+# 8 GPUs: 4 for generation, 4 for the actor, with their colocated SGLang
+# memory split stated here as an allocation-specific resource setting.
 #
 # This file is the single place the 8-GPU allocation is written down. Every arm at
-# this allocation composes it, so a change here reaches all of them; nothing else
-# belongs in it, and tests/test_tutor_arm_wiring.py fails the build if an allocation
-# file differs from its base in anything but these keys and the trial name.
+# this allocation composes it, so a change here reaches all of them.
 cluster:
   n_gpus_per_node: 8
 
@@ -13,3 +12,6 @@ rollout:
 
 actor:
   backend: "fsdp:d4p1t1"
+
+sglang:
+  mem_fraction_static: 0.50

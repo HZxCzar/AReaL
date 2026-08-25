@@ -277,6 +277,12 @@ class TutorPromptPoolConfig:
 
 
 NO_PERSONALITY = "none"
+PERSONALITY_GATED_TURN_VISIBILITY_SHARED = "shared"
+PERSONALITY_GATED_TURN_VISIBILITY_TEACHER_ONLY = "teacher_only"
+PERSONALITY_GATED_TURN_VISIBILITIES = (
+    PERSONALITY_GATED_TURN_VISIBILITY_SHARED,
+    PERSONALITY_GATED_TURN_VISIBILITY_TEACHER_ONLY,
+)
 
 
 @dataclass
@@ -331,6 +337,19 @@ class TutorPersonalityConfig:
             )
         },
     )
+    gated_turn_visibility: str = field(
+        default=PERSONALITY_GATED_TURN_VISIBILITY_SHARED,
+        metadata={
+            "help": (
+                "Who retains a gate-failed teacher turn and its injected student "
+                "complaint. 'shared' keeps both in the teacher and student "
+                "transcripts, preserving the original behavior. 'teacher_only' "
+                "keeps them in the teacher transcript but removes them from every "
+                "later real-student call and from student re-tests."
+            ),
+            "choices": list(PERSONALITY_GATED_TURN_VISIBILITIES),
+        },
+    )
     explain_ratio: float = field(
         default=1.0,
         metadata={
@@ -368,6 +387,13 @@ class TutorPersonalityConfig:
             raise ValueError(
                 "personality.gate_sample_rate must be in [0, 1], got "
                 f"{self.gate_sample_rate}."
+            )
+        self.gated_turn_visibility = str(self.gated_turn_visibility).strip().lower()
+        if self.gated_turn_visibility not in PERSONALITY_GATED_TURN_VISIBILITIES:
+            raise ValueError(
+                "personality.gated_turn_visibility must be one of "
+                f"{PERSONALITY_GATED_TURN_VISIBILITIES}, got "
+                f"{self.gated_turn_visibility!r}."
             )
         self.explain_ratio = float(self.explain_ratio)
         if not 0.0 <= self.explain_ratio <= 1.0:

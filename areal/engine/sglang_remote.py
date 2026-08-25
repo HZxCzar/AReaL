@@ -336,6 +336,23 @@ class RemoteSGLangEngine(InferenceEngine):
         """Asynchronously generate a response for the given request."""
         return await self._engine.agenerate(req)
 
+    def prepare_rollout_batch(
+        self,
+        data: list[dict[str, Any]],
+        workflow: WorkflowLike | None,
+        workflow_kwargs: dict[str, Any] | None = None,
+        group_size: int = 1,
+        proxy_addr: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run the controller's batch-level workflow hook."""
+        return self._engine.prepare_rollout_batch(
+            data=data,
+            workflow=workflow,
+            workflow_kwargs=workflow_kwargs,
+            group_size=group_size,
+            proxy_addr=proxy_addr,
+        )
+
     def init_weights_update_group(
         self, meta: WeightUpdateMeta, xccl_group_ranks: list[int] | None = None
     ) -> Future[None]:

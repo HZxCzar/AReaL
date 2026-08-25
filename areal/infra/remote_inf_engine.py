@@ -412,6 +412,13 @@ class RemoteInfEngine(InferenceEngine):
         self._lora_update_lock = Lock()
 
         self._workflow_executor: WorkflowExecutor | None = None
+        # ``RolloutController.prepare_batch`` streams individual tasks to remote
+        # workers, so its batch-level workflow hook is coordinated explicitly on
+        # one worker before those tasks are fanned out. Keep that hook's workflow
+        # instance alive across dataloader batches: hooks such as smooth weighted
+        # stratification carry residual state between calls.
+        self._batch_preparation_workflow: RolloutWorkflow | None = None
+        self._batch_preparation_lock = Lock()
         self._initialized = False
         self._proxy_gateway_addr: str | None = None
         self.local_server_processes: list[LocalInfServerInfo] = []
@@ -843,6 +850,33 @@ class RemoteInfEngine(InferenceEngine):
             resolved = GroupedRolloutWorkflow(resolved, group_size, self.logger)
 
         return resolved
+
+    def prepare_rollout_batch(
+        self,
+        data: list[dict[str, Any]],
+        workflow: WorkflowLike | None,
+        workflow_kwargs: dict[str, Any] | None = None,
+        group_size: int = 1,
+        proxy_addr: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run the stateful batch hook for controller-driven rollouts.
+
+        The controller captures one workflow on its first ``prepare_batch`` call,
+        matching :class:`WorkflowExecutor`. This companion instance exists only
+        to coordinate batch-level input decisions; the prepared dictionaries are
+        subsequently sent to the normal per-task workflow instances.
+        """
+        with self._batch_preparation_lock:
+            if self._batch_preparation_workflow is None:
+                self._batch_preparation_workflow = self._resolve_workflow(
+                    workflow,
+                    workflow_kwargs,
+                    group_size,
+                    proxy_addr=proxy_addr,
+                )
+            return WorkflowExecutor._prepare_rollout_batch(
+                data, self._batch_preparation_workflow
+            )
 
     def _resolve_should_accept_fn(
         self, should_accept_fn: Callable[[dict[str, Any]], bool] | str | None

@@ -22,6 +22,8 @@
 #   evaluator.teacher_pre_*   pre-solve on, verification OFF at eval
 #   student_models            one student, (behavior text, information unmasked)
 #   evaluator.freq_steps      25
+#   personality             shared prompt/complaint files, gate rate 1.0,
+#                           explain ratio 0.5, 3 retries, teacher-only failures
 #   free_chat.transfer_prompts  absent, so off: the re-test problem is the problem
 #                             the dialogue was about
 #   teacher_history_tags      unmasked -- the TEACHER side, unrelated to the
@@ -64,6 +66,20 @@ teacher_anti_leak_instruction_enabled: true
 # Default-off: only the private-visibility intervention tells the teacher which
 # sampled (behavior, information) student it is about to teach.
 teacher_private_visibility: false
+personality:
+  # Single source of truth for every 0818 personality arm.
+  prompts_path: examples/tutor/prompt_pools/personality_prompts_v1.json
+  complaints_path: examples/tutor/prompt_pools/personality_complaints_v1.json
+  # Audit every turn whenever the selected student has a personality.
+  gate_sample_rate: 1.0
+  # A failed teacher message and its rule-based complaint remain in the teacher's
+  # conversation, while later real-student calls and all student re-tests continue
+  # from the last gate-passing exchange.
+  gated_turn_visibility: teacher_only
+  # Half of failed turns explain the remedy; half only report that the student is lost.
+  explain_ratio: 0.5
+  # Retry an unclear gate verdict three times, then fail closed.
+  gate_retries: 3
 student_generalize:
   enabled: true
   source: sidecar
@@ -293,7 +309,7 @@ actor:
     lr_scheduler_type: constant
     gradient_clipping: 1.0
     warmup_steps_proportion: 0.001
-  eps_clip: 0.4
+  eps_clip: 0.2
   use_ppo_clip: true
   # DUAL CLIPPING. Without this the negative branch of the PPO objective is
   # unbounded, and that is what destroyed 20260816_070410 at step 195.
@@ -364,7 +380,7 @@ actor:
   # All components in reward.turn_local_components enter the baseline by default.
   group_baseline_local_reward_mode: exclude
   episode_loss_weighting: false
-  num_iterations: 2
+  num_iterations: 1
 ref:
   backend: ${actor.backend}
   experiment_name: ${experiment_name}
@@ -375,7 +391,7 @@ ref:
   dtype: ${actor.dtype}
   mb_spec:
     n_mbs: 1
-    max_tokens_per_mb: 40960
+    max_tokens_per_mb: 24576
   optimizer: null
   scheduling_strategy:
     type: colocation
@@ -425,7 +441,7 @@ saver:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: 50
+  freq_steps: 25
   freq_secs: null
 recover:
   mode: auto

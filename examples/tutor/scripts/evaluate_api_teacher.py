@@ -11,7 +11,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from itertools import combinations
 from pathlib import Path
@@ -130,6 +130,10 @@ class EpisodeResult:
     final_correct_score: float | None = None
     no_teaching_baseline: float | None = None
     code_stats: dict[str, int] | None = None
+    # Per-episode personality evidence. Keeping the counts here (rather than only
+    # in debug traces) lets full evaluations save traces only for errors without
+    # losing the turn-1 and post-complaint adaptation measurements.
+    personality_gate: dict[str, Any] = field(default_factory=dict)
 
 
 class RecordingTutorWorkflow(TutorAgentWorkflow):
@@ -457,6 +461,22 @@ def validate_effective_eval_semantics(
             f"requested={configured_names}, effective={effective_names}."
         )
 
+    expected_personality = asdict(config.personality)
+    effective_personality = dict(workflow_kwargs.get("personality") or {})
+    if effective_personality != expected_personality:
+        demanded = sorted(
+            {
+                str(student.get("personality") or "")
+                for student in student_models
+                if str(student.get("personality") or "") not in {"", "none"}
+            }
+        )
+        raise ValueError(
+            "Offline evaluator personality settings drifted from regular Eval: "
+            f"demanded={demanded}, effective={effective_personality}, "
+            f"expected={expected_personality}."
+        )
+
     if not config.free_chat.enabled:
         return
     free_chat = dict(workflow_kwargs.get("free_chat") or {})
@@ -577,6 +597,10 @@ def build_eval_workflow_kwargs(
         "opd": asdict(config.opd),
         "prompt_instruction": asdict(config.prompt_instruction),
         "free_chat": asdict(config.free_chat),
+        # The gate is part of the student's deployment behavior, not a training-only
+        # reward. Regular validation forwards this block in train.py; the standalone
+        # evaluator must do the same or demanding personality cells cannot run.
+        "personality": asdict(config.personality),
         "student_type_probe": asdict(config.student_type_probe),
         "cross_eval": asdict(config.cross_eval),
         "teacher_history_tags": config.teacher_history_tags,
@@ -799,6 +823,142 @@ def serialize_generalization(
     return payload
 
 
+def summarize_personality_gate(
+    workflow: RecordingTutorWorkflow, *, student_name: str
+) -> dict[str, Any]:
+    """Keep the gate sequence needed to distinguish blind and adaptive teaching.
+
+    Compliance is always computed over sampled gate calls. An unsampled turn is
+    neither a pass nor a failure. "Post complaint" starts after the first gated
+    turn, and the first-post value is the next *sampled* check; this avoids calling
+    an unaudited turn compliant merely because the student was allowed through.
+    """
+
+    personality = "none"
+    for runtime in workflow.student_model_runtimes.values():
+        if runtime.name == student_name:
+            personality = str(runtime.personality or "none")
+            break
+
+    traces = list(workflow.last_traces)
+    gate_traces = [
+        trace for trace in traces if trace.personality_gate_result is not None
+    ]
+    active = personality not in {"", "none"}
+    if not active:
+        return {
+            "personality": "none",
+            "active": False,
+            "eligible_turn_count": 0,
+            "sampled_turn_count": 0,
+            "passed_turn_count": 0,
+            "gated_turn_count": 0,
+            "gate_error_count": 0,
+            "compliance": None,
+            "turn1_sampled": False,
+            "turn1_passed": None,
+            "first_complaint_turn": None,
+            "first_complaint_kind": None,
+            "first_post_complaint_sampled_turn": None,
+            "first_post_complaint_passed": None,
+            "post_complaint_sampled_turn_count": 0,
+            "post_complaint_passed_turn_count": 0,
+            "post_complaint_compliance": None,
+            "post_complaint_all_passed": None,
+            "bare_complaint_count": 0,
+            "explain_complaint_count": 0,
+            "unknown_complaint_count": 0,
+        }
+
+    sampled = [
+        trace
+        for trace in gate_traces
+        if bool(trace.personality_gate_result.sampled)
+    ]
+    passed = [
+        trace for trace in sampled if bool(trace.personality_gate_result.passed)
+    ]
+    gated = [trace for trace in gate_traces if bool(trace.personality_gated)]
+    errors = [
+        trace
+        for trace in sampled
+        if bool(trace.personality_gate_result.error)
+    ]
+
+    turn1 = next(
+        (
+            trace
+            for trace in gate_traces
+            if trace.turn_idx == 1 and trace.personality_gate_result.sampled
+        ),
+        None,
+    )
+    first_complaint = gated[0] if gated else None
+    post_sampled = (
+        [trace for trace in sampled if trace.turn_idx > first_complaint.turn_idx]
+        if first_complaint is not None
+        else []
+    )
+    post_passed = [
+        trace
+        for trace in post_sampled
+        if bool(trace.personality_gate_result.passed)
+    ]
+    first_post = post_sampled[0] if post_sampled else None
+
+    bare_complaints = set(workflow.personality_complaints_bare)
+    explain_complaints = set(
+        workflow.personality_complaints_explain.get(personality, ())
+    )
+
+    def complaint_kind(trace: Any) -> str:
+        complaint = str(trace.student_output or "").strip()
+        if complaint in explain_complaints:
+            return "explain"
+        if complaint in bare_complaints:
+            return "bare"
+        return "unknown"
+
+    complaint_kinds = [complaint_kind(trace) for trace in gated]
+    return {
+        "personality": personality,
+        "active": True,
+        "eligible_turn_count": len(gate_traces),
+        "sampled_turn_count": len(sampled),
+        "passed_turn_count": len(passed),
+        "gated_turn_count": len(gated),
+        "gate_error_count": len(errors),
+        "compliance": _rate(len(passed), len(sampled)),
+        "turn1_sampled": turn1 is not None,
+        "turn1_passed": (
+            bool(turn1.personality_gate_result.passed) if turn1 is not None else None
+        ),
+        "first_complaint_turn": (
+            int(first_complaint.turn_idx) if first_complaint is not None else None
+        ),
+        "first_complaint_kind": (
+            complaint_kinds[0] if complaint_kinds else None
+        ),
+        "first_post_complaint_sampled_turn": (
+            int(first_post.turn_idx) if first_post is not None else None
+        ),
+        "first_post_complaint_passed": (
+            bool(first_post.personality_gate_result.passed)
+            if first_post is not None
+            else None
+        ),
+        "post_complaint_sampled_turn_count": len(post_sampled),
+        "post_complaint_passed_turn_count": len(post_passed),
+        "post_complaint_compliance": _rate(len(post_passed), len(post_sampled)),
+        "post_complaint_all_passed": (
+            len(post_passed) == len(post_sampled) if post_sampled else None
+        ),
+        "bare_complaint_count": complaint_kinds.count("bare"),
+        "explain_complaint_count": complaint_kinds.count("explain"),
+        "unknown_complaint_count": complaint_kinds.count("unknown"),
+    }
+
+
 def build_trace_payload(
     *,
     workflow: RecordingTutorWorkflow,
@@ -932,6 +1092,10 @@ def result_from_workflow(
             {str(key): int(value) for key, value in code_stats.items()}
             if isinstance(code_stats, dict)
             else None
+        ),
+        personality_gate=summarize_personality_gate(
+            workflow,
+            student_name=str(stats.get("student_name") or ""),
         ),
     )
 
@@ -1153,6 +1317,9 @@ def result_retry_reasons(
         reasons.append(f"answer_judge_failed={result.answer_judge_failed_count}")
     if result.teacher_pre_error_count:
         reasons.append(f"teacher_pre_errors={result.teacher_pre_error_count}")
+    gate = result.personality_gate or {}
+    if int(gate.get("gate_error_count", 0) or 0):
+        reasons.append(f"personality_gate_errors={gate['gate_error_count']}")
     expected_replays = max(0, int(expected_generalization_replays))
     if expected_replays:
         generalization = result.generalization or {}
@@ -1342,6 +1509,125 @@ def aggregate_mode(
         if result.no_teaching_baseline is not None
     ]
 
+    gate_payloads = [
+        result.personality_gate or {}
+        for result in completed
+        if isinstance(result.personality_gate, dict)
+    ]
+    active_gates = [gate for gate in gate_payloads if gate.get("active") is True]
+    sampled_turns = sum(
+        int(gate.get("sampled_turn_count", 0) or 0) for gate in active_gates
+    )
+    passed_turns = sum(
+        int(gate.get("passed_turn_count", 0) or 0) for gate in active_gates
+    )
+    gated_turns = sum(
+        int(gate.get("gated_turn_count", 0) or 0) for gate in active_gates
+    )
+    turn1_sampled = [gate for gate in active_gates if gate.get("turn1_sampled")]
+    complaint_episodes = [
+        gate for gate in active_gates if gate.get("first_complaint_turn") is not None
+    ]
+    first_post_checked = [
+        gate
+        for gate in complaint_episodes
+        if gate.get("first_post_complaint_passed") is not None
+    ]
+    post_sampled_turns = sum(
+        int(gate.get("post_complaint_sampled_turn_count", 0) or 0)
+        for gate in complaint_episodes
+    )
+    post_passed_turns = sum(
+        int(gate.get("post_complaint_passed_turn_count", 0) or 0)
+        for gate in complaint_episodes
+    )
+    post_sustained = [
+        gate
+        for gate in complaint_episodes
+        if gate.get("post_complaint_all_passed") is not None
+    ]
+    episode_compliances = [
+        float(gate["compliance"])
+        for gate in active_gates
+        if gate.get("compliance") is not None
+    ]
+    personality_gate = {
+        "active_episode_count": len(active_gates),
+        "ungated_episode_count": len(gate_payloads) - len(active_gates),
+        "personalities": dict(
+            sorted(
+                Counter(
+                    str(gate.get("personality") or "none") for gate in gate_payloads
+                ).items()
+            )
+        ),
+        "eligible_turn_count": sum(
+            int(gate.get("eligible_turn_count", 0) or 0) for gate in active_gates
+        ),
+        "sampled_turn_count": sampled_turns,
+        "passed_turn_count": passed_turns,
+        "gated_turn_count": gated_turns,
+        "gate_error_count": sum(
+            int(gate.get("gate_error_count", 0) or 0) for gate in active_gates
+        ),
+        "gate_error_episode_count": sum(
+            int(gate.get("gate_error_count", 0) or 0) > 0 for gate in active_gates
+        ),
+        "micro_compliance": _rate(passed_turns, sampled_turns),
+        "mean_episode_compliance": (
+            sum(episode_compliances) / len(episode_compliances)
+            if episode_compliances
+            else None
+        ),
+        "turn1_sampled_episode_count": len(turn1_sampled),
+        "turn1_passed_episode_count": sum(
+            gate.get("turn1_passed") is True for gate in turn1_sampled
+        ),
+        "turn1_compliance": _rate(
+            sum(gate.get("turn1_passed") is True for gate in turn1_sampled),
+            len(turn1_sampled),
+        ),
+        "complaint_episode_count": len(complaint_episodes),
+        "complaint_episode_rate": _rate(len(complaint_episodes), len(active_gates)),
+        "bare_complaint_count": sum(
+            int(gate.get("bare_complaint_count", 0) or 0) for gate in active_gates
+        ),
+        "explain_complaint_count": sum(
+            int(gate.get("explain_complaint_count", 0) or 0) for gate in active_gates
+        ),
+        "unknown_complaint_count": sum(
+            int(gate.get("unknown_complaint_count", 0) or 0) for gate in active_gates
+        ),
+        "first_post_complaint_checked_episode_count": len(first_post_checked),
+        "first_post_complaint_passed_episode_count": sum(
+            gate.get("first_post_complaint_passed") is True
+            for gate in first_post_checked
+        ),
+        "first_post_complaint_compliance": _rate(
+            sum(
+                gate.get("first_post_complaint_passed") is True
+                for gate in first_post_checked
+            ),
+            len(first_post_checked),
+        ),
+        "post_complaint_sampled_turn_count": post_sampled_turns,
+        "post_complaint_passed_turn_count": post_passed_turns,
+        "post_complaint_micro_compliance": _rate(
+            post_passed_turns, post_sampled_turns
+        ),
+        "post_complaint_sustained_episode_count": sum(
+            gate.get("post_complaint_all_passed") is True
+            for gate in post_sustained
+        ),
+        "post_complaint_sustained_rate": _rate(
+            sum(
+                gate.get("post_complaint_all_passed") is True
+                for gate in post_sustained
+            ),
+            len(post_sustained),
+        ),
+    }
+
     return {
         "expected_attempts": int(expected),
         "recorded_attempts": len(results),
@@ -1443,6 +1729,7 @@ def aggregate_mode(
         "free_chat_episode_count": sum(
             result.free_chat_enabled for result in completed
         ),
+        "personality_gate": personality_gate,
         "code_channel": code_channel,
         "generalization": generalization,
     }
@@ -1794,6 +2081,7 @@ def build_run_signature(
                 "teacher_adaptive_instruction_enabled": (
                     config.teacher_adaptive_instruction_enabled
                 ),
+                "personality": effective_kwargs["personality"],
                 "student_generalize_enabled": effective_kwargs[
                     "student_generalize_enabled"
                 ],

@@ -1,0 +1,65 @@
+# Frozen deployment-eval surface for the five 0818 personality teachers.
+#
+# The math split and TutorAgentWorkflow are the real validation path. OOD here is
+# the student demand, not a different math dataset: the final four personalities
+# were held out whole during training of the joint teacher.
+defaults:
+  - ../base/default@_global_
+  - _self_
+
+trial_name: 0818-personality-generalization-eval
+
+student_models: []
+student_axes:
+- behaviors: [text]
+  informations:
+    original:
+      mode: full
+  personalities:
+  # In-domain cells.
+  - none
+  - executive
+  - surface
+  - contrasting_cases
+  # Out-of-domain cells.
+  - analogy
+  - error_focused
+  - example_first
+  - rule_first
+  template:
+    name: qwen3-1.7b
+    weight: 1.0
+    base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+    model: qwen3-1.7b
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    # One singleton evaluator runs per cell. With concurrency 16 and eight replays,
+    # 192 leaves headroom without importing the tighter colocated-training cap.
+    max_concurrent_calls: 192
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-eval-qwen17b-student
+      extra_body:
+        top_k: 20
+        min_p: 0
+        chat_template_kwargs:
+          enable_thinking: false
+
+student_generalize:
+  replays: 8
+
+student_type_probe:
+  enabled: false
+
+# Deployment semantics: retain the teacher's draft, but do not verify it. Leak and
+# format diagnostics remain visible while neither one truncates or zeros the score.
+evaluator:
+  teacher_pre_enabled: true
+  teacher_pre_verify: false
+  leak_terminate: false
+  format_terminate: false
+  average_rollouts: 1

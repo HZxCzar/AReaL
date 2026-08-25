@@ -140,6 +140,9 @@ from examples.common.parsing import parse_json_dict
 from examples.pedagogical_rl import cross_eval
 from examples.tutor.configs import (
     NO_PERSONALITY,
+    PERSONALITY_GATED_TURN_VISIBILITIES,
+    PERSONALITY_GATED_TURN_VISIBILITY_SHARED,
+    PERSONALITY_GATED_TURN_VISIBILITY_TEACHER_ONLY,
     STUDENT_MODE_CODE,
     STUDENT_MODE_TEXT,
     TUTOR_EVAL_STUDENT_FIELD,
@@ -1712,6 +1715,21 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.personality_gate_sample_rate = float(
             settings.get("gate_sample_rate", 0.5)
         )
+        self.personality_gated_turn_visibility = str(
+            settings.get(
+                "gated_turn_visibility",
+                PERSONALITY_GATED_TURN_VISIBILITY_SHARED,
+            )
+        ).strip().lower()
+        if (
+            self.personality_gated_turn_visibility
+            not in PERSONALITY_GATED_TURN_VISIBILITIES
+        ):
+            raise ValueError(
+                "personality.gated_turn_visibility must be one of "
+                f"{PERSONALITY_GATED_TURN_VISIBILITIES}, got "
+                f"{self.personality_gated_turn_visibility!r}."
+            )
         self.personality_explain_ratio = float(settings.get("explain_ratio", 1.0))
         self.personality_gate_retries = max(1, int(settings.get("gate_retries", 3)))
         self.personality_prompts = load_personality_prompts(
@@ -1765,13 +1783,25 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 f"the file defines {sorted(self.personality_complaints_explain)}."
             )
         logger.info(
-            "personality gate active: %s (sample_rate=%.2f, explain_ratio=%.2f)",
+            "personality gate active: %s (sample_rate=%.2f, explain_ratio=%.2f, "
+            "gated_turn_visibility=%s)",
             ", ".join(
                 f"{name}[{self.personality_prompts[name]['source'].split(':')[0]}]"
                 for name in demanded
             ),
             self.personality_gate_sample_rate,
             self.personality_explain_ratio,
+            self.personality_gated_turn_visibility,
+        )
+
+    def _hide_personality_gated_turns_from_student(self) -> bool:
+        return (
+            getattr(
+                self,
+                "personality_gated_turn_visibility",
+                PERSONALITY_GATED_TURN_VISIBILITY_SHARED,
+            )
+            == PERSONALITY_GATED_TURN_VISIBILITY_TEACHER_ONLY
         )
 
     def _personality_rng(self, *, kind: str, turn_idx: int) -> random.Random:
@@ -2880,9 +2910,20 @@ class TutorAgentWorkflow(RolloutWorkflow):
             turn_count=0,
             turns=initial_turns,
         )
+        # This aliases the complete history until the first closed gate. In
+        # teacher_only mode that failure advances only `public_history`; later
+        # student calls continue from this filtered branch. Keeping the alias up
+        # to that point makes episodes with no failed gate byte-for-byte identical
+        # to the original shared-history path.
+        student_visible_history = public_history
+        student_history_filtered = False
+        hide_gated_turns_from_student = (
+            self._hide_personality_gated_turns_from_student()
+        )
         previous_tutor_visible_output = ""
         previous_tutor_raw_outputs: tuple[str, ...] = ()
         previous_student_output = initial_student_answer
+        student_visible_previous_output = initial_student_answer
         preceding_student_turn_behavior = initial_effective_student_turn_behavior
         previous_feedback = TutorPrivateFeedback(
             kind="student_judged",
@@ -2990,8 +3031,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
             student_state = StudentTurnState(
                 task=task,
-                public_history=public_history,
-                previous_student_output=previous_student_output,
+                public_history=student_visible_history,
+                previous_student_output=student_visible_previous_output,
                 latest_tutor_visible_output=tutor_visible_output,
                 student_prompt_selection=student_prompt_selection,
                 student_turn_behavior=student_turn_behavior,
@@ -3016,9 +3057,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 and not personality_gate_result.passed
             )
             if personality_gated:
-                # No student call: the complaint IS the student's turn. It stays in
-                # the transcript afterwards because it is what the student said, so
-                # the re-test reads it like any other turn.
+                # No student call: the complaint IS the teacher-visible student
+                # turn. Under shared visibility it remains in both transcripts;
+                # under teacher_only it gives the teacher feedback but never enters
+                # a later real-student call or re-test.
                 student_prompt = ""
                 student_answer_raw = self._personality_complaint(
                     selected_student.personality, turn_idx=turn_idx
@@ -3079,6 +3121,20 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 current_student_answer=student_answer,
                 env_feedback=self._teacher_env_feedback(judge_result, turn_idx),
             )
+            (
+                next_student_visible_history,
+                next_student_visible_output,
+                student_history_filtered,
+            ) = self._advance_student_visible_history(
+                complete_history_after=next_public_history,
+                student_visible_history=student_visible_history,
+                previous_student_output=student_visible_previous_output,
+                tutor_visible_output=tutor_visible_output,
+                current_student_output=student_answer,
+                personality_gated=personality_gated,
+                history_already_filtered=student_history_filtered,
+                hide_gated_turns=hide_gated_turns_from_student,
+            )
             turn_artifacts.append(
                 TurnArtifact(
                     turn_idx=turn_idx,
@@ -3103,12 +3159,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
 
             public_history = next_public_history
+            student_visible_history = next_student_visible_history
             previous_tutor_raw_outputs = (
                 *previous_tutor_raw_outputs,
                 tutor_raw_output if not tutor_format_error else "",
             )
             previous_tutor_visible_output = tutor_visible_output
             previous_student_output = student_answer
+            student_visible_previous_output = next_student_visible_output
             preceding_student_turn_behavior = effective_student_turn_behavior
             previous_feedback = TutorPrivateFeedback(
                 kind="student_judged",
@@ -4857,7 +4915,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         result = await (session.run(program) if keep else session.peek(program))
         return result.output, program, result.status, None
 
-    async def _run_public_summary_update(
+    def _append_public_history_turn(
         self,
         *,
         old_public_history: PublicHistoryState,
@@ -4906,6 +4964,59 @@ class TutorAgentWorkflow(RolloutWorkflow):
             summary="\n\n".join(entry for entry in entries if entry),
             turn_count=old_public_history.turn_count + 1,
             turns=turns,
+        )
+
+    async def _run_public_summary_update(
+        self,
+        *,
+        old_public_history: PublicHistoryState,
+        previous_student_answer: str,
+        tutor_visible_output: str,
+        current_student_answer: str,
+        env_feedback: str = "",
+    ) -> PublicHistoryState:
+        return self._append_public_history_turn(
+            old_public_history=old_public_history,
+            previous_student_answer=previous_student_answer,
+            tutor_visible_output=tutor_visible_output,
+            current_student_answer=current_student_answer,
+            env_feedback=env_feedback,
+        )
+
+    def _advance_student_visible_history(
+        self,
+        *,
+        complete_history_after: PublicHistoryState,
+        student_visible_history: PublicHistoryState,
+        previous_student_output: str,
+        tutor_visible_output: str,
+        current_student_output: str,
+        personality_gated: bool,
+        history_already_filtered: bool,
+        hide_gated_turns: bool | None = None,
+    ) -> tuple[PublicHistoryState, str, bool]:
+        """Advance the real student's branch without changing teacher history."""
+
+        hide = (
+            self._hide_personality_gated_turns_from_student()
+            if hide_gated_turns is None
+            else bool(hide_gated_turns)
+        )
+        if not hide:
+            return complete_history_after, current_student_output, False
+        if personality_gated:
+            return student_visible_history, previous_student_output, True
+        if not history_already_filtered:
+            return complete_history_after, current_student_output, False
+        return (
+            self._append_public_history_turn(
+                old_public_history=student_visible_history,
+                previous_student_answer=previous_student_output,
+                tutor_visible_output=tutor_visible_output,
+                current_student_answer=current_student_output,
+            ),
+            current_student_output,
+            True,
         )
 
     def _build_tutor_prompt(self, state: TutorTurnState) -> str:
@@ -5549,9 +5660,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
 
     def _build_teacher_progress_judge_prompt(self, artifact: TurnArtifact) -> str:
         student_reply_before_teacher = (
-            artifact.student_state.previous_student_output
-            if artifact.student_state is not None
-            else artifact.tutor_state.previous_feedback.student_output
+            artifact.tutor_state.student_reply_before_teacher
+            or artifact.tutor_state.previous_feedback.student_output
         )
         return render_prompt(
             TEACHER_PROGRESS_JUDGE_USER_TEMPLATE,
@@ -5796,12 +5906,37 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 return artifact
         return None
 
-    def _turn_generalization_anchor(
+    def _student_visible_history_after(
         self, artifact: TurnArtifact
-    ) -> StudentGeneralizationAnchor:
+    ) -> PublicHistoryState:
+        """Return the transcript a real student retains after this turn.
+
+        The stored public history is deliberately always complete because it is
+        the teacher's state and the training artifact. Only this student-side
+        projection removes closed-gate exchanges, and only when the mode asks for
+        it. Building the projection from ``student_state`` is important: that
+        state already contains the filtered prefix used by the real student call.
+        """
+
         turn_count = 0
         summary = ""
         if artifact.student_state is not None:
+            if self._hide_personality_gated_turns_from_student():
+                before = artifact.student_state.public_history
+                if artifact.personality_gated:
+                    return PublicHistoryState(
+                        summary=before.summary,
+                        turn_count=before.turn_count,
+                        turns=list(before.turns),
+                    )
+                return self._append_public_history_turn(
+                    old_public_history=before,
+                    previous_student_answer=(
+                        artifact.student_state.previous_student_output
+                    ),
+                    tutor_visible_output=artifact.tutor_visible_output,
+                    current_student_answer=artifact.student_output,
+                )
             turn_count = artifact.student_state.public_history.turn_count + 1
             entries = [artifact.student_state.public_history.summary]
             entries.append(
@@ -5815,14 +5950,38 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
             )
             summary = "\n\n".join(entry for entry in entries if entry)
+        return PublicHistoryState(
+            summary=summary,
+            turn_count=turn_count,
+            turns=list(artifact.public_history_after),
+        )
+
+    def _turn_generalization_anchor(
+        self, artifact: TurnArtifact
+    ) -> StudentGeneralizationAnchor:
+        public_history = self._student_visible_history_after(artifact)
+        previous_student_output = artifact.student_output
+        teacher_feedback = artifact.tutor_visible_output
+        if (
+            self._hide_personality_gated_turns_from_student()
+            and artifact.personality_gated
+            and artifact.student_state is not None
+        ):
+            previous_student_output = (
+                artifact.student_state.previous_student_output
+            )
+            teacher_feedback = next(
+                (
+                    str(turn.get("content", ""))
+                    for turn in reversed(public_history.turns)
+                    if turn.get("role") == "teacher"
+                ),
+                "",
+            )
         return StudentGeneralizationAnchor(
-            public_history=PublicHistoryState(
-                summary=summary,
-                turn_count=turn_count,
-                turns=list(artifact.public_history_after),
-            ),
-            previous_student_output=artifact.student_output,
-            teacher_feedback=artifact.tutor_visible_output,
+            public_history=public_history,
+            previous_student_output=previous_student_output,
+            teacher_feedback=teacher_feedback,
             reward_turn_idx=int(artifact.turn_idx),
         )
 
@@ -6244,14 +6403,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
     ) -> dict[int, float]:
         """S(t) at every turn boundary except the last.
 
-        Cuts the public history after the student's reply to turn t -- which is
-        exactly ``public_history_after`` -- and runs the same solo re-test the
-        episode ends with. The final boundary is skipped because it is the
-        episode's own re-test, already measured.
+        Cuts the student-visible history after turn t and runs the same solo
+        re-test the episode ends with. Under shared visibility this is exactly
+        ``public_history_after``; under teacher_only, closed-gate exchanges are
+        absent. The final boundary is skipped because it is the episode's own
+        re-test, already measured.
         """
         replays = max(1, int(self.student_generalize_turn_credit_replays))
         prefixes = [
-            (int(artifact.turn_idx), list(artifact.public_history_after or []))
+            (
+                int(artifact.turn_idx),
+                list(self._student_visible_history_after(artifact).turns),
+            )
             for artifact in episode_artifact.turns[:-1]
         ]
         prefixes = [(idx, history) for idx, history in prefixes if history]
@@ -6729,7 +6892,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
 
     @staticmethod
     def _cross_eval_transcript(
-        turn_artifacts: list[TurnArtifact], initial_student_answer: str = ""
+        turn_artifacts: list[TurnArtifact],
+        initial_student_answer: str = "",
+        *,
+        hide_personality_gated_turns: bool = False,
     ) -> list[dict[str, str]]:
         """This episode's dialogue in the shared teacher/student form.
 
@@ -6742,6 +6908,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if initial_student_answer:
             transcript.append({"role": "student", "content": initial_student_answer})
         for artifact in turn_artifacts:
+            if hide_personality_gated_turns and artifact.personality_gated:
+                continue
             visible = str(artifact.tutor_visible_output or "").strip()
             transcript.append({"role": "teacher", "content": visible})
             student_output = str(artifact.student_output or "").strip()
@@ -6880,7 +7048,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ground_truth=ground_truth,
             own_protocol="free_chat",
             own_transcript=self._cross_eval_transcript(
-                turn_artifacts, initial_student_answer
+                turn_artifacts,
+                initial_student_answer,
+                hide_personality_gated_turns=(
+                    self._hide_personality_gated_turns_from_student()
+                ),
             ),
             own_initial_attempt=initial_student_answer,
             teacher_call=teacher_call,

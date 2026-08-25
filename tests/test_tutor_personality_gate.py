@@ -36,7 +36,12 @@ from examples.tutor.configs import (
     TutorStudentMaskConfig,
     TutorStudentModelConfig,
 )
-from examples.tutor.core.types import PersonalityGateResult, TurnTrace
+from examples.tutor.core.types import (
+    PersonalityGateResult,
+    PublicHistoryState,
+    StudentTurnState,
+    TurnTrace,
+)
 from examples.tutor.prompts import PERSONALITY_GATE_USER_TEMPLATE
 from examples.tutor.workflow import (
     TutorAgentWorkflow,
@@ -465,6 +470,7 @@ def main() -> int:
         ("gate_sample_rate", -0.1),
         ("explain_ratio", 2.0),
         ("gate_retries", 0),
+        ("gated_turn_visibility", "student_only"),
     ):
         ok, detail = raises(
             lambda field=field, value=value: TutorPersonalityConfig(**{field: value}),
@@ -473,8 +479,187 @@ def main() -> int:
         check(f"{field}={value} is refused", ok, detail)
     default = TutorPersonalityConfig()
     check("sampling defaults to 0.5", default.gate_sample_rate == 0.5)
+    check(
+        "failed turns are shared by default for backward compatibility",
+        default.gated_turn_visibility == "shared",
+    )
+    teacher_only = TutorPersonalityConfig(
+        gated_turn_visibility=" Teacher_Only "
+    )
+    check(
+        "teacher_only visibility is accepted and normalized",
+        teacher_only.gated_turn_visibility == "teacher_only",
+    )
     check("the remedy is named by default", default.explain_ratio == 1.0)
     check("three retries by default", default.gate_retries == 3)
+
+    print("\n[11] teacher_only removes failed exchanges from every student view")
+    workflow = object.__new__(TutorAgentWorkflow)
+    workflow.free_chat_enabled = True
+    visible_before = PublicHistoryState(
+        summary="visible round 1",
+        turn_count=1,
+        turns=[
+            {"role": "teacher", "content": "visible teacher 1"},
+            {"role": "student", "content": "visible student 1"},
+        ],
+    )
+    failed = SimpleNamespace(
+        turn_idx=2,
+        student_state=SimpleNamespace(
+            public_history=visible_before,
+            previous_student_output="visible student 1",
+        ),
+        tutor_visible_output="hidden failed teacher",
+        student_output="hidden rule complaint",
+        personality_gated=True,
+        public_history_after=[
+            *visible_before.turns,
+            {"role": "teacher", "content": "hidden failed teacher"},
+            {"role": "student", "content": "hidden rule complaint"},
+        ],
+    )
+    workflow.personality_gated_turn_visibility = "shared"
+    shared = workflow._student_visible_history_after(failed)
+    check(
+        "shared mode preserves the old failed-turn transcript",
+        [turn["content"] for turn in shared.turns][-2:]
+        == ["hidden failed teacher", "hidden rule complaint"],
+        str(shared.turns),
+    )
+
+    workflow.personality_gated_turn_visibility = "teacher_only"
+    hidden = workflow._student_visible_history_after(failed)
+    check(
+        "teacher_only retains only the prefix before a failed gate",
+        hidden.turns == visible_before.turns and hidden.turn_count == 1,
+        str(hidden.turns),
+    )
+    (
+        live_after_failure,
+        live_output_after_failure,
+        live_history_filtered,
+    ) = workflow._advance_student_visible_history(
+        complete_history_after=PublicHistoryState(
+            summary="complete including failure",
+            turn_count=2,
+            turns=list(failed.public_history_after),
+        ),
+        student_visible_history=visible_before,
+        previous_student_output="visible student 1",
+        tutor_visible_output=failed.tutor_visible_output,
+        current_student_output=failed.student_output,
+        personality_gated=True,
+        history_already_filtered=False,
+    )
+    check(
+        "the live dialogue branch does not advance on a failed gate",
+        live_after_failure is visible_before
+        and live_output_after_failure == "visible student 1"
+        and live_history_filtered,
+    )
+    workflow.student_mask_active = False
+    next_real_student_messages = workflow._build_student_messages(
+        StudentTurnState(
+            task="TASK",
+            public_history=live_after_failure,
+            previous_student_output=live_output_after_failure,
+            latest_tutor_visible_output="visible teacher 3",
+        )
+    )
+    next_real_student_context = "\n".join(
+        message["content"] for message in next_real_student_messages
+    )
+    check(
+        "the next real student request contains neither failed-side message",
+        "hidden failed teacher" not in next_real_student_context
+        and "hidden rule complaint" not in next_real_student_context
+        and "visible teacher 3" in next_real_student_context,
+        next_real_student_context,
+    )
+    failed_anchor = workflow._turn_generalization_anchor(failed)
+    check(
+        "the final re-test anchor also excludes the failed exchange",
+        failed_anchor.public_history.turns == visible_before.turns
+        and failed_anchor.previous_student_output == "visible student 1",
+        str(failed_anchor.public_history.turns),
+    )
+
+    passed_after_failure = SimpleNamespace(
+        turn_idx=3,
+        student_state=SimpleNamespace(
+            public_history=live_after_failure,
+            previous_student_output=live_output_after_failure,
+        ),
+        tutor_visible_output="visible teacher 3",
+        student_output="visible student 3",
+        personality_gated=False,
+        public_history_after=[
+            *failed.public_history_after,
+            {"role": "teacher", "content": "visible teacher 3"},
+            {"role": "student", "content": "visible student 3"},
+        ],
+    )
+    resumed = workflow._student_visible_history_after(passed_after_failure)
+    resumed_text = [turn["content"] for turn in resumed.turns]
+    check(
+        "a later passing turn resumes from the filtered prefix",
+        resumed_text
+        == [
+            "visible teacher 1",
+            "visible student 1",
+            "visible teacher 3",
+            "visible student 3",
+        ],
+        str(resumed_text),
+    )
+    check(
+        "the student-visible turn count ignores the failed exchange",
+        resumed.turn_count == 2,
+        str(resumed.turn_count),
+    )
+    live_after_pass, live_output_after_pass, still_filtered = (
+        workflow._advance_student_visible_history(
+            complete_history_after=PublicHistoryState(
+                summary="complete through turn 3",
+                turn_count=3,
+                turns=list(passed_after_failure.public_history_after),
+            ),
+            student_visible_history=live_after_failure,
+            previous_student_output=live_output_after_failure,
+            tutor_visible_output=passed_after_failure.tutor_visible_output,
+            current_student_output=passed_after_failure.student_output,
+            personality_gated=False,
+            history_already_filtered=live_history_filtered,
+        )
+    )
+    check(
+        "the next real student call resumes on the filtered branch",
+        live_after_pass.turns == resumed.turns
+        and live_output_after_pass == "visible student 3"
+        and still_filtered,
+        str(live_after_pass.turns),
+    )
+    first_pass = SimpleNamespace(
+        personality_gated=False,
+        tutor_visible_output="visible teacher 1",
+        student_output="visible student 1",
+    )
+    filtered_cross_eval = workflow._cross_eval_transcript(
+        [first_pass, failed, passed_after_failure],
+        hide_personality_gated_turns=True,
+    )
+    check(
+        "cross-eval re-tests use the same filtered transcript",
+        [turn["content"] for turn in filtered_cross_eval]
+        == [
+            "visible teacher 1",
+            "visible student 1",
+            "visible teacher 3",
+            "visible student 3",
+        ],
+        str(filtered_cross_eval),
+    )
 
     print()
     if FAILURES:

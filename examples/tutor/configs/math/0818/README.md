@@ -126,15 +126,15 @@ Raising `freq_steps` also works and is orthogonal to all three.
 
 ## Offline evaluation of the checkpoints
 
-An arm with eval off still writes checkpoints: `saver.freq_steps` is 50, so a
-500-step run leaves 10 LoRA adapters (~87 MB each) at
+An arm with eval off still writes checkpoints: `saver.freq_steps` is 25, so a
+500-step run leaves 20 LoRA adapters (~87 MB each) at
 
     checkpoints/root/tutor-math-baseline/<trial>/default/epoch*epochstep*globalstep*/
 
 They are under **`default/`**, not `actor/` — `actor/` holds only `initial_lora`,
 the adapter shipped to the rollout engine at startup, which is the untrained one.
 The global step is one *below* the step you would name, because the save fires at the
-end of it: `freq_steps: 50` gives `globalstep49`, `99`, `149`.
+end of it: `freq_steps: 25` gives `globalstep24`, `49`, `74`, `99`.
 
 `scripts/eval_checkpoints.py` sweeps them. It does not reimplement the protocol — the
 evaluation is `evaluate_api_teacher.py` driving the real `TutorAgentWorkflow` — and

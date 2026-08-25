@@ -31,11 +31,11 @@ TWO KINDS OF LIMIT, and they behave differently on the live turn.
   history-only version a long message still lands in full at the moment it is
   sent, and only fades afterwards.
 
-TRUNCATION HAPPENS ON READ, NOT ON WRITE. The shared public history always holds
-what the teacher actually said. These functions return a masked VIEW and never
-mutate the input, because the same history object is rendered for the teacher --
-whose view must stay complete, or it could see what the student missed and the
-inference problem would disappear -- and is read by the reward path.
+TRUNCATION HAPPENS ON READ, NOT ON WRITE. The teacher's complete public history
+always holds what actually happened. A student-side gate policy may first project
+that into a history containing only accepted exchanges; these functions then return
+a masked VIEW and never mutate either input. The teacher therefore keeps its complete
+view while the student's visibility rules compose without leaking backward.
 
 DETERMINISTIC ON PURPOSE. A probabilistic mask would need an episode-seeded RNG
 so the student has forgotten the same things at re-test that it had forgotten

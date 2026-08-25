@@ -1,0 +1,20 @@
+# Warm-start control for the gate-100% intervention. The none student has no
+# personality gate, so this branch measures the effect of restarting from the
+# same 50-update point with fresh optimizer state.
+defaults:
+  - ../../../../base/personality/ID/none@_global_
+  - ../../../alloc@_global_
+  - _self_
+
+trial_name: 0818-personality-none-gate100-from50-8gpu
+
+actor:
+  init_lora_path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor/checkpoints/root/tutor-math-baseline/20260824_192159_0818-personality-none-8gpu/default/epoch1epochstep2globalstep49
+
+# The new counter starts at zero: 150 new updates plus the inherited 50 gives
+# 200 cumulative updates.
+total_train_steps: 150
+
+stats_logger:
+  wandb:
+    group: 0818-personality-gate100-from50-8gpu

@@ -1,0 +1,16 @@
+# Branch the executive specialist at 50 completed updates and audit every turn.
+defaults:
+  - ../../../../base/personality/ID/executive@_global_
+  - ../../../alloc@_global_
+  - _self_
+
+trial_name: 0818-personality-executive-gate100-from50-8gpu
+
+actor:
+  init_lora_path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor/checkpoints/root/tutor-math-baseline/20260824_082352_0818-personality-executive-8gpu/default/epoch1epochstep2globalstep49
+
+total_train_steps: 150
+
+stats_logger:
+  wandb:
+    group: 0818-personality-gate100-from50-8gpu

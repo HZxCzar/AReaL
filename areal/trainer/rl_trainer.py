@@ -843,8 +843,25 @@ class PPOTrainer:
             and getattr(opd_cfg, "enabled", False)
             and getattr(opd_cfg, "teacher_source", "policy") == "checkpoint"
         )
+        self._kl_from_actor_base = bool(
+            config.actor.kl_ctl > 0
+            and config.actor.backend.startswith("fsdp")
+            and config.actor._version == "v1"
+            and config.actor.use_lora
+            and config.actor.peft_type == "lora"
+            and config.actor.disable_dropout
+            and config.ref is not None
+            and config.ref.backend == config.actor.backend
+            and config.ref.path == config.actor.path
+            and config.ref.dtype == config.actor.dtype
+            and config.ref.disable_dropout
+            and not config.ref.use_lora
+            and not config.actor.init_from_scratch
+            and not config.ref.init_from_scratch
+        )
         if config.ref is not None and (
-            config.actor.kl_ctl > 0 or self._opd_frozen_teacher
+            (config.actor.kl_ctl > 0 and not self._kl_from_actor_base)
+            or self._opd_frozen_teacher
         ):
             ref_alloc = ModelAllocation.from_str(config.ref.backend, name="ref")
             self.ref = self._create_train_engine(config.ref, ref_alloc)
@@ -1307,8 +1324,10 @@ class PPOTrainer:
             # may exist purely to hold the frozen OPD teacher, and ref_logp is
             # multiplied by kl_ctl, so at 0.0 this whole pass is a forward over the
             # batch whose result is scaled to zero.
-            if self.ref is not None and self.config.actor.kl_ctl > 0:
-                if self._should_offload_ref:
+            if self.config.actor.kl_ctl > 0 and (
+                self.ref is not None or self._kl_from_actor_base
+            ):
+                if self.ref is not None and self._should_offload_ref:
                     self._onload_model(self.ref, role="ref")
                 with (
                     stats_tracker.record_timing("ref_logp"),
@@ -1318,11 +1337,16 @@ class PPOTrainer:
                         args={"global_step": global_step},
                     ),
                 ):
-                    ref_logps = self.ref.compute_logp(rollout_batch)
+                    if self._kl_from_actor_base:
+                        ref_logps = self.actor.compute_base_logp(rollout_batch)
+                        ref_stats_engine = self.actor
+                    else:
+                        ref_logps = self.ref.compute_logp(rollout_batch)
+                        ref_stats_engine = self.ref
                     for traj, logp in zip(rollout_batch, ref_logps):
                         traj["ref_logp"] = logp
-                    self.ref.get_device_stats().log("ref logp")
-                if self._should_offload_ref:
+                    ref_stats_engine.get_device_stats().log("ref logp")
+                if self.ref is not None and self._should_offload_ref:
                     self._offload_model(self.ref, role="ref")
 
             if self.teacher is not None:

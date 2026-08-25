@@ -23,7 +23,7 @@ usage() {
     '  CUDA_VISIBLE_DEVICES           At least <n> integer GPU ids; first <n> are used.' \
     '  STUDENT_MODEL_PATH             Local Qwen3-1.7B snapshot path.' \
     '  STUDENT_PORT                   Local OpenAI port (default 30001).' \
-    '  STUDENT_MEM_FRACTION_STATIC    Student server allocation (default 0.20).' \
+    '  STUDENT_MEM_FRACTION_STATIC    Student allocation (8 GPU: 0.45; 2/4 GPU: 0.20).' \
     '  DRY_RUN=1                      Validate and print commands without launching.'
 }
 
@@ -208,7 +208,12 @@ STUDENT_PORT="${STUDENT_PORT:-30001}"
 STUDENT_MODEL_PATH="${STUDENT_MODEL_PATH:-/inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e}"
 STUDENT_MODEL="${STUDENT_MODEL:-qwen3-1.7b}"
 STUDENT_CONTEXT_LENGTH="${STUDENT_CONTEXT_LENGTH:-40960}"
-STUDENT_MEM_FRACTION_STATIC="${STUDENT_MEM_FRACTION_STATIC:-0.20}"
+if [[ "$GPU_COUNT" == "8" ]]; then
+  DEFAULT_STUDENT_MEM_FRACTION_STATIC="0.45"
+else
+  DEFAULT_STUDENT_MEM_FRACTION_STATIC="0.20"
+fi
+STUDENT_MEM_FRACTION_STATIC="${STUDENT_MEM_FRACTION_STATIC:-$DEFAULT_STUDENT_MEM_FRACTION_STATIC}"
 SERVER_READY_TIMEOUT="${SERVER_READY_TIMEOUT:-900}"
 STUDENT_PROBE_TIMEOUT="${STUDENT_PROBE_TIMEOUT:-120}"
 

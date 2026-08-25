@@ -2411,6 +2411,15 @@ class FSDPPPOActor(FSDPEngine):
         return self.actor.compute_logp(*args, **kwargs)
 
     @torch.no_grad()
+    def compute_base_logp(self, *args, **kwargs) -> list[torch.Tensor] | None:
+        """Compute log-probabilities under the frozen base model of a LoRA actor."""
+        if not self.config.use_lora or self.config.peft_type != "lora":
+            raise RuntimeError("compute_base_logp requires a LoRA actor.")
+        assert isinstance(self.model, PeftModel)
+        with self.model.disable_adapter():
+            return self.actor.compute_logp(*args, **kwargs)
+
+    @torch.no_grad()
     def compute_world_model_logp(self, *args, **kwargs) -> list[torch.Tensor] | None:
         return self.actor.compute_world_model_logp(*args, **kwargs)
 

@@ -210,7 +210,7 @@ def main() -> int:
     )
 
     print()
-    print("[6] an allocation file changes the allocation and nothing else")
+    print("[6] an allocation file changes allocation-specific resources only")
     from omegaconf import OmegaConf
 
     ALLOWED = {
@@ -218,6 +218,7 @@ def main() -> int:
         ("rollout", "backend"),
         ("rollout", "max_concurrent_rollouts"),
         ("actor", "backend"),
+        ("sglang", "mem_fraction_static"),
         # ref.backend is ${actor.backend} in the base, so it follows the allocation
         # by interpolation rather than by being set a second time.
         ("ref", "backend"),

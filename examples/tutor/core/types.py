@@ -200,10 +200,11 @@ class StudentTurnState:
     student_prompt_selection: PromptPoolSelection | None = None
     student_turn_behavior: StudentTurnBehavior | None = None
     # Which part of the history this student may see, carried from the student
-    # selected for the episode. None means the whole history, so a rollout that
-    # configures no masks behaves exactly as before. The mask restricts the
-    # STUDENT's view only -- the teacher and the reward path read the unmasked
-    # public_history, which is what makes the teacher's inference problem real.
+    # selected for the episode. None means this whole student-visible history, so
+    # a rollout that configures no masks behaves exactly as before. A personality
+    # gate may already have removed teacher-only failed exchanges from this state;
+    # the mask can restrict it further. The teacher and training artifact retain
+    # their separate complete public history.
     student_mask: dict[str, Any] | None = None
     # The selected student's action space, 'text' or 'code'. Carried on the state
     # rather than read off the workflow because one workflow instance serves every

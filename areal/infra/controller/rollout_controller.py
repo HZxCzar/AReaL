@@ -975,6 +975,36 @@ class RolloutController:
     def get_capacity(self):
         return self.staleness_manager.get_capacity()
 
+    def _prepare_rollout_batch(
+        self,
+        data: list[dict[str, Any]],
+        workflow: str | None,
+        workflow_kwargs: dict[str, Any],
+        group_size: int,
+    ) -> list[dict[str, Any]]:
+        """Coordinate a batch-level workflow hook before task fan-out."""
+        if not self.workers:
+            raise RuntimeError("No rollout workers available for batch preparation.")
+
+        # Always use the same worker so stateful hooks retain their residual state
+        # across dataloader batches. The resulting per-item fields travel with the
+        # task when normal round-robin scheduling fans the batch out.
+        rank = 0
+        worker = self.workers[rank]
+        proxy_addr = self.get_proxy_addr(rank) if self._proxy_started else None
+        return run_async_task(
+            self.scheduler.async_call_engine,
+            worker.id,
+            "prepare_rollout_batch",
+            engine_name=self._engine_name(rank),
+            data=data,
+            workflow=workflow,
+            workflow_kwargs=workflow_kwargs,
+            group_size=group_size,
+            proxy_addr=proxy_addr,
+            http_timeout=self.config.request_timeout,
+        )
+
     def submit(
         self,
         data: dict[str, Any],
@@ -1072,6 +1102,12 @@ class RolloutController:
 
         def task_input_generator():
             for data in cycle_dataloader(dataloader):
+                data = self._prepare_rollout_batch(
+                    data,
+                    workflow=workflow_str,
+                    workflow_kwargs=workflow_kwargs,
+                    group_size=group_size,
+                )
                 for item in data:
                     yield _RemoteRolloutTaskInput(
                         data=item,

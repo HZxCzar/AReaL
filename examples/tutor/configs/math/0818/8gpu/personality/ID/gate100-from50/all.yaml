@@ -1,0 +1,17 @@
+# Branch the joint in-domain teacher at 50 completed updates. Every turn for
+# each gated personality is audited; the none cell remains ungated by design.
+defaults:
+  - ../../../../base/personality/ID/all@_global_
+  - ../../../alloc@_global_
+  - _self_
+
+trial_name: 0818-personality-all-gate100-from50-8gpu
+
+actor:
+  init_lora_path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor/checkpoints/root/tutor-math-baseline/20260824_192211_0818-personality-all-8gpu/default/epoch1epochstep2globalstep49
+
+total_train_steps: 150
+
+stats_logger:
+  wandb:
+    group: 0818-personality-gate100-from50-8gpu
