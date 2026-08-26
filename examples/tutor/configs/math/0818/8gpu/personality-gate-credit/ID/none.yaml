@@ -1,0 +1,10 @@
+defaults:
+  - ../../../base/personality-gate-credit/ID/none@_global_
+  - ../../alloc@_global_
+  - _self_
+
+trial_name: 0818-personality-gate-credit-none-8gpu
+
+stats_logger:
+  wandb:
+    group: 0818-personality-gate-credit-8gpu

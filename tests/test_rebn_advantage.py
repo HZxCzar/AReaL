@@ -377,6 +377,78 @@ def test_rebn_group_baseline_stores_turn_advantage_without_auxiliary_rewards():
     )
 
 
+def test_rebn_gate_credit_masks_improvement_before_turn_baseline():
+    actor = _make_actor(
+        PPOActorConfig(
+            advantage_estimator="rebn",
+            turn_discount=1.0,
+            kl_ctl=0.0,
+            adv_norm=None,
+            group_baseline="turn",
+            group_baseline_leave1out=True,
+            group_baseline_local_reward_mode="exclude",
+        )
+    )
+    data = {
+        "input_ids": torch.zeros((6, 3), dtype=torch.long),
+        "attention_mask": torch.ones((6, 3), dtype=torch.bool),
+        "loss_mask": torch.tensor([[0, 1, 0]] * 6, dtype=torch.long),
+        "logprobs": torch.zeros((6, 3)),
+        "rewards": torch.tensor([0.0, -1.0, 1.0, 0.0, 0.5, 0.0]),
+        "local_rewards": torch.tensor([0.0, -1.0, 0.0, 0.0, 0.0, 0.0]),
+        "gate_masked_rewards": torch.tensor([0.0, 0.0, 1.0, 0.0, 0.5, 0.0]),
+        "gate_credit_mask": torch.tensor([True, False, True, True, True, True]),
+        "trajectory_id": torch.tensor([11, 11, 11, 22, 22, 33]),
+        "turn_idx": torch.tensor([1, 2, 3, 1, 2, 1]),
+        "group_id": torch.zeros(6, dtype=torch.long),
+    }
+
+    result = actor._compute_advantages(data)
+
+    # Turn 2 of trajectory 11 fails the gate and gets zero improvement before
+    # its same-turn LOO comparison; its -1 local penalty remains local. Turn 3
+    # has no peer and therefore gets zero relative signal.
+    torch.testing.assert_close(
+        result["turn_advantage"],
+        torch.tensor([0.75, -1.5, 0.0, 0.0, 0.5, -0.75]),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_rebn_gate_fail_penalty_keeps_small_post_normalization_scale():
+    actor = _make_actor(
+        PPOActorConfig(
+            advantage_estimator="rebn",
+            turn_discount=1.0,
+            kl_ctl=0.0,
+            adv_norm=NormConfig(mean_level=None, std_level="batch"),
+            group_baseline="turn",
+            group_baseline_leave1out=True,
+        )
+    )
+    data = {
+        "input_ids": torch.zeros((2, 3), dtype=torch.long),
+        "attention_mask": torch.ones((2, 3), dtype=torch.bool),
+        "loss_mask": torch.tensor([[0, 1, 0]] * 2, dtype=torch.long),
+        "logprobs": torch.zeros((2, 3)),
+        "rewards": torch.zeros(2),
+        "personality_gate_fail_penalty": torch.tensor([0.0, -0.05]),
+        "trajectory_id": torch.tensor([11, 22]),
+        "turn_idx": torch.ones(2, dtype=torch.long),
+        "group_id": torch.zeros(2, dtype=torch.long),
+    }
+
+    result = actor._compute_advantages(data)
+
+    torch.testing.assert_close(
+        result["turn_advantage"],
+        torch.tensor([0.0, -0.05]),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
 def test_rebn_world_model_gate_scales_normalized_outcome_before_token_broadcast():
     """The four NLL/advantage quadrants change only normalized outcome credit."""
 
@@ -564,11 +636,22 @@ def test_tutor_response_tensordict_includes_trajectory_metadata():
     )
 
     tensor_dict = response_to_tensordict(
-        response, reward=1.0, trajectory_id=123, turn_idx=2
+        response,
+        reward=1.0,
+        personality_gate_fail_penalty=-0.05,
+        gate_masked_reward=0.75,
+        gate_credit_mask=False,
+        trajectory_id=123,
+        turn_idx=2,
     )
 
     assert tensor_dict["trajectory_id"].tolist() == [123]
     assert tensor_dict["turn_idx"].tolist() == [2]
+    torch.testing.assert_close(
+        tensor_dict["personality_gate_fail_penalty"], torch.tensor([-0.05])
+    )
+    assert tensor_dict["gate_masked_rewards"].tolist() == [0.75]
+    assert tensor_dict["gate_credit_mask"].tolist() == [False]
     assert "no_eos" not in tensor_dict
 
 

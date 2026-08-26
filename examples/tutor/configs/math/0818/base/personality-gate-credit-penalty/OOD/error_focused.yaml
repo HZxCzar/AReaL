@@ -1,0 +1,6 @@
+defaults:
+  - ../../personality-gate-credit/OOD/error_focused@_global_
+  - ../mode@_global_
+  - _self_
+
+trial_name: 0818-personality-gate-credit-penalty-error-focused

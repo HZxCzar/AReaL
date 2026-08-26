@@ -1272,6 +1272,24 @@ class PPOActor:
             raise ValueError(
                 "Batch-centered local penalties require advantage_estimator='rebn'."
             )
+        gate_credit_keys = {"gate_masked_rewards", "gate_credit_mask"}
+        present_gate_credit_keys = gate_credit_keys.intersection(data)
+        if present_gate_credit_keys and present_gate_credit_keys != gate_credit_keys:
+            missing = sorted(gate_credit_keys - present_gate_credit_keys)
+            raise ValueError(
+                "Incomplete gate-pass credit metadata; missing: " + ", ".join(missing)
+            )
+        if present_gate_credit_keys and self.config.advantage_estimator != "rebn":
+            raise ValueError(
+                "Gate-pass return credit requires advantage_estimator='rebn'."
+            )
+        if (
+            "personality_gate_fail_penalty" in data
+            and self.config.advantage_estimator != "rebn"
+        ):
+            raise ValueError(
+                "The personality-gate fail penalty requires advantage_estimator='rebn'."
+            )
         opd_keys = {
             "opd_teacher_logp",
             "opd_loss_mask",
@@ -1368,6 +1386,25 @@ class PPOActor:
             local_reward_score = torch.clip(
                 local_reward_score, max=self.reward_clip, min=-self.reward_clip
             )
+        gate_masked_reward_score = None
+        if present_gate_credit_keys:
+            if self.reward_norm is not None:
+                raise ValueError(
+                    "Gate-pass return credit is incompatible with reward_norm: "
+                    "normalizing the total reward would prevent exact component "
+                    "subtraction."
+                )
+            gate_masked_reward_score = data["gate_masked_rewards"].to(
+                reward_score.device
+            )
+            # Match the total reward's linear scaling without applying its bias a
+            # second time. The bias remains in the unmasked residual component.
+            gate_masked_reward_score = gate_masked_reward_score * self.reward_scaling
+            gate_masked_reward_score = torch.clip(
+                gate_masked_reward_score,
+                max=self.reward_clip,
+                min=-self.reward_clip,
+            )
 
         loss_mask = data["loss_mask"].float()
         loss_mask = torch.roll(loss_mask, shifts=-1, dims=-1)
@@ -1424,6 +1461,15 @@ class PPOActor:
                 seq_no_eos_mask=seq_no_eos_mask,
             )
             valid_turn_mask = loss_mask.sum(dim=-1) > 0
+            personality_gate_fail_penalty = None
+            if "personality_gate_fail_penalty" in data:
+                personality_gate_fail_penalty = data[
+                    "personality_gate_fail_penalty"
+                ].to(device=reward_score.device, dtype=reward_score.dtype)
+                personality_gate_fail_penalty = (
+                    personality_gate_fail_penalty
+                    * valid_turn_mask.to(personality_gate_fail_penalty.dtype)
+                )
             batch_centered_penalties = None
             if present_batch_penalty_keys:
                 batch_centered_penalties = _compute_batch_centered_penalties(
@@ -1466,13 +1512,35 @@ class PPOActor:
                 if local_reward_score is None
                 else reward_score - local_reward_score
             )
-            turn_returns = _compute_rebn_returns(
-                propagating_reward_score,
-                data["trajectory_id"].to(reward_score.device),
-                data["turn_idx"].to(reward_score.device),
-                self.config.turn_discount,
-                valid_mask=valid_turn_mask,
-            )
+            trajectory_ids = data["trajectory_id"].to(reward_score.device)
+            turn_indices = data["turn_idx"].to(reward_score.device)
+            if gate_masked_reward_score is None:
+                turn_returns = _compute_rebn_returns(
+                    propagating_reward_score,
+                    trajectory_ids,
+                    turn_indices,
+                    self.config.turn_discount,
+                    valid_mask=valid_turn_mask,
+                )
+            else:
+                residual_returns = _compute_rebn_returns(
+                    propagating_reward_score - gate_masked_reward_score,
+                    trajectory_ids,
+                    turn_indices,
+                    self.config.turn_discount,
+                    valid_mask=valid_turn_mask,
+                )
+                masked_returns = _compute_rebn_returns(
+                    gate_masked_reward_score,
+                    trajectory_ids,
+                    turn_indices,
+                    self.config.turn_discount,
+                    valid_mask=valid_turn_mask,
+                )
+                credit_mask = data["gate_credit_mask"].to(
+                    device=reward_score.device, dtype=masked_returns.dtype
+                )
+                turn_returns = residual_returns + masked_returns * credit_mask
             baseline_source = turn_returns
             if local_reward_score is not None:
                 local_masked = local_reward_score * valid_turn_mask.to(
@@ -1573,6 +1641,16 @@ class PPOActor:
                 # drop list below and the tests reading it stay put; it carries
                 # whichever level actor.loss_weighting names.
                 data["episode_loss_weight"] = loss_weights
+            # This coefficient is already in normalized-advantage units. Adding it
+            # here keeps a configured small gate penalty small even when outcome
+            # variance is near zero; putting it into rewards before adv_norm would
+            # divide away its magnitude. It is one scalar on the rejected turn and
+            # is never accumulated backward through the trajectory.
+            if personality_gate_fail_penalty is not None:
+                normalized_turn_returns = (
+                    normalized_turn_returns + personality_gate_fail_penalty
+                )
+                data["personality_gate_fail_advantage"] = personality_gate_fail_penalty
             if batch_centered_penalties is not None:
                 normalized_turn_returns = (
                     normalized_turn_returns + batch_centered_penalties
@@ -1889,6 +1967,13 @@ class PPOActor:
                 episode_loss_weight=data["episode_loss_weight"].float(),
                 denominator="n_seqs",
             )
+        if "personality_gate_fail_advantage" in data:
+            stats_tracker.stat(
+                personality_gate_fail_advantage=data[
+                    "personality_gate_fail_advantage"
+                ].float(),
+                denominator="n_seqs",
+            )
         if "opd_reverse_kl" in data:
             # Averaged over supervised tokens only, so the numbers are not diluted
             # by the turns OPD skipped. opd_reverse_kl is the per-token reverse KL
@@ -1967,6 +2052,10 @@ class PPOActor:
             "rewards",
             "tot_rewards",
             "kl_rewards",
+            "gate_masked_rewards",
+            "gate_credit_mask",
+            "personality_gate_fail_penalty",
+            "personality_gate_fail_advantage",
             "trajectory_id",
             "turn_idx",
             "batch_centered_penalty_score",

@@ -1,0 +1,7 @@
+# Add a calibrated, context-independent penalty to the teacher turn that the
+# personality gate rejects. The implementation adds this after the normal
+# outcome baseline and advantage normalization, so -0.5 remains -0.5 even when
+# the batch has little outcome variance. This overlay is composed on top of the
+# gate-pass-only credit arms below; it does not change their existing configs.
+reward:
+  personality_gate_fail_penalty: -0.5

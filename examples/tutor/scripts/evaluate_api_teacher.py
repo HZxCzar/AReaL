@@ -575,6 +575,7 @@ def build_eval_workflow_kwargs(
         "leak_penalty_aggregation": reward.leak_penalty_aggregation,
         "turn_local_reward_components": tuple(reward.turn_local_components),
         "format_error_penalty": reward.format_error_penalty,
+        "personality_gate_fail_penalty": reward.personality_gate_fail_penalty,
         "leaked_success_reward_scale": reward.leaked_success_reward_scale,
         "assign_success_reward": reward.assign_success_reward,
         "outcome_prior_turn_weight": reward.outcome_prior_turn_weight,
@@ -871,19 +872,11 @@ def summarize_personality_gate(
         }
 
     sampled = [
-        trace
-        for trace in gate_traces
-        if bool(trace.personality_gate_result.sampled)
+        trace for trace in gate_traces if bool(trace.personality_gate_result.sampled)
     ]
-    passed = [
-        trace for trace in sampled if bool(trace.personality_gate_result.passed)
-    ]
+    passed = [trace for trace in sampled if bool(trace.personality_gate_result.passed)]
     gated = [trace for trace in gate_traces if bool(trace.personality_gated)]
-    errors = [
-        trace
-        for trace in sampled
-        if bool(trace.personality_gate_result.error)
-    ]
+    errors = [trace for trace in sampled if bool(trace.personality_gate_result.error)]
 
     turn1 = next(
         (
@@ -900,9 +893,7 @@ def summarize_personality_gate(
         else []
     )
     post_passed = [
-        trace
-        for trace in post_sampled
-        if bool(trace.personality_gate_result.passed)
+        trace for trace in post_sampled if bool(trace.personality_gate_result.passed)
     ]
     first_post = post_sampled[0] if post_sampled else None
 
@@ -936,9 +927,7 @@ def summarize_personality_gate(
         "first_complaint_turn": (
             int(first_complaint.turn_idx) if first_complaint is not None else None
         ),
-        "first_complaint_kind": (
-            complaint_kinds[0] if complaint_kinds else None
-        ),
+        "first_complaint_kind": (complaint_kinds[0] if complaint_kinds else None),
         "first_post_complaint_sampled_turn": (
             int(first_post.turn_idx) if first_post is not None else None
         ),
@@ -1330,9 +1319,7 @@ def result_retry_reasons(
                 continue
             actual_replays = int(replay.get("replay_count", -1) or 0)
             if actual_replays != expected_replays:
-                reasons.append(
-                    f"{level}_replays={actual_replays}/{expected_replays}"
-                )
+                reasons.append(f"{level}_replays={actual_replays}/{expected_replays}")
             if replay.get("score") is None:
                 reasons.append(f"{level}_score=missing")
             if replay.get("student_error"):
@@ -1612,17 +1599,13 @@ def aggregate_mode(
         ),
         "post_complaint_sampled_turn_count": post_sampled_turns,
         "post_complaint_passed_turn_count": post_passed_turns,
-        "post_complaint_micro_compliance": _rate(
-            post_passed_turns, post_sampled_turns
-        ),
+        "post_complaint_micro_compliance": _rate(post_passed_turns, post_sampled_turns),
         "post_complaint_sustained_episode_count": sum(
-            gate.get("post_complaint_all_passed") is True
-            for gate in post_sustained
+            gate.get("post_complaint_all_passed") is True for gate in post_sustained
         ),
         "post_complaint_sustained_rate": _rate(
             sum(
-                gate.get("post_complaint_all_passed") is True
-                for gate in post_sustained
+                gate.get("post_complaint_all_passed") is True for gate in post_sustained
             ),
             len(post_sustained),
         ),
@@ -2049,9 +2032,7 @@ def build_run_signature(
                 "episode_error_retry_backoff_seconds": float(
                     args.episode_error_retry_backoff_seconds
                 ),
-                "retry_diagnostic_failures": bool(
-                    args.retry_diagnostic_failures
-                ),
+                "retry_diagnostic_failures": bool(args.retry_diagnostic_failures),
             },
             "auxiliary": {
                 "source_mode": config.auxiliary_model.mode,
@@ -2253,9 +2234,7 @@ async def run_episode(
         )
     )
     if should_trace:
-        retry_suffix = (
-            "" if execution_try <= 1 else f"_retry_{execution_try - 1:02d}"
-        )
+        retry_suffix = "" if execution_try <= 1 else f"_retry_{execution_try - 1:02d}"
         trace_path = (
             output_dir
             / "traces"
@@ -2633,9 +2612,7 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.episode_error_retries < 0:
         raise ValueError("--episode-error-retries must be non-negative.")
     if args.episode_error_retry_backoff_seconds < 0:
-        raise ValueError(
-            "--episode-error-retry-backoff-seconds must be non-negative."
-        )
+        raise ValueError("--episode-error-retry-backoff-seconds must be non-negative.")
     if args.episode_timeout_seconds <= 0:
         raise ValueError("--episode-timeout-seconds must be positive.")
     if args.presolve_attempts < 0:

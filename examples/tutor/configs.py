@@ -375,6 +375,7 @@ class TutorPersonalityConfig:
             )
         },
     )
+
     # No gate_max_tokens: the reply is bounded by auxiliary_model.max_tokens, and
     # _call_auxiliary_prompt takes no per-call override, so such a field would
     # configure nothing. The reply carries its reasoning before the verdict, so the
@@ -803,14 +804,14 @@ class TutorStudentAxesConfig:
             for label, mask in informations.items():
                 label = str(label).strip()
                 if not label:
-                    raise ValueError("student_axes.informations keys must be non-empty.")
+                    raise ValueError(
+                        "student_axes.informations keys must be non-empty."
+                    )
                 for personality in personalities:
                     # The open gate contributes NO name segment, which keeps every
                     # existing arm's cell names byte-identical and avoids the
                     # unreadable "-original-none" tail on the reference cell.
-                    suffix = (
-                        "" if personality == NO_PERSONALITY else f"-{personality}"
-                    )
+                    suffix = "" if personality == NO_PERSONALITY else f"-{personality}"
                     entry = replace(
                         template,
                         name=f"{stem}-{behavior}-{label}{suffix}",
@@ -819,7 +820,8 @@ class TutorStudentAxesConfig:
                         personality=(
                             "" if personality == NO_PERSONALITY else personality
                         ),
-                        mask=mask if isinstance(mask, TutorStudentMaskConfig)
+                        mask=mask
+                        if isinstance(mask, TutorStudentMaskConfig)
                         else TutorStudentMaskConfig(**dict(mask)),
                     )
                     expanded.append(entry)
@@ -874,6 +876,19 @@ class TutorStudentGeneralizeConfig:
     )
     level1_reward: float = field(default=0.2)
     level2_reward: float = field(default=0.5)
+    gate_pass_credit_only: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Propagate the ORIGINAL re-test improvement return only onto "
+                "teacher turns whose personality gate passed. Gate-failed turns "
+                "keep zero improvement return before the same-turn group baseline; "
+                "turn-local rewards such as leak and format penalties are unchanged. "
+                "Requires ReBN with a leave-one-out turn baseline and no advantage "
+                "mean-centering. Off preserves the historical reward path."
+            )
+        },
+    )
     turn_credit: bool = field(
         default=False,
         metadata={
@@ -1736,6 +1751,17 @@ class TutorRewardConfig:
             )
         },
     )
+    personality_gate_fail_penalty: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Turn-local advantage penalty for a teacher turn rejected by the "
+                "personality gate. It is added after the outcome baseline and "
+                "advantage normalization, so its configured magnitude stays small "
+                "and it never propagates to another turn. Must be <= 0; 0 disables it."
+            )
+        },
+    )
     assign_success_reward: bool = field(default=False)
     outcome_prior_turn_weight: float = field(default=0.1)
     outcome_credit_gamma: float = field(default=0.9)
@@ -1782,6 +1808,9 @@ class TutorRewardConfig:
     def __post_init__(self) -> None:
         if self.format_error_penalty > 0.0:
             raise ValueError("reward.format_error_penalty must be <= 0.")
+        self.personality_gate_fail_penalty = float(self.personality_gate_fail_penalty)
+        if self.personality_gate_fail_penalty > 0.0:
+            raise ValueError("reward.personality_gate_fail_penalty must be <= 0.")
         if self.leak_penalty_mode not in {"binary", "staged", "rawbase"}:
             raise ValueError(
                 "reward.leak_penalty_mode must be one of: "
@@ -2197,7 +2226,7 @@ class TutorOpdConfig:
             "help": (
                 "Instruction the teacher is conditioned on. Empty uses "
                 "prompts.TEACHER_REPAIR_INSTRUCTION. A leading @ names one of "
-                "prompts.TEACHER_NAMED_INSTRUCTIONS, e.g. \"@handback\"; "
+                'prompts.TEACHER_NAMED_INSTRUCTIONS, e.g. "@handback"; '
                 "anything else is used verbatim."
             )
         },
@@ -2369,6 +2398,7 @@ class TutorFreeChatConfig:
                 "you need that regime, use one of the branches that predates the "
                 "unification rather than this flag."
             )
+
     student_has_not_seen_problem: bool = field(
         default=False,
         metadata={
@@ -2589,9 +2619,7 @@ class TutorConfig(GRPOConfig):
     )
     prompt_pool: TutorPromptPoolConfig = field(default_factory=TutorPromptPoolConfig)
     teacher_pre: TutorTeacherPreConfig = field(default_factory=TutorTeacherPreConfig)
-    length_retry: TutorLengthRetryConfig = field(
-        default_factory=TutorLengthRetryConfig
-    )
+    length_retry: TutorLengthRetryConfig = field(default_factory=TutorLengthRetryConfig)
     auxiliary_model: TutorAuxiliaryModelConfig = field(
         default_factory=TutorAuxiliaryModelConfig
     )
@@ -2628,9 +2656,7 @@ class TutorConfig(GRPOConfig):
     evaluator: TutorEvaluatorConfig = field(default_factory=TutorEvaluatorConfig)
     reward: TutorRewardConfig = field(default_factory=TutorRewardConfig)
     world_model: TutorWorldModelConfig = field(default_factory=TutorWorldModelConfig)
-    guided_slots: TutorGuidedSlotsConfig = field(
-        default_factory=TutorGuidedSlotsConfig
-    )
+    guided_slots: TutorGuidedSlotsConfig = field(default_factory=TutorGuidedSlotsConfig)
     opd: TutorOpdConfig = field(default_factory=TutorOpdConfig)
     prompt_instruction: TutorInstructionPromptConfig = field(
         default_factory=TutorInstructionPromptConfig
@@ -2641,9 +2667,7 @@ class TutorConfig(GRPOConfig):
     )
     cross_eval: CrossEvalConfig = field(default_factory=CrossEvalConfig)
     actor: TutorActorConfig = field(default_factory=TutorActorConfig)
-    personality: TutorPersonalityConfig = field(
-        default_factory=TutorPersonalityConfig
-    )
+    personality: TutorPersonalityConfig = field(default_factory=TutorPersonalityConfig)
     teacher_history_tags: str = field(
         default="masked",
         metadata={
@@ -2948,3 +2972,52 @@ class TutorConfig(GRPOConfig):
                 "student_generalize.source='train' currently requires "
                 "dataset_type='math'."
             )
+        if (
+            self.reward.personality_gate_fail_penalty
+            and self.actor.advantage_estimator != "rebn"
+        ):
+            raise ValueError(
+                "reward.personality_gate_fail_penalty requires "
+                "actor.advantage_estimator='rebn'."
+            )
+        if self.student_generalize.gate_pass_credit_only:
+            if (
+                not self.student_generalize.enabled
+                or not self.student_generalize.retest_original
+                or not self.student_generalize.retest_reward
+            ):
+                raise ValueError(
+                    "student_generalize.gate_pass_credit_only requires enabled=true, "
+                    "retest_original=true, and a non-zero retest_reward."
+                )
+            if not self.free_chat.no_teaching_baseline:
+                raise ValueError(
+                    "student_generalize.gate_pass_credit_only requires "
+                    "free_chat.no_teaching_baseline=true so the masked component is "
+                    "re-test improvement rather than raw correctness."
+                )
+            if self.student_generalize.turn_credit:
+                raise ValueError(
+                    "student_generalize.gate_pass_credit_only cannot be combined "
+                    "with student_generalize.turn_credit."
+                )
+            if (
+                self.actor.advantage_estimator != "rebn"
+                or self.actor.group_baseline != "turn"
+                or not self.actor.group_baseline_leave1out
+                or self.actor.group_baseline_local_reward_mode != "exclude"
+            ):
+                raise ValueError(
+                    "student_generalize.gate_pass_credit_only requires ReBN with "
+                    "actor.group_baseline='turn', group_baseline_leave1out=true, and "
+                    "group_baseline_local_reward_mode='exclude'."
+                )
+            if (
+                self.actor.adv_norm is not None
+                and self.actor.adv_norm.mean_level is not None
+            ):
+                raise ValueError(
+                    "student_generalize.gate_pass_credit_only requires "
+                    "actor.adv_norm.mean_level=null so a singleton turn remains "
+                    "zero after its same-turn baseline."
+                )

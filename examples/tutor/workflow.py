@@ -462,7 +462,6 @@ def load_student_turn_behaviors(path: str) -> tuple[StudentTurnBehavior, ...]:
     return tuple(behaviors)
 
 
-
 def load_personality_prompts(path: str) -> dict[str, dict[str, str]]:
     """{name: {"source": citation, "preference": prompt}} from a JSON file.
 
@@ -586,8 +585,7 @@ def load_personality_complaints(
     def clean_list(raw: Any, label: str) -> tuple[str, ...]:
         if not isinstance(raw, list) or not raw:
             raise ValueError(
-                f"personality complaints {label} must be a non-empty array: "
-                f"{file_path}"
+                f"personality complaints {label} must be a non-empty array: {file_path}"
             )
         lines = tuple(str(line).strip() for line in raw if str(line).strip())
         if not lines:
@@ -734,7 +732,9 @@ def _retest_problem(data: dict[str, Any]) -> tuple[str, str]:
     task = str(raw_task)
     ground_truth = str(raw_ground_truth)
     if not task or not ground_truth:
-        raise ValueError("The designated re-test task and ground truth must be non-empty.")
+        raise ValueError(
+            "The designated re-test task and ground truth must be non-empty."
+        )
     return task, ground_truth
 
 
@@ -872,6 +872,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         leak_penalty_aggregation: str = "turn",
         turn_local_reward_components: tuple[str, ...] | list[str] = (),
         format_error_penalty: float = 0.0,
+        personality_gate_fail_penalty: float = 0.0,
         leaked_success_reward_scale: float = 1.0,
         assign_success_reward: bool = False,
         outcome_prior_turn_weight: float = 0.1,
@@ -926,9 +927,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_prompt_include_base: bool = False,
         student_turn_behavior_enabled: bool = False,
         student_turn_behavior_path: str = "",
-        student_turn_behavior_separate_call_behavior_names: (
-            list[str] | None
-        ) = None,
+        student_turn_behavior_separate_call_behavior_names: (list[str] | None) = None,
         prompt_pool_seed: int = 0,
         leak_check_system_prompt: str = "",
         answer_judge_enabled: bool = False,
@@ -946,6 +945,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_generalize_path: str = "",
         student_generalize_replays: int = 1,
         student_generalize_turn_credit: bool = False,
+        student_generalize_gate_pass_credit_only: bool = False,
         student_generalize_turn_credit_replays: int = 0,
         format_handling_mode: str = "continue",
         length_retry_enabled: bool = False,
@@ -1061,10 +1061,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             student_models
         )
         sampling_config = dict(student_sampling or {})
-        self.student_sampling_strategy = str(
-            sampling_config.get("strategy", "weighted_random")
-            or "weighted_random"
-        ).strip().lower()
+        self.student_sampling_strategy = (
+            str(sampling_config.get("strategy", "weighted_random") or "weighted_random")
+            .strip()
+            .lower()
+        )
         if self.student_sampling_strategy not in {"weighted_random", "stratified"}:
             raise ValueError(
                 "student_sampling.strategy must be 'weighted_random' or "
@@ -1107,6 +1108,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError("leak_penalty_aggregation must be 'turn' or 'episode'.")
         if format_error_penalty > 0.0:
             raise ValueError("format_error_penalty must be <= 0.")
+        if personality_gate_fail_penalty > 0.0:
+            raise ValueError("personality_gate_fail_penalty must be <= 0.")
         if leaked_success_reward_scale < 0.0:
             raise ValueError("leaked_success_reward_scale must be >= 0.")
 
@@ -1127,6 +1130,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.leak_penalty_aggregation = leak_penalty_aggregation
         self.turn_local_reward_components = tuple(turn_local_reward_components)
         self.format_error_penalty = float(format_error_penalty)
+        self.personality_gate_fail_penalty = float(personality_gate_fail_penalty)
         self.leaked_success_reward_scale = float(leaked_success_reward_scale)
         self.assign_success_reward = bool(assign_success_reward)
         self.outcome_prior_turn_weight = float(outcome_prior_turn_weight)
@@ -1270,8 +1274,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.opd_enabled = bool(opd_config.get("enabled", False))
         self.opd_loss_weight = float(opd_config.get("loss_weight", 1.0))
         self.opd_reward_clip = float(opd_config.get("reward_clip", 0.0))
-        self.opd_instruction, self.opd_instruction_name = (
-            resolve_teacher_instruction(opd_config.get("instruction"))
+        self.opd_instruction, self.opd_instruction_name = resolve_teacher_instruction(
+            opd_config.get("instruction")
         )
         self.opd_min_prior_failed_turns = int(
             opd_config.get("min_prior_failed_turns", 2)
@@ -1279,9 +1283,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.opd_max_turns_per_episode = int(opd_config.get("max_turns_per_episode", 0))
         self.opd_skip_guided_rows = bool(opd_config.get("skip_guided_rows", True))
         self.opd_skip_leaked_rows = bool(opd_config.get("skip_leaked_rows", True))
-        self.opd_context = (
-            opd_config.get("context") or "instruction"
-        ).strip()
+        self.opd_context = (opd_config.get("context") or "instruction").strip()
         if self.opd_context not in {"instruction", "presolve"}:
             raise ValueError("opd context must be 'instruction' or 'presolve'.")
         if self.opd_enabled and self.opd_loss_weight <= 0.0:
@@ -1399,18 +1401,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
         # Where an accepted draft is visible, and what a rejected one costs.
         # 'rollout'/'skip' are the historical behaviour and the defaults, so a
         # config that names neither is unchanged by this switch existing.
-        self.teacher_pre_visibility = (
-            teacher_pre_visibility or "rollout"
-        ).strip()
+        self.teacher_pre_visibility = (teacher_pre_visibility or "rollout").strip()
         if self.teacher_pre_visibility not in {"rollout", "opd_only"}:
-            raise ValueError(
-                "teacher_pre_visibility must be 'rollout' or 'opd_only'."
-            )
+            raise ValueError("teacher_pre_visibility must be 'rollout' or 'opd_only'.")
         self.teacher_pre_on_reject = (teacher_pre_on_reject or "skip").strip()
         if self.teacher_pre_on_reject not in {"skip", "continue"}:
-            raise ValueError(
-                "teacher_pre_on_reject must be 'skip' or 'continue'."
-            )
+            raise ValueError("teacher_pre_on_reject must be 'skip' or 'continue'.")
         self.teacher_pre_share_per_group = bool(teacher_pre_share_per_group)
         # The two halves of the pre-solve switch, checked once both are parsed.
         # configs.py rejects these combinations before a run starts; repeated here
@@ -1541,14 +1537,22 @@ class TutorAgentWorkflow(RolloutWorkflow):
         ).strip()
         if self.student_generalize_source not in {"generated", "sidecar", "train"}:
             raise ValueError(
-                "student_generalize_source must be "
-                "'sidecar', 'train', or 'generated'."
+                "student_generalize_source must be 'sidecar', 'train', or 'generated'."
             )
         self.student_generalize_path = student_generalize_path.strip()
-        self.student_generalize_replays = max(
-            1, int(student_generalize_replays)
-        )
+        self.student_generalize_replays = max(1, int(student_generalize_replays))
         self.student_generalize_turn_credit = bool(student_generalize_turn_credit)
+        self.student_generalize_gate_pass_credit_only = bool(
+            student_generalize_gate_pass_credit_only
+        )
+        if (
+            self.student_generalize_gate_pass_credit_only
+            and self.student_generalize_turn_credit
+        ):
+            raise ValueError(
+                "student_generalize gate-pass credit cannot be combined with "
+                "prefix turn credit."
+            )
         # 0 means "same as the final re-test", which keeps S(t) and S(T) measured
         # the same way so their difference carries no systematic bias.
         self.student_generalize_turn_credit_replays = (
@@ -1575,9 +1579,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "level1": float(student_generalize_level1_reward),
             "level2": float(student_generalize_level2_reward),
         }
-        self.student_generalize_retest_reward = float(
-            student_generalize_retest_reward
-        )
+        self.student_generalize_retest_reward = float(student_generalize_retest_reward)
         self.eval_preleak_retest = bool(eval_preleak_retest)
         if self.free_chat_enabled:
             # Nothing inside a free-chat episode is scored, so without the
@@ -1712,15 +1714,17 @@ class TutorAgentWorkflow(RolloutWorkflow):
         whichever rollout first drew that cell.
         """
         settings = dict(personality or {})
-        self.personality_gate_sample_rate = float(
-            settings.get("gate_sample_rate", 0.5)
-        )
-        self.personality_gated_turn_visibility = str(
-            settings.get(
-                "gated_turn_visibility",
-                PERSONALITY_GATED_TURN_VISIBILITY_SHARED,
+        self.personality_gate_sample_rate = float(settings.get("gate_sample_rate", 0.5))
+        self.personality_gated_turn_visibility = (
+            str(
+                settings.get(
+                    "gated_turn_visibility",
+                    PERSONALITY_GATED_TURN_VISIBILITY_SHARED,
+                )
             )
-        ).strip().lower()
+            .strip()
+            .lower()
+        )
         if (
             self.personality_gated_turn_visibility
             not in PERSONALITY_GATED_TURN_VISIBILITIES
@@ -1738,9 +1742,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         (
             self.personality_complaints_bare,
             self.personality_complaints_explain,
-        ) = load_personality_complaints(
-            str(settings.get("complaints_path", "") or "")
-        )
+        ) = load_personality_complaints(str(settings.get("complaints_path", "") or ""))
         self._personality_fallback_rng = random.Random(
             f"{self.prompt_pool_seed}:personality"
         )
@@ -2047,9 +2049,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self._stratified_student_batch_index += 1
         return assignments
 
-    def prepare_rollout_batch(
-        self, data: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
+    def prepare_rollout_batch(self, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if (
             self.student_sampling_strategy != "stratified"
             or len(self._stratified_student_scores) < 2
@@ -2126,9 +2126,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
 
         if forced_name:
-            raise ValueError(
-                "A forced student requires non-empty student_models."
-            )
+            raise ValueError("A forced student requires non-empty student_models.")
         legacy_name = (
             getattr(self, "aux_model", "legacy-student")
             if getattr(self, "aux_mode", "api") == "api"
@@ -2424,10 +2422,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         # opd.min_prior_failed_turns so the two arms differ only in where the
         # instruction ends up.
         if getattr(self, "prompt_instruction_enabled", False):
-            if (
-                int(turn_idx) - 1
-                < self.prompt_instruction_min_prior_failed_turns
-            ):
+            if int(turn_idx) - 1 < self.prompt_instruction_min_prior_failed_turns:
                 return None
             return TeacherGuidance(
                 kind="prompt",
@@ -2515,13 +2510,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return self._append_prompt_pool_suffix(self.student_system_prompt, selection)
 
     def _student_system_prompt_for_state(self, state: StudentTurnState) -> str:
-        return self._student_system_prompt_for_selection(
-            state.student_prompt_selection
-        )
+        return self._student_system_prompt_for_selection(state.student_prompt_selection)
 
-    def _student_question_system_prompt_for_state(
-        self, state: StudentTurnState
-    ) -> str:
+    def _student_question_system_prompt_for_state(self, state: StudentTurnState) -> str:
         return self._append_prompt_pool_suffix(
             STUDENT_QUESTION_SYSTEM_PROMPT,
             state.student_prompt_selection,
@@ -2902,9 +2893,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             initial_turns[-1]["env"] = self._teacher_env_feedback(
                 initial_judge_result, 0
             )
-            initial_summary = self._build_initial_public_summary(
-                initial_student_answer
-            )
+            initial_summary = self._build_initial_public_summary(initial_student_answer)
         public_history = PublicHistoryState(
             summary=initial_summary,
             turn_count=0,
@@ -2951,9 +2940,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     task=task,
                 ),
                 previous_tutor_raw_outputs=previous_tutor_raw_outputs,
-                teacher_private_student_profile=(
-                    teacher_private_student_profile
-                ),
+                teacher_private_student_profile=(teacher_private_student_profile),
             )
             try:
                 response, tutor_raw_output = await self._generate_tutor_response(
@@ -3014,7 +3001,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                         TurnArtifact(
                             turn_idx=turn_idx,
                             tutor_state=tutor_state,
-                            tutor_messages=list(self._build_tutor_messages(tutor_state)),
+                            tutor_messages=list(
+                                self._build_tutor_messages(tutor_state)
+                            ),
                             tutor_response=response,
                             tutor_raw_output=tutor_raw_output,
                             tutor_visible_output=tutor_visible_output,
@@ -3214,9 +3203,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             teacher_prompt_selection=teacher_prompt_selection,
             student_prompt_selection=student_prompt_selection,
             initial_student_turn_behavior=initial_student_turn_behavior,
-            initial_student_question_generation=(
-                initial_student_question_generation
-            ),
+            initial_student_question_generation=(initial_student_question_generation),
         )
         # Computed here rather than inside the probe runner so it never travels
         # through instance state: one workflow serves every concurrent episode.
@@ -3359,6 +3346,23 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     if getattr(self, "turn_local_reward_components", ())
                     else None
                 ),
+                personality_gate_fail_penalty=(
+                    getattr(self, "personality_gate_fail_penalty", 0.0)
+                    if artifact.personality_gated
+                    else 0.0
+                )
+                if getattr(self, "personality_gate_fail_penalty", 0.0)
+                else None,
+                gate_masked_reward=(
+                    assignment.reward_components.get("student_generalize_original", 0.0)
+                    if getattr(self, "student_generalize_gate_pass_credit_only", False)
+                    else None
+                ),
+                gate_credit_mask=(
+                    not artifact.personality_gated
+                    if getattr(self, "student_generalize_gate_pass_credit_only", False)
+                    else None
+                ),
                 trajectory_id=trajectory_id,
                 turn_idx=artifact.turn_idx,
                 input_tokens_override=clean_input,
@@ -3499,9 +3503,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             teacher_prompt_selection=teacher_prompt_selection,
             student_prompt_selection=student_prompt_selection,
             initial_student_turn_behavior=initial_student_turn_behavior,
-            initial_student_question_generation=(
-                initial_student_question_generation
-            ),
+            initial_student_question_generation=(initial_student_question_generation),
             code_stats=code_session.stats() if code_session is not None else None,
         )
         # A format-terminated episode is TRAINED, not discarded. It used to return
@@ -3931,8 +3933,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         axes_ready = all(name in axes for name in axis_names)
         if engine is None or completed is None or not axes_ready:
             logger.warning(
-                "student_type_probe skipped: engine=%s, completed_round=%s, "
-                "axes=%s",
+                "student_type_probe skipped: engine=%s, completed_round=%s, axes=%s",
                 engine is not None,
                 completed is not None,
                 sorted(axes),
@@ -3999,8 +4000,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 logger.warning(
                     "student_type_probe failed; reward omitted: %s",
                     ", ".join(
-                        f"{name}={failure!r}"
-                        for name, failure in axis_failures.items()
+                        f"{name}={failure!r}" for name, failure in axis_failures.items()
                     ),
                 )
                 metrics = {
@@ -4050,9 +4050,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 "type_probe/joint/calls": 0.0,
                 "type_probe/joint/failures": 1.0,
                 "type_probe/reward": 0.0,
-                "type_probe/unverified": float(
-                    self._type_probe_lora_honored is False
-                ),
+                "type_probe/unverified": float(self._type_probe_lora_honored is False),
             }
             for name in axis_names:
                 metrics[f"type_probe/{name}/calls"] = 0.0
@@ -4608,9 +4606,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
     ) -> str:
         behavior = state.student_turn_behavior
         if not self._is_student_separate_call_behavior(behavior):
-            raise ValueError(
-                "student question generation requires a request behavior."
-            )
+            raise ValueError("student question generation requires a request behavior.")
         return render_prompt(
             STUDENT_QUESTION_USER_TEMPLATE,
             task=state.task,
@@ -5074,8 +5070,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 previous_student_output=(
                     state.previous_student_output or EMPTY_PLACEHOLDER
                 ),
-                teacher_feedback=state.latest_tutor_visible_output
-                or NONE_PLACEHOLDER,
+                teacher_feedback=state.latest_tutor_visible_output or NONE_PLACEHOLDER,
             )
         behavior_prompt = self._student_turn_behavior_prompt(state)
         if behavior_prompt:
@@ -5118,9 +5113,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         """
         is_retest = level in (ORIGINAL_RETEST_LEVEL, PRELEAK_RETEST_LEVEL)
         context_task = (
-            transfer_task
-            if is_retest and transfer_task
-            else episode_artifact.task
+            transfer_task if is_retest and transfer_task else episode_artifact.task
         )
         free_chat = bool(getattr(self, "free_chat_enabled", False))
         code_student = (
@@ -5140,10 +5133,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             system = self._student_system_prompt_for_selection(
                 episode_artifact.student_prompt_selection
             )
-            system = (
-                f"{system.rstrip()}\n\n"
-                f"{self._task_context(context_task)}"
-            )
+            system = f"{system.rstrip()}\n\n{self._task_context(context_task)}"
         if is_retest:
             # The same resolver `_no_teaching_baseline` uses, which is the point:
             # S(0) is subtracted from this probe's score, so a difference between the
@@ -5528,9 +5518,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         score = parsed.get("score") if isinstance(parsed, dict) else None
         reason = parsed.get("reason", "") if isinstance(parsed, dict) else ""
         valid_score = (
-            isinstance(score, int)
-            and not isinstance(score, bool)
-            and score in {-1, 1}
+            isinstance(score, int) and not isinstance(score, bool) and score in {-1, 1}
         )
         if valid_score:
             return StudentRequestJudgeResult(
@@ -5967,9 +5955,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             and artifact.personality_gated
             and artifact.student_state is not None
         ):
-            previous_student_output = (
-                artifact.student_state.previous_student_output
-            )
+            previous_student_output = artifact.student_state.previous_student_output
             teacher_feedback = next(
                 (
                     str(turn.get("content", ""))
@@ -5987,10 +5973,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
 
     @staticmethod
     def _is_student_generalization_reward_turn(artifact: TurnArtifact) -> bool:
-        return (
-            artifact.student_state is not None
-            and not artifact.invalid_due_to_leak
-        )
+        return artifact.student_state is not None and not artifact.invalid_due_to_leak
 
     def _preleak_generalization_anchor(
         self, episode_artifact: EpisodeArtifact
@@ -6272,9 +6255,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
                 judge_result = judge_results[0]
                 replay_scored = len(judge_results)
-                replay_correct = sum(
-                    1 for judged in judge_results if judged.correct
-                )
+                replay_correct = sum(1 for judged in judge_results if judged.correct)
                 # Fraction correct, so a variant the student gets right 3 times
                 # out of 4 is worth more than one it gets right once.
                 replay_fraction = replay_correct / max(replay_scored, 1)
@@ -6535,18 +6516,17 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     credited = assignment_by_turn_idx.get(int(turn_idx))
                     if credited is None or not credit:
                         continue
-                    credited.reward_components[key] = (
-                        credited.reward_components.get(key, 0.0) + float(credit)
-                    )
+                    credited.reward_components[key] = credited.reward_components.get(
+                        key, 0.0
+                    ) + float(credit)
                     credited.reward += float(credit)
                 if result.confidence_reward and result.reward_turn_idx is not None:
                     tail = assignment_by_turn_idx.get(int(result.reward_turn_idx))
                     if tail is not None:
                         ckey = f"student_generalize_{result.level}_confidence"
-                        tail.reward_components[ckey] = (
-                            tail.reward_components.get(ckey, 0.0)
-                            + float(result.confidence_reward)
-                        )
+                        tail.reward_components[ckey] = tail.reward_components.get(
+                            ckey, 0.0
+                        ) + float(result.confidence_reward)
                         tail.reward += float(result.confidence_reward)
                 continue
             if not result.reward:
@@ -6856,9 +6836,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 f"({int(self.free_chat_budget)}); the ped arm is configured "
                 "from the same number and the protocol must match."
             )
-        tags = str(
-            dict(config.get("free_chat") or {}).get("teacher_history_tags", "")
-        )
+        tags = str(dict(config.get("free_chat") or {}).get("teacher_history_tags", ""))
         own_tags = str(getattr(self, "teacher_history_tags", "masked"))
         if tags and tags != own_tags:
             # Same reason as the budget. Under 'stripped' the teacher imitates
@@ -6995,10 +6973,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
     ) -> tuple[dict[str, float], dict[str, Any]]:
         specs = self._cross_eval_specs()
         draft = ""
-        if (
-            teacher_pre_solve_result is not None
-            and teacher_pre_solve_result.accepted
-        ):
+        if teacher_pre_solve_result is not None and teacher_pre_solve_result.accepted:
             draft = str(teacher_pre_solve_result.raw_output or "")
         specs["free_chat"].teacher_draft = draft
         specs["classroom"].teacher_draft = draft
@@ -7112,9 +7087,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
             student_problem_context=(
                 "\n\nThe student has not seen the math problem yet."
-                if getattr(
-                    self, "free_chat_student_has_not_seen_problem", False
-                )
+                if getattr(self, "free_chat_student_has_not_seen_problem", False)
                 else ""
             ),
         )
@@ -7125,9 +7098,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         return system
 
-    def _free_chat_open_prompt(
-        self, teacher_private_student_profile: str = ""
-    ) -> str:
+    def _free_chat_open_prompt(self, teacher_private_student_profile: str = "") -> str:
         """The user turn that starts the conversation and carries its directives.
 
         Same blocks in the same order they had at the end of the system prompt,
@@ -7282,9 +7253,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if include_guidance and guidance is not None:
             system = self._append_guidance_to_system(system, guidance.instruction)
         preamble = (
-            self._free_chat_preamble(
-                tutor_state, presolve_visible=presolve_visible
-            )
+            self._free_chat_preamble(tutor_state, presolve_visible=presolve_visible)
             if getattr(self, "free_chat_enabled", False)
             else []
         )
@@ -7302,8 +7271,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 ),
                 own_turn_raw_outputs=(
                     tutor_state.previous_tutor_raw_outputs
-                    if getattr(self, "teacher_history_tags", "stripped")
-                    == "unmasked"
+                    if getattr(self, "teacher_history_tags", "stripped") == "unmasked"
                     else None
                 ),
             ),
@@ -7352,9 +7320,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             system = "\n\n".join((system, FREE_CHAT_STUDENT_MASK_NOTE))
         return system, retest
 
-    def _build_student_messages(
-        self, state: StudentTurnState
-    ) -> list[dict[str, str]]:
+    def _build_student_messages(self, state: StudentTurnState) -> list[dict[str, str]]:
         code_student = (
             getattr(state, "student_mode", STUDENT_MODE_TEXT) == STUDENT_MODE_CODE
         )
@@ -7378,9 +7344,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         # too: someone who stops reading long messages stops reading this one.
         # Without that, a long message lands in full at the moment it is sent and
         # only fades afterwards, which removes most of the pressure toward brevity.
-        turns = apply_student_mask(
-            list(state.public_history.turns), state.student_mask
-        )
+        turns = apply_student_mask(list(state.public_history.turns), state.student_mask)
         latest_teacher_output = mask_current_turn(
             state.latest_tutor_visible_output.strip(), state.student_mask
         )
@@ -7491,13 +7455,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
         selected = 0
         for artifact in turn_artifacts:
             reason = self._opd_skip_reason(artifact)
-            if not reason and self.opd_max_turns_per_episode and (
-                selected >= self.opd_max_turns_per_episode
+            if (
+                not reason
+                and self.opd_max_turns_per_episode
+                and (selected >= self.opd_max_turns_per_episode)
             ):
                 reason = "episode_cap"
             if not reason:
                 tokenizer = (
-                    getattr(artifact.tutor_response, "tokenizer", None) or self.tokenizer
+                    getattr(artifact.tutor_response, "tokenizer", None)
+                    or self.tokenizer
                 )
                 try:
                     if getattr(self, "opd_context", "instruction") == "presolve":
@@ -7776,9 +7743,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             # subtracted from that probe's score, so any difference here would be
             # measured as teaching.
             if getattr(self, "free_chat_enabled", False):
-                system, retest_template = self._free_chat_student_prompts(
-                    student_mode
-                )
+                system, retest_template = self._free_chat_student_prompts(student_mode)
                 # The same resolver `_build_student_probe_messages` uses, for the
                 # reason in the comment just above: a different prompt here reads as
                 # teaching.
@@ -7811,7 +7776,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 # not a missing measurement: unaided, this student could not
                 # produce an answer.
                 texts = [
-                    answer for answer, _program, status, _err in answers
+                    answer
+                    for answer, _program, status, _err in answers
                     if status == "ok"
                 ]
                 attempted = sum(1 for _a, _p, _s, err in answers if err is None)
@@ -7978,17 +7944,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "final_correct": final_correct_score,
             # Whatever the teacher gave away, the episode still counts here. The
             # two punished readings are added below.
-            "final_correct_leak_gated": (
-                0.0 if leak_count else final_correct_score
-            ),
+            "final_correct_leak_gated": (0.0 if leak_count else final_correct_score),
             "stop/max_turns": float(termination_reason == "max_turns"),
             "stop/context_limit": float(
                 termination_reason == CONTEXT_BUDGET_TERMINATION_REASON
             ),
             "stop/leak": float(termination_reason == LEAK_TERMINATION_REASON),
-            "stop/format_error": float(
-                termination_reason == FORMAT_TERMINATION_REASON
-            ),
+            "stop/format_error": float(termination_reason == FORMAT_TERMINATION_REASON),
             "stop/teacher_pre_skipped": float(
                 termination_reason == TEACHER_PRE_SKIPPED_TERMINATION_REASON
             ),
@@ -8009,9 +7971,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
             for name, value in code_stats.items():
                 metrics[f"code/{name}"] = float(value)
                 metrics[f"code/{name}_per_turn"] = float(value) / turns
-            productive = turns - int(code_stats.get("crashes", 0)) - int(
-                code_stats.get("silent_cells", 0)
-            ) - int(code_stats.get("no_program", 0))
+            productive = (
+                turns
+                - int(code_stats.get("crashes", 0))
+                - int(code_stats.get("silent_cells", 0))
+                - int(code_stats.get("no_program", 0))
+            )
             # Turns that ran and actually told the teacher something.
             metrics["code/productive_per_turn"] = max(0.0, productive / turns)
         if teacher_pre_solve_result is not None:
@@ -8059,9 +8024,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         if preleak_score is not None:
             metrics["final_correct_preleak"] = preleak_score
-            metrics["final_correct_preleak_delta"] = (
-                final_correct_score - preleak_score
-            )
+            metrics["final_correct_preleak_delta"] = final_correct_score - preleak_score
 
         # Depth counters. The objective is that episodes where the student is
         # still wrong after two explanations still end solved -- depth/stuck_*
@@ -8134,9 +8097,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 source_selected = source == selected_source
                 prefix = f"prompt_source/{source}"
                 metrics[f"{prefix}/selected"] = float(source_selected)
-                metrics[f"{prefix}/solved"] = (
-                    outcome_score if source_selected else 0.0
-                )
+                metrics[f"{prefix}/solved"] = outcome_score if source_selected else 0.0
                 metrics[f"{prefix}/reward"] = (
                     float(total_reward) if source_selected else 0.0
                 )
@@ -8171,9 +8132,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 metrics[f"{prefix}/turns"] = float(len(traces))
                 metrics[f"{prefix}/call_failed"] = float(student_call_failed)
                 if baseline is not None:
-                    metrics[f"{prefix}/retest/no_teaching_baseline"] = float(
-                        baseline
-                    )
+                    metrics[f"{prefix}/retest/no_teaching_baseline"] = float(baseline)
                     if in_the_wild is not None:
                         metrics[f"{prefix}/retest/improvement"] = float(
                             in_the_wild - baseline
@@ -8484,9 +8443,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         metrics: dict[str, float] = {
             f"{prefix}/gated_turns": float(len(gated)),
             f"{prefix}/gate_calls": float(len(sampled)),
-            f"{prefix}/gate_error": float(
-                sum(1 for result in sampled if result.error)
-            ),
+            f"{prefix}/gate_error": float(sum(1 for result in sampled if result.error)),
             "personality/sampled_share": (
                 float(len(sampled)) / float(len(results)) if results else 0.0
             ),

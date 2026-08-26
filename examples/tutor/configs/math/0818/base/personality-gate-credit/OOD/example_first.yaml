@@ -1,0 +1,6 @@
+defaults:
+  - ../../personality/OOD/example_first@_global_
+  - ../mode@_global_
+  - _self_
+
+trial_name: 0818-personality-gate-credit-example-first

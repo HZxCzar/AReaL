@@ -43,6 +43,9 @@ def response_to_tensordict(
     *,
     reward: float,
     local_reward: float | None = None,
+    personality_gate_fail_penalty: float | None = None,
+    gate_masked_reward: float | None = None,
+    gate_credit_mask: bool | None = None,
     trajectory_id: int | None = None,
     turn_idx: int | None = None,
     input_tokens_override: list[int] | None = None,
@@ -88,6 +91,10 @@ def response_to_tensordict(
         )
     trajectory_value = 0 if trajectory_id is None else int(trajectory_id)
     turn_value = 0 if turn_idx is None else int(turn_idx)
+    if (gate_masked_reward is None) != (gate_credit_mask is None):
+        raise ValueError(
+            "gate_masked_reward and gate_credit_mask must be provided together."
+        )
     effective_reward = float(reward)
     if (
         zero_reward_on_length_stop
@@ -122,6 +129,29 @@ def response_to_tensordict(
             effective_local_reward = 0.0
         result["local_rewards"] = torch.tensor(
             [effective_local_reward], dtype=torch.float32
+        )
+    if personality_gate_fail_penalty is not None:
+        effective_gate_fail_penalty = float(personality_gate_fail_penalty)
+        if (
+            zero_reward_on_length_stop
+            and getattr(response, "stop_reason", None) == "length"
+        ):
+            effective_gate_fail_penalty = 0.0
+        result["personality_gate_fail_penalty"] = torch.tensor(
+            [effective_gate_fail_penalty], dtype=torch.float32
+        )
+    if gate_masked_reward is not None:
+        effective_gate_reward = float(gate_masked_reward)
+        if (
+            zero_reward_on_length_stop
+            and getattr(response, "stop_reason", None) == "length"
+        ):
+            effective_gate_reward = 0.0
+        result["gate_masked_rewards"] = torch.tensor(
+            [effective_gate_reward], dtype=torch.float32
+        )
+        result["gate_credit_mask"] = torch.tensor(
+            [bool(gate_credit_mask)], dtype=torch.bool
         )
     if batch_centered_penalty_weight is not None:
         score_valid = batch_centered_penalty_score is not None
@@ -213,9 +243,9 @@ def response_to_tensordict(
             opd_prompt_len = len(opd_tokens)
             opd_tokens = opd_tokens + output_tokens
             opd_loss_mask = [0] * opd_prompt_len + [1] * output_len
-        result["opd_input_ids"] = torch.tensor(
-            opd_tokens, dtype=torch.long
-        ).unsqueeze(0)
+        result["opd_input_ids"] = torch.tensor(opd_tokens, dtype=torch.long).unsqueeze(
+            0
+        )
         result["opd_attention_mask"] = torch.ones(
             len(opd_tokens), dtype=torch.bool
         ).unsqueeze(0)
