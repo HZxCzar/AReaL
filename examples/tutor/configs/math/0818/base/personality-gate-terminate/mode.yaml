@@ -1,0 +1,21 @@
+# Training-only personality-gate termination. A bare complaint does not arm the
+# policy. Once a gate failure draws a remedy-explaining complaint, the next gate
+# failure ends the rollout before that teacher output enters either dialogue.
+# Evaluation keeps the ordinary non-terminating gate behavior.
+personality:
+  terminate_after_explained_failure: true
+
+reward:
+  # This is a raw turn-local reward: it joins the leak/format path before
+  # advantage normalization. Ordinary gate failures remain unpenalized.
+  personality_gate_terminate_penalty: -0.5
+  personality_gate_fail_penalty: 0.0
+  # OmegaConf replaces lists on merge, so preserve the two default components.
+  turn_local_components:
+    - leak
+    - format_error
+    - personality_gate_terminate
+
+actor:
+  # Do not let a shared terminate rate cancel this local penalty in the baseline.
+  group_baseline_local_reward_mode: exclude

@@ -32,7 +32,13 @@ def _leak(leaked: bool) -> LeakCheckResult:
     )
 
 
-def _turn(turn_idx: int, *, leaked: bool, format_error: bool = False) -> TurnArtifact:
+def _turn(
+    turn_idx: int,
+    *,
+    leaked: bool,
+    format_error: bool = False,
+    gate_terminated: bool = False,
+) -> TurnArtifact:
     return TurnArtifact(
         turn_idx=turn_idx,
         tutor_state=SimpleNamespace(max_turns=5),
@@ -44,6 +50,7 @@ def _turn(turn_idx: int, *, leaked: bool, format_error: bool = False) -> TurnArt
         public_history_before=[],
         public_history_after=[],
         tutor_format_error=format_error,
+        personality_gate_terminated=gate_terminated,
     )
 
 
@@ -96,6 +103,27 @@ def test_format_penalty_is_reported_as_turn_local_when_configured():
 
     assert [a.local_reward for a in assignments] == [-0.5]
     assert [a.reward for a in assignments] == [-0.5]
+
+
+def test_personality_gate_terminate_penalty_is_local_and_only_on_terminal_turn():
+    computer = EpisodeRewardComputer(
+        success_reward=0.0,
+        leak_penalty=-1.0,
+        leak_penalty_mode="rawbase",
+        personality_gate_terminate_penalty=-0.5,
+        turn_local_components=("personality_gate_terminate",),
+    )
+    episode = _episode(
+        [
+            _turn(1, leaked=False),
+            _turn(2, leaked=False, gate_terminated=True),
+        ]
+    )
+    assignments = asyncio.run(computer.compute(episode))
+
+    assert [a.reward for a in assignments] == [0.0, -0.5]
+    assert [a.local_reward for a in assignments] == [0.0, -0.5]
+    assert assignments[1].reward_components == {"personality_gate_terminate": -0.5}
 
 
 def test_local_reward_defaults_to_zero_so_behaviour_is_unchanged():

@@ -250,6 +250,14 @@ class TurnArtifact:
     # attempt -- it contributes to neither solved nor final_correct -- but it does
     # consume one of the turn budget, which is the whole cost of failing the gate.
     personality_gated: bool = False
+    # True only when this gated turn injected the remedy-naming complaint rather
+    # than a bare "I don't understand" response. This records the sampled branch
+    # directly; no downstream logic has to infer it from complaint text.
+    personality_complaint_explained: bool = False
+    # The gate-failed teacher turn that ended training after an earlier explained
+    # complaint. Like a leak/format termination, this turn is trained but never
+    # enters either dialogue transcript.
+    personality_gate_terminated: bool = False
     # Set when this turn was selected for on-policy distillation. Holds the
     # instructed-teacher prompt tokens; the output tokens are appended by
     # ``response_to_tensordict``.
@@ -326,3 +334,5 @@ class TurnTrace:
     # attempt -- it contributes to neither solved nor final_correct -- but it does
     # consume one of the turn budget, which is the whole cost of failing the gate.
     personality_gated: bool = False
+    personality_complaint_explained: bool = False
+    personality_gate_terminated: bool = False

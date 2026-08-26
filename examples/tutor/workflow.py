@@ -332,6 +332,7 @@ _REWARD_COMPONENT_ALIASES = {
 
 LEAK_TERMINATION_REASON = "leak"
 FORMAT_TERMINATION_REASON = "format_error"
+PERSONALITY_GATE_TERMINATION_REASON = "personality_gate_after_explanation"
 TEACHER_PRE_SKIPPED_TERMINATION_REASON = "pre_solve_skipped"
 LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate"}
 TEACHER_PRE_ON_REJECT_MODES = {"skip", "continue"}
@@ -872,6 +873,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         leak_penalty_aggregation: str = "turn",
         turn_local_reward_components: tuple[str, ...] | list[str] = (),
         format_error_penalty: float = 0.0,
+        personality_gate_terminate_penalty: float = 0.0,
         personality_gate_fail_penalty: float = 0.0,
         leaked_success_reward_scale: float = 1.0,
         assign_success_reward: bool = False,
@@ -1108,6 +1110,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError("leak_penalty_aggregation must be 'turn' or 'episode'.")
         if format_error_penalty > 0.0:
             raise ValueError("format_error_penalty must be <= 0.")
+        if personality_gate_terminate_penalty > 0.0:
+            raise ValueError("personality_gate_terminate_penalty must be <= 0.")
         if personality_gate_fail_penalty > 0.0:
             raise ValueError("personality_gate_fail_penalty must be <= 0.")
         if leaked_success_reward_scale < 0.0:
@@ -1130,6 +1134,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.leak_penalty_aggregation = leak_penalty_aggregation
         self.turn_local_reward_components = tuple(turn_local_reward_components)
         self.format_error_penalty = float(format_error_penalty)
+        self.personality_gate_terminate_penalty = float(
+            personality_gate_terminate_penalty
+        )
         self.personality_gate_fail_penalty = float(personality_gate_fail_penalty)
         self.leaked_success_reward_scale = float(leaked_success_reward_scale)
         self.assign_success_reward = bool(assign_success_reward)
@@ -1735,6 +1742,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 f"{self.personality_gated_turn_visibility!r}."
             )
         self.personality_explain_ratio = float(settings.get("explain_ratio", 1.0))
+        self.personality_terminate_after_explained_failure = bool(
+            settings.get("terminate_after_explained_failure", False)
+        )
         self.personality_gate_retries = max(1, int(settings.get("gate_retries", 3)))
         self.personality_prompts = load_personality_prompts(
             str(settings.get("prompts_path", "") or "")
@@ -1786,7 +1796,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
         logger.info(
             "personality gate active: %s (sample_rate=%.2f, explain_ratio=%.2f, "
-            "gated_turn_visibility=%s)",
+            "gated_turn_visibility=%s, terminate_after_explained_failure=%s)",
             ", ".join(
                 f"{name}[{self.personality_prompts[name]['source'].split(':')[0]}]"
                 for name in demanded
@@ -1794,6 +1804,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             self.personality_gate_sample_rate,
             self.personality_explain_ratio,
             self.personality_gated_turn_visibility,
+            self.personality_terminate_after_explained_failure,
         )
 
     def _hide_personality_gated_turns_from_student(self) -> bool:
@@ -1824,19 +1835,29 @@ class TutorAgentWorkflow(RolloutWorkflow):
             f"{self.prompt_pool_seed}:personality-{kind}:{int(task_id)}:{int(turn_idx)}"
         )
 
-    def _personality_complaint(self, personality: str, *, turn_idx: int) -> str:
+    def _draw_personality_complaint(
+        self, personality: str, *, turn_idx: int
+    ) -> tuple[str, bool]:
         """The student's reply to a message that failed the gate.
 
         Drawn from a file, never generated at rollout time. A degenerate or off-spec
         generation here would mislabel the demand and punish a teacher that had
         complied, and this line is the only channel carrying the personality to the
-        teacher.
+        teacher. The bool records whether the sampled complaint names the remedy;
+        termination logic reads that branch directly instead of matching text.
         """
         rng = self._personality_rng(kind="complaint", turn_idx=turn_idx)
         explain = self.personality_complaints_explain.get(personality, ())
         if explain and rng.random() < self.personality_explain_ratio:
-            return rng.choice(explain)
-        return rng.choice(self.personality_complaints_bare)
+            return rng.choice(explain), True
+        return rng.choice(self.personality_complaints_bare), False
+
+    def _personality_complaint(self, personality: str, *, turn_idx: int) -> str:
+        """Compatibility wrapper for callers that only need the complaint text."""
+        complaint, _explained = TutorAgentWorkflow._draw_personality_complaint(
+            self, personality, turn_idx=turn_idx
+        )
+        return complaint
 
     async def _run_personality_gate(
         self,
@@ -2920,6 +2941,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
             judge_correct=False,
             judge_feedback=initial_judge_result.feedback,
         )
+        # Episode-local memory of what the teacher has actually been told. A bare
+        # complaint does not arm termination; an explain complaint does, and only a
+        # strictly later gate failure can consume it. Evaluation retains the gate
+        # and complaints but never enables this training policy.
+        personality_explanation_seen = False
+        terminate_gate_in_training = bool(
+            getattr(self, "personality_terminate_after_explained_failure", False)
+            and not self._in_eval_rollout()
+        )
 
         for turn_idx in range(1, self.max_turns + 1):
             tutor_state = TutorTurnState(
@@ -3045,13 +3075,46 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 personality_gate_result is not None
                 and not personality_gate_result.passed
             )
+            if (
+                personality_gated
+                and terminate_gate_in_training
+                and personality_explanation_seen
+            ):
+                # The teacher already received an explicit remedy on an earlier
+                # closed gate. Treat this repeated failure exactly like leak/format
+                # termination: train the offending teacher output, but append
+                # neither it nor a synthetic student complaint to either history.
+                termination_reason = PERSONALITY_GATE_TERMINATION_REASON
+                turn_artifacts.append(
+                    TurnArtifact(
+                        turn_idx=turn_idx,
+                        tutor_state=tutor_state,
+                        tutor_messages=list(self._build_tutor_messages(tutor_state)),
+                        tutor_response=response,
+                        tutor_raw_output=tutor_raw_output,
+                        tutor_visible_output=tutor_visible_output,
+                        leak_result=leak_result,
+                        public_history_before=public_before,
+                        public_history_after=public_before,
+                        tutor_format_error=tutor_format_error,
+                        personality_gate_result=personality_gate_result,
+                        personality_gated=True,
+                        personality_gate_terminated=True,
+                    )
+                )
+                break
+
+            personality_complaint_explained = False
             if personality_gated:
                 # No student call: the complaint IS the teacher-visible student
                 # turn. Under shared visibility it remains in both transcripts;
                 # under teacher_only it gives the teacher feedback but never enters
                 # a later real-student call or re-test.
                 student_prompt = ""
-                student_answer_raw = self._personality_complaint(
+                (
+                    student_answer_raw,
+                    personality_complaint_explained,
+                ) = self._draw_personality_complaint(
                     selected_student.personality, turn_idx=turn_idx
                 )
                 student_error = None
@@ -3144,8 +3207,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     student_question_generation=student_question_generation,
                     personality_gate_result=personality_gate_result,
                     personality_gated=personality_gated,
+                    personality_complaint_explained=(personality_complaint_explained),
                 )
             )
+
+            if personality_complaint_explained:
+                personality_explanation_seen = True
 
             public_history = next_public_history
             student_visible_history = next_student_visible_history
@@ -3258,6 +3325,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             leak_penalty_aggregation=getattr(self, "leak_penalty_aggregation", "turn"),
             turn_local_components=getattr(self, "turn_local_reward_components", ()),
             format_error_penalty=getattr(self, "format_error_penalty", 0.0),
+            personality_gate_terminate_penalty=getattr(
+                self, "personality_gate_terminate_penalty", 0.0
+            ),
             leaked_success_reward_scale=getattr(
                 self, "leaked_success_reward_scale", 1.0
             ),
@@ -7951,6 +8021,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
             "stop/leak": float(termination_reason == LEAK_TERMINATION_REASON),
             "stop/format_error": float(termination_reason == FORMAT_TERMINATION_REASON),
+            "stop/personality_gate_after_explanation": float(
+                termination_reason == PERSONALITY_GATE_TERMINATION_REASON
+            ),
             "stop/teacher_pre_skipped": float(
                 termination_reason == TEACHER_PRE_SKIPPED_TERMINATION_REASON
             ),
@@ -8386,6 +8459,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             self, "format_error_penalty", 0.0
         ):
             keys.append("format_error")
+        if getattr(self, "personality_gate_terminate_penalty", 0.0):
+            keys.append("personality_gate_terminate")
         if getattr(self, "enable_turn_penalty", False) and getattr(
             self, "turn_penalty", 0.0
         ):
@@ -8442,6 +8517,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
         gated = [result for result in results if not result.passed]
         metrics: dict[str, float] = {
             f"{prefix}/gated_turns": float(len(gated)),
+            f"{prefix}/explained_complaints": float(
+                sum(trace.personality_complaint_explained for trace in traces)
+            ),
+            f"{prefix}/terminated_after_explanation": float(
+                sum(trace.personality_gate_terminated for trace in traces)
+            ),
             f"{prefix}/gate_calls": float(len(sampled)),
             f"{prefix}/gate_error": float(sum(1 for result in sampled if result.error)),
             "personality/sampled_share": (

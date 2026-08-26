@@ -21,6 +21,7 @@ class EpisodeRewardComputer:
         leak_penalty_formula: float | None = None,
         leak_penalty_aggregation: str = "turn",
         format_error_penalty: float = 0.0,
+        personality_gate_terminate_penalty: float = 0.0,
         leaked_success_reward_scale: float = 1.0,
         assign_success_reward: bool = False,
         outcome_prior_turn_weight: float = 0.1,
@@ -49,6 +50,8 @@ class EpisodeRewardComputer:
             raise ValueError("leak_penalty_aggregation must be 'turn' or 'episode'.")
         if format_error_penalty > 0.0:
             raise ValueError("format_error_penalty must be <= 0.")
+        if personality_gate_terminate_penalty > 0.0:
+            raise ValueError("personality_gate_terminate_penalty must be <= 0.")
         if leaked_success_reward_scale < 0.0:
             raise ValueError("leaked_success_reward_scale must be >= 0.")
         if success_turn_shaping_enabled and success_turn_shaping_min_reward < 0.0:
@@ -86,6 +89,9 @@ class EpisodeRewardComputer:
         self.assign_success_reward = assign_success_reward
         self.leak_penalty_aggregation = leak_penalty_aggregation
         self.format_error_penalty = float(format_error_penalty)
+        self.personality_gate_terminate_penalty = float(
+            personality_gate_terminate_penalty
+        )
         self.leaked_success_reward_scale = float(leaked_success_reward_scale)
         self.outcome_prior_turn_weight = outcome_prior_turn_weight
         self.outcome_credit_gamma = outcome_credit_gamma
@@ -134,6 +140,13 @@ class EpisodeRewardComputer:
                 components[name] = value
             if artifact.tutor_format_error and self.format_error_penalty:
                 components["format_error"] = self.format_error_penalty
+            if (
+                artifact.personality_gate_terminated
+                and self.personality_gate_terminate_penalty
+            ):
+                components["personality_gate_terminate"] = (
+                    self.personality_gate_terminate_penalty
+                )
             success_credit = success_credits.get(artifact.turn_idx, 0.0)
             if success_credit:
                 components["success_credit"] = success_credit
@@ -319,4 +332,6 @@ def artifact_to_trace(
         student_question_generation=artifact.student_question_generation,
         personality_gate_result=artifact.personality_gate_result,
         personality_gated=artifact.personality_gated,
+        personality_complaint_explained=(artifact.personality_complaint_explained),
+        personality_gate_terminated=artifact.personality_gate_terminated,
     )

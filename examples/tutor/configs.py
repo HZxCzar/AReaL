@@ -363,6 +363,18 @@ class TutorPersonalityConfig:
             )
         },
     )
+    terminate_after_explained_failure: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Training-only gate termination. Once a failed gate has drawn an "
+                "explain complaint that names the student's remedy, the next failed "
+                "gate ends the rollout before that teacher message or another "
+                "complaint enters the dialogue. Evaluation always keeps the normal "
+                "non-terminating gate behavior. Off preserves the historical path."
+            )
+        },
+    )
     gate_retries: int = field(
         default=3,
         metadata={
@@ -1751,6 +1763,19 @@ class TutorRewardConfig:
             )
         },
     )
+    personality_gate_terminate_penalty: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Raw reward on the teacher turn that terminates because it failed "
+                "the personality gate after an earlier explain complaint. Configure "
+                "'personality_gate_terminate' as a turn-local component so the "
+                "penalty stays on that turn, then participates in the normal "
+                "advantage normalization exactly like local leak/format penalties. "
+                "Must be < 0 when termination is enabled; 0 keeps it disabled."
+            )
+        },
+    )
     personality_gate_fail_penalty: float = field(
         default=0.0,
         metadata={
@@ -1808,6 +1833,11 @@ class TutorRewardConfig:
     def __post_init__(self) -> None:
         if self.format_error_penalty > 0.0:
             raise ValueError("reward.format_error_penalty must be <= 0.")
+        self.personality_gate_terminate_penalty = float(
+            self.personality_gate_terminate_penalty
+        )
+        if self.personality_gate_terminate_penalty > 0.0:
+            raise ValueError("reward.personality_gate_terminate_penalty must be <= 0.")
         self.personality_gate_fail_penalty = float(self.personality_gate_fail_penalty)
         if self.personality_gate_fail_penalty > 0.0:
             raise ValueError("reward.personality_gate_fail_penalty must be <= 0.")
@@ -2979,6 +3009,37 @@ class TutorConfig(GRPOConfig):
             raise ValueError(
                 "reward.personality_gate_fail_penalty requires "
                 "actor.advantage_estimator='rebn'."
+            )
+        gate_terminate_enabled = bool(
+            self.personality.terminate_after_explained_failure
+        )
+        gate_terminate_penalty = self.reward.personality_gate_terminate_penalty
+        if gate_terminate_enabled:
+            if gate_terminate_penalty >= 0.0:
+                raise ValueError(
+                    "personality.terminate_after_explained_failure=true requires "
+                    "reward.personality_gate_terminate_penalty < 0."
+                )
+            if self.reward.personality_gate_fail_penalty:
+                raise ValueError(
+                    "personality gate termination cannot be combined with "
+                    "reward.personality_gate_fail_penalty: ordinary gate failures "
+                    "must remain unpenalized in this mode."
+                )
+            if "personality_gate_terminate" not in self.reward.turn_local_components:
+                raise ValueError(
+                    "personality gate termination requires "
+                    "'personality_gate_terminate' in reward.turn_local_components."
+                )
+            if self.actor.advantage_estimator != "rebn":
+                raise ValueError(
+                    "personality gate termination requires "
+                    "actor.advantage_estimator='rebn' for turn-local reward credit."
+                )
+        elif gate_terminate_penalty:
+            raise ValueError(
+                "reward.personality_gate_terminate_penalty requires "
+                "personality.terminate_after_explained_failure=true."
             )
         if self.student_generalize.gate_pass_credit_only:
             if (

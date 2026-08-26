@@ -575,6 +575,9 @@ def build_eval_workflow_kwargs(
         "leak_penalty_aggregation": reward.leak_penalty_aggregation,
         "turn_local_reward_components": tuple(reward.turn_local_components),
         "format_error_penalty": reward.format_error_penalty,
+        "personality_gate_terminate_penalty": (
+            reward.personality_gate_terminate_penalty
+        ),
         "personality_gate_fail_penalty": reward.personality_gate_fail_penalty,
         "leaked_success_reward_scale": reward.leaked_success_reward_scale,
         "assign_success_reward": reward.assign_success_reward,

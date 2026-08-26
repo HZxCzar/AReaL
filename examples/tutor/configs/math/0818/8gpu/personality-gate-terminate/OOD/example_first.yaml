@@ -1,0 +1,10 @@
+defaults:
+  - ../../../base/personality-gate-terminate/OOD/example_first@_global_
+  - ../../alloc@_global_
+  - _self_
+
+trial_name: 0818-personality-gate-terminate-example-first-8gpu
+
+stats_logger:
+  wandb:
+    group: 0818-personality-gate-terminate-8gpu
