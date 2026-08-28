@@ -1,0 +1,5 @@
+# Shared overrides for the batch-size-4 experiment family.
+total_train_steps: 1000
+
+train_dataset:
+  batch_size: 4

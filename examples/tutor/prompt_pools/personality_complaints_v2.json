@@ -1,0 +1,62 @@
+{
+  "bare": [
+    "I still don't understand.",
+    "That didn't help me.",
+    "I'm still confused.",
+    "I'm not following yet.",
+    "That isn't clicking for me.",
+    "I'm still stuck.",
+    "I couldn't make sense of that.",
+    "I'm not getting it yet."
+  ],
+  "explain": {
+    "feedback": [
+      "Please give me feedback about how I did on the work I just showed you.",
+      "Tell me how I am doing based on my attempt so far.",
+      "Give me information about the quality of my work on this problem.",
+      "Please respond to my own work and tell me how I performed.",
+      "Let me know what is going well in my attempt and what needs attention.",
+      "I need feedback on my performance on this problem."
+    ],
+    "hinting": [
+      "Please give me a hint that helps me move forward.",
+      "Offer me a clue or suggestion without giving me the full solution.",
+      "Point me toward an idea I could use without detailed instructions.",
+      "Give me a small hint about what might matter here.",
+      "Suggest something useful for me to notice or consider.",
+      "Nudge me in a helpful direction and let me continue from there."
+    ],
+    "instructing": [
+      "Please tell me what I should do here.",
+      "Give me clear instructions for how to proceed.",
+      "Explain how this should be done and why.",
+      "Tell me how to carry out the method.",
+      "Please instruct me on the procedure I should follow.",
+      "Tell me the steps to take and why they make sense."
+    ],
+    "explaining": [
+      "Please give me a more detailed explanation.",
+      "Clarify the mathematical information I need here.",
+      "Explain this idea in more detail.",
+      "I need more information and clarification about this part.",
+      "Please clarify what this means.",
+      "Give me a fuller explanation so I can understand it."
+    ],
+    "modeling": [
+      "Please demonstrate how to do this so I have something to imitate.",
+      "Show me the behavior or skill you want me to use.",
+      "Model the method for me so I can follow your example.",
+      "Demonstrate how someone would approach this.",
+      "Show me the process so I can imitate how it is done.",
+      "Please model the reasoning or skill I should learn."
+    ],
+    "questioning": [
+      "Please guide me by asking a question that makes me think and answer.",
+      "Ask me a question that requires an active answer from me.",
+      "Use questions that make me work through the idea myself.",
+      "Question me so I have to express my reasoning.",
+      "Ask something that prompts me to think and respond.",
+      "Lead me with questions and let me provide the answer."
+    ]
+  }
+}

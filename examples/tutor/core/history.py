@@ -61,5 +61,15 @@ def trace_to_json(trace: TurnTrace) -> dict[str, Any]:
     data = asdict(trace)
     if trace.student_question_generation is None:
         data.pop("student_question_generation", None)
+    gate = data.get("personality_gate_result")
+    if isinstance(gate, dict):
+        for key in (
+            "classification_label",
+            "classification_logprobs",
+            "classification_probabilities",
+            "classification_margin",
+        ):
+            if gate.get(key) is None:
+                gate.pop(key, None)
     data["tutor_state"]["ground_truth"] = trace.tutor_state.ground_truth
     return data

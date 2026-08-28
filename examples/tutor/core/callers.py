@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from examples.common.chat_budget import ChatContextBudget
 from examples.common.openai_utils import AsyncLLMCaller, TokenLogprob
 from examples.tutor.core.generation_budget import (
-    with_max_new_tokens,
     ContextBudgetLimitExceeded,
     ensure_response_within_train_sample_budget,
     prepare_train_sample_generation_config,
     raise_if_over_budget,
+    with_max_new_tokens,
 )
 from examples.tutor.core.text import strip_reasoning_for_context
 
@@ -26,6 +28,13 @@ class TextCallResult:
     raw_text: str = ""
     error: str | None = None
     token_logprobs: tuple[TokenLogprob, ...] = ()
+
+
+@dataclass(slots=True)
+class CandidateLogprobResult:
+    raw_text: str = ""
+    candidate_logprobs: dict[int, float] = field(default_factory=dict)
+    error: str | None = None
 
 
 @dataclass(slots=True)
@@ -129,6 +138,82 @@ class ApiAuxiliaryCaller:
             error=None,
             token_logprobs=result.token_logprobs,
         )
+
+    async def call_candidate_logprobs(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        candidates: dict[int, str],
+        rid_prefix: str = "auxiliary-candidates",
+    ) -> CandidateLogprobResult:
+        """Read one constrained next-token distribution from an SGLang API."""
+        del rid_prefix
+        try:
+            if not candidates:
+                raise ValueError("candidate logprob request needs at least one token.")
+            if len(candidates) > 20:
+                raise ValueError(
+                    "OpenAI-compatible top_logprobs supports at most 20 candidates, "
+                    f"got {len(candidates)}."
+                )
+            spellings = list(candidates.values())
+            if len(set(spellings)) != len(spellings):
+                raise ValueError(
+                    f"candidate token spellings must be unique, got {spellings}."
+                )
+
+            # SGLang applies this grammar before computing top_logprobs, so the
+            # response contains the complete candidate set rather than an
+            # arbitrary top-k slice of the full vocabulary.
+            regex = "(?:" + "|".join(re.escape(token) for token in spellings) + ")"
+            extra_body = dict(self.request_config.get("extra_body") or {})
+            extra_body.pop("ebnf", None)
+            extra_body.pop("json_schema", None)
+            extra_body.update({"regex": regex, "top_k": -1, "min_p": 0.0})
+            result = await self.caller.call(
+                messages,
+                request_overrides={
+                    **self.request_overrides,
+                    "max_tokens": None,
+                    "max_completion_tokens": 1,
+                    "n": 1,
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "response_format": None,
+                    "logprobs": True,
+                    "top_logprobs": len(candidates),
+                    "extra_body": extra_body,
+                },
+            )
+            if not result.token_logprobs:
+                raise RuntimeError(
+                    "candidate logprob response contained no generated-token logprobs."
+                )
+            first = result.token_logprobs[0]
+            returned: dict[str, float] = {first.token: float(first.logprob)}
+            for item in first.top_logprobs:
+                returned[item.token] = max(
+                    returned.get(item.token, float("-inf")), float(item.logprob)
+                )
+            missing = [token for token in spellings if token not in returned]
+            if missing:
+                raise RuntimeError(
+                    f"candidate logprob response omitted constrained tokens: {missing}."
+                )
+            logprobs = {
+                int(token_id): float(returned[token])
+                for token_id, token in candidates.items()
+            }
+            if not all(math.isfinite(value) for value in logprobs.values()):
+                raise RuntimeError(
+                    f"candidate logprob response contained non-finite values: {logprobs}."
+                )
+            return CandidateLogprobResult(
+                raw_text=result.text,
+                candidate_logprobs=logprobs,
+            )
+        except Exception as exc:
+            return CandidateLogprobResult(error=str(exc))
 
     async def call_text_many(
         self,
@@ -263,6 +348,58 @@ class AReaLEngineAuxiliaryCaller:
             error=None,
         )
 
+    async def call_candidate_logprobs(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        candidates: dict[int, str],
+        rid_prefix: str = "auxiliary-candidates",
+    ) -> CandidateLogprobResult:
+        """Read exact requested token logprobs from the SGLang engine path."""
+        try:
+            if not candidates:
+                raise ValueError("candidate logprob request needs at least one token.")
+            if len(set(candidates)) != len(candidates):
+                raise ValueError("candidate token ids must be unique.")
+            async with self._semaphore:
+                result = await self.chat_caller.generate(
+                    messages,
+                    gconfig=self._candidate_logprob_generation_config(),
+                    metadata={
+                        "disable_lora": True,
+                        "token_ids_logprob": list(candidates),
+                    },
+                    max_completion_tokens=1,
+                    max_train_sample_tokens=None,
+                    rid_prefix=rid_prefix,
+                )
+            positions = getattr(result.response, "output_token_ids_logprobs", None)
+            if not positions or not positions[0]:
+                raise RuntimeError(
+                    "candidate logprob response contained no token_ids_logprob data."
+                )
+            returned = {
+                int(token_id): float(logprob) for logprob, token_id in positions[0]
+            }
+            missing = [token_id for token_id in candidates if token_id not in returned]
+            if missing:
+                raise RuntimeError(
+                    f"candidate logprob response omitted token ids: {missing}."
+                )
+            logprobs = {
+                int(token_id): float(returned[token_id]) for token_id in candidates
+            }
+            if not all(math.isfinite(value) for value in logprobs.values()):
+                raise RuntimeError(
+                    f"candidate logprob response contained non-finite values: {logprobs}."
+                )
+            return CandidateLogprobResult(
+                raw_text=result.raw_text,
+                candidate_logprobs=logprobs,
+            )
+        except Exception as exc:
+            return CandidateLogprobResult(error=str(exc))
+
     async def call_text_many(
         self,
         messages: list[dict[str, str]],
@@ -298,6 +435,22 @@ class AReaLEngineAuxiliaryCaller:
         }
         if max_tokens is not None:
             kwargs["max_tokens"] = int(max_tokens)
+        if hasattr(base_gconfig, "new"):
+            return base_gconfig.new(**kwargs)
+        values = dict(getattr(base_gconfig, "__dict__", {}))
+        values.update(kwargs)
+        return GenerationHyperparameters(**values)
+
+    def _candidate_logprob_generation_config(self) -> Any:
+        base_gconfig = self._generation_config()
+        kwargs = {
+            "n_samples": 1,
+            "max_new_tokens": 1,
+            "greedy": True,
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "top_k": -1,
+        }
         if hasattr(base_gconfig, "new"):
             return base_gconfig.new(**kwargs)
         values = dict(getattr(base_gconfig, "__dict__", {}))

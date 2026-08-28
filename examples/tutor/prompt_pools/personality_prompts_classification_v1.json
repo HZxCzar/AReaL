@@ -1,0 +1,28 @@
+{
+  "personalities": {
+    "feedback": {
+      "source": "Van de Pol, Volman & Beishuizen (2010): feeding back as a scaffolding means that provides the student with information about their performance.",
+      "preference": "The teacher identifies a specific error or omission in the previous student message and corrects it."
+    },
+    "hinting": {
+      "source": "Van de Pol, Volman & Beishuizen (2010): hints as clues or suggestions that help the student proceed without supplying the entire solution or detailed instructions.",
+      "preference": "The teacher gives a useful clue but leaves the student to choose the mathematical action."
+    },
+    "instructing": {
+      "source": "Van de Pol, Volman & Beishuizen (2010): instructing as telling the student what to do or how something is to be done.",
+      "preference": "The teacher tells the student a concrete mathematical action and the exact expression, quantity, or object on which to perform it."
+    },
+    "explaining": {
+      "source": "Van de Pol, Volman & Beishuizen (2010): explaining as providing the student with detailed information or clarification.",
+      "preference": "The teacher provides and clarifies a relevant mathematical concept, rule, relationship, or reason."
+    },
+    "modeling": {
+      "source": "Van de Pol, Volman & Beishuizen (2010): modeling as demonstrating behavior or a process for the student to imitate.",
+      "preference": "The teacher works through at least one step of a different but structurally similar example."
+    },
+    "questioning": {
+      "source": "Van de Pol, Volman & Beishuizen (2010): questioning as asking questions that require an active linguistic and cognitive response from the student.",
+      "preference": "The teacher guides the student by asking them to supply meaningful mathematical reasoning or make a mathematical decision. A question that specifies an exact action and target is INSTRUCTING, not QUESTIONING."
+    }
+  }
+}

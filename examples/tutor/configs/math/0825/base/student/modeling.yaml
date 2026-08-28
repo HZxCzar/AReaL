@@ -1,0 +1,24 @@
+student_models:
+- name: qwen3-1.7b-text-original-modeling
+  weight: 1.0
+  mode: text
+  mask:
+    mode: full
+  personality: modeling
+  base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+  model: qwen3-1.7b
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 24
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false

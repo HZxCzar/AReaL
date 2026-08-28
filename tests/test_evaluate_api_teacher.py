@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from argparse import Namespace
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -138,6 +139,42 @@ def test_self_auxiliary_needs_an_explicit_external_bridge(
 def test_select_student_models_rejects_unknown_student() -> None:
     with pytest.raises(ValueError, match="Unknown --student-name"):
         select_student_models([{"name": "text"}], ["code"])
+
+
+def test_stratified_math_subset_is_deterministic_and_proportional() -> None:
+    dataset = [
+        {"metadata": {"type": math_type, "level": level}}
+        for math_type, level, count in (
+            ("Algebra", "Level 1", 10),
+            ("Geometry", "Level 2", 6),
+            ("Algebra", "Level 2", 4),
+        )
+        for _ in range(count)
+    ]
+
+    selected = api_eval.stratified_math_subset_indices(
+        dataset, sample_count=10, seed=42
+    )
+    repeated = api_eval.stratified_math_subset_indices(
+        dataset, sample_count=10, seed=42
+    )
+
+    assert selected == repeated
+    assert len(selected) == len(set(selected)) == 10
+    selected_strata = [
+        (
+            dataset[index]["metadata"]["type"],
+            dataset[index]["metadata"]["level"],
+        )
+        for index in selected
+    ]
+    assert Counter(selected_strata) == Counter(
+        {
+            ("Algebra", "Level 1"): 5,
+            ("Geometry", "Level 2"): 3,
+            ("Algebra", "Level 2"): 2,
+        }
+    )
 
 
 def test_generalization_serialization_preserves_replay_score() -> None:

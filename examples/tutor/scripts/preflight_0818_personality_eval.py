@@ -79,7 +79,9 @@ def _validate_adapters(
             )
         marker = adapter.name.rsplit("globalstep", 1)
         if len(marker) != 2 or not marker[1].isdigit():
-            raise ValueError(f"{label}: checkpoint directory has no globalstep: {adapter}")
+            raise ValueError(
+                f"{label}: checkpoint directory has no globalstep: {adapter}"
+            )
         completed_steps[label] = int(marker[1]) + 1
     return completed_steps
 
@@ -103,10 +105,10 @@ def run_preflight(args: argparse.Namespace) -> dict[str, object]:
     selected_students = [students_by_name[row[2]] for row in selected_rows]
 
     prompts = load_personality_prompts(config.personality.prompts_path)
-    bare, explained = load_personality_complaints(
-        config.personality.complaints_path
-    )
-    demanding = [personality for personality, _, _ in PERSONALITIES if personality != "none"]
+    bare, explained = load_personality_complaints(config.personality.complaints_path)
+    demanding = [
+        personality for personality, _, _ in PERSONALITIES if personality != "none"
+    ]
     missing_prompts = [name for name in demanding if name not in prompts]
     missing_complaints = [name for name in demanding if name not in explained]
     if missing_prompts or missing_complaints or not bare:
@@ -158,6 +160,7 @@ def run_preflight(args: argparse.Namespace) -> dict[str, object]:
         [selected_students[0]],
         tokenizer=tokenizer,
         limit=0,
+        stratified_max_samples=0,
         student_prompts=student_prompts,
     )
     config.evaluator.max_samples = args.max_samples or saved_max_samples
@@ -166,10 +169,12 @@ def run_preflight(args: argparse.Namespace) -> dict[str, object]:
         [selected_students[0]],
         tokenizer=tokenizer,
         limit=0,
+        stratified_max_samples=args.stratified_max_samples,
         student_prompts=student_prompts,
     )
+    requested_rows = args.stratified_max_samples or args.max_samples
     expected_runtime_rows = (
-        min(args.max_samples, len(full_dataset)) if args.max_samples else len(full_dataset)
+        min(requested_rows, len(full_dataset)) if requested_rows else len(full_dataset)
     )
     if len(runtime_dataset) != expected_runtime_rows:
         raise ValueError(
@@ -194,6 +199,21 @@ def run_preflight(args: argparse.Namespace) -> dict[str, object]:
         "runtime_dataset_rows": len(runtime_dataset),
         "runtime_dataset_sha256": dataset_sha256(runtime_dataset),
         "seed": config.seed,
+        "dataset_selection": {
+            "strategy": (
+                "math_type_level_stratified"
+                if args.stratified_max_samples
+                else "seeded_random"
+                if args.max_samples
+                else "full"
+            ),
+            "requested_rows": requested_rows,
+            "strata": (
+                ["metadata.type", "metadata.level"]
+                if args.stratified_max_samples
+                else []
+            ),
+        },
         "completed_steps": completed_steps,
         "config_sha256": hashlib.sha256(args.config.read_bytes()).hexdigest(),
         "resolved_config_sha256": hashlib.sha256(
@@ -236,14 +256,19 @@ def parse_args() -> argparse.Namespace:
         help="evaluate only this personality; repeat to select a subset",
     )
     parser.add_argument("--max-samples", type=int, default=0)
+    parser.add_argument("--stratified-max-samples", type=int, default=0)
     parser.add_argument("--replays", type=int, default=8)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    if args.max_samples < 0 or args.replays < 1:
-        raise ValueError("--max-samples must be non-negative and --replays positive")
+    if args.max_samples < 0 or args.stratified_max_samples < 0 or args.replays < 1:
+        raise ValueError("sample limits must be non-negative and --replays positive")
+    if args.max_samples and args.stratified_max_samples:
+        raise ValueError(
+            "Use either --max-samples or --stratified-max-samples, not both."
+        )
     report = run_preflight(args)
     split_counts = {
         split: sum(student["split"] == split for student in report["students"])

@@ -29,6 +29,8 @@ _STUDENT_GENERALIZE_MODES = {"only_success", "always"}
 _STUDENT_GENERALIZE_SOURCES = {"generated", "sidecar", "train"}
 _STUDENT_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _STUDENT_SAMPLING_STRATEGIES = {"weighted_random", "stratified"}
+_PERSONALITY_GATE_PROMPT_VERSIONS = {"v1", "v2"}
+_PERSONALITY_GATE_DECISION_MODES = {"binary", "classification"}
 
 STUDENT_MODE_TEXT = "text"
 STUDENT_MODE_CODE = "code"
@@ -289,10 +291,11 @@ PERSONALITY_GATED_TURN_VISIBILITIES = (
 class TutorPersonalityConfig:
     """The personality gate: files, sampling rate, and the failure policy.
 
-    A personality is ONE PROMPT. On a sampled teacher turn an auxiliary model is
-    asked that prompt about the teacher's message and answers PASS or FAIL; FAIL
-    means the student does not answer and a complaint takes its slot. Nothing else
-    defines a personality and nothing else gates a turn.
+    In the default binary mode a personality is one PASS/FAIL prompt. The optional
+    classification mode instead compares the next-token logits for A-G across the
+    configured prompt bank and passes only when the winning label equals the sampled
+    personality. In both modes, failure means the student does not answer and a
+    complaint takes its slot.
 
     The gate runs AFTER the format parse and the leak check, so a turn that already
     terminated costs no call. It runs at eval as well as training -- the two
@@ -322,6 +325,32 @@ class TutorPersonalityConfig:
                 "per-personality; 'bare' names nothing, so it carries no personality "
                 "information and one shared list serves every cell."
             )
+        },
+    )
+    gate_prompt_version: str = field(
+        default="v1",
+        metadata={
+            "help": (
+                "Personality-gate prompt contract. 'v1' preserves the original "
+                "task-and-teacher-message judge. 'v2' keeps that binary judge, "
+                "uses the six scaffolding preferences, and gives feedback the "
+                "latest real student message. Feedback skips its first turn."
+            ),
+            "choices": sorted(_PERSONALITY_GATE_PROMPT_VERSIONS),
+        },
+    )
+    gate_decision_mode: str = field(
+        default="binary",
+        metadata={
+            "help": (
+                "How the auxiliary judges a sampled teacher turn. 'binary' "
+                "preserves the existing per-preference PASS/FAIL prompt. "
+                "'classification' shows the auxiliary every configured "
+                "personality definition without revealing the sampled one, reads "
+                "the A-G next-token logprob distribution, then passes only when "
+                "its argmax label equals that personality."
+            ),
+            "choices": sorted(_PERSONALITY_GATE_DECISION_MODES),
         },
     )
     gate_sample_rate: float = field(
@@ -379,11 +408,10 @@ class TutorPersonalityConfig:
         default=3,
         metadata={
             "help": (
-                "Retries before an unclean verdict becomes FAIL. Anything that is "
-                "not a loadable object with verdict exactly PASS or FAIL -- missing "
-                "key, prose outside the object, truncation, API error, timeout -- "
-                "takes this path. FAIL is the conservative default: it never lets "
-                "through a message that may violate the personality."
+                "Retries before an unclean binary verdict or unavailable "
+                "classification logprob distribution becomes FAIL. Invalid binary "
+                "JSON, missing candidate logprobs, API errors, and timeouts take "
+                "this path. FAIL is the conservative default."
             )
         },
     )
@@ -395,6 +423,20 @@ class TutorPersonalityConfig:
     def __post_init__(self) -> None:
         self.prompts_path = str(self.prompts_path or "").strip()
         self.complaints_path = str(self.complaints_path or "").strip()
+        self.gate_prompt_version = str(self.gate_prompt_version).strip().lower()
+        if self.gate_prompt_version not in _PERSONALITY_GATE_PROMPT_VERSIONS:
+            raise ValueError(
+                "personality.gate_prompt_version must be one of "
+                f"{sorted(_PERSONALITY_GATE_PROMPT_VERSIONS)}, got "
+                f"{self.gate_prompt_version!r}."
+            )
+        self.gate_decision_mode = str(self.gate_decision_mode).strip().lower()
+        if self.gate_decision_mode not in _PERSONALITY_GATE_DECISION_MODES:
+            raise ValueError(
+                "personality.gate_decision_mode must be one of "
+                f"{sorted(_PERSONALITY_GATE_DECISION_MODES)}, got "
+                f"{self.gate_decision_mode!r}."
+            )
         self.gate_sample_rate = float(self.gate_sample_rate)
         if not 0.0 <= self.gate_sample_rate <= 1.0:
             raise ValueError(

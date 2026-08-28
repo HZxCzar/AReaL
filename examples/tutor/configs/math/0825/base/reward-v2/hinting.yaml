@@ -1,0 +1,7 @@
+defaults:
+  - ../default@_global_
+  - ../student/hinting@_global_
+  - base@_global_
+  - _self_
+
+trial_name: 0825-reward-v2-hinting

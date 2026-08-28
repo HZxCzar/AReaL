@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging as py_logging
+import math
 import operator
 import os
 import random
@@ -166,6 +167,7 @@ from examples.tutor.core.callers import (
     AReaLEngineActorCaller,
     AReaLEngineAuxiliaryCaller,
     AReaLEngineChatCaller,
+    CandidateLogprobResult,
     ExternalActorCaller,
     TextCallResult,
     apply_chat_template,
@@ -281,10 +283,17 @@ from examples.tutor.prompts import (
     NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT,
     NONE_PLACEHOLDER,
     NONE_YET_PLACEHOLDER,
-    POLARIS_FILTER_SOLVER_USER_TEMPLATE,
-    POLARIS_INSTRUCTION,
+    PERSONALITY_CLASSIFICATION_GATE_SYSTEM_PROMPT,
+    PERSONALITY_CLASSIFICATION_GATE_USER_TEMPLATE,
+    PERSONALITY_CLASSIFICATION_NO_LAST_STUDENT_MESSAGE,
     PERSONALITY_GATE_SYSTEM_PROMPT,
     PERSONALITY_GATE_USER_TEMPLATE,
+    PERSONALITY_GATE_V2_NO_PREVIOUS_STUDENT_MESSAGE,
+    PERSONALITY_GATE_V2_PREVIOUS_STUDENT_TEMPLATE,
+    PERSONALITY_GATE_V2_SYSTEM_PROMPT,
+    PERSONALITY_GATE_V2_USER_TEMPLATE,
+    POLARIS_FILTER_SOLVER_USER_TEMPLATE,
+    POLARIS_INSTRUCTION,
     PUBLIC_HISTORY_ENTRY_TEMPLATE,
     RAWBASE_LEAK_CHECK_FAILED_FEEDBACK_TEMPLATE,
     RAWBASE_LEAK_CHECK_SYSTEM_PROMPT,
@@ -1721,6 +1730,23 @@ class TutorAgentWorkflow(RolloutWorkflow):
         whichever rollout first drew that cell.
         """
         settings = dict(personality or {})
+        self.personality_gate_prompt_version = (
+            str(settings.get("gate_prompt_version", "v1")).strip().lower()
+        )
+        if self.personality_gate_prompt_version not in {"v1", "v2"}:
+            raise ValueError(
+                "personality.gate_prompt_version must be one of ['v1', 'v2'], got "
+                f"{self.personality_gate_prompt_version!r}."
+            )
+        self.personality_gate_decision_mode = (
+            str(settings.get("gate_decision_mode", "binary")).strip().lower()
+        )
+        if self.personality_gate_decision_mode not in {"binary", "classification"}:
+            raise ValueError(
+                "personality.gate_decision_mode must be one of "
+                "['binary', 'classification'], got "
+                f"{self.personality_gate_decision_mode!r}."
+            )
         self.personality_gate_sample_rate = float(settings.get("gate_sample_rate", 0.5))
         self.personality_gated_turn_visibility = (
             str(
@@ -1795,12 +1821,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 f"the file defines {sorted(self.personality_complaints_explain)}."
             )
         logger.info(
-            "personality gate active: %s (sample_rate=%.2f, explain_ratio=%.2f, "
-            "gated_turn_visibility=%s, terminate_after_explained_failure=%s)",
+            "personality gate active: %s (decision_mode=%s, sample_rate=%.2f, "
+            "explain_ratio=%.2f, gated_turn_visibility=%s, "
+            "terminate_after_explained_failure=%s)",
             ", ".join(
                 f"{name}[{self.personality_prompts[name]['source'].split(':')[0]}]"
                 for name in demanded
             ),
+            self.personality_gate_decision_mode,
             self.personality_gate_sample_rate,
             self.personality_explain_ratio,
             self.personality_gated_turn_visibility,
@@ -1859,6 +1887,39 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         return complaint
 
+    def _personality_classification_token_candidates(
+        self, letters: tuple[str, ...]
+    ) -> dict[int, str]:
+        """Resolve every answer letter to one unique tokenizer token."""
+        cache = getattr(self, "_personality_classification_token_cache", {})
+        cached = cache.get(letters)
+        if cached is not None:
+            return dict(cached)
+        tokenizer = getattr(self, "tokenizer", None)
+        if tokenizer is None or not hasattr(tokenizer, "encode"):
+            raise ValueError(
+                "classification personality gate needs the auxiliary model tokenizer "
+                "to resolve A-G token ids."
+            )
+        candidates: dict[int, str] = {}
+        for letter in letters:
+            encoded = tokenizer.encode(letter, add_special_tokens=False)
+            if len(encoded) != 1:
+                raise ValueError(
+                    f"classification answer {letter!r} is not one tokenizer token: "
+                    f"{list(encoded)}."
+                )
+            token_id = int(encoded[0])
+            if token_id in candidates:
+                raise ValueError(
+                    "classification answer letters must have unique token ids, got "
+                    f"{candidates[token_id]!r} and {letter!r} for {token_id}."
+                )
+            candidates[token_id] = letter
+        cache[letters] = dict(candidates)
+        self._personality_classification_token_cache = cache
+        return candidates
+
     async def _run_personality_gate(
         self,
         personality: str,
@@ -1866,6 +1927,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         *,
         task: str,
         turn_idx: int,
+        previous_student_message: str | None = None,
         aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
     ) -> PersonalityGateResult | None:
         """PASS/FAIL for one teacher message, or None when no gate applies.
@@ -1882,6 +1944,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if entry is None:
             raise ValueError(f"no preference prompt for personality {personality!r}.")
 
+        decision_mode = getattr(self, "personality_gate_decision_mode", "binary")
+        prompt_version = getattr(self, "personality_gate_prompt_version", "v1")
+        if (
+            personality == "feedback"
+            and turn_idx == 1
+            and (decision_mode == "classification" or prompt_version == "v2")
+        ):
+            # With no real student work there is nothing a feedback gate can audit.
+            # Let the first student reply happen without manufacturing a PASS that
+            # would contaminate feedback compliance.
+            return None
+
         if self.personality_gate_sample_rate < 1.0:
             rng = self._personality_rng(kind="sample", turn_idx=turn_idx)
             if rng.random() >= self.personality_gate_sample_rate:
@@ -1894,22 +1968,140 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     sampled=False,
                 )
 
-        user_prompt = PERSONALITY_GATE_USER_TEMPLATE.format(
-            preference=entry["preference"],
-            teacher_message=teacher_message.strip(),
-        )
+        classification_options: list[tuple[str, str, str]] = []
+        classification_candidates: dict[int, str] = {}
+        if decision_mode == "classification":
+            options = [
+                (name, candidate["preference"])
+                for name, candidate in self.personality_prompts.items()
+            ]
+            options.append(
+                (
+                    "NONE",
+                    "None of the six teaching methods describes how the teacher "
+                    "teaches in the message.",
+                )
+            )
+            if len(options) != 7:
+                raise ValueError(
+                    "classification mode requires six personality definitions "
+                    "plus NONE."
+                )
+            classification_options = [
+                (chr(ord("A") + index), name, definition)
+                for index, (name, definition) in enumerate(options)
+            ]
+            candidate_options = "\n\n".join(
+                f"{letter}. {name.upper()}\n{definition}"
+                for letter, name, definition in classification_options
+            )
+            classification_candidates = (
+                self._personality_classification_token_candidates(
+                    tuple(
+                        letter for letter, _name, _definition in classification_options
+                    )
+                )
+            )
+            system_prompt = PERSONALITY_CLASSIFICATION_GATE_SYSTEM_PROMPT.format(
+                candidate_options=candidate_options,
+            )
+            user_prompt = PERSONALITY_CLASSIFICATION_GATE_USER_TEMPLATE.format(
+                task=str(task or "").strip(),
+                last_student_message=(
+                    str(previous_student_message or "").strip()
+                    or PERSONALITY_CLASSIFICATION_NO_LAST_STUDENT_MESSAGE
+                ),
+                teacher_message=teacher_message.strip(),
+            )
+            rid_prefix = f"personality-gate-classification-{turn_idx}"
+        elif prompt_version == "v2":
+            previous_student_context = ""
+            if personality == "feedback":
+                previous_student_context = (
+                    PERSONALITY_GATE_V2_PREVIOUS_STUDENT_TEMPLATE.format(
+                        previous_student_message=(
+                            str(previous_student_message or "").strip()
+                            or PERSONALITY_GATE_V2_NO_PREVIOUS_STUDENT_MESSAGE
+                        )
+                    )
+                )
+            user_prompt = PERSONALITY_GATE_V2_USER_TEMPLATE.format(
+                preference=entry["preference"],
+                previous_student_context=previous_student_context,
+                teacher_message=teacher_message.strip(),
+            )
+            system_prompt = PERSONALITY_GATE_V2_SYSTEM_PROMPT.format(
+                task=str(task or "").strip()
+            )
+            rid_prefix = f"personality-gate-{personality}-{turn_idx}"
+        else:
+            user_prompt = PERSONALITY_GATE_USER_TEMPLATE.format(
+                preference=entry["preference"],
+                teacher_message=teacher_message.strip(),
+            )
+            system_prompt = PERSONALITY_GATE_SYSTEM_PROMPT.format(
+                task=str(task or "").strip()
+            )
+            rid_prefix = f"personality-gate-{personality}-{turn_idx}"
         last_error = "personality gate produced no verdict."
         raw_output = ""
         for attempt in range(1, self.personality_gate_retries + 1):
+            if decision_mode == "classification":
+                candidate_result = await self._call_auxiliary_candidate_logprobs(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    candidates=classification_candidates,
+                    aux_caller=aux_caller,
+                    rid_prefix=rid_prefix,
+                )
+                raw_output = candidate_result.raw_text
+                if candidate_result.error:
+                    last_error = str(candidate_result.error)
+                    continue
+
+                ordered_logprobs = [
+                    candidate_result.candidate_logprobs[token_id]
+                    for token_id in classification_candidates
+                ]
+                peak = max(ordered_logprobs)
+                log_normalizer = peak + math.log(
+                    sum(math.exp(value - peak) for value in ordered_logprobs)
+                )
+                normalized_logprobs = [
+                    value - log_normalizer for value in ordered_logprobs
+                ]
+                probabilities = [math.exp(value) for value in normalized_logprobs]
+                winner_index = max(
+                    range(len(probabilities)), key=probabilities.__getitem__
+                )
+                labels = [
+                    label for _letter, label, _definition in classification_options
+                ]
+                classification_label = labels[winner_index]
+                ranked_probabilities = sorted(probabilities, reverse=True)
+                return PersonalityGateResult(
+                    raw_output=(raw_output or classification_options[winner_index][0]),
+                    passed=classification_label == personality,
+                    reason="",
+                    error=None,
+                    attempts=attempt,
+                    classification_label=classification_label,
+                    classification_logprobs=dict(
+                        zip(labels, normalized_logprobs, strict=True)
+                    ),
+                    classification_probabilities=dict(
+                        zip(labels, probabilities, strict=True)
+                    ),
+                    classification_margin=(
+                        ranked_probabilities[0] - ranked_probabilities[1]
+                    ),
+                )
+
             result = await self._call_auxiliary_prompt(
-                # str.format touches the template only, so braces inside the problem
-                # -- LaTeX is full of them -- are substituted verbatim.
-                system_prompt=PERSONALITY_GATE_SYSTEM_PROMPT.format(
-                    task=str(task or "").strip()
-                ),
+                system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 aux_caller=aux_caller,
-                rid_prefix=f"personality-gate-{personality}-{turn_idx}",
+                rid_prefix=rid_prefix,
             )
             raw_output = result.raw_text or result.text
             if result.error:
@@ -2934,6 +3126,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         previous_tutor_raw_outputs: tuple[str, ...] = ()
         previous_student_output = initial_student_answer
         student_visible_previous_output = initial_student_answer
+        # Unlike previous_student_output, this never becomes a scripted gate
+        # complaint. Feedback-v2 judges the teacher against the student's latest
+        # actual work even after one or more teacher-only gate failures.
+        last_real_student_output = initial_student_answer
         preceding_student_turn_behavior = initial_effective_student_turn_behavior
         previous_feedback = TutorPrivateFeedback(
             kind="student_judged",
@@ -3069,6 +3265,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 tutor_visible_output,
                 task=task,
                 turn_idx=turn_idx,
+                previous_student_message=last_real_student_output,
                 aux_caller=aux_caller,
             )
             personality_gated = (
@@ -3223,6 +3420,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             previous_tutor_visible_output = tutor_visible_output
             previous_student_output = student_answer
             student_visible_previous_output = next_student_visible_output
+            if not personality_gated:
+                last_real_student_output = student_answer
             preceding_student_turn_behavior = effective_student_turn_behavior
             previous_feedback = TutorPrivateFeedback(
                 kind="student_judged",
@@ -4903,6 +5102,25 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 {"role": "user", "content": user_prompt},
             ],
             aux_caller=aux_caller,
+            rid_prefix=rid_prefix,
+        )
+
+    async def _call_auxiliary_candidate_logprobs(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        candidates: dict[int, str],
+        aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
+        rid_prefix: str = "auxiliary-candidates",
+    ) -> CandidateLogprobResult:
+        caller = aux_caller or self._make_auxiliary_caller(engine=None)
+        return await caller.call_candidate_logprobs(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            candidates=candidates,
             rid_prefix=rid_prefix,
         )
 

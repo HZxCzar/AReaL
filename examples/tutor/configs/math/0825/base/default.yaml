@@ -1,0 +1,549 @@
+# 0825 / base -- every setting the default arm uses. The allocation lives in the
+# sibling 2gpu/ 4gpu/ 8gpu/ files, which change GPU counts and nothing else.
+#
+# Layout, and why base is a directory rather than a file: 0810 kept its settings in
+# 2gpu/base.yaml and had 4gpu/ and 8gpu/ inherit from it, so the 2-GPU file was both
+# the shared configuration and one allocation of it. Editing a setting there
+# silently read as editing the 2-GPU arm. Here the split is explicit.
+#
+#     base/default.yaml     all settings; also launchable, at the 2-GPU allocation
+#     2gpu/base.yaml        cluster.n_gpus_per_node, the two backends, concurrency
+#     4gpu/base.yaml        the same three keys
+#     8gpu/base.yaml        the same three keys
+#
+# THE DEFAULTS THIS FILE FIXES, all of them stated rather than inherited:
+#
+#   leak_handling_mode        terminate
+#   format_handling_mode      terminate
+#   reward.turn_local_components  [leak, format_error] -- both penalties stay on the
+#                             turn that raised them instead of being accumulated
+#                             backward onto turns that may have taught well
+#   teacher_pre               enabled, verify true in TRAINING
+#   evaluator.teacher_pre_*   pre-solve on, verification OFF at eval
+#   student_models            one student, (behavior text, information unmasked)
+#   evaluator.freq_steps      25
+#   personality             shared seven-choice prompt/complaint files, A-G
+#                           classification gate, gate rate 1.0, explain ratio 0.5,
+#                           3 retries, teacher-only failures
+#   free_chat.transfer_prompts  absent, so off: the re-test problem is the problem
+#                             the dialogue was about
+#   teacher_history_tags      unmasked -- the TEACHER side, unrelated to the
+#                             student's information axis
+#
+# NOT COMPARABLE WITH 0810. Every 0810 arm ran leak_handling_mode reward_only or
+# format_handling_mode continue or both, and most ran teacher_history_tags masked.
+# Read 0825 against 0825.
+#
+# What is deliberately left off: student_generalize.turn_credit (the whole episode
+# reward lands on the last turn, as before) and free_chat.no_teaching_baseline
+# (retest/improvement is not reported, and turn_credit would require it). Both are
+# one-line additions in an arm that wants them.
+#
+# COST. Roughly 24 external calls an episode, a train step of 235-246 s at 4 GPUs,
+# and an eval pass of 1650-1840 s. At freq_steps 25 over 500 steps that is about
+# 33 h of training and 10 h of evaluation per arm.
+
+experiment_name: tutor-math-baseline
+trial_name: 0825-base
+seed: 42
+enable_offload: false
+total_train_epochs: 200
+tokenizer_path: ${actor.path}
+workflow: examples.tutor.workflow.TutorAgentWorkflow
+eval_workflow: ${workflow}
+dataset_type: math
+answer_scorer: math
+max_turns: 10
+enable_thinking: false
+# BOTH TERMINATE, and this is the leak half. A leak ends the conversation at the
+# leaking turn and the re-test runs on the transcript WITHOUT it, so the teacher
+# eats leak_penalty AND loses whatever the remaining rounds would have taught, and
+# the leaked answer buys nothing because the student never sees it. A leak on turn 1
+# leaves no completed round: the re-test is skipped and the episode is worth the
+# penalty alone.
+leak_handling_mode: terminate
+teacher_show_ground_truth: false
+teacher_anti_leak_instruction_enabled: true
+# Default-off: only the private-visibility intervention tells the teacher which
+# sampled (behavior, information) student it is about to teach.
+teacher_private_visibility: false
+personality:
+  # Single source of truth for every 0825 personality arm.
+  prompts_path: examples/tutor/prompt_pools/personality_prompts_classification_v2.json
+  complaints_path: examples/tutor/prompt_pools/personality_complaints_v2.json
+  gate_prompt_version: v2
+  # One A-G next-token distribution over the six teaching strategies plus NONE.
+  # The sampled student preference is never revealed to this classifier.
+  gate_decision_mode: classification
+  # Audit every turn whenever the selected student has a personality.
+  gate_sample_rate: 1.0
+  # A failed teacher message and its rule-based complaint remain in the teacher's
+  # conversation, while later real-student calls and all student re-tests continue
+  # from the last gate-passing exchange.
+  gated_turn_visibility: teacher_only
+  # Half of failed turns explain the remedy; half only report that the student is lost.
+  explain_ratio: 0.5
+  # Retry a missing/invalid candidate-logprob response three times, then fail closed.
+  gate_retries: 3
+student_generalize:
+  enabled: true
+  source: sidecar
+  level1_reward: 0.0
+  level2_reward: 0.0
+  mode: always
+  path: ''
+  replays: 8
+  retest_original: true
+  level1_enabled: false
+  level2_enabled: false
+  retest_reward: 1.0
+teacher_pre:
+  enabled: true
+  mode: filter_solver
+  attempts: 3
+  # 4096 STATED, not 0. Zero means inherit gconfig.max_new_tokens, which 8a60a2cb
+  # cut from 4096 to 1024 to stop a repetition loop dominating the gradient. That
+  # cap was measured on TEACHING turns, where the median generation is 172-221
+  # tokens and p99 is 551, so 1024 clips nothing real. The pre-solve is not a
+  # teaching turn: it is the teacher working a competition problem end to end, and
+  # 1024 truncates it mid-derivation. A truncated solution reaches no final answer,
+  # verification fails, and the episode is skipped -- which took
+  # rollout/stop/teacher_pre_skipped from 5-12% to 29-38% across every arm,
+  # including one with no personality gate at all.
+  #
+  # Setting it here restores the pre-solve budget without touching the teaching-turn
+  # cap that commit exists to enforce. If gconfig.max_new_tokens moves again this
+  # stays put, which is the point of stating it.
+  max_tokens: 4096
+  verify: true
+auxiliary_model:
+  mode: self
+  enable_thinking: false
+  base_url: ${oc.env:TUTOR_QWEN3_8B_BASE_URL}
+  model: qwen3-8b
+  api_key: ${oc.env:INF_API_KEY}
+  timeout: 120
+  max_tokens: 1024
+  temperature: 0.0
+  top_p: 1.0
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen8b-auxiliary
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+  answer_judge_enabled: true
+  answer_judge_max_tokens: 256
+# THE STUDENT, as a (behavior, information) pair, at its basic setting.
+#
+# behavior 'text' replies in prose and algebra; 'code' would make every reply one
+# Python program run in a persistent session. information is what the student may
+# see of the dialogue, and mask.mode 'full' hides nothing -- that is what unmasked
+# means on the STUDENT side here.
+#
+# BOTH ARE WRITTEN OUT even though both are the field defaults, because this is the
+# file that says what the default arm is. An arm that wants the product should use
+# student_axes instead, which keeps one copy of the endpoint; a list of
+# near-identical entries is how a changed endpoint reaches some of them and not
+# others, and omegaconf replaces a list on merge rather than merging element-wise.
+#
+# NOTE this is a DIFFERENT AXIS from teacher_history_tags at the bottom of the file,
+# which is how the TEACHER sees its own earlier replies. They share the word and
+# nothing else.
+#
+# One student, one at positive weight: the per-group draw has nothing to choose, so
+# every rollout of a GRPO group faces the same learner.
+student_sampling:
+  # A no-op with zero or one positive student. With multiple students, coordinate
+  # their configured weights across each rollout input batch.
+  strategy: stratified
+student_models:
+- name: qwen3-1.7b
+  weight: 1.0
+  mode: text
+  mask:
+    mode: full
+  base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+  model: qwen3-1.7b
+  api_key: ${auxiliary_model.api_key}
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+reward:
+  format_error_penalty: -0.5
+  success: 0.0
+  leak_penalty_mode: rawbase
+  assign_success_reward: false
+  leak_penalty: -1.0
+  leak_penalty_aggregation: episode
+  outcome_prior_turn_weight: 0.5
+  outcome_credit_gamma: 0.9
+  early_success_bonus: 0.0
+  max_turn_penalty: 0.0
+  enable_turn_penalty: false
+  turn_penalty: -0.01
+  length_penalty_threshold_chars: 0
+  length_penalty_per_100_chars: 0.0
+  length_penalty_min: 0.0
+  # Lists replace on merge; spelling out both components preserves leak-local.
+  turn_local_components: ["leak", "format_error"]
+
+debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor/debug_traces/${experiment_name}/${trial_name}
+debug_trace_every_n_rollouts: 10
+cluster:
+  n_nodes: 1
+  n_gpus_per_node: 2
+  fileroot: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor
+  name_resolve:
+    type: nfs
+    nfs_record_root: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor/name_resolve
+scheduler:
+  type: local
+rollout:
+  backend: sglang:d1p1t1
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  tokenizer_path: ${tokenizer_path}
+  max_concurrent_rollouts: 16
+  queue_size: null
+  consumer_batch_size: ${train_dataset.batch_size}
+  max_head_offpolicyness: 2
+  pause_grace_period: 10
+  enable_rollout_tracing: false
+  scheduling_spec: ${actor.scheduling_spec}
+  use_lora: true
+  dump_to_file: true
+  openai:
+    mode: inline
+    tool_call_parser: qwen25
+    reasoning_parser: qwen3
+    chat_template_type: concat
+    export_style: concat
+    turn_discount: 1.0
+# THE GENERATION CAP AND WHAT HAPPENS AT IT. The two belong together.
+#
+# A draft that stops on 'length' closed no tags, so it is a format error whatever
+# else it says, and under the token-mean PPO loss it also brings its whole length
+# into the gradient. That pair ended 20260822_133603, _133237 and _072948: a
+# teacher fell into a repetition loop, ran to the cap, and those capped turns took
+# 1.7% of the batch gradient, then 14.1%, then 47.7% over two steps, each at about
+# -4 sigma. Entropy left its floor, malformed output followed within three steps,
+# and none of the three came back. The leak penalty is TWICE the format penalty
+# with the same un-baselined, episode-terminating shape and sat at 3-4% for 130
+# steps without doing anything -- the length is what differs, not the reward.
+#
+# 1024 RATHER THAN 4096. Over ~32k healthy turns the median generation is 172-221
+# tokens, p99 is 440-551, and the longest seen at all is 992. 1024 therefore clips
+# nothing real, every length stop at it is pathological by construction, and a
+# survivor costs 5x a normal turn instead of 20x.
+#
+# LENGTH_RETRY resamples the turn instead of training on it, which is the only
+# remedy that removes the sample rather than making it count for less: the
+# discarded draft reaches nothing and the episode is not terminated, so it keeps
+# the re-test a format termination would have forfeited. Recomputed on the batch
+# that ignited 20260822_133603, three attempts take the capped share from 14.1% to
+# 0.3%.
+#
+# Attempts are CORRELATED, so this is not p^3. Repetition is prompt-locked: one
+# step after ignition, 8 of the 49 affected problems had 6 of their 8 samples
+# capping and 2 had all 8, and retry's effectiveness there falls from 93% to 56%.
+# Watch rollout/length_retry/exhausted. Near zero means the token-level loss is
+# safe; climbing means the repetition is locking and actor.loss_weighting: turn --
+# which bounds the share at the count share regardless of correlation -- is the
+# next lever.
+length_retry:
+  enabled: true
+  attempts: 3
+gconfig:
+  n_samples: 8
+  min_new_tokens: 0
+  max_new_tokens: 1024
+  max_tokens: 24576
+  greedy: false
+  temperature: 1.0
+  top_p: 1.0
+  lora_name: default_lora
+eval_gconfig:
+  n_samples: 1
+  min_new_tokens: 0
+  # Matched to gconfig deliberately. Eval also runs the pre-solve, and at eval
+  # teacher_pre_verify is false, so its attempts collapse to one and a truncated
+  # draft is accepted as-is -- leaving 4096 here would measure a generation regime
+  # training no longer has.
+  max_new_tokens: 1024
+  max_tokens: 24576
+  greedy: false
+  temperature: 0.7
+  top_p: 1.0
+  lora_name: default_lora
+actor:
+  backend: fsdp:d1p1t1
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+  init_from_scratch: false
+  disable_dropout: true
+  gradient_checkpointing: true
+  dtype: bfloat16
+  mb_spec:
+    n_mbs: 1
+    max_tokens_per_mb: 40960
+  optimizer:
+    type: adam
+    lr: 5.0e-05
+    weight_decay: 0.0
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1.0e-08
+    lr_scheduler_type: constant
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.001
+  eps_clip: 0.2
+  use_ppo_clip: true
+  # DUAL CLIPPING. Without this the negative branch of the PPO objective is
+  # unbounded, and that is what destroyed 20260816_070410 at step 195.
+  #
+  # For a NEGATIVE advantage, pg_loss1 = |A| * ratio grows without limit as the
+  # ratio grows, and the pessimistic max() selects exactly that branch once the
+  # ratio passes 1 + eps_clip. eps_clip bounds the term the max() discards, not
+  # the one it keeps, so it is no protection here. One batch carrying a cluster of
+  # large negative advantages therefore drives those tokens' log-probs toward
+  # minus infinity in a single update.
+  #
+  # Measured, per step, on that run: format errors had risen to 0.168/episode by
+  # 193, each -0.5 and concentrated on one turn by turn_local_components, giving
+  # an advantage minimum of -3.5 against a batch mean of -0.38. Then
+  #
+  #   step 193   clip_ratio 0.015   approx_kl -0.023   imp_weight min 2.9e-07
+  #   step 194   clip_ratio 0.037   approx_kl -0.098   imp_weight min 6.5e-14
+  #   step 195   clip_ratio 0.153   approx_kl -1.288   imp_weight min 5.3e-19
+  #   step 196   clip_ratio 0.331   approx_kl -1.943   imp_weight min 1.1e-43
+  #
+  # An importance weight of 1e-43 is a token the policy now assigns essentially
+  # zero probability while the behaviour policy had just sampled it. Probability
+  # mass has to go somewhere, so it spread across the vocabulary: entropy went
+  # 0.105 -> 0.608 -> 4.2 -> 9.8 over four steps, format errors reached 0.78, and
+  # 84% of episodes were dropped at the pre-solve filter.
+  #
+  # AND THE COLLAPSE IS ONE-WAY without this. behave_imp_weight_mode is
+  # 'token_mask' with cap 5.0, which zeroes any token whose ratio exceeded the
+  # cap -- after the jump that is most of them, so the samples carrying the
+  # correction were discarded. Mean importance weight fell to 0.21 by step 198:
+  # four fifths of the gradient signal gone, and the fifth that remained was the
+  # part the broken policy already agreed with.
+  #
+  # 3.0 bounds a single example's downward push at 3 * |A| instead of unbounded.
+  # It costs nothing when the policy is healthy -- dual_clipped_tokens stays near
+  # zero -- so this is a guard rail, not a tuning change.
+  c_clip: 3.0
+  advantage_estimator: rebn
+  turn_discount: 1.0
+  temperature: ${gconfig.temperature}
+  reward_scaling: 1.0
+  reward_bias: 0.0
+  kl_ctl: 0.0
+  ppo_n_minibatches: 4
+  recompute_logprob: true
+  use_decoupled_loss: true
+  behave_imp_weight_cap: 5.0
+  reward_norm: null
+  adv_norm:
+    mean_level: batch
+    std_level: batch
+  weight_update_mode: disk
+  use_lora: ${rollout.use_lora}
+  peft_type: lora
+  lora_rank: 16
+  lora_alpha: 16
+  target_modules:
+  - all-linear
+  max_new_tokens: ${gconfig.max_new_tokens}
+  scheduling_spec:
+  - task_type: worker
+    port_count: 2
+    gpu: 1
+    cmd: python3 -m areal.infra.rpc.rpc_server
+    env_vars: {}
+  group_baseline: episode
+  group_baseline_leave1out: true
+  # All components in reward.turn_local_components enter the baseline by default.
+  group_baseline_local_reward_mode: exclude
+  episode_loss_weighting: false
+  num_iterations: 1
+ref:
+  backend: ${actor.backend}
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${actor.path}
+  init_from_scratch: false
+  disable_dropout: true
+  dtype: ${actor.dtype}
+  mb_spec:
+    n_mbs: 1
+    max_tokens_per_mb: 24576
+  optimizer: null
+  scheduling_strategy:
+    type: colocation
+    target: actor
+  scheduling_spec: ${actor.scheduling_spec}
+sglang:
+  model_path: ${actor.path}
+  random_seed: ${seed}
+  skip_tokenizer_init: true
+  dtype: ${actor.dtype}
+  max_running_requests: 32
+  # PREFIX CACHING ON. AReaL's default is disable_radix_cache=true
+  # (areal/api/cli_args.py), which makes every turn re-prefill the whole
+  # transcript: the teacher re-sends the dialogue on each turn, and consecutive
+  # turn prompts were measured to share 85% of their tokens over a ten-turn
+  # episode (2890/4019 at turn 1->2, rising to 17507/18899 at turn 9->10).
+  #
+  # Safe with weight updates: sglang flushes the radix cache itself on the two
+  # paths AReaL uses, /load_lora_adapter and /update_weights_from_disk, where
+  # flush_cache defaults to true and the scheduler asserts the flush succeeded.
+  # Within a step every rollout shares one weight version, so the reuse is sound.
+  #
+  # Worth ~1.1x on its own and no more, because generation is not the critical
+  # path -- see 4gpu/alloc.yaml for where the step time actually goes.
+  disable_radix_cache: false
+  context_length: 40960
+  mem_fraction_static: 0.75
+  enable_lora: ${actor.use_lora}
+  max_lora_rank: ${actor.lora_rank}
+  max_loaded_loras: 16
+train_dataset:
+  batch_size: 16
+  shuffle: true
+  pin_memory: false
+  num_workers: 0
+  path: examples/tutor/data/math_1.7b_8b/math_pass@2
+  type: rl
+  max_length: 16384
+valid_dataset:
+  batch_size: ${train_dataset.batch_size}
+  pin_memory: false
+  num_workers: 0
+  path: examples/tutor/data/math_1.7b_8b/math_pass@2
+  type: rl
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 25
+  freq_secs: null
+recover:
+  mode: auto
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 25
+  freq_secs: null
+# evaluator:
+#   experiment_name: ${experiment_name}
+#   trial_name: ${trial_name}
+#   fileroot: ${cluster.fileroot}
+#   freq_epochs: null
+#   freq_steps: 25
+#   freq_secs: null
+#   max_samples: null
+#   average_rollouts: 1
+#   student_model_names:
+#   - qwen3-1.7b
+#   # EVAL USES THE PRE-SOLVE BUT DOES NOT VERIFY IT. Training verifies, which keeps
+#   # the training support clean; in use nothing checks the teacher's own solution
+#   # before it starts teaching, so leaving verification on at eval would measure a
+#   # setting that does not exist. Both lines are stated rather than left to follow
+#   # training, because "pre-solve on, unverified" is a deliberate pair and the
+#   # default for teacher_pre_enabled is to follow training.
+#   teacher_pre_enabled: true
+#   teacher_pre_verify: false
+#   leak_terminate: false
+#   # Same argument, for the same reason: terminating on a malformed turn is a
+#   # training policy, and nothing cuts a real conversation short because the
+#   # teacher mis-tagged a reply. The rate is still reported by format_errors.
+#   # Under terminate the step-0 eval of 20260814_053136 ended 83.5% of episodes
+#   # on a format error and only 16.5% reached the budget -- and that pass is the
+#   # baseline every later point is read against.
+#   format_terminate: false
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  # NOT OPTIONAL. base/default.yaml names 'qwen3-1.7b', which no longer exists once
+  # the pool is the eight qwen3-1.7b-<behavior>-<information> cells, and configs.py
+  # raises on an eval student with no student_models entry -- so the run would fail
+  # at startup rather than at the first eval.
+  student_model_names: null
+  eval_before_train: false
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: offline
+    entity: hz-czar-stanford
+    project: TAgent
+    name: ${trial_name}
+    group: 0825-base
+# The format half. SAFE ONLY BECAUSE max_turn_penalty IS 0.0: in a rollout that
+# charged for reaching the budget, terminating early would be a cheap way out of a
+# losing episode. Here a format-terminated episode collects format_error_penalty
+# -0.5 and loses its re-test, which is strictly worse than the worst honest outcome
+# of 0.0.
+#
+# The episode is TRAINED, not discarded. Excluding it also excludes the only
+# gradient pushing back on malformed output: over steps 8-16 of 20260814 the two
+# terminate arms trained on 23-42k valid tokens a step against 249-257k for the
+# continue arms, and their malformed rate climbed 0.61 -> 0.90 while the continue
+# arms fell to 0.00 by step 9.
+format_handling_mode: terminate
+total_train_steps: 800
+free_chat:
+  enabled: true
+  budget: 10
+  no_teaching_baseline: true
+  student_awareness_prompt_enabled: true
+# THE TEACHER SIDE, and it is a different axis from the student masks below. This
+# is how the teacher sees ITS OWN earlier replies; student_models[*].mask is what
+# the STUDENT sees of the dialogue. They share nothing but the word.
+#
+# 'masked' hands the tag skeleton back with the reasoning content replaced by a
+# placeholder, so the format is exemplified without the private deliberation being
+# replayed. It is itself a fix for 'stripped': under stripped the teacher read its
+# own untagged replies and imitated them, 6.3% malformed at depth 1 rising to 41.7%
+# at depth 5 on 20260810_234129, and configs.py records the same curve reaching
+# 73.4% at depth 10.
+#
+# 'unmasked' is the third mode -- each valid prior reply replayed verbatim, private
+# <reasoning> included, teacher view only. It should be at least as safe on format
+# drift, because the real tags are present rather than a skeleton. What it costs is
+# CONTEXT: the prompt grows with depth faster than under masked, and that is why it
+# is not the default. If an arm opts in, watch stop/context_limit and
+# ppo_actor/prompt_len, which ran avg 2419 / max 6451 under masked.
+#
+# cross_eval.free_chat.teacher_history_tags must equal this or the workflow raises
+# at startup: the ped comparison would otherwise measure the setting, not the
+# teacher.
+teacher_history_tags: masked

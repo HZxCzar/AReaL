@@ -75,10 +75,10 @@ class PersonalityGateResult:
     """One personality gate check on one teacher message.
 
     `passed` is what routes the turn: True calls the student, False replaces its
-    reply with a complaint. `reason` is the model's own analysis, kept for the debug
-    trace and never read by the reward path. `error` is set only when every retry
-    came back unclean, in which case `passed` is False -- the conservative default,
-    so a broken check never lets through a message that may violate the preference.
+    reply with a complaint. `reason` keeps the binary judge's analysis and is empty
+    for the logits classifier. `error` is set only when every retry came back
+    unclean, in which case `passed` is False -- the conservative default, so a
+    broken check never lets through a message that may violate the preference.
     """
 
     raw_output: str
@@ -90,6 +90,12 @@ class PersonalityGateResult:
     # checked is not evidence of compliance, so it must not land in the numerator or
     # the denominator of the compliance rate.
     sampled: bool = True
+    # Set only by the optional classification gate. Binary-gate traces retain their
+    # historical shape because trace_to_json removes these keys when they are None.
+    classification_label: str | None = None
+    classification_logprobs: dict[str, float] | None = None
+    classification_probabilities: dict[str, float] | None = None
+    classification_margin: float | None = None
 
 
 @dataclass(slots=True)

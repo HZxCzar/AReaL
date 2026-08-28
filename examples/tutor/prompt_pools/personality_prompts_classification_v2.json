@@ -1,0 +1,28 @@
+{
+  "personalities": {
+    "feedback": {
+      "source": "Van de Pol, Volman & Beishuizen (2010), Framework for Analysis of Scaffolding Strategies: feeding back.",
+      "preference": "The teacher gives the student information about the student's own performance."
+    },
+    "hinting": {
+      "source": "Van de Pol, Volman & Beishuizen (2010), Framework for Analysis of Scaffolding Strategies: hints.",
+      "preference": "The teacher offers clues or suggestions that help the student move forward without giving the full solution or detailed instructions."
+    },
+    "instructing": {
+      "source": "Van de Pol, Volman & Beishuizen (2010), Framework for Analysis of Scaffolding Strategies: instructing.",
+      "preference": "The teacher tells the student what to do or explains how it should be done and why."
+    },
+    "explaining": {
+      "source": "Van de Pol, Volman & Beishuizen (2010), Framework for Analysis of Scaffolding Strategies: explaining.",
+      "preference": "The teacher provides more detailed information or clarification."
+    },
+    "modeling": {
+      "source": "Van de Pol, Volman & Beishuizen (2010), Framework for Analysis of Scaffolding Strategies: modelling.",
+      "preference": "The teacher demonstrates behavior or a skill for the student to imitate."
+    },
+    "questioning": {
+      "source": "Van de Pol, Volman & Beishuizen (2010), Framework for Analysis of Scaffolding Strategies: questioning.",
+      "preference": "The teacher asks questions that require an active verbal and cognitive answer from the student."
+    }
+  }
+}

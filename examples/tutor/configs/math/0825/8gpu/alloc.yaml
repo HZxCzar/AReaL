@@ -1,0 +1,13 @@
+# Self-contained copy of the eight-GPU allocation used by the 0825 arms.
+cluster:
+  n_gpus_per_node: 8
+
+rollout:
+  backend: "sglang:d4p1t1"
+  max_concurrent_rollouts: 64
+
+actor:
+  backend: "fsdp:d4p1t1"
+
+sglang:
+  mem_fraction_static: 0.50

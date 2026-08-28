@@ -239,6 +239,80 @@ verdict is "PASS" if the message matches the preference and "FAIL" if it does
 not. Nothing outside the JSON object."""
 
 
+# Version 2 remains a binary, one-preference-at-a-time judge. It does not assume a
+# closed set of teaching methods: it asks only whether the supplied preference
+# describes the message's main teaching content. Only feedback receives the latest
+# real (non-scripted) student message.
+PERSONALITY_GATE_V2_SYSTEM_PROMPT = """You check whether a teacher's message \
+matches one student's stated preference for how they want to be taught.
+You will be given the student's preference and the tutor's message. Judge the
+manner of the whole message against that preference. Do not judge whether the
+details are correct, only the preference matters.
+
+PASS only if every required condition in the preference is satisfied and none
+of its FAIL conditions applies. Related wording, a partial match, or a merely
+supporting detail is not enough.
+
+The problem under discussion is:
+{task}"""
+
+PERSONALITY_GATE_V2_PREVIOUS_STUDENT_TEMPLATE = """<previous_student_message>
+{previous_student_message}
+</previous_student_message>
+
+"""
+
+PERSONALITY_GATE_V2_NO_PREVIOUS_STUDENT_MESSAGE = (
+    "No previous real student message is available."
+)
+
+PERSONALITY_GATE_V2_USER_TEMPLATE = """<student_preference>
+{preference}
+</student_preference>
+
+{previous_student_context}<teacher_message>
+{teacher_message}
+</teacher_message>
+
+Work through the teacher's message against the student's preference, then give
+your verdict. Reply with JSON only, in this order:
+
+{{"reasoning": "<your analysis in 1-3 sentences>", "verdict": "PASS"}}
+
+verdict is "PASS" if the message matches the preference and "FAIL" if it does
+not. Nothing outside the JSON object."""
+
+
+PERSONALITY_CLASSIFICATION_GATE_SYSTEM_PROMPT = """Choose exactly one answer from \
+the seven options below. Choose the option that best describes how the teacher
+teaches in the message.
+
+Judge only the teaching method. Do not judge whether the mathematical content
+is correct.
+
+{candidate_options}
+
+Reply with exactly one letter from A through G and nothing else."""
+
+PERSONALITY_CLASSIFICATION_GATE_USER_TEMPLATE = """<problem>
+{task}
+</problem>
+
+<last_student_message>
+{last_student_message}
+</last_student_message>
+
+<teacher_message>
+{teacher_message}
+</teacher_message>
+
+Answer:"""
+
+PERSONALITY_CLASSIFICATION_NO_LAST_STUDENT_MESSAGE = (
+    "No student message is available yet."
+)
+
+
 # Guidance instructions appended to the END of the teacher prompt, immediately
 # before generation. Placement is load-bearing: the identical text placed in the
 # system prompt is followed far less often. See analysis/hazard_20260806.
@@ -541,8 +615,7 @@ Information access:
 
 TEACHER_PRIVATE_BEHAVIOR_PARAGRAPHS = {
     "text": (
-        "The student communicates through natural language and mathematical "
-        "notation."
+        "The student communicates through natural language and mathematical notation."
     ),
     "code": (
         "The student can act only by writing one Python program per reply. The "
@@ -1028,12 +1101,8 @@ TYPE_PROBE_QUESTIONS = {
 
 TYPE_PROBE_DESCRIPTIONS = {
     "behavior": {
-        "text": (
-            "It answers in prose and algebra, writing its reasoning out."
-        ),
-        "code": (
-            "It answers by writing a Python program and running it."
-        ),
+        "text": ("It answers in prose and algebra, writing its reasoning out."),
+        "code": ("It answers by writing a Python program and running it."),
     },
     "information": {
         "full": (

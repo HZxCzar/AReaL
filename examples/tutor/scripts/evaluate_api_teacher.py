@@ -726,6 +726,7 @@ def prepare_test_dataset(
     *,
     tokenizer: Any,
     limit: int,
+    stratified_max_samples: int = 0,
     student_prompts: tuple[tutor_train.EvalStudentPrompt, ...] | None = None,
 ) -> Any:
     valid_config = tutor_train._without_remote_dataset_loading(config.valid_dataset)
@@ -759,10 +760,23 @@ def prepare_test_dataset(
     eval_max_samples = config.evaluator.max_samples
     if eval_max_samples is not None:
         eval_max_samples = int(eval_max_samples)
+        if stratified_max_samples > 0 and eval_max_samples > 0:
+            raise ValueError(
+                "Use either evaluator.max_samples or --stratified-max-samples, "
+                "not both."
+            )
         if 0 < eval_max_samples < len(dataset):
             rng = random.Random(config.seed)
             indices = sorted(rng.sample(range(len(dataset)), k=eval_max_samples))
             dataset = dataset.select(indices)
+    if 0 < stratified_max_samples < len(dataset):
+        dataset = dataset.select(
+            stratified_math_subset_indices(
+                dataset,
+                sample_count=stratified_max_samples,
+                seed=int(config.seed),
+            )
+        )
     if limit > 0 and limit < len(dataset):
         dataset = dataset.select(range(limit))
     dataset = tutor_train._expand_eval_dataset_for_students(
@@ -776,6 +790,55 @@ def prepare_test_dataset(
         student_prompts,
     )
     return dataset
+
+
+def stratified_math_subset_indices(
+    dataset: Any,
+    *,
+    sample_count: int,
+    seed: int,
+) -> list[int]:
+    """Select a deterministic proportional subset over MATH type x level."""
+    if sample_count <= 0:
+        raise ValueError("sample_count must be positive.")
+    dataset_size = len(dataset)
+    if sample_count >= dataset_size:
+        return list(range(dataset_size))
+
+    strata: dict[tuple[str, str], list[int]] = {}
+    for index in range(dataset_size):
+        row = dataset[index]
+        metadata = row.get("metadata") if hasattr(row, "get") else None
+        if not isinstance(metadata, dict):
+            raise ValueError(
+                "Stratified evaluation requires every row to have metadata."
+            )
+        math_type = str(metadata.get("type") or "").strip()
+        level = str(metadata.get("level") or "").strip()
+        if not math_type or not level:
+            raise ValueError(
+                "Stratified evaluation requires metadata.type and metadata.level."
+            )
+        strata.setdefault((math_type, level), []).append(index)
+
+    allocations: dict[tuple[str, str], int] = {}
+    remainders: dict[tuple[str, str], int] = {}
+    for key, indices in strata.items():
+        numerator = sample_count * len(indices)
+        allocations[key], remainders[key] = divmod(numerator, dataset_size)
+    unallocated = sample_count - sum(allocations.values())
+    remainder_order = sorted(strata, key=lambda key: (-remainders[key], key))
+    for key in remainder_order[:unallocated]:
+        allocations[key] += 1
+
+    rng = random.Random(seed)
+    selected: list[int] = []
+    for key in sorted(strata):
+        selected.extend(rng.sample(strata[key], allocations[key]))
+    selected.sort()
+    if len(selected) != sample_count or len(set(selected)) != sample_count:
+        raise RuntimeError("Stratified subset selection produced invalid indices.")
+    return selected
 
 
 def dataset_sha256(dataset: Any) -> str:
@@ -914,7 +977,7 @@ def summarize_personality_gate(
         return "unknown"
 
     complaint_kinds = [complaint_kind(trace) for trace in gated]
-    return {
+    payload = {
         "personality": personality,
         "active": True,
         "eligible_turn_count": len(gate_traces),
@@ -949,6 +1012,45 @@ def summarize_personality_gate(
         "explain_complaint_count": complaint_kinds.count("explain"),
         "unknown_complaint_count": complaint_kinds.count("unknown"),
     }
+    classification_labels = Counter(
+        str(trace.personality_gate_result.classification_label)
+        for trace in sampled
+        if trace.personality_gate_result.classification_label is not None
+    )
+    if classification_labels:
+        payload["classification_label_counts"] = dict(
+            sorted(classification_labels.items())
+        )
+    classification_distributions = [
+        trace.personality_gate_result.classification_probabilities
+        for trace in sampled
+        if trace.personality_gate_result.classification_probabilities is not None
+    ]
+    if classification_distributions:
+        labels = sorted(
+            {
+                label
+                for distribution in classification_distributions
+                for label in distribution
+            }
+        )
+        payload["classification_distribution_count"] = len(classification_distributions)
+        payload["mean_classification_probabilities"] = {
+            label: sum(
+                float(distribution.get(label, 0.0))
+                for distribution in classification_distributions
+            )
+            / len(classification_distributions)
+            for label in labels
+        }
+        margins = [
+            float(trace.personality_gate_result.classification_margin)
+            for trace in sampled
+            if trace.personality_gate_result.classification_margin is not None
+        ]
+        if margins:
+            payload["mean_classification_margin"] = sum(margins) / len(margins)
+    return payload
 
 
 def build_trace_payload(
@@ -1613,6 +1715,52 @@ def aggregate_mode(
             len(post_sustained),
         ),
     }
+    classification_label_counts = Counter()
+    for gate in active_gates:
+        classification_label_counts.update(
+            {
+                str(label): int(count)
+                for label, count in (
+                    gate.get("classification_label_counts") or {}
+                ).items()
+            }
+        )
+    if classification_label_counts:
+        personality_gate["classification_label_counts"] = dict(
+            sorted(classification_label_counts.items())
+        )
+    classification_distribution_count = sum(
+        int(gate.get("classification_distribution_count", 0) or 0)
+        for gate in active_gates
+    )
+    if classification_distribution_count:
+        probability_sums: Counter[str] = Counter()
+        margin_sum = 0.0
+        margin_count = 0
+        for gate in active_gates:
+            count = int(gate.get("classification_distribution_count", 0) or 0)
+            if count <= 0:
+                continue
+            probability_sums.update(
+                {
+                    str(label): float(probability) * count
+                    for label, probability in (
+                        gate.get("mean_classification_probabilities") or {}
+                    ).items()
+                }
+            )
+            if gate.get("mean_classification_margin") is not None:
+                margin_sum += float(gate["mean_classification_margin"]) * count
+                margin_count += count
+        personality_gate["classification_distribution_count"] = (
+            classification_distribution_count
+        )
+        personality_gate["mean_classification_probabilities"] = {
+            label: total / classification_distribution_count
+            for label, total in sorted(probability_sums.items())
+        }
+        if margin_count:
+            personality_gate["mean_classification_margin"] = margin_sum / margin_count
 
     return {
         "expected_attempts": int(expected),
@@ -2005,6 +2153,14 @@ def build_run_signature(
             "overrides": list(args.overrides),
             "dataset_size": dataset_size,
             "dataset_sha256": dataset_hash,
+            "dataset_selection": {
+                "strategy": (
+                    "math_type_level_stratified"
+                    if int(args.stratified_max_samples) > 0
+                    else "config"
+                ),
+                "stratified_max_samples": int(args.stratified_max_samples),
+            },
             "attempts": attempts,
             "modes": [asdict(mode) for mode in modes],
             "presolve": {
@@ -2523,6 +2679,15 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Base validation-item limit before student and prompt expansion.",
     )
+    parser.add_argument(
+        "--stratified-max-samples",
+        type=int,
+        default=0,
+        help=(
+            "Select this many base rows proportionally by metadata.type x "
+            "metadata.level using the config seed; 0 disables stratification."
+        ),
+    )
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--max-retries", type=int, default=0)
     parser.add_argument(
@@ -2610,6 +2775,10 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"--{label.replace('_', '-')} must be positive.")
     if args.attempts < 0:
         raise ValueError("--attempts must be non-negative.")
+    if args.stratified_max_samples < 0:
+        raise ValueError("--stratified-max-samples must be non-negative.")
+    if args.stratified_max_samples > 0 and args.limit > 0:
+        raise ValueError("Use either --stratified-max-samples or --limit, not both.")
     if args.max_retries < 0:
         raise ValueError("--max-retries must be non-negative.")
     if args.episode_error_retries < 0:
@@ -2668,6 +2837,7 @@ async def main_async(args: argparse.Namespace) -> None:
         student_models,
         tokenizer=tokenizer,
         limit=max(0, int(args.limit)),
+        stratified_max_samples=int(args.stratified_max_samples),
         student_prompts=student_prompts,
     )
     prompt_row_counts = student_prompt_row_counts(dataset)

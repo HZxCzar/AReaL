@@ -34,6 +34,7 @@ class TokenLogprob:
     token: str
     logprob: float
     bytes: tuple[int, ...] | None = None
+    top_logprobs: tuple[TokenLogprob, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,8 +119,9 @@ class AsyncLLMCaller:
         content = (choice.message.content or "").strip()
         choice_logprobs = getattr(choice, "logprobs", None)
         logprob_content = getattr(choice_logprobs, "content", None) or []
-        token_logprobs = tuple(
-            TokenLogprob(
+
+        def token_logprob(item: Any, *, include_top: bool) -> TokenLogprob:
+            return TokenLogprob(
                 token=str(item.token),
                 logprob=float(item.logprob),
                 bytes=(
@@ -127,8 +129,18 @@ class AsyncLLMCaller:
                     if getattr(item, "bytes", None) is not None
                     else None
                 ),
+                top_logprobs=(
+                    tuple(
+                        token_logprob(candidate, include_top=False)
+                        for candidate in (getattr(item, "top_logprobs", None) or [])
+                    )
+                    if include_top
+                    else ()
+                ),
             )
-            for item in logprob_content
+
+        token_logprobs = tuple(
+            token_logprob(item, include_top=True) for item in logprob_content
         )
         return LLMCallResult(text=content, token_logprobs=token_logprobs)
 

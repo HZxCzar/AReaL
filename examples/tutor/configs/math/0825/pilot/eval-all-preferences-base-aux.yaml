@@ -1,0 +1,66 @@
+# Full-student evaluation for one trained teacher and the six 0825 preferences.
+# The teacher and auxiliary share one Qwen3-8B server, but only teacher requests
+# carry the trained LoRA. Auxiliary calls therefore use the untrained base 8B,
+# matching the rollout judge; the student remains the configured Qwen3-1.7B API.
+defaults:
+  - ../base/default@_global_
+  - _self_
+
+trial_name: 0825-preference-full-student-base-aux-eval
+
+personality:
+  gate_decision_mode: classification
+  prompts_path: examples/tutor/prompt_pools/personality_prompts_classification_v2.json
+
+# Standalone evaluation has no AReaL engine. API mode sends the same untrained-8B
+# sampling settings to TUTOR_QWEN3_8B_BASE_URL without a per-request LoRA path.
+auxiliary_model:
+  mode: api
+
+student_models: []
+student_axes:
+- behaviors: [text]
+  informations:
+    original:
+      mode: full
+  personalities:
+  - none
+  - feedback
+  - hinting
+  - instructing
+  - explaining
+  - modeling
+  - questioning
+  template:
+    name: qwen3-1.7b
+    weight: 1.0
+    base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+    model: qwen3-1.7b
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    max_concurrent_calls: 192
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-eval-qwen17b-student-v2
+      extra_body:
+        top_k: 20
+        min_p: 0
+        chat_template_kwargs:
+          enable_thinking: false
+
+student_generalize:
+  replays: 8
+
+student_type_probe:
+  enabled: false
+
+evaluator:
+  teacher_pre_enabled: true
+  teacher_pre_verify: false
+  leak_terminate: false
+  format_terminate: false
+  average_rollouts: 1
