@@ -1,5 +1,5 @@
-# The joint in-domain pool. The held-out OOD strategies are hinting,
-# instructing, and modeling.
+# The joint in-domain pool. The held-out OOD strategies are instructing,
+# explaining, and questioning.
 student_models: []
 
 student_axes:
@@ -8,9 +8,9 @@ student_axes:
     original:
       mode: full
   personalities:
+  - modeling
+  - hinting
   - none
-  - explaining
-  - questioning
   - feedback
   template:
     name: qwen3-1.7b

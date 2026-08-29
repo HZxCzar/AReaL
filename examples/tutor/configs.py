@@ -5,6 +5,7 @@ from typing import Any
 # The head-to-head cross is configured from one place for both arms; see the
 # module docstring for why it is not defined here.
 from examples.pedagogical_rl.cross_eval_config import CrossEvalConfig
+from examples.tutor.core.types import TURN_LOCAL_REWARD_PLACEMENTS
 from examples.tutor.prompts import (
     DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT,
     DEFAULT_LEAK_CHECK_SYSTEM_PROMPT,
@@ -30,7 +31,11 @@ _STUDENT_GENERALIZE_SOURCES = {"generated", "sidecar", "train"}
 _STUDENT_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _STUDENT_SAMPLING_STRATEGIES = {"weighted_random", "stratified"}
 _PERSONALITY_GATE_PROMPT_VERSIONS = {"v1", "v2"}
-_PERSONALITY_GATE_DECISION_MODES = {"binary", "classification"}
+_PERSONALITY_GATE_DECISION_MODES = {
+    "binary",
+    "classifier",
+    "classifier_logits",
+}
 
 STUDENT_MODE_TEXT = "text"
 STUDENT_MODE_CODE = "code"
@@ -291,10 +296,10 @@ PERSONALITY_GATED_TURN_VISIBILITIES = (
 class TutorPersonalityConfig:
     """The personality gate: files, sampling rate, and the failure policy.
 
-    In the default binary mode a personality is one PASS/FAIL prompt. The optional
-    classification mode instead compares the next-token logits for A-G across the
-    configured prompt bank and passes only when the winning label equals the sampled
-    personality. In both modes, failure means the student does not answer and a
+    In the default binary mode a personality is one PASS/FAIL prompt. The official
+    classifier chooses among all six preferences plus NONE with a brief JSON
+    reasoning. The optional classifier_logits mode instead compares the next-token
+    logits for A-G. In every mode, failure means the student does not answer and a
     complaint takes its slot.
 
     The gate runs AFTER the format parse and the leak check, so a turn that already
@@ -334,7 +339,7 @@ class TutorPersonalityConfig:
                 "Personality-gate prompt contract. 'v1' preserves the original "
                 "task-and-teacher-message judge. 'v2' keeps that binary judge, "
                 "uses the six scaffolding preferences, and gives feedback the "
-                "latest real student message. Feedback skips its first turn."
+                "last student message. Feedback skips its first turn."
             ),
             "choices": sorted(_PERSONALITY_GATE_PROMPT_VERSIONS),
         },
@@ -345,10 +350,12 @@ class TutorPersonalityConfig:
             "help": (
                 "How the auxiliary judges a sampled teacher turn. 'binary' "
                 "preserves the existing per-preference PASS/FAIL prompt. "
-                "'classification' shows the auxiliary every configured "
-                "personality definition without revealing the sampled one, reads "
-                "the A-G next-token logprob distribution, then passes only when "
-                "its argmax label equals that personality."
+                "'classifier' is the official seven-way classifier: it shows every "
+                "configured definition without revealing the sampled one and asks "
+                "for a brief reasoning plus one named decision in JSON. "
+                "'classifier_logits' is the alternate A-G next-token-logprob "
+                "implementation. Both pass only when the selected label equals "
+                "the sampled personality."
             ),
             "choices": sorted(_PERSONALITY_GATE_DECISION_MODES),
         },
@@ -408,10 +415,10 @@ class TutorPersonalityConfig:
         default=3,
         metadata={
             "help": (
-                "Retries before an unclean binary verdict or unavailable "
-                "classification logprob distribution becomes FAIL. Invalid binary "
-                "JSON, missing candidate logprobs, API errors, and timeouts take "
-                "this path. FAIL is the conservative default."
+                "Retries before an unclean binary/classifier verdict or unavailable "
+                "classifier_logits distribution becomes FAIL. Invalid JSON, "
+                "missing candidate logprobs, API errors, and timeouts take this "
+                "path. FAIL is the conservative default."
             )
         },
     )
@@ -1790,9 +1797,25 @@ class TutorRewardConfig:
                 "behaviour, where a leak on the last turn discounts the "
                 "returns of every good turn before it. Names match the "
                 "reward_component/* metrics, e.g. 'leak', 'format_error', and "
+                "'personality_gate_fail', or "
                 "in staged leak mode 'leak_final_answer', 'leak_compute', "
                 "'leak_formula'. Requires advantage_estimator='rebn' and is "
                 "incompatible with actor.reward_norm."
+            )
+        },
+    )
+    turn_local_component_placements: dict[str, str] = field(
+        default_factory=dict,
+        metadata={
+            "help": (
+                "Optional per-component placement for turn-local rewards. "
+                "'group_norm' includes the component in the group baseline and "
+                "the later std scaling; 'pre_std' adds it after the group "
+                "baseline but before std scaling; 'post_std' adds its configured "
+                "value after advantage normalization, in normalized-advantage "
+                "units. Unlisted components retain the legacy behavior selected "
+                "by actor.group_baseline_local_reward_mode. Keys must also appear "
+                "in reward.turn_local_components."
             )
         },
     )
@@ -1812,8 +1835,8 @@ class TutorRewardConfig:
                 "Raw reward on the teacher turn that terminates because it failed "
                 "the personality gate after an earlier explain complaint. Configure "
                 "'personality_gate_terminate' as a turn-local component so the "
-                "penalty stays on that turn, then participates in the normal "
-                "advantage normalization exactly like local leak/format penalties. "
+                "penalty stays on that turn; its advantage layer is selected by "
+                "reward.turn_local_component_placements like leak/format penalties. "
                 "Must be < 0 when termination is enabled; 0 keeps it disabled."
             )
         },
@@ -1823,9 +1846,10 @@ class TutorRewardConfig:
         metadata={
             "help": (
                 "Turn-local advantage penalty for a teacher turn rejected by the "
-                "personality gate. It is added after the outcome baseline and "
-                "advantage normalization, so its configured magnitude stays small "
-                "and it never propagates to another turn. Must be <= 0; 0 disables it."
+                "personality gate. Add 'personality_gate_fail' to "
+                "reward.turn_local_components to control its layer with "
+                "turn_local_component_placements. If omitted, the legacy path "
+                "adds it after advantage normalization. Must be <= 0; 0 disables it."
             )
         },
     )
@@ -1875,6 +1899,30 @@ class TutorRewardConfig:
     def __post_init__(self) -> None:
         if self.format_error_penalty > 0.0:
             raise ValueError("reward.format_error_penalty must be <= 0.")
+        self.turn_local_components = list(self.turn_local_components)
+        self.turn_local_component_placements = dict(
+            self.turn_local_component_placements
+        )
+        unknown_components = sorted(
+            self.turn_local_component_placements.keys()
+            - set(self.turn_local_components)
+        )
+        if unknown_components:
+            raise ValueError(
+                "reward.turn_local_component_placements keys must also appear in "
+                f"reward.turn_local_components; unknown: {unknown_components}."
+            )
+        invalid_placements = {
+            name: placement
+            for name, placement in self.turn_local_component_placements.items()
+            if placement not in TURN_LOCAL_REWARD_PLACEMENTS
+        }
+        if invalid_placements:
+            raise ValueError(
+                "reward.turn_local_component_placements values must be "
+                "'group_norm', 'pre_std', or 'post_std'; got "
+                f"{invalid_placements}."
+            )
         self.personality_gate_terminate_penalty = float(
             self.personality_gate_terminate_penalty
         )

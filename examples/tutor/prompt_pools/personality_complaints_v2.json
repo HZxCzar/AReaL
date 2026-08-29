@@ -11,52 +11,60 @@
   ],
   "explain": {
     "feedback": [
-      "Please give me feedback about how I did on the work I just showed you.",
-      "Tell me how I am doing based on my attempt so far.",
-      "Give me information about the quality of my work on this problem.",
-      "Please respond to my own work and tell me how I performed.",
-      "Let me know what is going well in my attempt and what needs attention.",
-      "I need feedback on my performance on this problem."
+      "For now, just check the work I showed you, identify the first wrong step, and correct that step.",
+      "What I need from you here is only an assessment of which parts of my reasoning are valid, which claim is not, and what the corrected claim should be.",
+      "Please stick to my attempt: identify the misconception it reveals and replace that idea with the correct one.",
+      "All I want at this point is feedback on whether my setup matches the problem and, if not, its corrected form.",
+      "Keep your response focused on where my method stops being valid and how that exact point should be corrected.",
+      "Tell me what I did well, what I did incorrectly, and fix the incorrect part—nothing beyond my own work for now.",
+      "Just check the calculations I wrote, mark the first invalid one, and give its corrected form.",
+      "Please use only my attempt as the basis of your response: diagnose its error and correct it."
     ],
     "hinting": [
-      "Please give me a hint that helps me move forward.",
-      "Offer me a clue or suggestion without giving me the full solution.",
-      "Point me toward an idea I could use without detailed instructions.",
-      "Give me a small hint about what might matter here.",
-      "Suggest something useful for me to notice or consider.",
-      "Nudge me in a helpful direction and let me continue from there."
+      "Could you give me one small hint without solving it for me?",
+      "I'm stuck—can you point me toward what I should notice?",
+      "Just give me a clue to get started; I want to finish it myself.",
+      "Can you nudge me in the right direction without giving the answer away?",
+      "What's one useful idea I should try here? Leave the rest to me.",
+      "Could you remind me of one relevant fact and let me take it from there?"
     ],
     "instructing": [
-      "Please tell me what I should do here.",
-      "Give me clear instructions for how to proceed.",
-      "Explain how this should be done and why.",
-      "Tell me how to carry out the method.",
-      "Please instruct me on the procedure I should follow.",
-      "Tell me the steps to take and why they make sense."
+      "For now, just tell me the next concrete operation and exactly how to set it up.",
+      "What I need from you is only an ordered sequence of actions I can follow.",
+      "Please stick to telling me what to write first and what action follows it.",
+      "All I want here is a procedure I can execute, including how to carry out each step.",
+      "Keep your response to direct instructions for applying the method to this problem.",
+      "List only the calculations or transformations I should perform, in order.",
+      "Just give me a concrete plan of action from where I am to the end.",
+      "Please focus only on exactly what I should do with the given information, step by step."
     ],
     "explaining": [
-      "Please give me a more detailed explanation.",
-      "Clarify the mathematical information I need here.",
-      "Explain this idea in more detail.",
-      "I need more information and clarification about this part.",
-      "Please clarify what this means.",
-      "Give me a fuller explanation so I can understand it."
+      "For now, just explain the main concept this problem relies on and what it means.",
+      "What I need here is only clarification of why the relevant rule applies in this situation.",
+      "Please stick to explaining the relationship between the quantities and why it holds.",
+      "All I want right now is a precise definition of the key mathematical object or term.",
+      "Keep your response focused on what the important expression represents.",
+      "Clarify only the principle that makes the mathematical step we are discussing valid.",
+      "Just give me the background principle needed to understand what is happening here.",
+      "Please focus only on the central idea and how it connects to the conditions of the problem."
     ],
     "modeling": [
-      "Please demonstrate how to do this so I have something to imitate.",
-      "Show me the behavior or skill you want me to use.",
-      "Model the method for me so I can follow your example.",
-      "Demonstrate how someone would approach this.",
-      "Show me the process so I can imitate how it is done.",
-      "Please model the reasoning or skill I should learn."
+      "I learn better by watching. Could you do one small example for me?",
+      "I learn best by seeing it done. Can you work out one small example?",
+      "Can you do one easy example yourself while I watch?",
+      "Can you show me exactly what you would write for one small example?",
+      "What would your full solution look like on a simple example?",
+      "Could you show me exactly how you would solve one small example?"
     ],
     "questioning": [
-      "Please guide me by asking a question that makes me think and answer.",
-      "Ask me a question that requires an active answer from me.",
-      "Use questions that make me work through the idea myself.",
-      "Question me so I have to express my reasoning.",
-      "Ask something that prompts me to think and respond.",
-      "Lead me with questions and let me provide the answer."
+      "For now, just guide me with one open-ended question at a time and let me reason out each answer.",
+      "What I need from you is only a question that makes me explain the key relationship and why it holds.",
+      "Please stick to asking about the assumptions in my current approach so I have to justify them.",
+      "All I want right now is a question that makes me compare two possible approaches and defend one.",
+      "Keep your response to a question that asks me to predict what should happen before calculating.",
+      "Just ask me to interpret the important expression in my own words.",
+      "Ask only a question that makes me choose the next step and justify my choice.",
+      "Please focus only on testing my understanding through a question that makes me reconstruct the reasoning."
     ]
   }
 }

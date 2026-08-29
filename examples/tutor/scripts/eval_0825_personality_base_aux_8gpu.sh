@@ -5,6 +5,8 @@ set -Eeuo pipefail
 # 0825 preference students. The trained variant carries the 0818 LoRA; the
 # untrained variant is the base model. Gate, leak, and answer-judge requests always
 # use the untrained base 8B. Runtime uses four teacher/student pairs: eight GPUs.
+# GATE_DECISION_MODE selects the official reasoning-plus-decision classifier or
+# the alternate A-G next-token-logprob classifier.
 
 usage() {
   cat <<'EOF'
@@ -30,18 +32,21 @@ Examples:
     bash examples/tutor/scripts/eval_0825_personality_base_aux_8gpu.sh analyze
 
 Defaults and useful overrides:
-  GATE_DECISION_MODE=classification
+  GATE_DECISION_MODE=classifier     # classifier | classifier_logits
   TEACHER_VARIANT=trained           # trained | untrained
   EVAL_STRATIFIED_MAX_SAMPLES=48    # 0 means the complete evaluation set
   EVAL_CONCURRENCY=16
+  EVAL_FOCUS_PREFERENCE=             # empty by default; set to schedule one first
   BASE_PORT=35000
   ADAPTER_PATH=/explicit/checkpoint/path  # trained only
   EVAL_RUN_DIR=/explicit/output/path
 
 During a run, every completed episode is appended immediately to the cell's
 results.jsonl. The combined live_summary.json and live_summary.tsv are refreshed
-every five seconds. The gate is one seven-way A-G classification over the six
-preferences plus NONE, using the untrained base Qwen3-8B auxiliary model.
+every five seconds. Both gate modes make one seven-way choice over the six
+preferences plus NONE using the untrained base Qwen3-8B auxiliary model.
+`classifier` generates brief reasoning followed by one named decision;
+`classifier_logits` reads A-G next-token logits.
 EOF
 }
 
@@ -62,12 +67,7 @@ esac
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT_DIR"
 PYTHON="$ROOT_DIR/.venv/bin/python"
-GATE_DECISION_MODE="${GATE_DECISION_MODE:-classification}"
-if [[ "$GATE_DECISION_MODE" != "classification" ]]; then
-  printf 'The 0825 evaluator is configured for classification; got %q.\n' \
-    "$GATE_DECISION_MODE" >&2
-  exit 2
-fi
+GATE_DECISION_MODE="${GATE_DECISION_MODE:-classifier}"
 TEACHER_VARIANT="${TEACHER_VARIANT:-trained}"
 case "$TEACHER_VARIANT" in
   trained|untrained) ;;
@@ -77,8 +77,21 @@ case "$TEACHER_VARIANT" in
     exit 2
     ;;
 esac
-EVAL_CONFIG="$ROOT_DIR/examples/tutor/configs/math/0825/pilot/eval-all-preferences-base-aux.yaml"
-RUN_KIND="0825-personality-classification-base-aux-$TEACHER_VARIANT"
+case "$GATE_DECISION_MODE" in
+  classifier)
+    EVAL_CONFIG="$ROOT_DIR/examples/tutor/configs/math/0825/pilot/eval-all-preferences-base-aux.yaml"
+    RUN_KIND="0825-personality-classifier-base-aux-$TEACHER_VARIANT"
+    ;;
+  classifier_logits)
+    EVAL_CONFIG="$ROOT_DIR/examples/tutor/configs/math/0825/pilot/eval-all-preferences-classifier-logits-base-aux.yaml"
+    RUN_KIND="0825-personality-classifier-logits-base-aux-$TEACHER_VARIANT"
+    ;;
+  *)
+    printf 'GATE_DECISION_MODE must be classifier or classifier_logits; got %q.\n' \
+      "$GATE_DECISION_MODE" >&2
+    exit 2
+    ;;
+esac
 LAUNCHER_SCRIPT="examples/tutor/scripts/eval_0825_personality_base_aux_8gpu.sh"
 BASE_CONFIG="$ROOT_DIR/examples/tutor/configs/math/0825/base/default.yaml"
 EVALUATOR="$ROOT_DIR/examples/tutor/scripts/evaluate_api_teacher.py"
@@ -134,6 +147,7 @@ fi
 
 EVAL_STRATIFIED_MAX_SAMPLES="${EVAL_STRATIFIED_MAX_SAMPLES:-48}"
 EVAL_CONCURRENCY="${EVAL_CONCURRENCY:-16}"
+EVAL_FOCUS_PREFERENCE="${EVAL_FOCUS_PREFERENCE:-}"
 GENERALIZE_REPLAYS="${GENERALIZE_REPLAYS:-8}"
 SERVER_MAX_RUNNING_REQUESTS="${SERVER_MAX_RUNNING_REQUESTS:-192}"
 CALLER_MAX_CONCURRENT="${CALLER_MAX_CONCURRENT:-192}"
@@ -555,6 +569,28 @@ STUDENTS=(
   qwen3-1.7b-text-original-modeling
   qwen3-1.7b-text-original-questioning
 )
+if [[ -n "$EVAL_FOCUS_PREFERENCE" ]]; then
+  focus_index=-1
+  for cell_index in "${!PREFERENCES[@]}"; do
+    if [[ "${PREFERENCES[$cell_index]}" == "$EVAL_FOCUS_PREFERENCE" ]]; then
+      focus_index=$cell_index
+      break
+    fi
+  done
+  if (( focus_index < 0 )); then
+    printf 'EVAL_FOCUS_PREFERENCE must be one of: %s; got %q.\n' \
+      "${PREFERENCES[*]}" "$EVAL_FOCUS_PREFERENCE" >&2
+    exit 2
+  fi
+  if (( focus_index > 0 )); then
+    focus_preference="${PREFERENCES[$focus_index]}"
+    focus_student="${STUDENTS[$focus_index]}"
+    PREFERENCES[$focus_index]="${PREFERENCES[0]}"
+    STUDENTS[$focus_index]="${STUDENTS[0]}"
+    PREFERENCES[0]="$focus_preference"
+    STUDENTS[0]="$focus_student"
+  fi
+fi
 TEACHER_NAME="$TEACHER_VARIANT"
 
 run_pair() (
@@ -835,8 +871,8 @@ trap - EXIT INT TERM
 if (( PENDING_COUNT > 0 )); then
   printf '[done-with-pending] %s episodes need backfill. Rerun with:\n' \
     "$PENDING_COUNT"
-  printf 'CUDA_VISIBLE_DEVICES=%s TEACHER_VARIANT=%q EVAL_STRATIFIED_MAX_SAMPLES=%q EVAL_RUN_DIR=%q bash %q run\n' \
-    "$CUDA_VISIBLE_DEVICES" "$TEACHER_VARIANT" \
+  printf 'CUDA_VISIBLE_DEVICES=%s GATE_DECISION_MODE=%q TEACHER_VARIANT=%q EVAL_STRATIFIED_MAX_SAMPLES=%q EVAL_RUN_DIR=%q bash %q run\n' \
+    "$CUDA_VISIBLE_DEVICES" "$GATE_DECISION_MODE" "$TEACHER_VARIANT" \
     "$EVAL_STRATIFIED_MAX_SAMPLES" "$RUN_DIR" "$LAUNCHER_SCRIPT"
   exit 0
 fi

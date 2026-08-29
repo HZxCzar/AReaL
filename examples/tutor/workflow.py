@@ -283,9 +283,11 @@ from examples.tutor.prompts import (
     NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT,
     NONE_PLACEHOLDER,
     NONE_YET_PLACEHOLDER,
-    PERSONALITY_CLASSIFICATION_GATE_SYSTEM_PROMPT,
-    PERSONALITY_CLASSIFICATION_GATE_USER_TEMPLATE,
-    PERSONALITY_CLASSIFICATION_NO_LAST_STUDENT_MESSAGE,
+    PERSONALITY_CLASSIFIER_GATE_SYSTEM_PROMPT,
+    PERSONALITY_CLASSIFIER_GATE_USER_TEMPLATE,
+    PERSONALITY_CLASSIFIER_LOGITS_GATE_SYSTEM_PROMPT,
+    PERSONALITY_CLASSIFIER_LOGITS_GATE_USER_TEMPLATE,
+    PERSONALITY_CLASSIFIER_NO_LAST_STUDENT_MESSAGE,
     PERSONALITY_GATE_SYSTEM_PROMPT,
     PERSONALITY_GATE_USER_TEMPLATE,
     PERSONALITY_GATE_V2_NO_PREVIOUS_STUDENT_MESSAGE,
@@ -566,6 +568,52 @@ def _parse_personality_gate_reply(text: str) -> tuple[bool, str, str | None]:
     if verdict == "FAIL":
         return False, reason, None
     return False, reason, f"personality gate verdict was {verdict!r}, not PASS/FAIL."
+
+
+def _parse_personality_classifier_reply(
+    text: str,
+    labels: tuple[str, ...],
+) -> tuple[str | None, str, str | None]:
+    """Return ``(label, reasoning, parse_error)`` from a seven-way JSON reply."""
+    body = _strip_reasoning_for_context(str(text or "")).strip()
+    if not body:
+        return None, "", "personality classifier returned an empty response."
+    if body.startswith("```"):
+        body = re.sub(r"^```[a-zA-Z]*\n?", "", body)
+        body = re.sub(r"\n?```$", "", body).strip()
+    start, end = body.find("{"), body.rfind("}")
+    if start < 0 or end <= start:
+        return (
+            None,
+            "",
+            "personality classifier reply contained no JSON object.",
+        )
+    try:
+        payload = json.loads(body[start : end + 1])
+    except json.JSONDecodeError as exc:
+        return (
+            None,
+            "",
+            f"personality classifier reply was not valid JSON: {exc.msg}",
+        )
+    if not isinstance(payload, dict):
+        return None, "", "personality classifier reply was not a JSON object."
+
+    reasoning = str(payload.get("reasoning") or "").strip()
+    if not reasoning:
+        return None, "", "personality classifier reasoning was empty."
+    decision = str(payload.get("decision") or "").strip().upper()
+    canonical_labels = {label.upper(): label for label in labels}
+    label = canonical_labels.get(decision)
+    if label is None:
+        allowed = ", ".join(canonical_labels)
+        return (
+            None,
+            reasoning,
+            "personality classifier decision was "
+            f"{decision!r}, not one of [{allowed}].",
+        )
+    return label, reasoning, None
 
 
 def load_personality_complaints(
@@ -881,6 +929,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         leak_penalty_formula: float | None = None,
         leak_penalty_aggregation: str = "turn",
         turn_local_reward_components: tuple[str, ...] | list[str] = (),
+        turn_local_reward_component_placements: dict[str, str] | None = None,
+        turn_local_reward_default_placement: str = "pre_std",
         format_error_penalty: float = 0.0,
         personality_gate_terminate_penalty: float = 0.0,
         personality_gate_fail_penalty: float = 0.0,
@@ -1142,6 +1192,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         self.leak_penalty_aggregation = leak_penalty_aggregation
         self.turn_local_reward_components = tuple(turn_local_reward_components)
+        self.turn_local_reward_component_placements = dict(
+            turn_local_reward_component_placements or {}
+        )
+        self.turn_local_reward_default_placement = turn_local_reward_default_placement
         self.format_error_penalty = float(format_error_penalty)
         self.personality_gate_terminate_penalty = float(
             personality_gate_terminate_penalty
@@ -1741,10 +1795,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.personality_gate_decision_mode = (
             str(settings.get("gate_decision_mode", "binary")).strip().lower()
         )
-        if self.personality_gate_decision_mode not in {"binary", "classification"}:
+        if self.personality_gate_decision_mode not in {
+            "binary",
+            "classifier",
+            "classifier_logits",
+        }:
             raise ValueError(
                 "personality.gate_decision_mode must be one of "
-                "['binary', 'classification'], got "
+                "['binary', 'classifier', 'classifier_logits'], got "
                 f"{self.personality_gate_decision_mode!r}."
             )
         self.personality_gate_sample_rate = float(settings.get("gate_sample_rate", 0.5))
@@ -1887,18 +1945,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         return complaint
 
-    def _personality_classification_token_candidates(
+    def _personality_classifier_logits_token_candidates(
         self, letters: tuple[str, ...]
     ) -> dict[int, str]:
         """Resolve every answer letter to one unique tokenizer token."""
-        cache = getattr(self, "_personality_classification_token_cache", {})
+        cache = getattr(self, "_personality_classifier_logits_token_cache", {})
         cached = cache.get(letters)
         if cached is not None:
             return dict(cached)
         tokenizer = getattr(self, "tokenizer", None)
         if tokenizer is None or not hasattr(tokenizer, "encode"):
             raise ValueError(
-                "classification personality gate needs the auxiliary model tokenizer "
+                "classifier_logits needs the auxiliary model tokenizer "
                 "to resolve A-G token ids."
             )
         candidates: dict[int, str] = {}
@@ -1906,18 +1964,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
             encoded = tokenizer.encode(letter, add_special_tokens=False)
             if len(encoded) != 1:
                 raise ValueError(
-                    f"classification answer {letter!r} is not one tokenizer token: "
+                    f"classifier_logits answer {letter!r} is not one tokenizer token: "
                     f"{list(encoded)}."
                 )
             token_id = int(encoded[0])
             if token_id in candidates:
                 raise ValueError(
-                    "classification answer letters must have unique token ids, got "
+                    "classifier_logits answer letters need unique token ids, got "
                     f"{candidates[token_id]!r} and {letter!r} for {token_id}."
                 )
             candidates[token_id] = letter
         cache[letters] = dict(candidates)
-        self._personality_classification_token_cache = cache
+        self._personality_classifier_logits_token_cache = cache
         return candidates
 
     async def _run_personality_gate(
@@ -1930,7 +1988,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         previous_student_message: str | None = None,
         aux_caller: ApiAuxiliaryCaller | AReaLEngineAuxiliaryCaller | None = None,
     ) -> PersonalityGateResult | None:
-        """PASS/FAIL for one teacher message, or None when no gate applies.
+        """One gate outcome for a teacher message, or None when no gate applies.
 
         Sampling: below 1.0 not every turn is checked, so the conversation always
         progresses and an episode is never fully blocked, while the teacher -- unable
@@ -1949,7 +2007,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if (
             personality == "feedback"
             and turn_idx == 1
-            and (decision_mode == "classification" or prompt_version == "v2")
+            and (
+                decision_mode in {"classifier", "classifier_logits"}
+                or prompt_version == "v2"
+            )
         ):
             # With no real student work there is nothing a feedback gate can audit.
             # Let the first student reply happen without manufacturing a PASS that
@@ -1969,8 +2030,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
 
         classification_options: list[tuple[str, str, str]] = []
+        classification_labels: tuple[str, ...] = ()
         classification_candidates: dict[int, str] = {}
-        if decision_mode == "classification":
+        if decision_mode in {"classifier", "classifier_logits"}:
             options = [
                 (name, candidate["preference"])
                 for name, candidate in self.personality_prompts.items()
@@ -1984,36 +2046,54 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
             if len(options) != 7:
                 raise ValueError(
-                    "classification mode requires six personality definitions "
+                    "classifier mode requires six personality definitions "
                     "plus NONE."
                 )
             classification_options = [
                 (chr(ord("A") + index), name, definition)
                 for index, (name, definition) in enumerate(options)
             ]
-            candidate_options = "\n\n".join(
-                f"{letter}. {name.upper()}\n{definition}"
-                for letter, name, definition in classification_options
+            classification_labels = tuple(
+                name for _letter, name, _definition in classification_options
             )
-            classification_candidates = (
-                self._personality_classification_token_candidates(
-                    tuple(
-                        letter for letter, _name, _definition in classification_options
+            if decision_mode == "classifier_logits":
+                candidate_options = "\n\n".join(
+                    f"{letter}. {name.upper()}\n{definition}"
+                    for letter, name, definition in classification_options
+                )
+                classification_candidates = (
+                    self._personality_classifier_logits_token_candidates(
+                        tuple(
+                            letter
+                            for letter, _name, _definition in classification_options
+                        )
                     )
                 )
-            )
-            system_prompt = PERSONALITY_CLASSIFICATION_GATE_SYSTEM_PROMPT.format(
-                candidate_options=candidate_options,
-            )
-            user_prompt = PERSONALITY_CLASSIFICATION_GATE_USER_TEMPLATE.format(
+                system_prompt = PERSONALITY_CLASSIFIER_LOGITS_GATE_SYSTEM_PROMPT.format(
+                    candidate_options=candidate_options,
+                )
+                user_template = PERSONALITY_CLASSIFIER_LOGITS_GATE_USER_TEMPLATE
+                rid_prefix = f"personality-gate-classifier-logits-{turn_idx}"
+            else:
+                candidate_options = "\n\n".join(
+                    f"{name.upper()}\n{definition}"
+                    for _letter, name, definition in classification_options
+                )
+                system_prompt = (
+                    PERSONALITY_CLASSIFIER_GATE_SYSTEM_PROMPT.format(
+                        candidate_options=candidate_options,
+                    )
+                )
+                user_template = PERSONALITY_CLASSIFIER_GATE_USER_TEMPLATE
+                rid_prefix = f"personality-gate-classifier-{turn_idx}"
+            user_prompt = user_template.format(
                 task=str(task or "").strip(),
                 last_student_message=(
                     str(previous_student_message or "").strip()
-                    or PERSONALITY_CLASSIFICATION_NO_LAST_STUDENT_MESSAGE
+                    or PERSONALITY_CLASSIFIER_NO_LAST_STUDENT_MESSAGE
                 ),
                 teacher_message=teacher_message.strip(),
             )
-            rid_prefix = f"personality-gate-classification-{turn_idx}"
         elif prompt_version == "v2":
             previous_student_context = ""
             if personality == "feedback":
@@ -2046,7 +2126,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         last_error = "personality gate produced no verdict."
         raw_output = ""
         for attempt in range(1, self.personality_gate_retries + 1):
-            if decision_mode == "classification":
+            if decision_mode == "classifier_logits":
                 candidate_result = await self._call_auxiliary_candidate_logprobs(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
@@ -2095,6 +2175,35 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     classification_margin=(
                         ranked_probabilities[0] - ranked_probabilities[1]
                     ),
+                )
+
+            if decision_mode == "classifier":
+                result = await self._call_auxiliary_prompt(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    aux_caller=aux_caller,
+                    rid_prefix=rid_prefix,
+                )
+                raw_output = result.raw_text or result.text
+                if result.error:
+                    last_error = str(result.error)
+                    continue
+                classification_label, reason, parse_error = (
+                    _parse_personality_classifier_reply(
+                        result.text,
+                        classification_labels,
+                    )
+                )
+                if parse_error:
+                    last_error = parse_error
+                    continue
+                return PersonalityGateResult(
+                    raw_output=raw_output,
+                    passed=classification_label == personality,
+                    reason=reason,
+                    error=None,
+                    attempts=attempt,
+                    classification_label=classification_label,
                 )
 
             result = await self._call_auxiliary_prompt(
@@ -3514,6 +3623,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
             lora_version=episode_lora_version,
             trajectory_id=trajectory_id,
         )
+        turn_local_reward_components = tuple(
+            getattr(self, "turn_local_reward_components", ())
+        )
+        gate_fail_is_local_component = (
+            "personality_gate_fail" in turn_local_reward_components
+        )
         reward_computer = EpisodeRewardComputer(
             success_reward=self.success_reward,
             leak_penalty=self.leak_penalty,
@@ -3522,10 +3637,23 @@ class TutorAgentWorkflow(RolloutWorkflow):
             leak_penalty_compute=getattr(self, "leak_penalty_compute", None),
             leak_penalty_formula=getattr(self, "leak_penalty_formula", None),
             leak_penalty_aggregation=getattr(self, "leak_penalty_aggregation", "turn"),
-            turn_local_components=getattr(self, "turn_local_reward_components", ()),
+            turn_local_components=turn_local_reward_components,
+            turn_local_component_placements=getattr(
+                self, "turn_local_reward_component_placements", {}
+            ),
+            turn_local_default_placement=getattr(
+                self, "turn_local_reward_default_placement", "pre_std"
+            ),
             format_error_penalty=getattr(self, "format_error_penalty", 0.0),
             personality_gate_terminate_penalty=getattr(
                 self, "personality_gate_terminate_penalty", 0.0
+            ),
+            # New configs route this through the generic local-component path.
+            # Omission keeps the historical dedicated post-std actor signal.
+            personality_gate_fail_penalty=(
+                getattr(self, "personality_gate_fail_penalty", 0.0)
+                if gate_fail_is_local_component
+                else 0.0
             ),
             leaked_success_reward_scale=getattr(
                 self, "leaked_success_reward_scale", 1.0
@@ -3611,8 +3739,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 artifact.tutor_response,
                 reward=assignment.reward,
                 local_reward=(
-                    assignment.local_reward
-                    if getattr(self, "turn_local_reward_components", ())
+                    assignment.local_reward if turn_local_reward_components else None
+                ),
+                local_reward_by_placement=(
+                    assignment.local_reward_by_placement
+                    if turn_local_reward_components
                     else None
                 ),
                 personality_gate_fail_penalty=(
@@ -3620,7 +3751,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     if artifact.personality_gated
                     else 0.0
                 )
-                if getattr(self, "personality_gate_fail_penalty", 0.0)
+                if (
+                    getattr(self, "personality_gate_fail_penalty", 0.0)
+                    and not gate_fail_is_local_component
+                )
                 else None,
                 gate_masked_reward=(
                     assignment.reward_components.get("student_generalize_original", 0.0)

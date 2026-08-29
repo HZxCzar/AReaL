@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """The personality gate: parsing, sampling, complaints, couplings, and the arm.
 
-A personality is one prompt. On a sampled teacher turn an auxiliary model is asked
-that prompt about the teacher's message and answers PASS or FAIL; FAIL means the
-student does not answer and a complaint takes its slot. This checks the parts of that
-which can be checked without a GPU or an endpoint.
+A personality is one prompt. On a sampled teacher turn an auxiliary model either
+answers its binary prompt or chooses among all six personalities plus NONE; a failed
+match means the student does not answer and a complaint takes its slot. This checks
+the parts of that which can be checked without a GPU or an endpoint.
 
 What it deliberately does check, because each is a silent failure otherwise:
 
@@ -19,6 +19,7 @@ What it deliberately does check, because each is a silent failure otherwise:
 
 Run from the repo root with the venv and .env active.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -45,6 +46,7 @@ from examples.tutor.core.types import (
 from examples.tutor.prompts import PERSONALITY_GATE_USER_TEMPLATE
 from examples.tutor.workflow import (
     TutorAgentWorkflow,
+    _parse_personality_classifier_reply,
     _parse_personality_gate_reply,
     load_personality_complaints,
     load_personality_prompts,
@@ -109,7 +111,9 @@ def _stub(**overrides) -> SimpleNamespace:
         "_personality_metrics",
     ):
         setattr(
-            stub, method, getattr(TutorAgentWorkflow, method).__get__(stub, TutorAgentWorkflow)
+            stub,
+            method,
+            getattr(TutorAgentWorkflow, method).__get__(stub, TutorAgentWorkflow),
         )
     # A staticmethod, so it needs no binding -- but it does have to be present, since
     # the metrics helper reads it off self.
@@ -135,7 +139,9 @@ def main() -> int:
     passed, _, err = _parse_personality_gate_reply(
         '```json\n{"reasoning": "r", "verdict": "pass"}\n```'
     )
-    check("a fenced, lowercase verdict parses", passed and err is None, f"{passed} {err}")
+    check(
+        "a fenced, lowercase verdict parses", passed and err is None, f"{passed} {err}"
+    )
     passed, _, err = _parse_personality_gate_reply(
         'Sure! {"reasoning": "r", "verdict": "FAIL"} hope that helps'
     )
@@ -148,7 +154,85 @@ def main() -> int:
         ("other verdict", '{"reasoning": "r", "verdict": "MAYBE"}'),
     ):
         passed, _, err = _parse_personality_gate_reply(text)
-        check(f"{label} is a parse error and not a pass", err is not None and not passed, f"{err}")
+        check(
+            f"{label} is a parse error and not a pass",
+            err is not None and not passed,
+            f"{err}",
+        )
+
+    classifier_labels = (
+        "feedback",
+        "hinting",
+        "instructing",
+        "explaining",
+        "modeling",
+        "questioning",
+        "NONE",
+    )
+    label, reason, err = _parse_personality_classifier_reply(
+        '{"reasoning": "It mainly clarifies the concept.", "decision": "EXPLAINING"}',
+        classifier_labels,
+    )
+    check(
+        "a clean named classifier decision parses",
+        label == "explaining" and reason and err is None,
+        f"{label} {reason} {err}",
+    )
+    label, _, err = _parse_personality_classifier_reply(
+        '{"reasoning": "", "decision": "EXPLAINING"}',
+        classifier_labels,
+    )
+    check(
+        "classifier JSON requires its reasoning",
+        label is None and err is not None,
+        str(err),
+    )
+
+    classifier_prompts = {
+        name: {"source": "source", "preference": f"definition for {name}"}
+        for name in classifier_labels
+        if name != "NONE"
+    }
+    captured_json: dict[str, str] = {}
+
+    async def classify_with_reasoning(**kwargs):
+        captured_json.update(kwargs)
+        return _reply(
+            '{"reasoning": "It mainly clarifies the concept.", '
+            '"decision": "EXPLAINING"}'
+        )
+
+    json_stub = _stub(
+        personality_prompts=classifier_prompts,
+        personality_gate_decision_mode="classifier",
+        personality_gate_prompt_version="v2",
+        _call_auxiliary_prompt=classify_with_reasoning,
+    )
+    json_result = asyncio.run(
+        json_stub._run_personality_gate(
+            "explaining",
+            "TEACHER MESSAGE",
+            task="TASK",
+            turn_idx=2,
+            previous_student_message="LAST STUDENT MESSAGE",
+        )
+    )
+    check(
+        "classifier routes by its named decision",
+        json_result.passed
+        and json_result.classification_label == "explaining"
+        and bool(json_result.reason),
+        str(json_result),
+    )
+    check(
+        "classifier sees all choices and the last student message",
+        all(
+            name.upper() in captured_json.get("system_prompt", "")
+            for name in classifier_labels
+        )
+        and "LAST STUDENT MESSAGE" in captured_json.get("user_prompt", ""),
+        captured_json.get("system_prompt", "")[-200:],
+    )
 
     print("\n[2] retries, then FAIL -- never fail-open")
     calls = {"n": 0}
@@ -184,16 +268,22 @@ def main() -> int:
     stub = _stub(_call_auxiliary_prompt=always_broken)
     check(
         "no personality means no gate at all",
-        asyncio.run(stub._run_personality_gate("", "x", task="TASK", turn_idx=1)) is None,
+        asyncio.run(stub._run_personality_gate("", "x", task="TASK", turn_idx=1))
+        is None,
     )
     check(
         f"{NO_PERSONALITY!r} means no gate at all",
-        asyncio.run(stub._run_personality_gate(NO_PERSONALITY, "x", task="TASK", turn_idx=1)) is None,
+        asyncio.run(
+            stub._run_personality_gate(NO_PERSONALITY, "x", task="TASK", turn_idx=1)
+        )
+        is None,
     )
     calls["n"] = 0
     stub = _stub(personality_gate_sample_rate=0.0, _call_auxiliary_prompt=always_broken)
     unsampled = [
-        asyncio.run(stub._run_personality_gate("instrumental", "x", task="TASK", turn_idx=turn))
+        asyncio.run(
+            stub._run_personality_gate("instrumental", "x", task="TASK", turn_idx=turn)
+        )
         for turn in range(1, 6)
     ]
     check("rate 0 never calls the model", calls["n"] == 0, str(calls["n"]))
@@ -209,7 +299,9 @@ def main() -> int:
 
     calls["n"] = 0
     stub = _stub(personality_gate_sample_rate=1.0, _call_auxiliary_prompt=always_pass)
-    sampled = asyncio.run(stub._run_personality_gate("instrumental", "x", task="TASK", turn_idx=1))
+    sampled = asyncio.run(
+        stub._run_personality_gate("instrumental", "x", task="TASK", turn_idx=1)
+    )
     check("rate 1 always calls", calls["n"] == 1, str(calls["n"]))
     check("a sampled turn is marked sampled", sampled.sampled, str(sampled))
 
@@ -234,8 +326,12 @@ def main() -> int:
         "<student_preference>" in user_prompt and "<teacher_message>" in user_prompt,
     )
     system_prompt = captured.get("system_prompt", "")
-    check("the problem reaches the system prompt", "TEACHER SAID THIS" not in system_prompt
-          and "THE PROBLEM TEXT" in system_prompt, system_prompt[-120:])
+    check(
+        "the problem reaches the system prompt",
+        "TEACHER SAID THIS" not in system_prompt
+        and "THE PROBLEM TEXT" in system_prompt,
+        system_prompt[-120:],
+    )
     check(
         "the template was formatted, not passed through",
         "{task}" not in system_prompt,
@@ -243,7 +339,7 @@ def main() -> int:
     )
     # Inside the object, not in the surrounding prose -- the prose says "give your
     # verdict" first, and what matters is the key order the model is asked to emit.
-    skeleton = user_prompt[user_prompt.index('{"'):]
+    skeleton = user_prompt[user_prompt.index('{"') :]
     check(
         "reasoning is requested before the verdict in the object",
         skeleton.index("reasoning") < skeleton.index("verdict"),
@@ -293,7 +389,9 @@ def main() -> int:
             raw_output="", passed=passed, reason="", error=error, sampled=sampled
         )
 
-    runtime = SimpleNamespace(name="s-text-original-instrumental", personality="instrumental")
+    runtime = SimpleNamespace(
+        name="s-text-original-instrumental", personality="instrumental"
+    )
     stub = _stub(student_model_runtimes={"s": runtime})
     traces = [
         trace(1, gate(True)),
@@ -364,7 +462,9 @@ def main() -> int:
     entry = TutorStudentModelConfig(**_student(mode="code", personality=NO_PERSONALITY))
     check("the open gate is allowed on any student", entry.mode == "code")
 
-    print("\n[8] expansion is a triple product, and the open gate is invisible in names")
+    print(
+        "\n[8] expansion is a triple product, and the open gate is invisible in names"
+    )
     template = TutorStudentModelConfig(**_student(name="qwen3-1.7b", weight=1.0))
     axes = TutorStudentAxesConfig(
         behaviors=["text"],
@@ -388,7 +488,8 @@ def main() -> int:
     )
     check(
         "the open-gate cell carries no personality",
-        next(e for e in expanded if e.name == "qwen3-1.7b-text-original").personality == "",
+        next(e for e in expanded if e.name == "qwen3-1.7b-text-original").personality
+        == "",
     )
     check(
         "weight is split across the product",
@@ -433,12 +534,12 @@ def main() -> int:
         )
         check("a personality without a preference is refused", ok, detail)
         path.write_text(
-            json.dumps({"personalities": {NO_PERSONALITY: {"source": "s", "preference": "p"}}}),
+            json.dumps(
+                {"personalities": {NO_PERSONALITY: {"source": "s", "preference": "p"}}}
+            ),
             encoding="utf-8",
         )
-        ok, detail = raises(
-            lambda: load_personality_prompts(str(path)), "open gate"
-        )
+        ok, detail = raises(lambda: load_personality_prompts(str(path)), "open gate")
         check("the open gate may not have a prompt", ok, detail)
 
     check("the shipped prompt file exists", PROMPTS.is_file(), str(PROMPTS))
@@ -459,7 +560,8 @@ def main() -> int:
     check("bare complaints are shared and non-empty", len(bare) >= 5, str(len(bare)))
     check(
         "the preference fits the template without KeyError",
-        "PREF" not in PERSONALITY_GATE_USER_TEMPLATE.format(
+        "PREF"
+        not in PERSONALITY_GATE_USER_TEMPLATE.format(
             preference="X", teacher_message="Y"
         ),
     )
@@ -483,12 +585,15 @@ def main() -> int:
         "failed turns are shared by default for backward compatibility",
         default.gated_turn_visibility == "shared",
     )
-    teacher_only = TutorPersonalityConfig(
-        gated_turn_visibility=" Teacher_Only "
-    )
+    teacher_only = TutorPersonalityConfig(gated_turn_visibility=" Teacher_Only ")
     check(
         "teacher_only visibility is accepted and normalized",
         teacher_only.gated_turn_visibility == "teacher_only",
+    )
+    classifier_mode = TutorPersonalityConfig(gate_decision_mode=" Classifier ")
+    check(
+        "classifier is accepted and normalized",
+        classifier_mode.gate_decision_mode == "classifier",
     )
     check("the remedy is named by default", default.explain_ratio == 1.0)
     check("three retries by default", default.gate_retries == 3)

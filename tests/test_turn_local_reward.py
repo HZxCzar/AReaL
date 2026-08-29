@@ -23,7 +23,7 @@ from examples.tutor.core.types import (
 )
 from tests.test_rebn_advantage import _make_actor
 
-from areal.api.cli_args import PPOActorConfig
+from areal.api.cli_args import NormConfig, PPOActorConfig
 
 
 def _leak(leaked: bool) -> LeakCheckResult:
@@ -37,6 +37,7 @@ def _turn(
     *,
     leaked: bool,
     format_error: bool = False,
+    gate_failed: bool = False,
     gate_terminated: bool = False,
 ) -> TurnArtifact:
     return TurnArtifact(
@@ -50,6 +51,7 @@ def _turn(
         public_history_before=[],
         public_history_after=[],
         tutor_format_error=format_error,
+        personality_gated=gate_failed,
         personality_gate_terminated=gate_terminated,
     )
 
@@ -103,6 +105,33 @@ def test_format_penalty_is_reported_as_turn_local_when_configured():
 
     assert [a.local_reward for a in assignments] == [-0.5]
     assert [a.reward for a in assignments] == [-0.5]
+
+
+def test_turn_local_components_can_choose_different_placements():
+    computer = EpisodeRewardComputer(
+        success_reward=0.0,
+        leak_penalty=-1.0,
+        leak_penalty_mode="rawbase",
+        format_error_penalty=-0.5,
+        personality_gate_fail_penalty=-0.25,
+        turn_local_components=("leak", "format_error", "personality_gate_fail"),
+        turn_local_component_placements={
+            "leak": "post_std",
+            "format_error": "pre_std",
+            "personality_gate_fail": "group_norm",
+        },
+    )
+    assignments = asyncio.run(
+        computer.compute(
+            _episode([_turn(1, leaked=True, format_error=True, gate_failed=True)])
+        )
+    )
+
+    assert assignments[0].local_reward_by_placement == {
+        "group_norm": -0.25,
+        "pre_std": -0.5,
+        "post_std": -1.0,
+    }
 
 
 def test_personality_gate_terminate_penalty_is_local_and_only_on_terminal_turn():
@@ -190,6 +219,39 @@ def test_turn_local_penalty_stays_on_its_own_turn():
     # Turn 1 keeps the +0.5 outcome; turn 2 still eats the whole -1.0.
     torch.testing.assert_close(
         result["turn_advantage"], torch.tensor([0.5, -0.5]), rtol=0.0, atol=0.0
+    )
+
+
+def test_post_std_local_penalty_keeps_its_configured_advantage_scale():
+    actor = _make_actor(
+        PPOActorConfig(
+            advantage_estimator="rebn",
+            turn_discount=1.0,
+            kl_ctl=0.0,
+            adv_norm=NormConfig(mean_level=None, std_level="batch"),
+        )
+    )
+    result = actor._compute_advantages(
+        {
+            "input_ids": torch.zeros((4, 4), dtype=torch.long),
+            "attention_mask": torch.ones((4, 4), dtype=torch.bool),
+            "loss_mask": torch.tensor([[0, 1, 0, 0]] * 4, dtype=torch.long),
+            "logprobs": torch.zeros((4, 4)),
+            "rewards": torch.tensor([-1.0, 0.0, 0.0, 0.0]),
+            "local_rewards": torch.tensor([-1.0, 0.0, 0.0, 0.0]),
+            "local_rewards_group_norm": torch.zeros(4),
+            "local_rewards_pre_std": torch.zeros(4),
+            "local_rewards_post_std": torch.tensor([-1.0, 0.0, 0.0, 0.0]),
+            "trajectory_id": torch.arange(4),
+            "turn_idx": torch.ones(4, dtype=torch.long),
+        }
+    )
+
+    torch.testing.assert_close(
+        result["turn_advantage"],
+        torch.tensor([-1.0, 0.0, 0.0, 0.0]),
+        rtol=0.0,
+        atol=0.0,
     )
 
 

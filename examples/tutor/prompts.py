@@ -283,7 +283,7 @@ verdict is "PASS" if the message matches the preference and "FAIL" if it does
 not. Nothing outside the JSON object."""
 
 
-PERSONALITY_CLASSIFICATION_GATE_SYSTEM_PROMPT = """Choose exactly one answer from \
+PERSONALITY_CLASSIFIER_LOGITS_GATE_SYSTEM_PROMPT = """Choose exactly one answer from \
 the seven options below. Choose the option that best describes how the teacher
 teaches in the message.
 
@@ -294,7 +294,7 @@ is correct.
 
 Reply with exactly one letter from A through G and nothing else."""
 
-PERSONALITY_CLASSIFICATION_GATE_USER_TEMPLATE = """<problem>
+PERSONALITY_CLASSIFIER_LOGITS_GATE_USER_TEMPLATE = """<problem>
 {task}
 </problem>
 
@@ -308,7 +308,42 @@ PERSONALITY_CLASSIFICATION_GATE_USER_TEMPLATE = """<problem>
 
 Answer:"""
 
-PERSONALITY_CLASSIFICATION_NO_LAST_STUDENT_MESSAGE = (
+
+PERSONALITY_CLASSIFIER_GATE_SYSTEM_PROMPT = """Choose exactly one of \
+the seven options that best represents the primary scaffolding means used in the
+teacher message as a whole. If several means appear, choose the one that carries
+the most pedagogical content.
+
+In the reasoning, briefly identify what the teacher actually does and why the
+selected option fits better than any other applicable option.
+
+Judge only the teaching method. Do not judge whether the mathematical content
+is correct.
+Judge what the teacher actually does, not cue phrases.
+
+{candidate_options}
+
+Return exactly one JSON object in this key order:
+
+{{"reasoning": "<brief reasoning>", "decision": "<FEEDBACK|HINTING|INSTRUCTING|EXPLAINING|MODELING|QUESTIONING|NONE>"}}
+
+Nothing may appear outside the JSON object."""
+
+PERSONALITY_CLASSIFIER_GATE_USER_TEMPLATE = """<problem>
+{task}
+</problem>
+
+<last_student_message>
+{last_student_message}
+</last_student_message>
+
+<teacher_message>
+{teacher_message}
+</teacher_message>
+
+Response:"""
+
+PERSONALITY_CLASSIFIER_NO_LAST_STUDENT_MESSAGE = (
     "No student message is available yet."
 )
 

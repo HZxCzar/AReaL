@@ -1,4 +1,4 @@
-# Full-student evaluation using the optional A-G next-token-logprob classifier.
+# Full-student evaluation using the alternate A-G next-token-logprob classifier.
 # Model routing is inherited from the base-aux pilot: trained Qwen3-8B teacher
 # requests carry the LoRA, all auxiliary/judge calls use base Qwen3-8B without a
 # LoRA, and real student calls use Qwen3-1.7B.
@@ -6,8 +6,8 @@ defaults:
   - eval-all-preferences-base-aux@_global_
   - _self_
 
-trial_name: 0825-preference-classification-full-student-base-aux-eval
+trial_name: 0825-preference-classifier-logits-full-student-base-aux-eval
 
 personality:
-  gate_decision_mode: classification
+  gate_decision_mode: classifier_logits
   prompts_path: examples/tutor/prompt_pools/personality_prompts_classification_v2.json

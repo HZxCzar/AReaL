@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from .types import (
+    TURN_LOCAL_REWARD_PLACEMENTS,
     EpisodeArtifact,
     LeakCheckResult,
     RewardAssignment,
     TurnArtifact,
+    TurnLocalRewardPlacement,
     TurnTrace,
 )
 
@@ -22,6 +26,7 @@ class EpisodeRewardComputer:
         leak_penalty_aggregation: str = "turn",
         format_error_penalty: float = 0.0,
         personality_gate_terminate_penalty: float = 0.0,
+        personality_gate_fail_penalty: float = 0.0,
         leaked_success_reward_scale: float = 1.0,
         assign_success_reward: bool = False,
         outcome_prior_turn_weight: float = 0.1,
@@ -37,6 +42,8 @@ class EpisodeRewardComputer:
         length_penalty_per_100_chars: float = 0.0,
         length_penalty_min: float = 0.0,
         turn_local_components: tuple[str, ...] | list[str] = (),
+        turn_local_component_placements: Mapping[str, str] | None = None,
+        turn_local_default_placement: str = "pre_std",
     ) -> None:
         if leak_penalty_mode not in {"binary", "staged", "rawbase"}:
             raise ValueError(
@@ -52,6 +59,31 @@ class EpisodeRewardComputer:
             raise ValueError("format_error_penalty must be <= 0.")
         if personality_gate_terminate_penalty > 0.0:
             raise ValueError("personality_gate_terminate_penalty must be <= 0.")
+        if personality_gate_fail_penalty > 0.0:
+            raise ValueError("personality_gate_fail_penalty must be <= 0.")
+        if turn_local_default_placement not in TURN_LOCAL_REWARD_PLACEMENTS:
+            raise ValueError(
+                "turn_local_default_placement must be 'group_norm', 'pre_std', "
+                f"or 'post_std', got {turn_local_default_placement!r}."
+            )
+        local_components = frozenset(turn_local_components)
+        local_placements = dict(turn_local_component_placements or {})
+        unknown_components = sorted(local_placements.keys() - local_components)
+        if unknown_components:
+            raise ValueError(
+                "turn_local_component_placements keys must also appear in "
+                f"turn_local_components; unknown: {unknown_components}."
+            )
+        invalid_placements = {
+            name: placement
+            for name, placement in local_placements.items()
+            if placement not in TURN_LOCAL_REWARD_PLACEMENTS
+        }
+        if invalid_placements:
+            raise ValueError(
+                "turn-local reward placement must be 'group_norm', 'pre_std', "
+                f"or 'post_std'; got {invalid_placements}."
+            )
         if leaked_success_reward_scale < 0.0:
             raise ValueError("leaked_success_reward_scale must be >= 0.")
         if success_turn_shaping_enabled and success_turn_shaping_min_reward < 0.0:
@@ -92,6 +124,7 @@ class EpisodeRewardComputer:
         self.personality_gate_terminate_penalty = float(
             personality_gate_terminate_penalty
         )
+        self.personality_gate_fail_penalty = float(personality_gate_fail_penalty)
         self.leaked_success_reward_scale = float(leaked_success_reward_scale)
         self.outcome_prior_turn_weight = outcome_prior_turn_weight
         self.outcome_credit_gamma = outcome_credit_gamma
@@ -105,7 +138,11 @@ class EpisodeRewardComputer:
         self.length_penalty_threshold_chars = length_penalty_threshold_chars
         self.length_penalty_per_100_chars = length_penalty_per_100_chars
         self.length_penalty_min = length_penalty_min
-        self.turn_local_components = frozenset(turn_local_components)
+        self.turn_local_components = local_components
+        self.turn_local_component_placements = {
+            name: local_placements.get(name, turn_local_default_placement)
+            for name in local_components
+        }
 
     async def compute(self, episode: EpisodeArtifact) -> list[RewardAssignment]:
         success_artifact = self._success_artifact(episode)
@@ -147,6 +184,8 @@ class EpisodeRewardComputer:
                 components["personality_gate_terminate"] = (
                     self.personality_gate_terminate_penalty
                 )
+            if artifact.personality_gated and self.personality_gate_fail_penalty:
+                components["personality_gate_fail"] = self.personality_gate_fail_penalty
             success_credit = success_credits.get(artifact.turn_idx, 0.0)
             if success_credit:
                 components["success_credit"] = success_credit
@@ -158,18 +197,21 @@ class EpisodeRewardComputer:
             if length_penalty:
                 components["length_penalty"] = length_penalty
             reward = float(sum(components.values()))
-            local_reward = float(
-                sum(
-                    value
-                    for name, value in components.items()
-                    if name in self.turn_local_components
-                )
-            )
+            local_reward_by_placement: dict[TurnLocalRewardPlacement, float] = {
+                placement: 0.0 for placement in TURN_LOCAL_REWARD_PLACEMENTS
+            }
+            for name, value in components.items():
+                if name not in self.turn_local_components:
+                    continue
+                placement = self.turn_local_component_placements[name]
+                local_reward_by_placement[placement] += value
+            local_reward = float(sum(local_reward_by_placement.values()))
             assignments.append(
                 RewardAssignment(
                     reward=reward,
                     reward_components=components,
                     local_reward=local_reward,
+                    local_reward_by_placement=local_reward_by_placement,
                 )
             )
         return assignments

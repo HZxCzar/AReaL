@@ -92,14 +92,22 @@ def run_preflight(args: argparse.Namespace) -> dict[str, Any]:
             "qwen3-1.7b",
         )
 
-    _require_equal("personality.gate_prompt_version", config.personality.gate_prompt_version, "v2")
+    _require_equal(
+        "personality.gate_prompt_version", config.personality.gate_prompt_version, "v2"
+    )
     _require_equal(
         "personality.gate_decision_mode",
         config.personality.gate_decision_mode,
         args.gate_decision_mode,
     )
-    _require_equal("personality.gate_sample_rate", float(config.personality.gate_sample_rate), 1.0)
-    _require_equal("personality.gated_turn_visibility", config.personality.gated_turn_visibility, "teacher_only")
+    _require_equal(
+        "personality.gate_sample_rate", float(config.personality.gate_sample_rate), 1.0
+    )
+    _require_equal(
+        "personality.gated_turn_visibility",
+        config.personality.gated_turn_visibility,
+        "teacher_only",
+    )
     _require_equal(
         "auxiliary model",
         str(config.auxiliary_model.model or "").lower(),
@@ -109,7 +117,9 @@ def run_preflight(args: argparse.Namespace) -> dict[str, Any]:
     prompts = load_personality_prompts(config.personality.prompts_path)
     bare, explained = load_personality_complaints(config.personality.complaints_path)
     demanding = [preference for preference, _ in PREFERENCES if preference != "none"]
-    missing_prompts = [preference for preference in demanding if preference not in prompts]
+    missing_prompts = [
+        preference for preference in demanding if preference not in prompts
+    ]
     missing_complaints = [
         preference for preference in demanding if preference not in explained
     ]
@@ -160,9 +170,7 @@ def run_preflight(args: argparse.Namespace) -> dict[str, Any]:
             "leak_continues": effective["leak_handling_mode"] == "reward_only",
             "format_continues": effective["format_handling_mode"] == "continue",
             "gate_v2": effective["personality"].get("gate_prompt_version") == "v2",
-            "gate_decision_mode": effective["personality"].get(
-                "gate_decision_mode"
-            )
+            "gate_decision_mode": effective["personality"].get("gate_decision_mode")
             == args.gate_decision_mode,
             "original_retest": effective["student_generalize_retest_original"] is True,
             "preleak_retest": effective["eval_preleak_retest"] is True,
@@ -230,8 +238,7 @@ def run_preflight(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "teacher": args.teacher_variant,
         "students": [
-            {"preference": preference, "name": name}
-            for preference, name in PREFERENCES
+            {"preference": preference, "name": name} for preference, name in PREFERENCES
         ],
         "adapter": adapter,
         "completed_steps": completed_steps,
@@ -241,7 +248,9 @@ def run_preflight(args: argparse.Namespace) -> dict[str, Any]:
         "seed": int(config.seed),
         "dataset_selection": {
             "strategy": (
-                "full" if args.stratified_max_samples == 0 else "math_type_level_stratified"
+                "full"
+                if args.stratified_max_samples == 0
+                else "math_type_level_stratified"
             ),
             "requested_rows": args.stratified_max_samples,
             "strata": ["metadata.type", "metadata.level"],
@@ -290,8 +299,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--replays", type=int, default=8)
     parser.add_argument(
         "--gate-decision-mode",
-        choices=("binary", "classification"),
-        default="classification",
+        choices=("binary", "classifier", "classifier_logits"),
+        default="classifier",
     )
     parser.add_argument("--require-base-aux", action="store_true")
     return parser.parse_args()

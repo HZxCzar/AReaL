@@ -17,14 +17,14 @@
 #   format_handling_mode      terminate
 #   reward.turn_local_components  [leak, format_error] -- both penalties stay on the
 #                             turn that raised them instead of being accumulated
-#                             backward onto turns that may have taught well
+#                             backward; both use post_std placement by default
 #   teacher_pre               enabled, verify true in TRAINING
 #   evaluator.teacher_pre_*   pre-solve on, verification OFF at eval
 #   student_models            one student, (behavior text, information unmasked)
 #   evaluator.freq_steps      25
-#   personality             shared seven-choice prompt/complaint files, A-G
-#                           classification gate, gate rate 1.0, explain ratio 0.5,
-#                           3 retries, teacher-only failures
+#   personality             shared seven-choice prompt/complaint files, reasoning
+#                           classifier, gate rate 1.0, explain ratio 0.5, 3 retries,
+#                           teacher-only failures
 #   free_chat.transfer_prompts  absent, so off: the re-test problem is the problem
 #                             the dialogue was about
 #   teacher_history_tags      unmasked -- the TEACHER side, unrelated to the
@@ -40,14 +40,14 @@
 # one-line additions in an arm that wants them.
 #
 # COST. Roughly 24 external calls an episode, a train step of 235-246 s at 4 GPUs,
-# and an eval pass of 1650-1840 s. At freq_steps 25 over 500 steps that is about
-# 33 h of training and 10 h of evaluation per arm.
+# and an eval pass of 1650-1840 s. At freq_steps 25 over 1000 steps that is about
+# 66 h of training and 20 h of evaluation per arm.
 
 experiment_name: tutor-math-baseline
 trial_name: 0825-base
 seed: 42
 enable_offload: false
-total_train_epochs: 200
+total_train_epochs: 1000
 tokenizer_path: ${actor.path}
 workflow: examples.tutor.workflow.TutorAgentWorkflow
 eval_workflow: ${workflow}
@@ -72,9 +72,9 @@ personality:
   prompts_path: examples/tutor/prompt_pools/personality_prompts_classification_v2.json
   complaints_path: examples/tutor/prompt_pools/personality_complaints_v2.json
   gate_prompt_version: v2
-  # One A-G next-token distribution over the six teaching strategies plus NONE.
-  # The sampled student preference is never revealed to this classifier.
-  gate_decision_mode: classification
+  # Official seven-way reasoning classifier over the six teaching strategies plus
+  # NONE. The sampled student preference is never revealed to the classifier.
+  gate_decision_mode: classifier
   # Audit every turn whenever the selected student has a personality.
   gate_sample_rate: 1.0
   # A failed teacher message and its rule-based complaint remain in the teacher's
@@ -83,7 +83,7 @@ personality:
   gated_turn_visibility: teacher_only
   # Half of failed turns explain the remedy; half only report that the student is lost.
   explain_ratio: 0.5
-  # Retry a missing/invalid candidate-logprob response three times, then fail closed.
+  # Retry a missing/invalid classifier response three times, then fail closed.
   gate_retries: 3
 student_generalize:
   enabled: true
@@ -191,8 +191,6 @@ reward:
   assign_success_reward: false
   leak_penalty: -1.0
   leak_penalty_aggregation: episode
-  outcome_prior_turn_weight: 0.5
-  outcome_credit_gamma: 0.9
   early_success_bonus: 0.0
   max_turn_penalty: 0.0
   enable_turn_penalty: false
@@ -202,6 +200,12 @@ reward:
   length_penalty_min: 0.0
   # Lists replace on merge; spelling out both components preserves leak-local.
   turn_local_components: ["leak", "format_error"]
+  # Fixed normalized-advantage penalties: neither event enters the group baseline
+  # or the batch std. Override one component with group_norm or pre_std for an
+  # ablation; configs without this mapping retain the legacy actor-wide behavior.
+  turn_local_component_placements:
+    leak: post_std
+    format_error: post_std
 
 debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor/debug_traces/${experiment_name}/${trial_name}
 debug_trace_every_n_rollouts: 10
@@ -382,7 +386,7 @@ actor:
     env_vars: {}
   group_baseline: episode
   group_baseline_leave1out: true
-  # All components in reward.turn_local_components enter the baseline by default.
+  # Legacy fallback for any local component without an explicit placement above.
   group_baseline_local_reward_mode: exclude
   episode_loss_weighting: false
   num_iterations: 1
@@ -519,7 +523,7 @@ stats_logger:
 # continue arms, and their malformed rate climbed 0.61 -> 0.90 while the continue
 # arms fell to 0.00 by step 9.
 format_handling_mode: terminate
-total_train_steps: 800
+total_train_steps: 1000
 free_chat:
   enabled: true
   budget: 10

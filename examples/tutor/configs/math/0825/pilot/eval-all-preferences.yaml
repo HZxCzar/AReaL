@@ -8,7 +8,7 @@ defaults:
 trial_name: 0825-preference-full-student-eval
 
 personality:
-  gate_decision_mode: classification
+  gate_decision_mode: classifier
   prompts_path: examples/tutor/prompt_pools/personality_prompts_classification_v2.json
 
 student_models: []

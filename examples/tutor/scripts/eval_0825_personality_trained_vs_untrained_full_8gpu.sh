@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Run the complete 0825 classification evaluation twice on the same eight GPUs:
+# Run the complete 0825 classifier evaluation twice on the same eight GPUs:
 # first with the trained 0818 LoRA teacher, then with the untrained Qwen3-8B base
 # teacher. Gate/leak/answer judges are base Qwen3-8B in both runs; students are
 # Qwen3-1.7B in both runs.

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import torch
 
 from examples.tutor.core.callers import apply_chat_template
+from examples.tutor.core.types import TURN_LOCAL_REWARD_PLACEMENTS
 
 
 def tokenize_teacher_forced_response(
@@ -43,6 +45,7 @@ def response_to_tensordict(
     *,
     reward: float,
     local_reward: float | None = None,
+    local_reward_by_placement: Mapping[str, float] | None = None,
     personality_gate_fail_penalty: float | None = None,
     gate_masked_reward: float | None = None,
     gate_credit_mask: bool | None = None,
@@ -95,6 +98,17 @@ def response_to_tensordict(
         raise ValueError(
             "gate_masked_reward and gate_credit_mask must be provided together."
         )
+    if local_reward_by_placement is not None and local_reward is None:
+        raise ValueError(
+            "local_reward_by_placement requires the matching local_reward total."
+        )
+    unknown_local_placements = set(local_reward_by_placement or {}) - set(
+        TURN_LOCAL_REWARD_PLACEMENTS
+    )
+    if unknown_local_placements:
+        raise ValueError(
+            f"Unknown turn-local reward placements: {sorted(unknown_local_placements)}."
+        )
     effective_reward = float(reward)
     if (
         zero_reward_on_length_stop
@@ -130,6 +144,19 @@ def response_to_tensordict(
         result["local_rewards"] = torch.tensor(
             [effective_local_reward], dtype=torch.float32
         )
+        if local_reward_by_placement is not None:
+            for placement in TURN_LOCAL_REWARD_PLACEMENTS:
+                effective_placement_reward = float(
+                    local_reward_by_placement.get(placement, 0.0)
+                )
+                if (
+                    zero_reward_on_length_stop
+                    and getattr(response, "stop_reason", None) == "length"
+                ):
+                    effective_placement_reward = 0.0
+                result[f"local_rewards_{placement}"] = torch.tensor(
+                    [effective_placement_reward], dtype=torch.float32
+                )
     if personality_gate_fail_penalty is not None:
         effective_gate_fail_penalty = float(personality_gate_fail_penalty)
         if (

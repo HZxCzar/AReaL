@@ -508,6 +508,16 @@ def main(args):
         leak_penalty_formula=reward.leak_penalty_formula,
         leak_penalty_aggregation=reward.leak_penalty_aggregation,
         turn_local_reward_components=tuple(reward.turn_local_components),
+        turn_local_reward_component_placements=dict(
+            reward.turn_local_component_placements
+        ),
+        # An omitted per-component placement is deliberately legacy-compatible.
+        # It resolves to the same layer selected by the existing actor-wide mode.
+        turn_local_reward_default_placement=(
+            "group_norm"
+            if config.actor.group_baseline_local_reward_mode == "include"
+            else "pre_std"
+        ),
         format_error_penalty=reward.format_error_penalty,
         personality_gate_terminate_penalty=(reward.personality_gate_terminate_penalty),
         personality_gate_fail_penalty=reward.personality_gate_fail_penalty,

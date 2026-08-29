@@ -6,6 +6,8 @@ from typing import Any, Literal
 FeedbackKind = Literal["none", "student_judged"]
 LeakHandlingMode = Literal["disabled", "reward_only", "terminate"]
 StudentGeneralizeMode = Literal["only_success", "always"]
+TurnLocalRewardPlacement = Literal["group_norm", "pre_std", "post_std"]
+TURN_LOCAL_REWARD_PLACEMENTS = frozenset({"group_norm", "pre_std", "post_std"})
 PromptSelectionSource = Literal[
     "pool",
     "pool_base",
@@ -75,10 +77,10 @@ class PersonalityGateResult:
     """One personality gate check on one teacher message.
 
     `passed` is what routes the turn: True calls the student, False replaces its
-    reply with a complaint. `reason` keeps the binary judge's analysis and is empty
-    for the logits classifier. `error` is set only when every retry came back
-    unclean, in which case `passed` is False -- the conservative default, so a
-    broken check never lets through a message that may violate the preference.
+    reply with a complaint. `reason` keeps the binary or JSON-classifier analysis
+    and is empty for the logits classifier. `error` is set only when every retry
+    came back unclean, in which case `passed` is False -- the conservative default,
+    so a broken check never lets through a message that may violate the preference.
     """
 
     raw_output: str
@@ -90,7 +92,7 @@ class PersonalityGateResult:
     # checked is not evidence of compliance, so it must not land in the numerator or
     # the denominator of the compliance rate.
     sampled: bool = True
-    # Set only by the optional classification gate. Binary-gate traces retain their
+    # Set only by a classifier gate. Binary-gate traces retain their
     # historical shape because trace_to_json removes these keys when they are None.
     classification_label: str | None = None
     classification_logprobs: dict[str, float] | None = None
@@ -307,6 +309,12 @@ class RewardAssignment:
     # EpisodeRewardComputer(turn_local_components=...); 0.0 keeps the old
     # behaviour, where every component propagates.
     local_reward: float = 0.0
+    # The same local total split by the advantage layer where each component is
+    # applied. Keeping the split here lets leak and format_error choose different
+    # placements without changing the scalar reward or its component metrics.
+    local_reward_by_placement: dict[TurnLocalRewardPlacement, float] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(slots=True)

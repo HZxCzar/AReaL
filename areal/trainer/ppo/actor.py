@@ -1290,6 +1290,30 @@ class PPOActor:
             raise ValueError(
                 "The personality-gate fail penalty requires advantage_estimator='rebn'."
             )
+        local_reward_placement_keys = {
+            "local_rewards_group_norm",
+            "local_rewards_pre_std",
+            "local_rewards_post_std",
+        }
+        present_local_reward_placement_keys = local_reward_placement_keys.intersection(
+            data
+        )
+        if (
+            present_local_reward_placement_keys
+            and present_local_reward_placement_keys != local_reward_placement_keys
+        ):
+            missing = sorted(
+                local_reward_placement_keys - present_local_reward_placement_keys
+            )
+            raise ValueError(
+                "Incomplete turn-local reward placement metadata; missing: "
+                + ", ".join(missing)
+            )
+        if present_local_reward_placement_keys and "local_rewards" not in data:
+            raise ValueError(
+                "Turn-local reward placement metadata requires the "
+                "'local_rewards' total."
+            )
         opd_keys = {
             "opd_teacher_logp",
             "opd_loss_mask",
@@ -1366,6 +1390,8 @@ class PPOActor:
         # before accumulation and add them back after, so only the offending
         # turn carries them. Absent column => unchanged behaviour.
         local_reward_score = None
+        local_reward_scores_by_placement = None
+        post_std_local_reward_advantage = None
         if "local_rewards" in data:
             if self.config.advantage_estimator != "rebn":
                 # Only ReBN accumulates rewards across turns, so only ReBN can
@@ -1386,6 +1412,24 @@ class PPOActor:
             local_reward_score = torch.clip(
                 local_reward_score, max=self.reward_clip, min=-self.reward_clip
             )
+            if present_local_reward_placement_keys:
+                local_reward_scores_by_placement = {}
+                for placement in ("group_norm", "pre_std"):
+                    placement_score = data[f"local_rewards_{placement}"].to(
+                        device=reward_score.device, dtype=reward_score.dtype
+                    )
+                    placement_score = placement_score * self.reward_scaling
+                    local_reward_scores_by_placement[placement] = torch.clip(
+                        placement_score,
+                        max=self.reward_clip,
+                        min=-self.reward_clip,
+                    )
+                # A post-std component is already expressed in normalized-
+                # advantage units, like personality_gate_fail_penalty. It must
+                # not inherit reward scaling, clipping, or the batch std.
+                post_std_local_reward_advantage = data["local_rewards_post_std"].to(
+                    device=reward_score.device, dtype=reward_score.dtype
+                )
         gate_masked_reward_score = None
         if present_gate_credit_keys:
             if self.reward_norm is not None:
@@ -1543,32 +1587,55 @@ class PPOActor:
                 turn_returns = residual_returns + masked_returns * credit_mask
             baseline_source = turn_returns
             if local_reward_score is not None:
-                local_masked = local_reward_score * valid_turn_mask.to(
-                    turn_returns.dtype
-                )
-                # Local rewards always stay on the turn that earned them. The mode
-                # below changes only the control variate used as the group baseline.
-                turn_returns = turn_returns + local_masked
-                local_baseline_mode = self.config.group_baseline_local_reward_mode
-                if local_baseline_mode == "include":
+                valid_turn_weights = valid_turn_mask.to(turn_returns.dtype)
+                if local_reward_scores_by_placement is not None:
+                    group_local_masked = (
+                        local_reward_scores_by_placement["group_norm"]
+                        * valid_turn_weights
+                    )
+                    pre_std_local_masked = (
+                        local_reward_scores_by_placement["pre_std"] * valid_turn_weights
+                    )
+                    # Both are turn-local. Only group_norm enters the first
+                    # (group-baseline) normalization; both enter the later std.
+                    turn_returns = (
+                        turn_returns + group_local_masked + pre_std_local_masked
+                    )
                     if self.config.group_baseline == "episode":
-                        # The episode baseline reads the first turn, so gather the
-                        # complete local total there for the baseline only.
+                        # The episode baseline reads the first turn, so gather all
+                        # group_norm components there for the baseline only.
                         baseline_source = (
                             baseline_source
                             + _episode_local_at_first_turn(
-                                local_masked,
+                                group_local_masked,
                                 data["trajectory_id"].to(reward_score.device),
                                 data["turn_idx"].to(reward_score.device),
                                 valid_turn_mask,
                             )
                         )
                     else:
-                        # A turn baseline compares the local reward only with peers
-                        # at the same depth.
-                        baseline_source = turn_returns
-                # In "exclude" mode baseline_source intentionally remains the
-                # propagating return with every local component removed.
+                        # A turn baseline compares group_norm components only with
+                        # peers at the same depth. pre_std remains outside it.
+                        baseline_source = baseline_source + group_local_masked
+                else:
+                    # Legacy batches carry only the aggregate local_rewards column.
+                    # Preserve their actor-wide include/exclude behavior exactly.
+                    local_masked = local_reward_score * valid_turn_weights
+                    turn_returns = turn_returns + local_masked
+                    local_baseline_mode = self.config.group_baseline_local_reward_mode
+                    if local_baseline_mode == "include":
+                        if self.config.group_baseline == "episode":
+                            baseline_source = (
+                                baseline_source
+                                + _episode_local_at_first_turn(
+                                    local_masked,
+                                    data["trajectory_id"].to(reward_score.device),
+                                    data["turn_idx"].to(reward_score.device),
+                                    valid_turn_mask,
+                                )
+                            )
+                        else:
+                            baseline_source = turn_returns
             if self.config.group_baseline is not None:
                 if "group_id" not in data:
                     raise ValueError(
@@ -1641,6 +1708,21 @@ class PPOActor:
                 # drop list below and the tests reading it stay put; it carries
                 # whichever level actor.loss_weighting names.
                 data["episode_loss_weight"] = loss_weights
+            # Per-component post_std local rewards are fixed advantage-unit
+            # penalties. Add them at the same final layer as the personality gate
+            # penalty so rare leak/format events cannot set the batch std or have
+            # their magnitude divided by it.
+            if post_std_local_reward_advantage is not None:
+                post_std_local_reward_advantage = (
+                    post_std_local_reward_advantage
+                    * valid_turn_mask.to(post_std_local_reward_advantage.dtype)
+                )
+                normalized_turn_returns = (
+                    normalized_turn_returns + post_std_local_reward_advantage
+                )
+                data["local_reward_post_std_advantage"] = (
+                    post_std_local_reward_advantage
+                )
             # This coefficient is already in normalized-advantage units. Adding it
             # here keeps a configured small gate penalty small even when outcome
             # variance is near zero; putting it into rewards before adv_norm would
@@ -1974,6 +2056,13 @@ class PPOActor:
                 ].float(),
                 denominator="n_seqs",
             )
+        if "local_reward_post_std_advantage" in data:
+            stats_tracker.stat(
+                local_reward_post_std_advantage=data[
+                    "local_reward_post_std_advantage"
+                ].float(),
+                denominator="n_seqs",
+            )
         if "opd_reverse_kl" in data:
             # Averaged over supervised tokens only, so the numbers are not diluted
             # by the turns OPD skipped. opd_reverse_kl is the per-token reverse KL
@@ -2054,6 +2143,11 @@ class PPOActor:
             "kl_rewards",
             "gate_masked_rewards",
             "gate_credit_mask",
+            "local_rewards",
+            "local_rewards_group_norm",
+            "local_rewards_pre_std",
+            "local_rewards_post_std",
+            "local_reward_post_std_advantage",
             "personality_gate_fail_penalty",
             "personality_gate_fail_advantage",
             "trajectory_id",

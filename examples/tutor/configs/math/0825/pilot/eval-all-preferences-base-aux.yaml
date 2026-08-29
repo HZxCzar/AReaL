@@ -9,8 +9,11 @@ defaults:
 trial_name: 0825-preference-full-student-base-aux-eval
 
 personality:
-  gate_decision_mode: classification
+  gate_decision_mode: classifier
   prompts_path: examples/tutor/prompt_pools/personality_prompts_classification_v2.json
+  # Keep the inherited 0.5 default unless a complaint-only evaluation explicitly
+  # requests remedy-naming complaints on every failed gate.
+  explain_ratio: ${oc.env:TUTOR_PERSONALITY_EXPLAIN_RATIO,0.5}
 
 # Standalone evaluation has no AReaL engine. API mode sends the same untrained-8B
 # sampling settings to TUTOR_QWEN3_8B_BASE_URL without a per-request LoRA path.
