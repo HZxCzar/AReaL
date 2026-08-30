@@ -303,12 +303,13 @@ class RecoverHandler:
             shutil.rmtree(path, ignore_errors=True)
 
     @classmethod
-    def _cleanup_other_generations(
+    def _cleanup_old_generations(
         cls,
         experiment_name: str,
         trial_name: str,
         fileroot: str,
         current_generation: str,
+        keep_last_n: int,
     ) -> None:
         if dist.is_initialized() and dist.get_rank() != 0:
             return
@@ -319,12 +320,46 @@ class RecoverHandler:
             )
             if not os.path.isdir(generations_root):
                 return
+
+            previous_generations: list[tuple[int, str, str]] = []
+            invalid_generations: list[tuple[str, str]] = []
             for name in os.listdir(generations_root):
                 if name == current_generation:
                     continue
                 path = os.path.join(generations_root, name)
-                if os.path.isdir(path):
-                    shutil.rmtree(path, ignore_errors=True)
+                if not os.path.isdir(path):
+                    continue
+                step_info_path = os.path.join(path, "recover_info", "step_info.json")
+                try:
+                    with open(step_info_path) as f:
+                        step_info = json.load(f)
+                    timestamp = int(name.rsplit("-", 1)[-1])
+                    int(step_info["global_step"])
+                except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+                    invalid_generations.append((name, path))
+                    continue
+                previous_generations.append((timestamp, name, path))
+
+            previous_generations.sort(reverse=True)
+            retained_previous = {
+                name for _, name, _ in previous_generations[: keep_last_n - 1]
+            }
+            removed = 0
+            for name, path in invalid_generations:
+                shutil.rmtree(path, ignore_errors=True)
+                removed += 1
+            for _, name, path in previous_generations:
+                if name in retained_previous:
+                    continue
+                shutil.rmtree(path, ignore_errors=True)
+                removed += 1
+            logger.info(
+                "Retained %d recovery generation(s) (keep_last_n=%d); "
+                "removed %d old or invalid generation(s).",
+                1 + len(retained_previous),
+                keep_last_n,
+                removed,
+            )
         except Exception as exc:
             logger.warning("Failed to clean old recovery generations: %s", exc)
 
@@ -480,11 +515,12 @@ class RecoverHandler:
             raise
         self.last_step_info = step_info
         if commit_is_durable:
-            self._cleanup_other_generations(
+            self._cleanup_old_generations(
                 self.config.experiment_name,
                 self.config.trial_name,
                 self.config.fileroot,
                 generation,
+                self.config.keep_last_n,
             )
 
     def load(

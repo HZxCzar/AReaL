@@ -33,6 +33,16 @@ class TestRecoverConfig:
         )
         assert config.mode == "disabled"
         assert config.retries == 3
+        assert config.keep_last_n == 3
+
+    def test_keep_last_n_must_be_positive(self):
+        with pytest.raises(ValueError, match="keep_last_n must be at least 1"):
+            RecoverConfig(
+                experiment_name="test_exp",
+                trial_name="test_trial",
+                fileroot="/tmp",
+                keep_last_n=0,
+            )
 
     @pytest.mark.parametrize("mode", ["on", "off", "auto", "disabled"])
     def test_valid_modes(self, mode):
@@ -314,6 +324,54 @@ class TestRecoverHandler:
             with open(pointer_path) as f:
                 assert json.load(f)["generation"] == first_generation
             assert check_if_auto_recover(handler.config) is True
+
+    def test_successful_saves_keep_last_three_generations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler = self._make_handler(tmpdir, "on")
+
+            class Engine:
+                @staticmethod
+                def save(meta):
+                    with open(os.path.join(meta.path, "complete"), "w") as f:
+                        f.write("ok")
+
+            class Stateful:
+                @staticmethod
+                def state_dict():
+                    return {}
+
+            stateful = Stateful()
+            for global_step in range(4):
+                handler.dump(
+                    Engine(),
+                    StepInfo(
+                        epoch=0,
+                        epoch_step=global_step,
+                        global_step=global_step,
+                        steps_per_epoch=handler.ft_spec.steps_per_epoch,
+                    ),
+                    stateful,
+                    stateful,
+                    stateful,
+                    stateful,
+                )
+
+            generations_root = os.path.join(
+                handler._recover_root("test_exp", "test_trial", tmpdir),
+                handler._GENERATIONS_DIR,
+            )
+            retained_steps = []
+            for generation in os.listdir(generations_root):
+                with open(
+                    os.path.join(
+                        generations_root,
+                        generation,
+                        "recover_info",
+                        "step_info.json",
+                    )
+                ) as f:
+                    retained_steps.append(json.load(f)["global_step"])
+            assert sorted(retained_steps) == [1, 2, 3]
 
     def test_failed_state_collection_removes_uncommitted_generation(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -2156,6 +2156,15 @@ class RecoverConfig(_Timer):
         default=3,
         metadata={"help": "Number of recovery retries when recovery is enabled."},
     )
+    keep_last_n: int = field(
+        default=3,
+        metadata={
+            "help": (
+                "Number of complete recovery generations to retain. The current "
+                "generation is always retained; values must be at least 1."
+            )
+        },
+    )
     no_save_optim: bool = field(
         default=False,
         metadata={
@@ -2178,6 +2187,10 @@ class RecoverConfig(_Timer):
                 f"Invalid recover mode '{self.mode}'. "
                 f"Valid options: {valid_modes}. "
                 f"Note: 'fault' and 'resume' modes have been removed."
+            )
+        if self.keep_last_n < 1:
+            raise ValueError(
+                f"recover.keep_last_n must be at least 1, got {self.keep_last_n}."
             )
 
 
