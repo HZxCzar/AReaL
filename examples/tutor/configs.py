@@ -1828,6 +1828,28 @@ class TutorRewardConfig:
             )
         },
     )
+    teacher_exact_repeat_penalty: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Penalty on a teacher reply that exactly matches any earlier "
+                "student-visible teacher reply after whitespace normalization. "
+                "Add 'teacher_exact_repeat' to reward.turn_local_components to "
+                "choose its advantage layer. Must be <= 0; 0 disables it."
+            )
+        },
+    )
+    teacher_exact_repeat_terminate: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Terminate before calling the student when a student-visible "
+                "teacher reply exactly repeats any earlier visible reply. The "
+                "repeated reply is trained but excluded from student and re-test "
+                "contexts. Requires a negative local exact-repeat penalty."
+            )
+        },
+    )
     personality_gate_terminate_penalty: float = field(
         default=0.0,
         metadata={
@@ -1899,6 +1921,9 @@ class TutorRewardConfig:
     def __post_init__(self) -> None:
         if self.format_error_penalty > 0.0:
             raise ValueError("reward.format_error_penalty must be <= 0.")
+        self.teacher_exact_repeat_penalty = float(self.teacher_exact_repeat_penalty)
+        if self.teacher_exact_repeat_penalty > 0.0:
+            raise ValueError("reward.teacher_exact_repeat_penalty must be <= 0.")
         self.turn_local_components = list(self.turn_local_components)
         self.turn_local_component_placements = dict(
             self.turn_local_component_placements
@@ -1923,6 +1948,17 @@ class TutorRewardConfig:
                 "'group_norm', 'pre_std', or 'post_std'; got "
                 f"{invalid_placements}."
             )
+        if self.teacher_exact_repeat_terminate:
+            if self.teacher_exact_repeat_penalty >= 0.0:
+                raise ValueError(
+                    "reward.teacher_exact_repeat_terminate requires "
+                    "reward.teacher_exact_repeat_penalty < 0."
+                )
+            if "teacher_exact_repeat" not in self.turn_local_components:
+                raise ValueError(
+                    "reward.teacher_exact_repeat_terminate requires "
+                    "'teacher_exact_repeat' in reward.turn_local_components."
+                )
         self.personality_gate_terminate_penalty = float(
             self.personality_gate_terminate_penalty
         )

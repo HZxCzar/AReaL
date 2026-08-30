@@ -266,6 +266,11 @@ class TurnArtifact:
     # complaint. Like a leak/format termination, this turn is trained but never
     # enters either dialogue transcript.
     personality_gate_terminated: bool = False
+    # True when this student-visible reply exactly matches any earlier
+    # student-visible teacher reply after whitespace normalization. A terminating
+    # repeat is trained but is not appended to either the student conversation or
+    # the re-test context.
+    teacher_exact_repeat: bool = False
     # Set when this turn was selected for on-policy distillation. Holds the
     # instructed-teacher prompt tokens; the output tokens are appended by
     # ``response_to_tensordict``.
@@ -350,3 +355,4 @@ class TurnTrace:
     personality_gated: bool = False
     personality_complaint_explained: bool = False
     personality_gate_terminated: bool = False
+    teacher_exact_repeat: bool = False

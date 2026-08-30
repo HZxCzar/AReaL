@@ -15,9 +15,10 @@
 #
 #   leak_handling_mode        terminate
 #   format_handling_mode      terminate
-#   reward.turn_local_components  [leak, format_error] -- both penalties stay on the
-#                             turn that raised them instead of being accumulated
-#                             backward; both use post_std placement by default
+#   reward.turn_local_components  [leak, format_error, teacher_exact_repeat] -- all
+#                             three penalties stay on the turn that raised them
+#                             instead of being accumulated backward; all use
+#                             post_std placement by default
 #   teacher_pre               enabled, verify true in TRAINING
 #   evaluator.teacher_pre_*   pre-solve on, verification OFF at eval
 #   student_models            one student, (behavior text, information unmasked)
@@ -183,6 +184,13 @@ student_models:
         enable_thinking: false
 reward:
   format_error_penalty: -0.5
+  # Exact means the visible teacher text matches any earlier student-visible
+  # teacher text after whitespace normalization. This catches A-B-A, not only
+  # adjacent repeats. Stop before the student call and train the repeated turn on
+  # this fixed post-std penalty; the repeated text enters neither student history
+  # nor the re-test context.
+  teacher_exact_repeat_penalty: -0.5
+  teacher_exact_repeat_terminate: true
   success: 0.0
   leak_penalty_mode: rawbase
   assign_success_reward: false
@@ -195,14 +203,15 @@ reward:
   length_penalty_threshold_chars: 0
   length_penalty_per_100_chars: 0.0
   length_penalty_min: 0.0
-  # Lists replace on merge; spelling out both components preserves leak-local.
-  turn_local_components: ["leak", "format_error"]
-  # Fixed normalized-advantage penalties: neither event enters the group baseline
+  # Lists replace on merge; spelling out all components preserves each local term.
+  turn_local_components: ["leak", "format_error", "teacher_exact_repeat"]
+  # Fixed normalized-advantage penalties: none enters the group baseline
   # or the batch std. Override one component with group_norm or pre_std for an
   # ablation; configs without this mapping retain the legacy actor-wide behavior.
   turn_local_component_placements:
     leak: post_std
     format_error: post_std
+    teacher_exact_repeat: post_std
 
 debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor/debug_traces/${experiment_name}/${trial_name}
 debug_trace_every_n_rollouts: 10

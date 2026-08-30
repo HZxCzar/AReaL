@@ -37,6 +37,7 @@ def _turn(
     *,
     leaked: bool,
     format_error: bool = False,
+    exact_repeat: bool = False,
     gate_failed: bool = False,
     gate_terminated: bool = False,
 ) -> TurnArtifact:
@@ -51,6 +52,7 @@ def _turn(
         public_history_before=[],
         public_history_after=[],
         tutor_format_error=format_error,
+        teacher_exact_repeat=exact_repeat,
         personality_gated=gate_failed,
         personality_gate_terminated=gate_terminated,
     )
@@ -105,6 +107,33 @@ def test_format_penalty_is_reported_as_turn_local_when_configured():
 
     assert [a.local_reward for a in assignments] == [-0.5]
     assert [a.reward for a in assignments] == [-0.5]
+
+
+def test_exact_repeat_penalty_is_post_std_on_only_the_repeated_turn():
+    computer = EpisodeRewardComputer(
+        success_reward=0.0,
+        leak_penalty=-1.0,
+        leak_penalty_mode="rawbase",
+        teacher_exact_repeat_penalty=-0.5,
+        turn_local_components=("teacher_exact_repeat",),
+        turn_local_component_placements={"teacher_exact_repeat": "post_std"},
+    )
+    assignments = asyncio.run(
+        computer.compute(
+            _episode(
+                [
+                    _turn(1, leaked=False),
+                    _turn(2, leaked=False, exact_repeat=True),
+                ]
+            )
+        )
+    )
+
+    assert [a.reward for a in assignments] == [0.0, -0.5]
+    assert [a.local_reward_by_placement["post_std"] for a in assignments] == [
+        0.0,
+        -0.5,
+    ]
 
 
 def test_turn_local_components_can_choose_different_placements():

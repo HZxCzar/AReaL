@@ -70,6 +70,17 @@ _STOPWORDS = frozenset(
     here what which who when where how why now next step let s t re ve ll m d""".split()
 )
 
+
+def normalize_exact_teacher_output(text: str | None) -> str:
+    """Canonical text for exact-repeat detection.
+
+    Only whitespace is normalized. Case, punctuation, words, numbers, and math
+    remain significant so a stable teaching scaffold with new content is not
+    mistaken for a repeat.
+    """
+    return " ".join((text or "").split())
+
+
 # Depth buckets. Kept coarse so the metric namespace stays readable, and cut
 # where the measured behaviour changes: 1-2 is the healthy end, 3-4 is where
 # the overlap crosses 20%, 5-7 is where the hazard reaches single digits, 8-10

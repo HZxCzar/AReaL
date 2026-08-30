@@ -25,6 +25,7 @@ class EpisodeRewardComputer:
         leak_penalty_formula: float | None = None,
         leak_penalty_aggregation: str = "turn",
         format_error_penalty: float = 0.0,
+        teacher_exact_repeat_penalty: float = 0.0,
         personality_gate_terminate_penalty: float = 0.0,
         personality_gate_fail_penalty: float = 0.0,
         leaked_success_reward_scale: float = 1.0,
@@ -57,6 +58,8 @@ class EpisodeRewardComputer:
             raise ValueError("leak_penalty_aggregation must be 'turn' or 'episode'.")
         if format_error_penalty > 0.0:
             raise ValueError("format_error_penalty must be <= 0.")
+        if teacher_exact_repeat_penalty > 0.0:
+            raise ValueError("teacher_exact_repeat_penalty must be <= 0.")
         if personality_gate_terminate_penalty > 0.0:
             raise ValueError("personality_gate_terminate_penalty must be <= 0.")
         if personality_gate_fail_penalty > 0.0:
@@ -121,6 +124,7 @@ class EpisodeRewardComputer:
         self.assign_success_reward = assign_success_reward
         self.leak_penalty_aggregation = leak_penalty_aggregation
         self.format_error_penalty = float(format_error_penalty)
+        self.teacher_exact_repeat_penalty = float(teacher_exact_repeat_penalty)
         self.personality_gate_terminate_penalty = float(
             personality_gate_terminate_penalty
         )
@@ -177,6 +181,8 @@ class EpisodeRewardComputer:
                 components[name] = value
             if artifact.tutor_format_error and self.format_error_penalty:
                 components["format_error"] = self.format_error_penalty
+            if artifact.teacher_exact_repeat and self.teacher_exact_repeat_penalty:
+                components["teacher_exact_repeat"] = self.teacher_exact_repeat_penalty
             if (
                 artifact.personality_gate_terminated
                 and self.personality_gate_terminate_penalty
@@ -376,4 +382,5 @@ def artifact_to_trace(
         personality_gated=artifact.personality_gated,
         personality_complaint_explained=(artifact.personality_complaint_explained),
         personality_gate_terminated=artifact.personality_gate_terminated,
+        teacher_exact_repeat=artifact.teacher_exact_repeat,
     )

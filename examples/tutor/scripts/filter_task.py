@@ -895,6 +895,8 @@ def build_workflow(
             else "pre_std"
         ),
         format_error_penalty=reward.format_error_penalty,
+        teacher_exact_repeat_penalty=reward.teacher_exact_repeat_penalty,
+        teacher_exact_repeat_terminate=reward.teacher_exact_repeat_terminate,
         personality_gate_terminate_penalty=(reward.personality_gate_terminate_penalty),
         personality_gate_fail_penalty=reward.personality_gate_fail_penalty,
         leaked_success_reward_scale=reward.leaked_success_reward_scale,

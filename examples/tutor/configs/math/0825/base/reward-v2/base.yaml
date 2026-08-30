@@ -15,6 +15,7 @@ reward:
   personality_gate_fail_penalty: -0.5
   # Lists replace on merge: preserve the default local penalties and add the
   # reward-v2-only gate-failure component here, beside its coefficient.
-  turn_local_components: ["leak", "format_error", "personality_gate_fail"]
+  turn_local_components:
+    ["leak", "format_error", "teacher_exact_repeat", "personality_gate_fail"]
   turn_local_component_placements:
     personality_gate_fail: post_std

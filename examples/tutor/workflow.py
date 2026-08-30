@@ -192,7 +192,10 @@ from examples.tutor.core.parsers import (
     parse_staged_leak_check_result,
     parse_tagged_teacher_output,
 )
-from examples.tutor.core.repetition import depth_metrics
+from examples.tutor.core.repetition import (
+    depth_metrics,
+    normalize_exact_teacher_output,
+)
 from examples.tutor.core.rewards import EpisodeRewardComputer, artifact_to_trace
 from examples.tutor.core.scoring import AnswerScorer, get_answer_scorer
 from examples.tutor.core.semantic_similarity import (
@@ -343,6 +346,7 @@ _REWARD_COMPONENT_ALIASES = {
 
 LEAK_TERMINATION_REASON = "leak"
 FORMAT_TERMINATION_REASON = "format_error"
+TEACHER_EXACT_REPEAT_TERMINATION_REASON = "teacher_exact_repeat"
 PERSONALITY_GATE_TERMINATION_REASON = "personality_gate_after_explanation"
 TEACHER_PRE_SKIPPED_TERMINATION_REASON = "pre_solve_skipped"
 LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate"}
@@ -932,6 +936,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         turn_local_reward_component_placements: dict[str, str] | None = None,
         turn_local_reward_default_placement: str = "pre_std",
         format_error_penalty: float = 0.0,
+        teacher_exact_repeat_penalty: float = 0.0,
+        teacher_exact_repeat_terminate: bool = False,
         personality_gate_terminate_penalty: float = 0.0,
         personality_gate_fail_penalty: float = 0.0,
         leaked_success_reward_scale: float = 1.0,
@@ -1169,6 +1175,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError("leak_penalty_aggregation must be 'turn' or 'episode'.")
         if format_error_penalty > 0.0:
             raise ValueError("format_error_penalty must be <= 0.")
+        if teacher_exact_repeat_penalty > 0.0:
+            raise ValueError("teacher_exact_repeat_penalty must be <= 0.")
+        if teacher_exact_repeat_terminate:
+            if teacher_exact_repeat_penalty >= 0.0:
+                raise ValueError(
+                    "teacher_exact_repeat_terminate requires "
+                    "teacher_exact_repeat_penalty < 0."
+                )
+            if "teacher_exact_repeat" not in turn_local_reward_components:
+                raise ValueError(
+                    "teacher_exact_repeat_terminate requires "
+                    "'teacher_exact_repeat' in turn_local_reward_components."
+                )
         if personality_gate_terminate_penalty > 0.0:
             raise ValueError("personality_gate_terminate_penalty must be <= 0.")
         if personality_gate_fail_penalty > 0.0:
@@ -1197,6 +1216,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         self.turn_local_reward_default_placement = turn_local_reward_default_placement
         self.format_error_penalty = float(format_error_penalty)
+        self.teacher_exact_repeat_penalty = float(teacher_exact_repeat_penalty)
+        self.teacher_exact_repeat_terminate = bool(teacher_exact_repeat_terminate)
         self.personality_gate_terminate_penalty = float(
             personality_gate_terminate_penalty
         )
@@ -3231,6 +3252,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         hide_gated_turns_from_student = (
             self._hide_personality_gated_turns_from_student()
         )
+        # All student-visible teacher replies in this episode, not just the last
+        # one. This is what makes A-B-A a repeat while keeping gate-failed turns
+        # out of the comparison set in teacher-only visibility mode.
+        student_visible_teacher_outputs: set[str] = set()
         previous_tutor_visible_output = ""
         previous_tutor_raw_outputs: tuple[str, ...] = ()
         previous_student_output = initial_student_answer
@@ -3410,6 +3435,42 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
                 break
 
+            teacher_output_will_be_student_visible = not (
+                personality_gated and hide_gated_turns_from_student
+            )
+            normalized_teacher_output = normalize_exact_teacher_output(
+                tutor_visible_output
+            )
+            teacher_exact_repeat = bool(
+                teacher_output_will_be_student_visible
+                and normalized_teacher_output
+                and normalized_teacher_output in student_visible_teacher_outputs
+            )
+            if teacher_exact_repeat and self.teacher_exact_repeat_terminate:
+                # Keep the offending sample for its local penalty, but stop before
+                # the student call and leave both student-visible histories at the
+                # last completed round. The teacher's prompt already contains all
+                # private gate feedback that preceded this turn.
+                termination_reason = TEACHER_EXACT_REPEAT_TERMINATION_REASON
+                turn_artifacts.append(
+                    TurnArtifact(
+                        turn_idx=turn_idx,
+                        tutor_state=tutor_state,
+                        tutor_messages=list(self._build_tutor_messages(tutor_state)),
+                        tutor_response=response,
+                        tutor_raw_output=tutor_raw_output,
+                        tutor_visible_output=tutor_visible_output,
+                        leak_result=leak_result,
+                        public_history_before=public_before,
+                        public_history_after=public_before,
+                        tutor_format_error=tutor_format_error,
+                        personality_gate_result=personality_gate_result,
+                        personality_gated=personality_gated,
+                        teacher_exact_repeat=True,
+                    )
+                )
+                break
+
             personality_complaint_explained = False
             if personality_gated:
                 # No student call: the complaint IS the teacher-visible student
@@ -3514,8 +3575,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     personality_gate_result=personality_gate_result,
                     personality_gated=personality_gated,
                     personality_complaint_explained=(personality_complaint_explained),
+                    teacher_exact_repeat=teacher_exact_repeat,
                 )
             )
+
+            if teacher_output_will_be_student_visible and normalized_teacher_output:
+                student_visible_teacher_outputs.add(normalized_teacher_output)
 
             if personality_complaint_explained:
                 personality_explanation_seen = True
@@ -3645,6 +3710,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 self, "turn_local_reward_default_placement", "pre_std"
             ),
             format_error_penalty=getattr(self, "format_error_penalty", 0.0),
+            teacher_exact_repeat_penalty=getattr(
+                self, "teacher_exact_repeat_penalty", 0.0
+            ),
             personality_gate_terminate_penalty=getattr(
                 self, "personality_gate_terminate_penalty", 0.0
             ),
@@ -6888,10 +6956,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
         prefix whose re-test failed to score is carried forward rather than
         dropped, which keeps that property intact.
         """
+        # A terminating exact-repeat turn was never shown to the student and
+        # therefore cannot have produced re-test improvement. Attach the final
+        # boundary to the last completed, non-repeat round instead.
+        credit_artifacts = [
+            artifact for artifact in turn_artifacts if not artifact.teacher_exact_repeat
+        ]
         credits: dict[int, float] = {}
         previous = float(baseline)
-        last_position = len(turn_artifacts) - 1
-        for position, artifact in enumerate(turn_artifacts):
+        last_position = len(credit_artifacts) - 1
+        for position, artifact in enumerate(credit_artifacts):
             turn_idx = int(artifact.turn_idx)
             if position == last_position:
                 current = float(final_fraction)
@@ -8360,6 +8434,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 int(bool(getattr(trace, "tutor_format_error", None)))
                 for trace in traces
             ),
+            "teacher_exact_repeats": sum(
+                int(bool(trace.teacher_exact_repeat)) for trace in traces
+            ),
             "invalid_success_due_to_leak": int(invalid_success_due_to_leak),
             "pre_solved": float(pre_success),
             "solved": outcome_score,
@@ -8373,6 +8450,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
             "stop/leak": float(termination_reason == LEAK_TERMINATION_REASON),
             "stop/format_error": float(termination_reason == FORMAT_TERMINATION_REASON),
+            "stop/teacher_exact_repeat": float(
+                termination_reason == TEACHER_EXACT_REPEAT_TERMINATION_REASON
+            ),
             "stop/personality_gate_after_explanation": float(
                 termination_reason == PERSONALITY_GATE_TERMINATION_REASON
             ),
@@ -8811,6 +8891,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             self, "format_error_penalty", 0.0
         ):
             keys.append("format_error")
+        if getattr(self, "teacher_exact_repeat_penalty", 0.0):
+            keys.append("teacher_exact_repeat")
         if getattr(self, "personality_gate_terminate_penalty", 0.0):
             keys.append("personality_gate_terminate")
         if getattr(self, "enable_turn_penalty", False) and getattr(

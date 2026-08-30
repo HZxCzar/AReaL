@@ -26,6 +26,7 @@ def trace_to_history_record(
         "teacher_format_error": trace.tutor_format_error,
         "personality_complaint_explained": trace.personality_complaint_explained,
         "personality_gate_terminated": trace.personality_gate_terminated,
+        "teacher_exact_repeat": trace.teacher_exact_repeat,
         "public_history_before": trace.public_history_before,
         "public_history_after": trace.public_history_after,
         "student_turn_behavior": (

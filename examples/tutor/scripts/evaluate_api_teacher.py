@@ -583,6 +583,8 @@ def build_eval_workflow_kwargs(
             else "pre_std"
         ),
         "format_error_penalty": reward.format_error_penalty,
+        "teacher_exact_repeat_penalty": reward.teacher_exact_repeat_penalty,
+        "teacher_exact_repeat_terminate": reward.teacher_exact_repeat_terminate,
         "personality_gate_terminate_penalty": (
             reward.personality_gate_terminate_penalty
         ),
