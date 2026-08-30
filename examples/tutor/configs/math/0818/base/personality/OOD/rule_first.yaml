@@ -33,12 +33,11 @@ student_models:
   max_tokens: 2048
   temperature: 0.7
   top_p: 0.8
-  # 32, as in base/single/*.yaml, and it must NOT be raised for a larger allocation.
-  # One AsyncLLMCaller is built per student entry and the endpoint is tuned for 32
-  # concurrent student requests in total; a saturated endpoint refuses rather than
-  # slows, and the symptom is student/<name>/call_failed corrupting an episode's
-  # reward rather than merely costing time.
-  max_concurrent_calls: 32
+  # 24 rather than 32: the 8-GPU local student reached 95-96% KV usage and queued
+  # requests at 32. Waiting on this caller-local semaphore happens before the HTTP
+  # timeout, so the lower cap adds backpressure without turning queueing into a
+  # failed episode.
+  max_concurrent_calls: 24
   request_params:
     seed: 42
     extra_headers:

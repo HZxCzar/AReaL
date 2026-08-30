@@ -21,13 +21,10 @@
 #   teacher_pre               enabled, verify true in TRAINING
 #   evaluator.teacher_pre_*   pre-solve on, verification OFF at eval
 #   student_models            one student, (behavior text, information unmasked)
-#   evaluator.freq_steps      25
 #   personality             shared prompt/complaint files, gate rate 1.0,
 #                           explain ratio 0.5, 3 retries, teacher-only failures
 #   free_chat.transfer_prompts  absent, so off: the re-test problem is the problem
 #                             the dialogue was about
-#   teacher_history_tags      unmasked -- the TEACHER side, unrelated to the
-#                             student's information axis
 #
 # NOT COMPARABLE WITH 0810. Every 0810 arm ran leak_handling_mode reward_only or
 # format_handling_mode continue or both, and most ran teacher_history_tags masked.
