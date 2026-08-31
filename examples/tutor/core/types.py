@@ -4,7 +4,9 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 FeedbackKind = Literal["none", "student_judged"]
-LeakHandlingMode = Literal["disabled", "reward_only", "terminate"]
+LeakHandlingMode = Literal[
+    "disabled", "reward_only", "terminate", "masked_continue"
+]
 StudentGeneralizeMode = Literal["only_success", "always"]
 TurnLocalRewardPlacement = Literal["group_norm", "pre_std", "post_std"]
 TURN_LOCAL_REWARD_PLACEMENTS = frozenset({"group_norm", "pre_std", "post_std"})
@@ -245,6 +247,10 @@ class TurnArtifact:
     student_error: str | None = None
     judge_result: JudgeResult | None = None
     invalid_due_to_leak: bool = False
+    # In masked_continue mode a leaked teacher turn is retained only in the
+    # teacher's history. The real student is not called; student_output is the
+    # injected user reply, and student/re-test history stays on its prior branch.
+    leak_masked: bool = False
     previous_teacher_similarity: float | None = None
     teacher_similarity_error: str | None = None
     teacher_progress_judge_result: TeacherProgressJudgeResult | None = None
@@ -339,6 +345,7 @@ class TurnTrace:
     student_turn_behavior: StudentTurnBehavior | None = None
     leak_level: int | None = None
     invalid_due_to_leak: bool = False
+    leak_masked: bool = False
     tutor_format_error: str | None = None
     previous_teacher_similarity: float | None = None
     teacher_similarity_error: str | None = None

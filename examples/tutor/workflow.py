@@ -349,7 +349,15 @@ FORMAT_TERMINATION_REASON = "format_error"
 TEACHER_EXACT_REPEAT_TERMINATION_REASON = "teacher_exact_repeat"
 PERSONALITY_GATE_TERMINATION_REASON = "personality_gate_after_explanation"
 TEACHER_PRE_SKIPPED_TERMINATION_REASON = "pre_solve_skipped"
-LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate"}
+LEAK_HANDLING_MODES = {
+    "disabled",
+    "reward_only",
+    "terminate",
+    "masked_continue",
+}
+LEAK_MASKED_STUDENT_REPLY = (
+    "Please do not leak the answer to me; let me think by myself."
+)
 TEACHER_PRE_ON_REJECT_MODES = {"skip", "continue"}
 # Live entries in the pre-solve cache. One step needs
 # train_dataset.batch_size (16) of them, so this is deep enough that nothing is
@@ -1100,7 +1108,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if leak_handling_mode not in LEAK_HANDLING_MODES:
             raise ValueError(
                 "leak_handling_mode must be one of: 'disabled', "
-                "'reward_only', or 'terminate'."
+                "'reward_only', 'terminate', or 'masked_continue'."
             )
         self.leak_handling_mode: LeakHandlingMode = leak_handling_mode
         self.gconfig = gconfig
@@ -1922,6 +1930,17 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 PERSONALITY_GATED_TURN_VISIBILITY_SHARED,
             )
             == PERSONALITY_GATED_TURN_VISIBILITY_TEACHER_ONLY
+        )
+
+    def _turn_hidden_from_student(self, artifact: TurnArtifact) -> bool:
+        """Whether this teacher/fake-student pair belongs only to teacher history."""
+
+        return bool(
+            getattr(artifact, "leak_masked", False)
+            or (
+                artifact.personality_gated
+                and self._hide_personality_gated_turns_from_student()
+            )
         )
 
     def _personality_rng(self, *, kind: str, turn_idx: int) -> random.Random:
@@ -3348,7 +3367,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
                 break
             leak_result = self._pending_leak_check_result()
-            if self.leak_handling_mode == "terminate":
+            if self.leak_handling_mode in {"terminate", "masked_continue"}:
                 leak_result = await self._run_optional_leak_check(
                     task,
                     ground_truth,
@@ -3374,6 +3393,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
                         )
                     )
                     break
+            leak_masked = bool(
+                self.leak_handling_mode == "masked_continue"
+                and leak_result.leaked
+            )
 
             student_turn_behavior = self._select_student_turn_behavior(
                 response_index=turn_idx
@@ -3394,13 +3417,20 @@ class TutorAgentWorkflow(RolloutWorkflow):
             # auxiliary call -- worth most when the policy is worst, since both rates
             # start high. And before the student call, because a message that fails
             # the preference means the student does not answer at all.
-            personality_gate_result = await self._run_personality_gate(
-                selected_student.personality,
-                tutor_visible_output,
-                task=task,
-                turn_idx=turn_idx,
-                previous_student_message=last_real_student_output,
-                aux_caller=aux_caller,
+            # A masked leak has already closed the student-visibility gate. Do
+            # not spend a second classifier call or inject a competing
+            # personality complaint on the same teacher turn.
+            personality_gate_result = (
+                None
+                if leak_masked
+                else await self._run_personality_gate(
+                    selected_student.personality,
+                    tutor_visible_output,
+                    task=task,
+                    turn_idx=turn_idx,
+                    previous_student_message=last_real_student_output,
+                    aux_caller=aux_caller,
+                )
             )
             personality_gated = (
                 personality_gate_result is not None
@@ -3436,7 +3466,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 break
 
             teacher_output_will_be_student_visible = not (
-                personality_gated and hide_gated_turns_from_student
+                leak_masked
+                or (personality_gated and hide_gated_turns_from_student)
             )
             normalized_teacher_output = normalize_exact_teacher_output(
                 tutor_visible_output
@@ -3472,7 +3503,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 break
 
             personality_complaint_explained = False
-            if personality_gated:
+            if leak_masked:
+                # This synthetic reply is a user turn in the teacher's
+                # conversation. The real student is never called, and the
+                # filtered student/re-test branch advances by neither message.
+                student_prompt = ""
+                student_answer_raw = LEAK_MASKED_STUDENT_REPLY
+                student_error = None
+            elif personality_gated:
                 # No student call: the complaint IS the teacher-visible student
                 # turn. Under shared visibility it remains in both transcripts;
                 # under teacher_only it gives the teacher feedback but never enters
@@ -3501,7 +3539,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             # wrong answer.
             judge_result = (
                 self._unscored_judge_result()
-                if (free_chat or personality_gated)
+                if (free_chat or personality_gated or leak_masked)
                 else await self._score_answer_async(
                     task,
                     ground_truth,
@@ -3519,6 +3557,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 should_generate=(
                     not free_chat
                     and not personality_gated
+                    and not leak_masked
                     and not judge_result.correct
                     and not student_error
                     and turn_idx < self.max_turns
@@ -3551,6 +3590,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 tutor_visible_output=tutor_visible_output,
                 current_student_output=student_answer,
                 personality_gated=personality_gated,
+                leak_masked=leak_masked,
                 history_already_filtered=student_history_filtered,
                 hide_gated_turns=hide_gated_turns_from_student,
             )
@@ -3563,6 +3603,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     tutor_raw_output=tutor_raw_output,
                     tutor_visible_output=tutor_visible_output,
                     leak_result=leak_result,
+                    leak_masked=leak_masked,
                     public_history_before=public_before,
                     public_history_after=list(next_public_history.turns),
                     tutor_format_error=tutor_format_error,
@@ -3594,7 +3635,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             previous_tutor_visible_output = tutor_visible_output
             previous_student_output = student_answer
             student_visible_previous_output = next_student_visible_output
-            if not personality_gated:
+            if not personality_gated and not leak_masked:
                 last_real_student_output = student_answer
             preceding_student_turn_behavior = effective_student_turn_behavior
             previous_feedback = TutorPrivateFeedback(
@@ -3830,7 +3871,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     else None
                 ),
                 gate_credit_mask=(
-                    not artifact.personality_gated
+                    not (artifact.personality_gated or artifact.leak_masked)
                     if getattr(self, "student_generalize_gate_pass_credit_only", False)
                     else None
                 ),
@@ -5480,6 +5521,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         personality_gated: bool,
         history_already_filtered: bool,
         hide_gated_turns: bool | None = None,
+        leak_masked: bool = False,
     ) -> tuple[PublicHistoryState, str, bool]:
         """Advance the real student's branch without changing teacher history."""
 
@@ -5488,9 +5530,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
             if hide_gated_turns is None
             else bool(hide_gated_turns)
         )
-        if not hide:
+        if not hide and not leak_masked and not history_already_filtered:
             return complete_history_after, current_student_output, False
-        if personality_gated:
+        if leak_masked or (personality_gated and hide):
             return student_visible_history, previous_student_output, True
         if not history_already_filtered:
             return complete_history_after, current_student_output, False
@@ -6399,9 +6441,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
         turn_count = 0
         summary = ""
         if artifact.student_state is not None:
-            if self._hide_personality_gated_turns_from_student():
+            if (
+                self._hide_personality_gated_turns_from_student()
+                or getattr(self, "leak_handling_mode", "") == "masked_continue"
+            ):
                 before = artifact.student_state.public_history
-                if artifact.personality_gated:
+                if self._turn_hidden_from_student(artifact):
                     return PublicHistoryState(
                         summary=before.summary,
                         turn_count=before.turn_count,
@@ -6441,8 +6486,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         previous_student_output = artifact.student_output
         teacher_feedback = artifact.tutor_visible_output
         if (
-            self._hide_personality_gated_turns_from_student()
-            and artifact.personality_gated
+            self._turn_hidden_from_student(artifact)
             and artifact.student_state is not None
         ):
             previous_student_output = artifact.student_state.previous_student_output
@@ -7382,7 +7426,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if initial_student_answer:
             transcript.append({"role": "student", "content": initial_student_answer})
         for artifact in turn_artifacts:
-            if hide_personality_gated_turns and artifact.personality_gated:
+            if getattr(artifact, "leak_masked", False) or (
+                hide_personality_gated_turns and artifact.personality_gated
+            ):
                 continue
             visible = str(artifact.tutor_visible_output or "").strip()
             transcript.append({"role": "teacher", "content": visible})

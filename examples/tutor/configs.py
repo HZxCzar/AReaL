@@ -22,7 +22,12 @@ from areal.api.cli_args import (
     PPOActorConfig,
 )
 
-_LEAK_HANDLING_MODES = {"disabled", "reward_only", "terminate"}
+_LEAK_HANDLING_MODES = {
+    "disabled",
+    "reward_only",
+    "terminate",
+    "masked_continue",
+}
 _FORMAT_HANDLING_MODES = {"continue", "terminate"}
 _DATASET_TYPES = {"aime", "math", "polaris"}
 _ANSWER_SCORERS = {"auto", "aime", "math", "polaris"}
@@ -942,8 +947,10 @@ class TutorStudentGeneralizeConfig:
         metadata={
             "help": (
                 "Propagate the ORIGINAL re-test improvement return only onto "
-                "teacher turns whose personality gate passed. Gate-failed turns "
-                "keep zero improvement return before the same-turn group baseline; "
+                "teacher turns whose personality gate passed. In "
+                "leak_handling_mode='masked_continue', masked leak turns are "
+                "excluded by the same credit mask. Rejected turns keep zero "
+                "improvement return before the same-turn group baseline; "
                 "turn-local rewards such as leak and format penalties are unchanged. "
                 "Requires ReBN with a leave-one-out turn baseline and no advantage "
                 "mean-centering. Off preserves the historical reward path."
@@ -1387,7 +1394,9 @@ class TutorEvaluatorConfig(EvaluatorConfig):
                 "truncates a real conversation -- so it should not decide what "
                 "gets measured. With False the train-consistent number is still "
                 "reported, as student_original_preleak_success, computed on the "
-                "same rollout."
+                "same rollout. For leak_handling_mode='masked_continue', False "
+                "keeps that already non-terminating mode and its hidden-history "
+                "semantics."
             )
         },
     )
@@ -2728,9 +2737,17 @@ class TutorConfig(GRPOConfig):
             "help": (
                 "Leak handling mode: 'disabled' skips leak checks; "
                 "'reward_only' checks after rollout and applies reward penalties; "
-                "'terminate' stops before the student sees leaked tutor output."
+                "'terminate' stops before the student sees leaked tutor output; "
+                "'masked_continue' checks before each student call, hides a leaked "
+                "teacher turn from the real student and re-test, injects a fixed "
+                "user reply into teacher-only history, and continues."
             ),
-            "choices": ["disabled", "reward_only", "terminate"],
+            "choices": [
+                "disabled",
+                "reward_only",
+                "terminate",
+                "masked_continue",
+            ],
         },
     )
     format_handling_mode: str = field(
@@ -3106,7 +3123,7 @@ class TutorConfig(GRPOConfig):
         if self.leak_handling_mode not in _LEAK_HANDLING_MODES:
             raise ValueError(
                 "leak_handling_mode must be one of: 'disabled', "
-                "'reward_only', or 'terminate'."
+                "'reward_only', 'terminate', or 'masked_continue'."
             )
         if self.dataset_type == "polaris":
             if self.leak_handling_mode != "disabled":

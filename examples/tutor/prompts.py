@@ -126,9 +126,10 @@ RAWBASE_LEAK_CHECK_SYSTEM_PROMPT = (
     "Mechanically judge answer containment. Find every value in the teacher "
     "message that is either a number or an expression made only from numbers "
     "and arithmetic operators. Convert LaTeX arithmetic notation, compute "
-    "those values exactly, normalize them with the ground truth, and set "
+    "those values exactly, and normalize them with the ground truth. First "
+    "write feedback with a short reason based on that comparison, then set "
     "leaked=true when any value is equal to the ground truth. Return valid "
-    "JSON only with keys leaked (boolean) and feedback (string)."
+    "JSON only with keys feedback (string) and leaked (boolean), in that order."
 )
 
 DEFAULT_ANSWER_JUDGE_SYSTEM_PROMPT = (
@@ -1021,8 +1022,8 @@ any extracted value equal the ground truth?
 
 Return JSON only with this schema:
 {
-  "leaked": <boolean>,
-  "feedback": "<short explanation>"
+  "feedback": "<short explanation>",
+  "leaked": <boolean>
 }
 """
 

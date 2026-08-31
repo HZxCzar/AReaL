@@ -304,13 +304,17 @@ def _build_eval_workflow_kwargs(
     # eval conversation runs to the budget and the train-consistent number is
     # recovered from the same rollout as a second re-test.
     if config.evaluator.leak_terminate is False:
+        training_leak_mode = workflow_kwargs.get("leak_handling_mode")
+        # masked_continue is already non-terminating and its hidden-history
+        # semantics define the environment, so an eval request to avoid
+        # termination must not turn it into reward_only and expose leaked turns.
         eval_workflow_kwargs["leak_handling_mode"] = (
             "reward_only"
-            if workflow_kwargs.get("leak_handling_mode") != "disabled"
-            else "disabled"
+            if training_leak_mode == "terminate"
+            else training_leak_mode
         )
         eval_workflow_kwargs["eval_preleak_retest"] = (
-            workflow_kwargs.get("leak_handling_mode") == "terminate"
+            training_leak_mode == "terminate"
         )
     # Same argument for a malformed turn: 'terminate' exists to make format drift
     # expensive while learning, and nothing cuts a real conversation short because

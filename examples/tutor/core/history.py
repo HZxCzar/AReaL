@@ -23,6 +23,7 @@ def trace_to_history_record(
         "reward_components": dict(trace.reward_components),
         "leak_detected": trace.leaked,
         "invalid_due_to_leak": trace.invalid_due_to_leak,
+        "leak_masked": trace.leak_masked,
         "teacher_format_error": trace.tutor_format_error,
         "personality_complaint_explained": trace.personality_complaint_explained,
         "personality_gate_terminated": trace.personality_gate_terminated,
