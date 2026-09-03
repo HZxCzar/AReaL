@@ -668,13 +668,38 @@ def _compute_turn_group_baseline(
     group_ids: torch.Tensor,
     valid_mask: torch.Tensor,
     leave_one_out: bool,
+    *,
+    singleton_fallback_baseline: torch.Tensor | None = None,
+    singleton_credit_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Per-row baseline from other episodes at the same group and turn depth.
 
     Ragged episodes contribute only at turns they actually reached. A singleton
-    ``(group_id, turn_idx)`` stratum uses its own return as the baseline, yielding
-    zero relative advantage instead of importing a value from another depth.
+    ``(group_id, turn_idx)`` stratum normally uses its own return as the baseline,
+    yielding zero relative advantage. When both singleton arguments are supplied,
+    a credit-eligible singleton instead uses its episode-level fallback baseline;
+    an ineligible singleton still uses its own return and therefore stays zero.
     """
+    if (singleton_fallback_baseline is None) != (singleton_credit_mask is None):
+        raise ValueError(
+            "singleton_fallback_baseline and singleton_credit_mask must be "
+            "provided together."
+        )
+    if singleton_fallback_baseline is not None:
+        assert singleton_credit_mask is not None
+        if singleton_fallback_baseline.shape != turn_returns.shape:
+            raise ValueError(
+                "singleton_fallback_baseline must match turn_returns shape, got "
+                f"{tuple(singleton_fallback_baseline.shape)} and "
+                f"{tuple(turn_returns.shape)}."
+            )
+        if singleton_credit_mask.shape != turn_returns.shape:
+            raise ValueError(
+                "singleton_credit_mask must match turn_returns shape, got "
+                f"{tuple(singleton_credit_mask.shape)} and "
+                f"{tuple(turn_returns.shape)}."
+            )
+
     baseline = torch.zeros_like(turn_returns)
     valid_rows = torch.nonzero(valid_mask.bool(), as_tuple=False).flatten()
     if valid_rows.numel() == 0:
@@ -709,10 +734,18 @@ def _compute_turn_group_baseline(
 
     if leave_one_out:
         counts = stratum_count[stratum_inverse]
+        singleton_baseline = valid_returns
+        if singleton_fallback_baseline is not None:
+            eligible = singleton_credit_mask[valid_rows].bool()
+            singleton_baseline = torch.where(
+                eligible,
+                singleton_fallback_baseline[valid_rows],
+                valid_returns,
+            )
         row_baseline = torch.where(
             counts > 1.0,
             (stratum_sum[stratum_inverse] - valid_returns) / (counts - 1.0),
-            valid_returns,
+            singleton_baseline,
         )
     else:
         row_baseline = stratum_sum[stratum_inverse] / stratum_count[
@@ -1645,19 +1678,63 @@ class PPOActor:
                         "before compute_advantages; check that rollout groups "
                         "survive to that point."
                     )
-                baseline_fn = (
-                    _compute_episode_group_baseline
-                    if self.config.group_baseline == "episode"
-                    else _compute_turn_group_baseline
-                )
-                group_baseline = baseline_fn(
-                    baseline_source,
-                    data["trajectory_id"].to(reward_score.device),
-                    data["turn_idx"].to(reward_score.device),
-                    data["group_id"].to(reward_score.device),
-                    valid_turn_mask,
-                    self.config.group_baseline_leave1out,
-                )
+                if self.config.group_baseline == "episode":
+                    group_baseline = _compute_episode_group_baseline(
+                        baseline_source,
+                        trajectory_ids,
+                        turn_indices,
+                        data["group_id"].to(reward_score.device),
+                        valid_turn_mask,
+                        self.config.group_baseline_leave1out,
+                    )
+                else:
+                    singleton_fallback_baseline = None
+                    singleton_credit_mask = None
+                    if self.config.turn_group_baseline_singleton_fallback:
+                        if gate_masked_reward_score is None:
+                            raise ValueError(
+                                "actor.turn_group_baseline_singleton_fallback "
+                                "requires gate-pass-only reward metadata."
+                            )
+                        if not self.config.group_baseline_leave1out:
+                            raise ValueError(
+                                "actor.turn_group_baseline_singleton_fallback "
+                                "requires group_baseline_leave1out=true."
+                            )
+                        # Recover the original episode improvement before the
+                        # per-turn gate mask. gamma=1 is deliberate: stopped peers
+                        # provide their actual re-test improvement as the fallback,
+                        # not a depth-dependent discounted value.
+                        unmasked_improvement_returns = _compute_rebn_returns(
+                            gate_masked_reward_score,
+                            trajectory_ids,
+                            turn_indices,
+                            1.0,
+                            valid_mask=valid_turn_mask,
+                        )
+                        singleton_fallback_baseline = (
+                            _compute_episode_group_baseline(
+                                unmasked_improvement_returns,
+                                trajectory_ids,
+                                turn_indices,
+                                data["group_id"].to(reward_score.device),
+                                valid_turn_mask,
+                                True,
+                            )
+                        )
+                        singleton_credit_mask = data["gate_credit_mask"].to(
+                            device=reward_score.device, dtype=torch.bool
+                        )
+                    group_baseline = _compute_turn_group_baseline(
+                        baseline_source,
+                        trajectory_ids,
+                        turn_indices,
+                        data["group_id"].to(reward_score.device),
+                        valid_turn_mask,
+                        self.config.group_baseline_leave1out,
+                        singleton_fallback_baseline=singleton_fallback_baseline,
+                        singleton_credit_mask=singleton_credit_mask,
+                    )
                 turn_returns = turn_returns - group_baseline
                 data["group_baseline"] = group_baseline
             if self.adv_norm is not None and valid_turn_mask.any():

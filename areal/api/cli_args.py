@@ -1303,7 +1303,8 @@ class PPOActorConfig(TrainEngineConfig):
             "return differences (mid-turn rewards) are preserved exactly. 'turn' "
             "instead compares returns only across episodes with the same group_id "
             "and turn_idx; missing ragged turns are excluded and singleton strata "
-            "produce zero relative advantage. Requires "
+            "produce zero relative advantage unless "
+            "turn_group_baseline_singleton_fallback is enabled. Requires "
             "advantage_estimator='rebn' and a 'group_id' column in rollout data. "
             "None disables it.",
             "choices": ["episode", "turn", None],
@@ -1314,6 +1315,18 @@ class PPOActorConfig(TrainEngineConfig):
         metadata={
             "help": "Exclude an episode from its own group baseline. Used when "
             "actor.group_baseline is 'episode' or 'turn'."
+        },
+    )
+    turn_group_baseline_singleton_fallback: bool = field(
+        default=False,
+        metadata={
+            "help": "Improve singleton handling for a leave-one-out turn group "
+            "baseline with gate-pass-only credit. When a (group_id, turn_idx) "
+            "stratum contains one real turn, a gate-passing turn is compared "
+            "against the other episodes' unmasked outcome improvement, while a "
+            "gate-rejected turn keeps zero relative task advantage. False keeps "
+            "the legacy behavior where every singleton uses its own return as "
+            "the baseline. Only applies when group_baseline='turn'."
         },
     )
     group_baseline_local_reward_mode: str = field(

@@ -3234,6 +3234,6 @@ class TutorConfig(GRPOConfig):
             ):
                 raise ValueError(
                     "student_generalize.gate_pass_credit_only requires "
-                    "actor.adv_norm.mean_level=null so a singleton turn remains "
-                    "zero after its same-turn baseline."
+                    "actor.adv_norm.mean_level=null so zero-credit turns remain "
+                    "zero after the group baseline."
                 )

@@ -358,6 +358,10 @@ actor:
     env_vars: {}
   group_baseline: episode
   group_baseline_leave1out: true
+  # Reward-v3 changes the baseline to turn-level. At a ragged singleton depth,
+  # compare a Gate-passing turn with the stopped peers' re-test improvements;
+  # keep a Gate-rejected singleton at zero task advantage.
+  turn_group_baseline_singleton_fallback: true
   # Legacy fallback for any local component without an explicit placement above.
   group_baseline_local_reward_mode: exclude
   episode_loss_weighting: false
