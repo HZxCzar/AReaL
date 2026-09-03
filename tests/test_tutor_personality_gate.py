@@ -128,9 +128,24 @@ def _reply(text: str = "", error: str | None = None) -> SimpleNamespace:
 def main() -> int:
     print("\n[1] the verdict parser is strict, and unclean means FAIL")
     passed, reason, err = _parse_personality_gate_reply(
+        "<reasoning>compares two concrete choices</reasoning>"
+        "<verdict>PASS</verdict>"
+    )
+    check("a clean XML PASS parses", passed and err is None, f"{passed} {err}")
+    check("the XML reasoning is kept", reason == "compares two concrete choices")
+    passed, reason, err = _parse_personality_gate_reply(
+        r"<reasoning>uses \\sin and \\pi but not the requested method</reasoning>"
+        "<verdict>FAIL</verdict>"
+    )
+    check(
+        "LaTeX backslashes cannot break an XML FAIL",
+        not passed and err is None,
+        f"{passed} {err}",
+    )
+    passed, reason, err = _parse_personality_gate_reply(
         '{"reasoning": "asks a question", "verdict": "PASS"}'
     )
-    check("a clean PASS parses", passed and err is None, f"{passed} {err}")
+    check("a legacy JSON PASS parses", passed and err is None, f"{passed} {err}")
     check("the reasoning is kept", reason == "asks a question", reason)
     passed, _, err = _parse_personality_gate_reply(
         '{"reasoning": "states the step", "verdict": "FAIL"}'

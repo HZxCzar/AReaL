@@ -1,0 +1,10 @@
+defaults:
+  - ../../../base/reward-v3/ID/attempt-diagnosis@_global_
+  - ../../alloc@_global_
+  - _self_
+
+trial_name: 0901-preference-v3-reward-v3-attempt-diagnosis-8gpu
+
+stats_logger:
+  wandb:
+    group: 0901-preference-v3-reward-v3-8gpu

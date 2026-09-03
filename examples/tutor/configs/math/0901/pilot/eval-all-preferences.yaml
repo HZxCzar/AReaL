@@ -1,0 +1,71 @@
+# Offline full-matrix evaluation for the 0901 V3 preference experiments.
+# Everything follows the reward-v3 training rollout except that the teacher's
+# pre-solve is intentionally accepted without answer verification.
+defaults:
+  - ../base/default@_global_
+  - ../base/reward-v3/base@_global_
+  - _self_
+
+trial_name: 0901-preference-v3-full-matrix-eval
+
+# Match the rollout policy's sampling distribution. Evaluation still requests one
+# sample per dataset row, but that sample uses the training temperature.
+eval_gconfig:
+  temperature: ${gconfig.temperature}
+
+# In training, the in-engine auxiliary caller sets disable_lora=True. Pointing
+# API-mode auxiliary calls at the same Qwen3-8B endpoint without lora_path
+# reproduces that fixed-base judge for leak, preference Gate, and answer checks.
+auxiliary_model:
+  mode: api
+  max_concurrent_calls: 192
+
+student_models: []
+student_axes:
+- behaviors: [text]
+  informations:
+    original:
+      mode: full
+  personalities:
+  - none
+  - attempt-diagnosis
+  - subgoal-decomposition
+  - contrastive-comparison
+  - causal-justification
+  - step-demonstration
+  - independent-verification
+  template:
+    name: qwen3-1.7b
+    weight: 1.0
+    base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+    model: qwen3-1.7b
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    max_concurrent_calls: 192
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-eval-qwen17b-student-v3
+      extra_body:
+        top_k: 20
+        min_p: 0
+        chat_template_kwargs:
+          enable_thinking: false
+
+student_generalize:
+  replays: 8
+
+student_type_probe:
+  enabled: false
+
+evaluator:
+  teacher_pre_enabled: true
+  teacher_pre_verify: false
+  # None means follow training exactly: masked_continue for leak and terminate
+  # for malformed teacher output.
+  leak_terminate: null
+  format_terminate: null
+  average_rollouts: 1

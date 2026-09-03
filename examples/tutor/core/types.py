@@ -241,6 +241,10 @@ class TurnArtifact:
     public_history_before: list[dict[str, str]]
     public_history_after: list[dict[str, str]]
     tutor_format_error: str | None = None
+    # A valid policy action that ends the dialogue before another student call.
+    # It has no student-visible text, but remains a trainable teacher turn so the
+    # terminal outcome can teach the policy when to stop.
+    teacher_ended: bool = False
     student_state: StudentTurnState | None = None
     student_prompt: str = ""
     student_output: str = ""
@@ -347,6 +351,7 @@ class TurnTrace:
     invalid_due_to_leak: bool = False
     leak_masked: bool = False
     tutor_format_error: str | None = None
+    teacher_ended: bool = False
     previous_teacher_similarity: float | None = None
     teacher_similarity_error: str | None = None
     teacher_progress_judge_result: TeacherProgressJudgeResult | None = None

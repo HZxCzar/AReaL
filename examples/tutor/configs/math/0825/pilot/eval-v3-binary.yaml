@@ -1,0 +1,63 @@
+# Opt-in API pilot for the six V3 preferences. This file changes no training arm.
+defaults:
+  - ../base/default@_global_
+  - _self_
+
+trial_name: 0825-v3-binary-api-eval
+
+personality:
+  prompts_path: examples/tutor/prompt_pools/personality_prompts_v3.json
+  complaints_path: examples/tutor/prompt_pools/personality_complaints_v3.json
+  gate_prompt_version: v3
+  gate_decision_mode: binary
+  gate_sample_rate: 1.0
+  gated_turn_visibility: teacher_only
+  explain_ratio: 1.0
+  gate_retries: 3
+
+student_models: []
+student_axes:
+- behaviors: [text]
+  informations:
+    original:
+      mode: full
+  personalities:
+  - attempt-diagnosis
+  - causal-justification
+  - subgoal-decomposition
+  - step-demonstration
+  - independent-verification
+  - contrastive-comparison
+  template:
+    name: qwen3-1.7b
+    weight: 1.0
+    base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+    model: qwen3-1.7b
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    max_concurrent_calls: 64
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-v3-qwen17b-student
+      extra_body:
+        top_k: 20
+        min_p: 0
+        chat_template_kwargs:
+          enable_thinking: false
+
+student_generalize:
+  replays: 8
+
+student_type_probe:
+  enabled: false
+
+evaluator:
+  teacher_pre_enabled: true
+  teacher_pre_verify: false
+  leak_terminate: false
+  format_terminate: false
+  average_rollouts: 1

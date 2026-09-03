@@ -634,6 +634,7 @@ def build_eval_workflow_kwargs(
         "teacher_user_prompt_template": config.teacher_user_prompt_template,
         "teacher_show_ground_truth": config.teacher_show_ground_truth,
         "format_handling_mode": config.format_handling_mode,
+        "teacher_end_enabled": config.teacher_end_enabled,
         "teacher_pre_enabled": teacher_pre.enabled,
         "teacher_pre_mode": teacher_pre.mode,
         "teacher_pre_verify": teacher_pre.verify,

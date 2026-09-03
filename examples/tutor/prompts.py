@@ -40,6 +40,20 @@ your message shown to the student
 The student will see only the text inside <output>...</output>. Put all private
 thinking inside <reasoning>...</reasoning>. Do not use JSON or Markdown code fences."""
 
+NON_THINKING_TEACHER_OUTPUT_FORMAT_WITH_END_PROMPT = """\
+For each reply, first use this tagged section:
+<reasoning>
+your private thinking about what the student needs next
+</reasoning>
+Then use exactly one of:
+<output>
+your non-empty message shown to the student
+</output>
+<end></end>
+Use <end></end> when you think the conversation can end early.
+The student will see only the text inside <output>...</output>. Put all private
+thinking inside <reasoning>...</reasoning>. Do not use JSON or Markdown code fences."""
+
 # How the teacher sees its OWN earlier turns under `teacher_history_tags: masked`,
 # and what `unmasked` falls back to on a malformed turn. `public_history` holds the
 # with the tags stripped, which reads as an in-context example that replies do
@@ -282,6 +296,44 @@ your verdict. Reply with JSON only, in this order:
 
 verdict is "PASS" if the message matches the preference and "FAIL" if it does
 not. Nothing outside the JSON object."""
+
+
+PERSONALITY_GATE_V3_SYSTEM_PROMPT = """You judge whether a tutor message follows \
+one stated student preference.
+Judge the teaching approach, not mathematical correctness. Ignore tone,
+politeness, and verbosity.
+If the preference requires a previous student response but no previous real
+student message is available, return PASS so the student can respond first.
+
+Reply with exactly these two XML elements, with the reasoning before the
+verdict:
+<reasoning>brief reason</reasoning>
+<verdict>PASS</verdict>
+
+Set verdict to PASS exactly when the tutor message satisfies the preference;
+otherwise set it to FAIL. Ensure the verdict agrees with the reasoning.
+Use only PASS or FAIL inside the verdict element. Put nothing outside the two
+elements."""
+
+PERSONALITY_GATE_V3_NO_LAST_STUDENT_MESSAGE = (
+    "No previous real student message is available."
+)
+
+PERSONALITY_GATE_V3_USER_TEMPLATE = """<student_preference>
+{preference}
+</student_preference>
+
+<problem>
+{task}
+</problem>
+
+<latest_student_message>
+{last_student_message}
+</latest_student_message>
+
+<tutor_message>
+{teacher_message}
+</tutor_message>"""
 
 
 PERSONALITY_CLASSIFIER_LOGITS_GATE_SYSTEM_PROMPT = """Choose exactly one answer from \

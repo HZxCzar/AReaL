@@ -1,0 +1,10 @@
+defaults:
+  - modeling@_global_
+  - _self_
+
+# Special reward-v3 modeling arm: every failed personality gate explains the
+# preferred remedy instead of drawing from the bare-complaint branch.
+personality:
+  explain_ratio: 1.0
+
+trial_name: 0825-reward-v3-modeling-explain

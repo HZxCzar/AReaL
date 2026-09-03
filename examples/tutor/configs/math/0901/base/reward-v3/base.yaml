@@ -1,0 +1,20 @@
+# Match the 0825 reward-v3 credit assignment with the 0901 V3 binary gate.
+# Gate-failed and leaked turns are hidden from the real student and re-test and
+# receive no improvement credit. There is no direct gate or leak penalty.
+leak_handling_mode: masked_continue
+
+student_generalize:
+  gate_pass_credit_only: true
+
+actor:
+  group_baseline: turn
+  group_baseline_leave1out: true
+  group_baseline_local_reward_mode: exclude
+  adv_norm:
+    mean_level: null
+    std_level: batch
+
+reward:
+  leak_penalty: 0.0
+  personality_gate_fail_penalty: 0.0
+

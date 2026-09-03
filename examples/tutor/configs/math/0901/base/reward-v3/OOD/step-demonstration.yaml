@@ -1,0 +1,7 @@
+defaults:
+  - ../../default@_global_
+  - ../../student/step-demonstration@_global_
+  - ../base@_global_
+  - _self_
+
+trial_name: 0901-preference-v3-reward-v3-step-demonstration

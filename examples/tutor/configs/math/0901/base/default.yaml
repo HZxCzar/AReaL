@@ -1,48 +1,18 @@
-# 0825 / base -- every setting the default arm uses. The allocation lives in the
-# sibling 2gpu/ 4gpu/ 8gpu/ files, which change GPU counts and nothing else.
+# 0901 / base -- a standalone, fully specified copy of the training default.
+# It deliberately does not inherit from another dated experiment directory.
+# Allocation-specific files override only GPU topology and concurrency.
 #
-# Layout, and why base is a directory rather than a file: 0810 kept its settings in
-# 2gpu/base.yaml and had 4gpu/ and 8gpu/ inherit from it, so the 2-GPU file was both
-# the shared configuration and one allocation of it. Editing a setting there
-# silently read as editing the 2-GPU arm. Here the split is explicit.
+# The personality interface is V3: six independent binary gates, V3 prompt and
+# complaint pools, every eligible turn gated, teacher-only failed-turn visibility,
+# and an explicit preference complaint after every gate failure.
 #
-#     base/default.yaml     all settings; also launchable, at the 2-GPU allocation
-#     2gpu/base.yaml        cluster.n_gpus_per_node, the two backends, concurrency
-#     4gpu/base.yaml        the same three keys
-#     8gpu/base.yaml        the same three keys
+# This file retains the complete default reward and rollout settings. The sibling
+# reward-v3/base.yaml is the opt-in credit-assignment layer: it changes leak handling
+# to masked_continue, removes direct leak/gate penalties, enables gate-pass-only
+# improvement credit, and selects the turn-level leave-one-out baseline.
 #
-# THE DEFAULTS THIS FILE FIXES, all of them stated rather than inherited:
-#
-#   leak_handling_mode        terminate
-#   format_handling_mode      terminate
-#   reward.turn_local_components  [leak, format_error, teacher_exact_repeat] -- all
-#                             three penalties stay on the turn that raised them
-#                             instead of being accumulated backward; all use
-#                             post_std placement by default
-#   teacher_pre               enabled, verify true in TRAINING
-#   evaluator.teacher_pre_*   pre-solve on, verification OFF at eval
-#   student_models            one student, (behavior text, information unmasked)
-#   personality             shared seven-choice prompt/complaint files, reasoning
-#                           classifier, gate rate 1.0, explain ratio 0.5, 3 retries,
-#                           teacher-only failures
-#   free_chat.transfer_prompts  absent, so off: the re-test problem is the problem
-#                             the dialogue was about
-#
-# NOT COMPARABLE WITH 0810. Every 0810 arm ran leak_handling_mode reward_only or
-# format_handling_mode continue or both, and most ran teacher_history_tags masked.
-# Read 0825 against 0825.
-#
-# What is deliberately left off: student_generalize.turn_credit (the whole episode
-# reward lands on the last turn, as before) and free_chat.no_teaching_baseline
-# (retest/improvement is not reported, and turn_credit would require it). Both are
-# one-line additions in an arm that wants them.
-#
-# COST. Roughly 24 external calls an episode, a train step of 235-246 s at 4 GPUs,
-# and an eval pass of 1650-1840 s. At freq_steps 25 over 1000 steps that is about
-# 66 h of training and 20 h of evaluation per arm.
-
 experiment_name: tutor-math-baseline
-trial_name: 0825-base
+trial_name: 0901-preference-v3-default
 seed: 42
 enable_offload: false
 total_train_epochs: 1000
@@ -66,22 +36,18 @@ teacher_anti_leak_instruction_enabled: true
 # sampled (behavior, information) student it is about to teach.
 teacher_private_visibility: false
 personality:
-  # Single source of truth for every 0825 personality arm.
-  prompts_path: examples/tutor/prompt_pools/personality_prompts_classification_v2.json
-  complaints_path: examples/tutor/prompt_pools/personality_complaints_v2.json
-  gate_prompt_version: v2
-  # Official seven-way reasoning classifier over the six teaching strategies plus
-  # NONE. The sampled student preference is never revealed to the classifier.
-  gate_decision_mode: classifier
-  # Audit every turn whenever the selected student has a personality.
+  # Single source of truth for every 0901 preference-V3 arm.
+  prompts_path: examples/tutor/prompt_pools/personality_prompts_v3.json
+  complaints_path: examples/tutor/prompt_pools/personality_complaints_v3.json
+  gate_prompt_version: v3
+  # Each sampled preference is judged independently as PASS/FAIL.
+  gate_decision_mode: binary
   gate_sample_rate: 1.0
-  # A failed teacher message and its rule-based complaint remain in the teacher's
-  # conversation, while later real-student calls and all student re-tests continue
-  # from the last gate-passing exchange.
+  # Failed turns remain visible to the teacher but are hidden from subsequent
+  # real-student calls and from the final student re-test.
   gated_turn_visibility: teacher_only
-  # Half of failed turns explain the remedy; half only report that the student is lost.
-  explain_ratio: 0.5
-  # Retry a missing/invalid classifier response three times, then fail closed.
+  # Every failed gate uses an explicit preference-remedy complaint.
+  explain_ratio: 1.0
   gate_retries: 3
 student_generalize:
   enabled: true
@@ -516,7 +482,7 @@ stats_logger:
     entity: hz-czar-stanford
     project: TAgent
     name: ${trial_name}
-    group: 0825-base
+    group: 0901-base
 # The format half. SAFE ONLY BECAUSE max_turn_penalty IS 0.0: in a rollout that
 # charged for reaching the budget, terminating early would be a cheap way out of a
 # losing episode. Here a format-terminated episode collects format_error_penalty
@@ -529,6 +495,7 @@ stats_logger:
 # continue arms, and their malformed rate climbed 0.61 -> 0.90 while the continue
 # arms fell to 0.00 by step 9.
 format_handling_mode: terminate
+teacher_end_enabled: true
 total_train_steps: 1000
 free_chat:
   enabled: true

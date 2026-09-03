@@ -190,7 +190,7 @@ from examples.tutor.core.history import (
 from examples.tutor.core.parsers import (
     parse_leak_check_result,
     parse_staged_leak_check_result,
-    parse_tagged_teacher_output,
+    parse_tagged_teacher_action,
 )
 from examples.tutor.core.repetition import (
     depth_metrics,
@@ -284,6 +284,7 @@ from examples.tutor.prompts import (
     NO_PREVIOUS_VISIBLE_TUTORING_HISTORY,
     NO_VISIBLE_TUTORING_HISTORY,
     NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT,
+    NON_THINKING_TEACHER_OUTPUT_FORMAT_WITH_END_PROMPT,
     NONE_PLACEHOLDER,
     NONE_YET_PLACEHOLDER,
     PERSONALITY_CLASSIFIER_GATE_SYSTEM_PROMPT,
@@ -297,6 +298,9 @@ from examples.tutor.prompts import (
     PERSONALITY_GATE_V2_PREVIOUS_STUDENT_TEMPLATE,
     PERSONALITY_GATE_V2_SYSTEM_PROMPT,
     PERSONALITY_GATE_V2_USER_TEMPLATE,
+    PERSONALITY_GATE_V3_NO_LAST_STUDENT_MESSAGE,
+    PERSONALITY_GATE_V3_SYSTEM_PROMPT,
+    PERSONALITY_GATE_V3_USER_TEMPLATE,
     POLARIS_FILTER_SOLVER_USER_TEMPLATE,
     POLARIS_INSTRUCTION,
     PUBLIC_HISTORY_ENTRY_TEMPLATE,
@@ -347,6 +351,7 @@ _REWARD_COMPONENT_ALIASES = {
 LEAK_TERMINATION_REASON = "leak"
 FORMAT_TERMINATION_REASON = "format_error"
 TEACHER_EXACT_REPEAT_TERMINATION_REASON = "teacher_exact_repeat"
+TEACHER_END_TERMINATION_REASON = "teacher_end"
 PERSONALITY_GATE_TERMINATION_REASON = "personality_gate_after_explanation"
 TEACHER_PRE_SKIPPED_TERMINATION_REASON = "pre_solve_skipped"
 LEAK_HANDLING_MODES = {
@@ -550,11 +555,12 @@ def load_personality_prompts(path: str) -> dict[str, dict[str, str]]:
 
 
 def _parse_personality_gate_reply(text: str) -> tuple[bool, str, str | None]:
-    """(passed, reason, parse_error) from the gate's JSON reply.
+    """Return ``(passed, reason, parse_error)`` from a binary gate reply.
 
-    Strict on purpose. Anything other than a loadable object whose verdict is
-    exactly PASS or FAIL is a parse error, which the caller retries and then treats
-    as FAIL.
+    V3 uses two XML-style tags so mathematical backslashes in the reasoning cannot
+    corrupt the envelope. Legacy JSON remains accepted for V1/V2 compatibility.
+    Anything without an exact PASS/FAIL verdict is retried and ultimately fails
+    closed.
     """
     body = _strip_reasoning_for_context(str(text or "")).strip()
     if not body:
@@ -564,6 +570,32 @@ def _parse_personality_gate_reply(text: str) -> tuple[bool, str, str | None]:
     if body.startswith("```"):
         body = re.sub(r"^```[a-zA-Z]*\n?", "", body)
         body = re.sub(r"\n?```$", "", body).strip()
+
+    xml_match = re.fullmatch(
+        r"<reasoning>(.*?)</reasoning>\s*<verdict>\s*([^<]*?)\s*</verdict>",
+        body,
+        flags=re.DOTALL,
+    )
+    if xml_match is not None:
+        reason = xml_match.group(1).strip()
+        verdict = xml_match.group(2).strip().upper()
+        if verdict == "PASS":
+            return True, reason, None
+        if verdict == "FAIL":
+            return False, reason, None
+        return (
+            False,
+            reason,
+            f"personality gate verdict was {verdict!r}, not PASS/FAIL.",
+        )
+    if any(
+        tag in body
+        for tag in ("<reasoning>", "</reasoning>", "<verdict>", "</verdict>")
+    ):
+        return False, "", "personality gate reply was not valid tagged XML."
+
+    # V1/V2 still request JSON. Keep their historical parser so dated configs do
+    # not silently change when V3 switches transport format.
     start, end = body.find("{"), body.rfind("}")
     if start < 0 or end <= start:
         return False, "", "personality gate reply contained no JSON object."
@@ -1035,12 +1067,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
         student_generalize_confidence_enabled: bool = False,
         student_generalize_confidence_reward_scale: float = 0.25,
         eval_repeat_count: int = 1,
+        teacher_end_enabled: bool = False,
     ):
         self.eval_repeat_count = int(eval_repeat_count)
         if self.eval_repeat_count < 1:
             raise ValueError("eval_repeat_count must be >= 1.")
         self._eval_repeat_outcomes: dict[int, list[float]] = {}
         self.max_turns = max_turns
+        self.teacher_end_enabled = bool(teacher_end_enabled)
         # Resolved here rather than with the other reward settings because the
         # budget overwrites max_turns, and max_turns is read by everything below.
         free_chat_config = dict(free_chat or {})
@@ -1816,9 +1850,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.personality_gate_prompt_version = (
             str(settings.get("gate_prompt_version", "v1")).strip().lower()
         )
-        if self.personality_gate_prompt_version not in {"v1", "v2"}:
+        if self.personality_gate_prompt_version not in {"v1", "v2", "v3"}:
             raise ValueError(
-                "personality.gate_prompt_version must be one of ['v1', 'v2'], got "
+                "personality.gate_prompt_version must be one of "
+                "['v1', 'v2', 'v3'], got "
                 f"{self.personality_gate_prompt_version!r}."
             )
         self.personality_gate_decision_mode = (
@@ -2134,6 +2169,18 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 ),
                 teacher_message=teacher_message.strip(),
             )
+        elif prompt_version == "v3":
+            user_prompt = PERSONALITY_GATE_V3_USER_TEMPLATE.format(
+                preference=entry["preference"],
+                task=str(task or "").strip(),
+                last_student_message=(
+                    str(previous_student_message or "").strip()
+                    or PERSONALITY_GATE_V3_NO_LAST_STUDENT_MESSAGE
+                ),
+                teacher_message=teacher_message.strip(),
+            )
+            system_prompt = PERSONALITY_GATE_V3_SYSTEM_PROMPT
+            rid_prefix = f"personality-gate-v3-{personality}-{turn_idx}"
         elif prompt_version == "v2":
             previous_student_context = ""
             if personality == "feedback":
@@ -2572,16 +2619,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
             return DEFAULT_STAGED_LEAK_CHECK_SYSTEM_PROMPT
         return prompt
 
+    def _teacher_output_format_prompt(self) -> str:
+        if getattr(self, "teacher_end_enabled", False):
+            return NON_THINKING_TEACHER_OUTPUT_FORMAT_WITH_END_PROMPT
+        return NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT
+
     def _resolve_teacher_system_prompt(self, prompt: str) -> str:
         prompt = (prompt or "").strip()
-        if (
-            not self.enable_thinking
-            and NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT not in prompt
-        ):
+        format_prompt = self._teacher_output_format_prompt()
+        if not self.enable_thinking and format_prompt not in prompt:
             prompt = (
-                f"{prompt}\n\n{NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT}"
+                f"{prompt}\n\n{format_prompt}"
                 if prompt
-                else NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT
+                else format_prompt
             ).strip()
         instructions = []
         if getattr(self, "teacher_anti_leak_instruction_enabled", False):
@@ -2910,13 +2960,33 @@ class TutorAgentWorkflow(RolloutWorkflow):
             return self.teacher_warmup_prompt
         return self._append_prompt_pool_suffix(self.teacher_system_prompt, selection)
 
-    def _parse_tutor_visible_output(self, raw_output: str) -> tuple[str, str | None]:
+    def _parse_tutor_action(
+        self, raw_output: str
+    ) -> tuple[str, bool, str | None]:
         if getattr(self, "enable_thinking", False):
-            return _strip_reasoning_for_context(raw_output), None
-        output, parse_error = parse_tagged_teacher_output(raw_output)
+            output = _strip_reasoning_for_context(raw_output).strip()
+            if getattr(self, "teacher_end_enabled", False):
+                if output == "<end></end>":
+                    return "", True, None
+                if re.search(r"</?end\b[^>]*>", output):
+                    return "", False, (
+                        "teacher end action must be exactly <end></end>"
+                    )
+                if not output:
+                    return "", False, "teacher output must be non-empty"
+            return output, False, None
+        output, ended, parse_error = parse_tagged_teacher_action(
+            raw_output,
+            allow_end=getattr(self, "teacher_end_enabled", False),
+            require_nonempty_output=getattr(self, "teacher_end_enabled", False),
+        )
         if output is None:
-            return "", parse_error or "failed to parse tagged teacher output"
-        return _strip_reasoning_for_context(output), None
+            return "", False, parse_error or "failed to parse tagged teacher output"
+        return _strip_reasoning_for_context(output), ended, None
+
+    def _parse_tutor_visible_output(self, raw_output: str) -> tuple[str, str | None]:
+        output, _, parse_error = self._parse_tutor_action(raw_output)
+        return output, parse_error
 
     def _extract_tutor_visible_output(self, raw_output: str) -> str:
         output, _ = self._parse_tutor_visible_output(raw_output)
@@ -3271,10 +3341,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
         hide_gated_turns_from_student = (
             self._hide_personality_gated_turns_from_student()
         )
-        # All student-visible teacher replies in this episode, not just the last
-        # one. This is what makes A-B-A a repeat while keeping gate-failed turns
-        # out of the comparison set in teacher-only visibility mode.
-        student_visible_teacher_outputs: set[str] = set()
+        # All successfully parsed teacher replies in this episode, including
+        # leak-masked and personality-gated turns. The visibility masks control
+        # what the real student and re-test can see, not whether the teacher may
+        # repeat itself. Keeping the whole episode also makes A-B-A a repeat.
+        teacher_outputs: set[str] = set()
         previous_tutor_visible_output = ""
         previous_tutor_raw_outputs: tuple[str, ...] = ()
         previous_student_output = initial_student_answer
@@ -3335,10 +3406,43 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
                 termination_reason = CONTEXT_BUDGET_TERMINATION_REASON
                 break
-            tutor_visible_output, tutor_format_error = self._parse_tutor_visible_output(
-                tutor_raw_output
-            )
+            (
+                tutor_visible_output,
+                teacher_ended,
+                tutor_format_error,
+            ) = self._parse_tutor_action(tutor_raw_output)
             public_before = list(public_history.turns)
+            if teacher_ended:
+                # END is a trainable policy action, but not a message.  Keep the
+                # complete teacher state in the artifact and the filtered student
+                # state as the re-test anchor; neither receives an additional turn.
+                termination_reason = TEACHER_END_TERMINATION_REASON
+                end_student_state = StudentTurnState(
+                    task=task,
+                    public_history=student_visible_history,
+                    previous_student_output=student_visible_previous_output,
+                    latest_tutor_visible_output="",
+                    student_prompt_selection=student_prompt_selection,
+                    student_mask=selected_student.mask,
+                    student_mode=selected_student.mode,
+                    student_personality=selected_student.personality,
+                )
+                turn_artifacts.append(
+                    TurnArtifact(
+                        turn_idx=turn_idx,
+                        tutor_state=tutor_state,
+                        tutor_messages=list(self._build_tutor_messages(tutor_state)),
+                        tutor_response=response,
+                        tutor_raw_output=tutor_raw_output,
+                        tutor_visible_output="",
+                        leak_result=self._teacher_end_leak_check_result(),
+                        public_history_before=public_before,
+                        public_history_after=public_before,
+                        teacher_ended=True,
+                        student_state=end_student_state,
+                    )
+                )
+                break
             if (
                 tutor_format_error
                 and getattr(self, "format_handling_mode", "continue") == "terminate"
@@ -3465,17 +3569,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
                 break
 
-            teacher_output_will_be_student_visible = not (
-                leak_masked
-                or (personality_gated and hide_gated_turns_from_student)
-            )
             normalized_teacher_output = normalize_exact_teacher_output(
                 tutor_visible_output
             )
             teacher_exact_repeat = bool(
-                teacher_output_will_be_student_visible
-                and normalized_teacher_output
-                and normalized_teacher_output in student_visible_teacher_outputs
+                normalized_teacher_output
+                and normalized_teacher_output in teacher_outputs
             )
             if teacher_exact_repeat and self.teacher_exact_repeat_terminate:
                 # Keep the offending sample for its local penalty, but stop before
@@ -3620,8 +3719,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 )
             )
 
-            if teacher_output_will_be_student_visible and normalized_teacher_output:
-                student_visible_teacher_outputs.add(normalized_teacher_output)
+            if normalized_teacher_output:
+                teacher_outputs.add(normalized_teacher_output)
 
             if personality_complaint_explained:
                 personality_explanation_seen = True
@@ -4438,7 +4537,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             (
                 artifact
                 for artifact in reversed(turn_artifacts)
-                if artifact.student_state is not None
+                if artifact.student_state is not None and not artifact.teacher_ended
             ),
             None,
         )
@@ -4582,7 +4681,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         for artifact, assignment in reversed(
             list(zip(turn_artifacts, assignments, strict=True))
         ):
-            if artifact.student_state is None:
+            if artifact.student_state is None or artifact.teacher_ended:
                 continue
             assignment.reward_components["student_type_probe"] = (
                 assignment.reward_components.get("student_type_probe", 0.0) + reward
@@ -5201,6 +5300,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raw_result={"pending": True},
         )
 
+    @staticmethod
+    def _teacher_end_leak_check_result() -> LeakCheckResult:
+        return LeakCheckResult(
+            raw_output="",
+            leaked=False,
+            feedback="Leak check skipped for teacher end action.",
+            parse_error=None,
+            raw_result={"teacher_end": True},
+        )
+
     async def _annotate_turn_leak_results(
         self,
         task: str,
@@ -5211,6 +5320,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
     ) -> int:
         if not turn_artifacts:
             return 0
+        targets = [
+            artifact for artifact in turn_artifacts if not artifact.teacher_ended
+        ]
         leak_results = await asyncio.gather(
             *(
                 self._run_optional_leak_check(
@@ -5219,11 +5331,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     artifact.tutor_visible_output,
                     aux_caller=aux_caller,
                 )
-                for artifact in turn_artifacts
+                for artifact in targets
             )
         )
         leak_count = 0
-        for artifact, leak_result in zip(turn_artifacts, leak_results, strict=True):
+        for artifact, leak_result in zip(targets, leak_results, strict=True):
             artifact.leak_result = leak_result
             leak_count += int(leak_result.leaked)
         return leak_count
@@ -6112,7 +6224,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         targets = [
             artifact
             for artifact in turn_artifacts
-            if self._student_request_judge_targets(artifact)
+            if not artifact.teacher_ended
+            and self._student_request_judge_targets(artifact)
         ]
         if not targets:
             return
@@ -6265,6 +6378,13 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise RuntimeError("teacher progress judge caller is unavailable.")
 
         async def judge(artifact: TurnArtifact) -> TeacherProgressJudgeResult:
+            if artifact.teacher_ended:
+                return TeacherProgressJudgeResult(
+                    raw_output="",
+                    score=None,
+                    reason="",
+                    parse_error="skipped_teacher_end",
+                )
             if artifact.invalid_due_to_leak or artifact.leak_result.leaked:
                 return TeacherProgressJudgeResult(
                     raw_output="",
@@ -6441,6 +6561,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
         turn_count = 0
         summary = ""
         if artifact.student_state is not None:
+            if artifact.teacher_ended:
+                # END contributes no teacher or student message.  Its state is
+                # the exact filtered prefix on which the final re-test runs.
+                before = artifact.student_state.public_history
+                return PublicHistoryState(
+                    summary=before.summary,
+                    turn_count=before.turn_count,
+                    turns=list(before.turns),
+                )
             if (
                 self._hide_personality_gated_turns_from_student()
                 or getattr(self, "leak_handling_mode", "") == "masked_continue"
@@ -6485,6 +6614,16 @@ class TutorAgentWorkflow(RolloutWorkflow):
         public_history = self._student_visible_history_after(artifact)
         previous_student_output = artifact.student_output
         teacher_feedback = artifact.tutor_visible_output
+        if artifact.teacher_ended and artifact.student_state is not None:
+            previous_student_output = artifact.student_state.previous_student_output
+            teacher_feedback = next(
+                (
+                    str(turn.get("content", ""))
+                    for turn in reversed(public_history.turns)
+                    if turn.get("role") == "teacher"
+                ),
+                "",
+            )
         if (
             self._turn_hidden_from_student(artifact)
             and artifact.student_state is not None
@@ -7426,7 +7565,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if initial_student_answer:
             transcript.append({"role": "student", "content": initial_student_answer})
         for artifact in turn_artifacts:
-            if getattr(artifact, "leak_masked", False) or (
+            if artifact.teacher_ended or getattr(artifact, "leak_masked", False) or (
                 hide_personality_gated_turns and artifact.personality_gated
             ):
                 continue
@@ -7649,7 +7788,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         """
         parts = [FREE_CHAT_TEACHER_OPEN_PROMPT]
         if not self.enable_thinking:
-            parts.append(NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT)
+            parts.append(self._teacher_output_format_prompt())
         if getattr(self, "teacher_anti_leak_instruction_enabled", False):
             parts.append(TEACHER_ANTI_LEAK_INSTRUCTION)
         if getattr(self, "teacher_adaptive_instruction_enabled", False):
@@ -7938,6 +8077,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
     def _opd_skip_reason(self, artifact: TurnArtifact) -> str:
         """Why this turn is not eligible for on-policy distillation, or ""."""
         state = artifact.tutor_state
+        if artifact.teacher_ended:
+            return "teacher_end"
         if state.guidance is not None and state.guidance.kind == "prompt":
             # Defensive: the configs forbid running both arms at once, and the
             # teacher would otherwise be handed the instruction twice.
@@ -8066,6 +8207,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "opd/selected_ratio": float(selected / max(1, len(turn_artifacts))),
         }
         reasons = [
+            "teacher_end",
             "guided",
             "prompt_arm",
             "leak",
@@ -8483,6 +8625,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "teacher_exact_repeats": sum(
                 int(bool(trace.teacher_exact_repeat)) for trace in traces
             ),
+            "teacher_ends": sum(int(bool(trace.teacher_ended)) for trace in traces),
             "invalid_success_due_to_leak": int(invalid_success_due_to_leak),
             "pre_solved": float(pre_success),
             "solved": outcome_score,
@@ -8498,6 +8641,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
             "stop/format_error": float(termination_reason == FORMAT_TERMINATION_REASON),
             "stop/teacher_exact_repeat": float(
                 termination_reason == TEACHER_EXACT_REPEAT_TERMINATION_REASON
+            ),
+            "stop/teacher_end": float(
+                termination_reason == TEACHER_END_TERMINATION_REASON
+            ),
+            "stop/teacher_end_turn": float(
+                next((trace.turn_idx for trace in traces if trace.teacher_ended), 0)
             ),
             "stop/personality_gate_after_explanation": float(
                 termination_reason == PERSONALITY_GATE_TERMINATION_REASON

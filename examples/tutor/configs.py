@@ -35,7 +35,7 @@ _STUDENT_GENERALIZE_MODES = {"only_success", "always"}
 _STUDENT_GENERALIZE_SOURCES = {"generated", "sidecar", "train"}
 _STUDENT_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _STUDENT_SAMPLING_STRATEGIES = {"weighted_random", "stratified"}
-_PERSONALITY_GATE_PROMPT_VERSIONS = {"v1", "v2"}
+_PERSONALITY_GATE_PROMPT_VERSIONS = {"v1", "v2", "v3"}
 _PERSONALITY_GATE_DECISION_MODES = {
     "binary",
     "classifier",
@@ -344,7 +344,9 @@ class TutorPersonalityConfig:
                 "Personality-gate prompt contract. 'v1' preserves the original "
                 "task-and-teacher-message judge. 'v2' keeps that binary judge, "
                 "uses the six scaffolding preferences, and gives feedback the "
-                "last student message. Feedback skips its first turn."
+                "last student message. Feedback skips its first turn. 'v3' is "
+                "the concise binary contract and gives every gate the latest "
+                "real student message."
             ),
             "choices": sorted(_PERSONALITY_GATE_PROMPT_VERSIONS),
         },
@@ -2784,6 +2786,16 @@ class TutorConfig(GRPOConfig):
                 "concentrates a large advantage on few tokens."
             ),
             "choices": ["continue", "terminate"],
+        },
+    )
+    teacher_end_enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Allow the teacher to end the dialogue with "
+                "<reasoning>...</reasoning><end></end>. When enabled, an empty "
+                "<output> is a format error instead of an implicit no-op."
+            )
         },
     )
     teacher_show_ground_truth: bool = field(

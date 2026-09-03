@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from examples.common.parsing import join_errors, parse_json_dict
 
 from .text import strip_reasoning_for_context
@@ -11,6 +13,7 @@ _TEACHER_RESPONSE_TAGS = (
     "<output>",
     "</output>",
 )
+TEACHER_END_TAG = "<end></end>"
 
 
 def parse_tagged_teacher_output(raw_output: str) -> tuple[str | None, str | None]:
@@ -30,6 +33,47 @@ def parse_tagged_teacher_output(raw_output: str) -> tuple[str | None, str | None
 
     output_start = output_open + len("<output>")
     return text[output_start:output_close].strip(), None
+
+
+def parse_tagged_teacher_action(
+    raw_output: str,
+    *,
+    allow_end: bool = False,
+    require_nonempty_output: bool = False,
+) -> tuple[str | None, bool, str | None]:
+    """Parse a normal visible reply or the explicit teacher end action.
+
+    Returns ``(visible_output, ended, parse_error)``.  The legacy parser above
+    deliberately keeps accepting an empty output; callers that enable the new
+    end action opt into the stricter non-empty contract here.
+    """
+
+    text = raw_output or ""
+    if allow_end:
+        reasoning_open_count = text.count("<reasoning>")
+        reasoning_close_count = text.count("</reasoning>")
+        if reasoning_open_count == 1 and reasoning_close_count == 1:
+            reasoning_open = text.index("<reasoning>")
+            reasoning_close = text.index("</reasoning>")
+            if reasoning_open < reasoning_close:
+                suffix = text[reasoning_close + len("</reasoning>") :].strip()
+                # Reserve every end-like XML tag in the action position.  Only
+                # the exact paired tag is valid; a bare or mixed tag is a format
+                # error rather than a normal student-visible message.
+                if re.search(r"</?end\b[^>]*>", suffix):
+                    if text[:reasoning_open].strip() or suffix != TEACHER_END_TAG:
+                        return None, False, (
+                            "teacher end action must be exactly "
+                            "<reasoning>...</reasoning><end></end>"
+                        )
+                    return "", True, None
+
+    output, parse_error = parse_tagged_teacher_output(text)
+    if output is None:
+        return None, False, parse_error
+    if require_nonempty_output and not output:
+        return None, False, "teacher <output> must contain a non-empty message"
+    return output, False, None
 
 
 def parse_public_summary(raw_output: str) -> str:

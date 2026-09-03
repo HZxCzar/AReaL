@@ -374,6 +374,7 @@ def artifact_to_trace(
         invalid_due_to_leak=artifact.invalid_due_to_leak,
         leak_masked=artifact.leak_masked,
         tutor_format_error=artifact.tutor_format_error,
+        teacher_ended=artifact.teacher_ended,
         previous_teacher_similarity=artifact.previous_teacher_similarity,
         teacher_similarity_error=artifact.teacher_similarity_error,
         teacher_progress_judge_result=artifact.teacher_progress_judge_result,

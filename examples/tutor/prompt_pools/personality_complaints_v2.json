@@ -49,12 +49,12 @@
       "Please focus only on the central idea and how it connects to the conditions of the problem."
     ],
     "modeling": [
-      "I learn better by watching. Could you do one small example for me?",
-      "I learn best by seeing it done. Can you work out one small example?",
-      "Can you do one easy example yourself while I watch?",
-      "Can you show me exactly what you would write for one small example?",
-      "What would your full solution look like on a simple example?",
-      "Could you show me exactly how you would solve one small example?"
+      "Could you show me the pattern by doing one easier example yourself?",
+      "Could you show me the method by working one easier example yourself?",
+      "Could you show me the pattern by working one easier example yourself?",
+      "Could you show me the pattern once by working an easier example yourself?",
+      "Please show me the pattern by working one easier example yourself.",
+      "Could I watch you show the pattern by working one easier example yourself?"
     ],
     "questioning": [
       "For now, just guide me with one open-ended question at a time and let me reason out each answer.",

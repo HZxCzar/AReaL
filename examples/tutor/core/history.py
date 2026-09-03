@@ -25,6 +25,7 @@ def trace_to_history_record(
         "invalid_due_to_leak": trace.invalid_due_to_leak,
         "leak_masked": trace.leak_masked,
         "teacher_format_error": trace.tutor_format_error,
+        "teacher_ended": trace.teacher_ended,
         "personality_complaint_explained": trace.personality_complaint_explained,
         "personality_gate_terminated": trace.personality_gate_terminated,
         "teacher_exact_repeat": trace.teacher_exact_repeat,
