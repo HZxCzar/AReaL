@@ -52,10 +52,14 @@ esac
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT_DIR"
 PYTHON="$ROOT_DIR/.venv/bin/python"
-EVAL_CONFIG="$ROOT_DIR/examples/tutor/configs/math/0901/pilot/eval-all-preferences.yaml"
+EVAL_CONFIG="${MATRIX_EVAL_CONFIG:-$ROOT_DIR/examples/tutor/configs/math/0901/pilot/eval-all-preferences.yaml}"
 BASE_CONFIG="$ROOT_DIR/examples/tutor/configs/math/0901/base/default.yaml"
 EVALUATOR="$ROOT_DIR/examples/tutor/scripts/evaluate_api_teacher.py"
-LAUNCHER_SCRIPT="examples/tutor/scripts/eval_0901_preference_matrix_8gpu.sh"
+LAUNCHER_SCRIPT="${MATRIX_LAUNCHER_SCRIPT:-examples/tutor/scripts/eval_0901_preference_matrix_8gpu.sh}"
+EXPECTED_EXPLAIN_RATIO="${MATRIX_EXPECTED_EXPLAIN_RATIO:-1.0}"
+OUTPUT_TAG="${MATRIX_OUTPUT_TAG:-}"
+STRATIFIED_SAMPLES="${MATRIX_STRATIFIED_SAMPLES:-0}"
+INCLUDE_NONE_STUDENT="${MATRIX_INCLUDE_NONE_STUDENT:-1}"
 
 for required in "$PYTHON" "$EVAL_CONFIG" "$BASE_CONFIG" "$EVALUATOR"; do
   if [[ ! -e "$required" ]]; then
@@ -228,13 +232,17 @@ BASE_PORT="${BASE_PORT:-37000}"
 SAVE_TRACES="${SAVE_TRACES:-all}"
 COMMON_GLOBAL_STEP="${COMMON_GLOBAL_STEP:-}"
 
-for integer_name in EVAL_CONCURRENCY SERVER_MAX_RUNNING_REQUESTS CALLER_MAX_CONCURRENT EPISODE_ERROR_RETRIES EPISODE_RETRY_BACKOFF_SECONDS EPISODE_TIMEOUT_SECONDS CELL_WALL_TIMEOUT_SECONDS CELL_PROCESS_RESTARTS SERVER_READY_TIMEOUT BASE_PORT; do
+for integer_name in EVAL_CONCURRENCY SERVER_MAX_RUNNING_REQUESTS CALLER_MAX_CONCURRENT EPISODE_ERROR_RETRIES EPISODE_RETRY_BACKOFF_SECONDS EPISODE_TIMEOUT_SECONDS CELL_WALL_TIMEOUT_SECONDS CELL_PROCESS_RESTARTS SERVER_READY_TIMEOUT BASE_PORT STRATIFIED_SAMPLES; do
   integer_value="${!integer_name}"
   if [[ ! "$integer_value" =~ ^[0-9]+$ ]]; then
     printf '%s must be a non-negative integer; got %q.\n' "$integer_name" "$integer_value" >&2
     exit 2
   fi
 done
+if [[ "$INCLUDE_NONE_STUDENT" != "0" && "$INCLUDE_NONE_STUDENT" != "1" ]]; then
+  printf 'MATRIX_INCLUDE_NONE_STUDENT must be 0 or 1; got %q.\n' "$INCLUDE_NONE_STUDENT" >&2
+  exit 2
+fi
 if [[ -n "$COMMON_GLOBAL_STEP" && ! "$COMMON_GLOBAL_STEP" =~ ^[0-9]+$ ]]; then
   printf 'COMMON_GLOBAL_STEP must be a non-negative integer; got %q.\n' "$COMMON_GLOBAL_STEP" >&2
   exit 2
@@ -309,6 +317,11 @@ STUDENTS=(
   qwen3-1.7b-text-original-step-demonstration
   qwen3-1.7b-text-original-independent-verification
 )
+if [[ "$INCLUDE_NONE_STUDENT" == "0" ]]; then
+  PREFERENCES=("${PREFERENCES[@]:1}")
+  STUDENT_SPLITS=("${STUDENT_SPLITS[@]:1}")
+  STUDENTS=("${STUDENTS[@]:1}")
+fi
 
 # A resumed run must keep its original common checkpoint even if training has
 # since created a newer checkpoint shared by all five runs.
@@ -399,7 +412,7 @@ PREFLIGHT_ARGS=()
 for teacher in "${TEACHERS[@]}"; do
   PREFLIGHT_ARGS+=("$teacher" "${TRIALS[$teacher]}" "${ADAPTERS[$teacher]}")
 done
-PREFLIGHT_OUTPUT="$("$PYTHON" -B - "$EVAL_CONFIG" "$TEACHER_MODEL_PATH" "$STUDENT_MODEL_PATH" "$COMMON_GLOBAL_STEP" "${PREFLIGHT_ARGS[@]}" <<'PY'
+PREFLIGHT_OUTPUT="$("$PYTHON" -B - "$EVAL_CONFIG" "$TEACHER_MODEL_PATH" "$STUDENT_MODEL_PATH" "$COMMON_GLOBAL_STEP" "$EXPECTED_EXPLAIN_RATIO" "$STRATIFIED_SAMPLES" "$INCLUDE_NONE_STUDENT" "${PREFLIGHT_ARGS[@]}" <<'PY'
 import hashlib
 import json
 import sys
@@ -425,7 +438,10 @@ config_path = Path(sys.argv[1]).resolve()
 teacher_model_path = Path(sys.argv[2]).resolve()
 student_model_path = Path(sys.argv[3]).resolve()
 common_step = int(sys.argv[4])
-teacher_args = sys.argv[5:]
+expected_explain_ratio = float(sys.argv[5])
+stratified_samples = int(sys.argv[6])
+include_none_student = bool(int(sys.argv[7]))
+teacher_args = sys.argv[8:]
 if len(teacher_args) != 15:
     raise SystemExit("Expected exactly five teacher checkpoint triples")
 
@@ -483,7 +499,9 @@ checks = {
     "teacher_only_failed_turns": (
         config.personality.gated_turn_visibility == "teacher_only"
     ),
-    "scripted_gate_complaint": float(config.personality.explain_ratio) == 1.0,
+    "explain_ratio": (
+        float(config.personality.explain_ratio) == expected_explain_ratio
+    ),
     "gate_retries": int(config.personality.gate_retries) == 3,
     "gate_nonterminating": (
         not config.personality.terminate_after_explained_failure
@@ -536,6 +554,9 @@ for student in students:
             and personality["gate_decision_mode"] == "binary"
         ),
         "teacher_only": personality["gated_turn_visibility"] == "teacher_only",
+        "explain_ratio": (
+            float(personality["explain_ratio"]) == expected_explain_ratio
+        ),
         "original_retest": effective["student_generalize_retest_original"] is True,
         "eight_retests": int(effective["student_generalize_replays"]) == 8,
         "teacher_end": effective["teacher_end_enabled"] is True,
@@ -560,11 +581,16 @@ dataset = prepare_test_dataset(
     [students[0]],
     tokenizer=tokenizer,
     limit=0,
-    stratified_max_samples=0,
+    stratified_max_samples=stratified_samples,
     student_prompts=student_prompts,
 )
 if not dataset:
     raise SystemExit("The full evaluation dataset is empty")
+if stratified_samples > 0 and len(dataset) != stratified_samples:
+    raise SystemExit(
+        f"Stratified selection returned {len(dataset)} rows, "
+        f"expected {stratified_samples}"
+    )
 
 teachers = []
 for index in range(0, len(teacher_args), 3):
@@ -594,18 +620,22 @@ for label, path, hidden_size, layers in (
     if signature != ("qwen3", hidden_size, layers):
         raise SystemExit(f"{label} model signature is wrong: {signature}")
 
+selected_students = [
+    {
+        "preference": preference,
+        "name": name,
+        "split": "ID" if index < 4 else "OOD",
+    }
+    for index, (preference, name) in enumerate(zip(preferences, expected_students))
+]
+if not include_none_student:
+    selected_students = selected_students[1:]
+
 report = {
     "common_global_step": common_step,
     "completed_train_steps": common_step + 1,
     "teachers": teachers,
-    "students": [
-        {
-            "preference": preference,
-            "name": name,
-            "split": "ID" if index < 4 else "OOD",
-        }
-        for index, (preference, name) in enumerate(zip(preferences, expected_students))
-    ],
+    "students": selected_students,
     "dataset_rows": len(dataset),
     "dataset_sha256": dataset_sha256(dataset),
     "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
@@ -635,8 +665,8 @@ report = {
 }
 print(
     "[preflight] rollout semantics PASS; "
-    f"teachers={len(teachers)}, students={len(students)}, "
-    f"cells={len(teachers) * len(students)}, full_rows_per_cell={len(dataset)}"
+    f"teachers={len(teachers)}, students={len(selected_students)}, "
+    f"cells={len(teachers) * len(selected_students)}, rows_per_cell={len(dataset)}"
 )
 print(f"[preflight] dataset_sha256={report['dataset_sha256']}")
 print("PREFLIGHT_JSON=" + json.dumps(report, sort_keys=True, separators=(",", ":")))
@@ -650,8 +680,13 @@ if [[ -z "$PREFLIGHT_JSON" ]]; then
 fi
 EXPECTED_ROWS="$("$PYTHON" -B -c 'import json,sys; print(json.loads(sys.argv[1])["dataset_rows"])' "$PREFLIGHT_JSON")"
 
+if [[ -n "$OUTPUT_TAG" && ! "$OUTPUT_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+  printf 'MATRIX_OUTPUT_TAG contains unsupported characters: %q.\n' "$OUTPUT_TAG" >&2
+  exit 2
+fi
+OUTPUT_TAG_PART="${OUTPUT_TAG:+-$OUTPUT_TAG}"
 STAMP="${EVAL_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
-RUN_DIR="${EVAL_RUN_DIR:-$TUTOR_FILEROOT/offline_eval/0901-preference-v3-step$COMPLETED_TRAIN_STEPS-full-matrix/$STAMP}"
+RUN_DIR="${EVAL_RUN_DIR:-$TUTOR_FILEROOT/offline_eval/0901-preference-v3-step$COMPLETED_TRAIN_STEPS$OUTPUT_TAG_PART-full-matrix/$STAMP}"
 if [[ "$MODE" == "preflight" ]]; then
   printf '[preflight] no files or GPU processes were created.\n'
   printf '[preflight] prospective output=%s\n' "$RUN_DIR"
@@ -713,7 +748,7 @@ print("[preflight] eight GPU ids and eight local ports: PASS")
 PY
 
 mkdir -p "$RUN_DIR/logs" "$RUN_DIR/cells" "$RUN_DIR/pairs"
-"$PYTHON" -B - "$RUN_DIR/manifest.json" "$PREFLIGHT_JSON" "$EVAL_CONCURRENCY" "$SERVER_MAX_RUNNING_REQUESTS" "$CALLER_MAX_CONCURRENT" "$SAVE_TRACES" "$BASE_PORT" "$EPISODE_ERROR_RETRIES" "$EPISODE_RETRY_BACKOFF_SECONDS" "$EPISODE_TIMEOUT_SECONDS" "$CELL_WALL_TIMEOUT_SECONDS" "$CELL_PROCESS_RESTARTS" <<'PY'
+"$PYTHON" -B - "$RUN_DIR/manifest.json" "$PREFLIGHT_JSON" "$EVAL_CONCURRENCY" "$SERVER_MAX_RUNNING_REQUESTS" "$CALLER_MAX_CONCURRENT" "$SAVE_TRACES" "$BASE_PORT" "$EPISODE_ERROR_RETRIES" "$EPISODE_RETRY_BACKOFF_SECONDS" "$EPISODE_TIMEOUT_SECONDS" "$CELL_WALL_TIMEOUT_SECONDS" "$CELL_PROCESS_RESTARTS" "$STRATIFIED_SAMPLES" <<'PY'
 import json
 import sys
 from datetime import UTC, datetime
@@ -732,6 +767,7 @@ from pathlib import Path
     episode_timeout,
     cell_timeout,
     cell_restarts,
+    stratified_samples,
 ) = sys.argv[1:]
 preflight = json.loads(preflight_raw)
 dataset_rows = preflight.pop("dataset_rows")
@@ -739,7 +775,11 @@ dataset_hash = preflight.pop("dataset_sha256")
 payload = {
     **preflight,
     "dataset": {
-        "selection": "full",
+        "selection": (
+            "math_type_level_stratified"
+            if int(stratified_samples) > 0
+            else "full"
+        ),
         "rows": dataset_rows,
         "sha256": dataset_hash,
     },
@@ -801,7 +841,7 @@ wait_ready() {
 
 validate_cell() {
   local output=$1 teacher=$2 student=$3 preference=$4 adapter=$5
-  "$PYTHON" -B - "$output" "$teacher" "$student" "$preference" "$adapter" "$EXPECTED_ROWS" <<'PY'
+  "$PYTHON" -B - "$output" "$teacher" "$student" "$preference" "$adapter" "$EXPECTED_ROWS" "$EXPECTED_EXPLAIN_RATIO" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -810,6 +850,7 @@ output = Path(sys.argv[1])
 teacher, student, preference = sys.argv[2:5]
 adapter = str(Path(sys.argv[5]).resolve())
 expected = int(sys.argv[6])
+expected_explain_ratio = float(sys.argv[7])
 summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
 signature = json.loads(
     (output / "run_config.json").read_text(encoding="utf-8")
@@ -852,7 +893,9 @@ semantic_checks = {
     "binary_gate": personality["gate_decision_mode"] == "binary",
     "gate_every_turn": float(personality["gate_sample_rate"]) == 1.0,
     "teacher_only": personality["gated_turn_visibility"] == "teacher_only",
-    "explain_every_failure": float(personality["explain_ratio"]) == 1.0,
+    "explain_ratio": (
+        float(personality["explain_ratio"]) == expected_explain_ratio
+    ),
     "gate_retries": int(personality["gate_retries"]) == 3,
     "original_retest": semantics["student_generalize_retest_original"] is True,
     "eight_retests": int(semantics["student_generalize_replays"]) == 8,
@@ -979,7 +1022,7 @@ run_pair() (
       --student-generalization config
       --student-name "$student"
       --attempts 0
-      --stratified-max-samples 0
+      --stratified-max-samples "$STRATIFIED_SAMPLES"
       --concurrency "$EVAL_CONCURRENCY"
       --episode-error-retries "$EPISODE_ERROR_RETRIES"
       --episode-error-retry-backoff-seconds "$EPISODE_RETRY_BACKOFF_SECONDS"
@@ -1053,7 +1096,10 @@ cleanup_all() {
 }
 trap cleanup_all EXIT INT TERM
 
-printf '[run] 5 teachers x 7 students x %s rows; 35 cells over 4 GPU pairs\n' "$EXPECTED_ROWS"
+TEACHER_COUNT="${#TEACHERS[@]}"
+STUDENT_COUNT="${#STUDENTS[@]}"
+CELL_COUNT=$((TEACHER_COUNT * STUDENT_COUNT))
+printf '[run] %s teachers x %s students x %s rows; %s cells over 4 GPU pairs\n' "$TEACHER_COUNT" "$STUDENT_COUNT" "$EXPECTED_ROWS" "$CELL_COUNT"
 printf '[run] output=%s\n' "$RUN_DIR"
 for ((pair_index = 0; pair_index < PAIR_COUNT; pair_index++)); do
   run_pair "$pair_index" "${GPU_IDS[$((pair_index * 2))]}" "${GPU_IDS[$((pair_index * 2 + 1))]}" &

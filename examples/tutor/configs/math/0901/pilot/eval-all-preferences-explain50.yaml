@@ -1,0 +1,10 @@
+# Full 0901 preference matrix with a 50/50 mixture of explained and bare
+# scripted replies after preference-Gate failures.
+defaults:
+  - eval-all-preferences@_global_
+  - _self_
+
+trial_name: 0901-preference-v3-explain50-full-matrix-eval
+
+personality:
+  explain_ratio: 0.5
