@@ -1,87 +1,122 @@
-# PedagogicalRL baseline in AReaL
+# PedagogicalRL comparison arm
 
-This example ports the PedagogicalRL **method** into AReaL while leaving both projects'
-infrastructure untouched.
+This directory runs the PedagogicalRL method on AReaL without changing tutor or
+core AReaL code. The comparison configs are under `configs/comparison/`.
 
-## What is aligned
+## Training contract
 
-- Qwen3-8B LoRA teacher, frozen Qwen3-1.7B API student, Math Pass@2 data.
-- Native PedagogicalRL teacher/student prompts, GUIDED/ATTEMPTED state machine, ten
-  teacher turns, two whole-dialogue judges, eight final training attempts, and all four
-  native reward terms.
-- 16 problems x 8 rollouts = 128 episodes per outer step, group-wise reward
-  normalization, and two full optimizer updates per rollout batch (mu=2).
-- 750 outer rollout steps / 96,000 episodes / 1,500 optimizer updates.
+The comparison preserves the parts that define PedagogicalRL:
 
-There is no student pre-solve filter. Training selects one leak gate with
-`generation.leak_judge_mode`: `pedagogical_rl` uses the native whole-dialogue leak gate,
-while `turn` uses AReaL's rawbase judge after every teacher output. The native
-whole-dialogue pedagogical-values gate remains enabled in both modes.
+- native PedagogicalRL teacher and student prompts;
+- deterministic GUIDED/ATTEMPTED classroom assignment;
+- no preference and no teacher pre-solve during training;
+- two attempts from each native whole-dialogue hard judge;
+- eight final student attempts, scored with PedagogicalRL's exact final-box
+  string match;
+- one scalar reward per episode, normalized across the eight trajectories for
+  the same problem and broadcast to every teacher token;
+- PPO clipping `epsilon=0.2`, `mu=2` full-batch policy updates, and
+  `beta=0.001` sampled forward KL in the token loss;
+- teacher temperature 1.0 and frozen student/judge temperature 0.6.
 
-Evaluation follows the native GUIDED/ATTEMPTED classroom state machine. Every teacher
-output is checked by the rawbase judge without terminating the rollout; after the full
-dialogue, both native whole-dialogue judges run, and eight final student answers are
-always generated. This gives raw student accuracy plus turn-gated and native-leak-gated
-accuracy from the same rollout. Evaluation runs three repeats per test problem.
+The controlled substitutions shared with our arm are Qwen3-8B rank-16 LoRA as
+teacher, Qwen3-1.7B as student, the same Math Pass@2 split, ten teacher actions,
+and the common teacher action envelope. The launcher serves Qwen3-1.7B locally;
+the frozen judges use the rollout engine's Qwen3-8B base model with LoRA
+disabled. No external inference endpoint is used.
 
-Optional `teacher_pre` privately asks the trainable teacher for a solution draft before
-both training and evaluation dialogues. With `verify: true`, up to `attempts` drafts are
-checked and a problem group is rejected unless a correct draft is found. With
-`verify: false`, exactly one unjudged draft is used. The accepted draft is teacher-only:
-it is absent from the public transcript and from both leak judges' inputs.
-
-Comparable evaluation metrics use the tutor W&B schema: `final_correct`, `pre_solved`
-(always zero because student pre-solve is disabled), `solved`, `leaks`, `turns`,
-`stop/leak`, and the two `repeat/final_correct/*` stability metrics. Turn-level and
-native whole-dialogue judge diagnostics remain separate under `turn_leak/*` and
-`native_leak/*`; failed verified teacher presolves use `teacher_pre/rejected`.
-
-The W&B step is the AReaL outer rollout step. Evaluation every 10 displayed steps
-therefore means every 20 optimizer updates; do not divide the W&B x-axis.
-
-## Ablations
-
-The baseline is the complete config. The other three configs inherit it and override
-only their ablation switches, so model, data, optimizer, LoRA, and sampling settings
-stay identical. Pass the selected config to the unified launcher:
-
-```bash
-bash examples/pedagogical_rl/run_official.sh examples/pedagogical_rl/configs/qwen3_8b_qwen3_1_7b_math_pass2_baseline.yaml
-bash examples/pedagogical_rl/run_official.sh examples/pedagogical_rl/configs/qwen3_8b_qwen3_1_7b_math_pass2_turn_leak.yaml
-bash examples/pedagogical_rl/run_official.sh examples/pedagogical_rl/configs/qwen3_8b_qwen3_1_7b_math_pass2_teacher_pre_verified.yaml
-bash examples/pedagogical_rl/run_official.sh examples/pedagogical_rl/configs/qwen3_8b_qwen3_1_7b_math_pass2_teacher_pre_unverified.yaml
+```xml
+<reasoning>private reasoning</reasoning><output>non-empty student-visible reply</output>
 ```
 
-The launcher defaults to the baseline config. An optional second argument overrides
-`trial_name`.
+or:
 
-## Local links and offline execution
-
-The untracked `data`, `models/teacher`, `.venv`, and repository `.env` links point to
-shared files already prepared on the CPU host. The GPU host does not need external
-network access. The launch script sources the linked `.env`, forces Hugging Face and W&B
-offline, and unsets proxy variables only inside the submitted job.
-
-The INF endpoint is aligned with the tutor experiment and stored in the YAML. The API
-key is loaded from the linked AReaL `.env`, so the one submitted command is:
-
-```bash
-bash examples/pedagogical_rl/run_official.sh
+```xml
+<reasoning>private reasoning</reasoning><end></end>
 ```
 
-## Head-to-head with the tutor method
+PedagogicalRL has no generic output-format reward. One of its four reward helpers
+is a `<think>`-tag helper, which is zero in its published non-thinking setting. Under
+the shared XML interface that inactive slot is replaced by the agreed format
+rule: malformed or empty output ends the episode before another student call or
+final test and contributes `-0.5`; a valid action contributes zero. The native
+final-answer/hard-rejection reward, `+0.1` early-end reward, and `-0.5`
+max-length penalty are unchanged.
 
-`_eval_episode` also emits its numbers under `ped_eval/*`. The tutor workflow
-runs this same post-dialogue protocol when `pedagogical_eval.enabled=true`, so
-the two arms are compared on one metric, `ped_eval/final_correct`:
+The budget is 1,000 rollout batches x 16 problems x 8 trajectories = 128,000
+episodes. Native `mu=2` is retained, so this is 2,000 optimizer updates over the
+same sampled data.
+
+## Train on eight GPUs
+
+From the `dev-unified` worktree:
 
 ```bash
-bash examples/pedagogical_rl/run_official.sh examples/pedagogical_rl/configs/qwen3_8b_qwen3_1_7b_math_pass2_baseline.yaml
+bash examples/pedagogical_rl/run_comparison.sh
 ```
+
+The launcher uses all eight visible GPUs, starts a data-parallel local student
+server on the rollout GPUs, and writes a checkpoint every 25 rollout steps. An
+explicit trial name or Hydra override may follow the config:
 
 ```bash
-bash examples/tutor/run_official.sh examples/tutor/configs/math/0723/2gpu/qwen8b-train-qwen1.7b-math-pre-aleak-generated-pedeval.yaml
+bash examples/pedagogical_rl/run_comparison.sh \
+  examples/pedagogical_rl/configs/comparison/8gpu.yaml \
+  my-pedagogical-run
 ```
 
-See the PedagogicalRL comparison section of `examples/tutor/README.md` for what
-the protocol changes on the tutor side and which asymmetries remain.
+## PedagogicalRL-protocol cross-evaluation
+
+The evaluation config accepts a rank-16 teacher adapter trained by either
+method. It evaluates every test problem under both full GUIDED and full
+ATTEMPTED protocols and all seven students (`none` plus six V3 preferences).
+Thus the complete split is 528 x 2 x 7 = 7,392 dialogues.
+
+For each row it first samples eight official no-tutor attempts, then runs the
+classroom and samples eight final attempts. ATTEMPTED also has its separate
+student-first attempt inside the conversation; that initial student action is
+never preference-gated. After each teacher action, preference students use the
+same V3 binary gate and complaint pool as our protocol. A failed action and its
+scripted complaint remain visible to the teacher but are hidden from the frozen
+student, native whole-dialogue judges, and final attempts.
+
+No tutor rawbase leak gate is inserted. PedagogicalRL's native whole-dialogue
+leak judge is diagnostic and never stops evaluation. Results include both raw
+improvement and leak-aware improvement, where a natively leaked dialogue is
+assigned zero improvement:
+
+- `ped_eval/<guided|attempted>/<preference>/improvement_raw`
+- `ped_eval/<guided|attempted>/<preference>/improvement_leak_aware`
+- matching final accuracy, leak, gate-compliance, turn, and format metrics.
+
+Run it after training, or on one of our adapters:
+
+```bash
+bash examples/pedagogical_rl/run_comparison.sh \
+  examples/pedagogical_rl/configs/comparison/eval_8gpu.yaml \
+  actor.init_lora_path=/absolute/path/to/checkpoint \
+  trial_name=ped-protocol-eval-name
+```
+
+`total_train_steps=0` makes this evaluation-only: it loads the adapter, performs
+the version-0 validation matrix, and exits without a policy update.
+
+The reverse cross uses the existing tutor 0901 full-matrix evaluator, unchanged,
+through a local wrapper:
+
+```bash
+bash examples/pedagogical_rl/run_tutor_protocol_eval.sh \
+  /absolute/path/to/pedagogical-rl-checkpoint
+```
+
+That target protocol therefore owns its prompts, ten-turn dialogue, unverified
+evaluation-time pre-solve, leak/preference masking, seven students, and retest;
+none of those semantics is reimplemented in this example.
+
+## Local links
+
+This worktree already has the shared repository `.venv` and `.env` symlinks.
+`examples/pedagogical_rl/data` points to the same prepared offline data tree.
+The comparison launcher sets placeholder API credentials only for the local
+student server. No source or configuration outside `examples/pedagogical_rl`
+is modified by this comparison arm.

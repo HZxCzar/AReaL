@@ -1,0 +1,10 @@
+defaults:
+  - ../../../base/reward-v4/ID/none@_global_
+  - ../../alloc@_global_
+  - _self_
+
+trial_name: 0901-preference-v3-reward-v4-none-8gpu
+
+stats_logger:
+  wandb:
+    group: 0901-preference-v3-reward-v4-8gpu

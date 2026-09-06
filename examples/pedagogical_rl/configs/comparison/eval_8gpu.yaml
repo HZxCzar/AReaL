@@ -1,0 +1,78 @@
+# Full PedagogicalRL-protocol cross-evaluation matrix.
+#
+# Supply actor.init_lora_path on the command line.  The adapter may come from
+# either training method: this protocol always uses PedagogicalRL's native
+# teacher/student prompts and GUIDED/ATTEMPTED dialogue, while the optional V3
+# preference gate changes only what reaches the frozen student.
+defaults:
+  - 8gpu@_global_
+  - _self_
+
+trial_name: 0904-pedagogical-rl-full-matrix-eval
+total_train_epochs: 1
+total_train_steps: 0
+
+actor:
+  init_lora_path: ""
+
+teacher_pre:
+  enabled: false
+  verify: false
+
+evaluation:
+  matrix_enabled: true
+  compute_initial_attempts: true
+  conversation_types: [GUIDED, ATTEMPTED]
+  preference_names:
+    - none
+    - attempt-diagnosis
+    - causal-justification
+    - subgoal-decomposition
+    - step-demonstration
+    - independent-verification
+    - contrastive-comparison
+  preference_prompts_path: examples/tutor/prompt_pools/personality_prompts_v3.json
+  preference_complaints_path: examples/tutor/prompt_pools/personality_complaints_v3.json
+  preference_gate_retries: 3
+  preference_explain_ratio: 1.0
+  preference_gate_temperature: 0.0
+  preference_gate_top_p: 1.0
+  preference_gate_top_k: 20
+  preference_gate_min_p: 0.0
+  preference_gate_max_tokens: 1024
+  # PedagogicalRL's own whole-dialogue leak judge is the reported leak metric.
+  # Our rawbase turn judge is therefore not inserted into this protocol.
+  record_turn_leak_diagnostic: false
+
+valid_dataset:
+  batch_size: 16
+  shuffle: false
+  pin_memory: false
+  num_workers: 0
+  path: ${train_dataset.path}
+  type: rl
+  max_length: 12000
+  scheduling_spec: null
+
+evaluator:
+  eval_before_train: true
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+  average_rollouts: 1
+
+saver:
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+
+recover:
+  mode: disabled
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+
+stats_logger:
+  wandb:
+    group: 0904-pedagogical-rl-full-matrix-eval
+    tags: [pedagogical-rl, cross-eval, guided, attempted, preference-v3]

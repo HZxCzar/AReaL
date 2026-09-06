@@ -1,0 +1,10 @@
+# Additive compatibility config for comparison with evaluations produced before
+# the causal-justification and independent-verification Gate prompts were tightened.
+defaults:
+  - eval-all-preferences-explain100@_global_
+  - _self_
+
+trial_name: 0901-preference-v3-explain100-legacy-gates-eval
+
+personality:
+  prompts_path: examples/tutor/prompt_pools/personality_prompts_v3_legacy.json

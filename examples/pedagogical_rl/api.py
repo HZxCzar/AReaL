@@ -4,6 +4,10 @@ import asyncio
 from typing import Any, Protocol
 
 from examples.pedagogical_rl.config import PedagogicalAPIModelConfig
+from examples.tutor.core.callers import (
+    AReaLEngineAuxiliaryCaller,
+    AReaLEngineChatCaller,
+)
 
 try:
     from openai import AsyncOpenAI
@@ -50,6 +54,8 @@ class PedagogicalAPIClient:
         max_tokens: int,
         temperature: float,
         top_p: float,
+        top_k: int | None = None,
+        min_p: float | None = None,
     ) -> list[str]:
         if n < 1:
             raise ValueError("n must be positive")
@@ -68,8 +74,8 @@ class PedagogicalAPIClient:
                 seed=self.config.seed,
                 extra_headers=self.config.extra_headers or None,
                 extra_body={
-                    "top_k": self.config.top_k,
-                    "min_p": self.config.min_p,
+                    "top_k": self.config.top_k if top_k is None else int(top_k),
+                    "min_p": self.config.min_p if min_p is None else float(min_p),
                     "chat_template_kwargs": self.config.chat_template_kwargs,
                 },
             )
@@ -80,3 +86,79 @@ class PedagogicalAPIClient:
                 f"expected {n}"
             )
         return [choice.message.content or "" for choice in choices]
+
+
+class PedagogicalEngineClient:
+    """Pedagogical model client backed by the rollout engine's base model.
+
+    Its public ``generate`` contract matches :class:`PedagogicalAPIClient`, but
+    every request carries ``disable_lora=True`` through the shared tutor engine
+    caller. Judge samples therefore come from the frozen Qwen3-8B base model and
+    never enter the trainable teacher interaction cache.
+    """
+
+    def __init__(
+        self,
+        config: PedagogicalAPIModelConfig,
+        *,
+        engine: Any,
+        tokenizer: Any,
+        base_gconfig: Any,
+    ) -> None:
+        self.config = config
+        self.base_gconfig = base_gconfig
+        self._semaphore = asyncio.Semaphore(config.max_concurrent_calls)
+        self._chat_caller = AReaLEngineChatCaller(
+            engine=engine,
+            tokenizer=tokenizer,
+            enable_thinking=bool(
+                config.chat_template_kwargs.get("enable_thinking", False)
+            ),
+        )
+
+    async def generate(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        n: int,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        top_k: int | None = None,
+        min_p: float | None = None,
+    ) -> list[str]:
+        if n < 1:
+            raise ValueError("n must be positive")
+        request_gconfig = self.base_gconfig
+        sampling_overrides = {
+            "top_k": self.config.top_k if top_k is None else int(top_k),
+        }
+        # AReaL's in-engine GenerationHyperparameters has no min_p field. All
+        # comparison configs use min_p=0, which is exactly the backend default.
+        requested_min_p = self.config.min_p if min_p is None else float(min_p)
+        if requested_min_p != 0.0:
+            raise ValueError("the in-engine judge supports only min_p=0")
+        if hasattr(request_gconfig, "new"):
+            request_gconfig = request_gconfig.new(**sampling_overrides)
+
+        caller = AReaLEngineAuxiliaryCaller(
+            chat_caller=self._chat_caller,
+            base_gconfig=request_gconfig,
+            max_completion_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            max_concurrency=self.config.max_concurrent_calls,
+            context_length=getattr(self.base_gconfig, "max_tokens", None),
+            context_window_margin=0,
+            semaphore=self._semaphore,
+        )
+        results = await caller.call_text_many(
+            messages,
+            n=n,
+            rid_prefix="pedagogical-judge",
+            timeout=float(self.config.timeout) * max(1, int(n)),
+        )
+        errors = [result.error for result in results if result.error]
+        if errors:
+            raise RuntimeError(errors[0])
+        return [result.text for result in results]

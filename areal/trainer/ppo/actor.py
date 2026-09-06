@@ -937,6 +937,121 @@ def _compute_loss_weights(
     raise ValueError(f"unknown actor.loss_weighting level {level!r}")
 
 
+def _log_environment_advantage_stats(
+    data: dict[str, Any],
+    *,
+    valid_turn_mask: torch.Tensor,
+    loss_mask: torch.Tensor,
+    outcome_turn_advantage: torch.Tensor,
+    final_turn_advantage: torch.Tensor,
+) -> None:
+    """Log how much usable policy-gradient signal each Tutor student supplies.
+
+    ``outcome`` is the normalized task/improvement advantage before post-std local
+    components. ``final`` is the turn advantage after those components, i.e. the
+    scalar broadcast over that turn's teacher tokens for the PPO loss. Keeping the
+    two apart shows whether an environment is teaching from outcomes or merely
+    contributing format/leak/gate penalties.
+    """
+
+    environment_ids = data.get("student_environment_id")
+    environment_names = data.get("student_environment_names")
+    if environment_ids is None or environment_names is None:
+        return
+    if not isinstance(environment_names, dict):
+        raise ValueError("student_environment_names must be a name-to-id mapping.")
+    environment_items = sorted(
+        ((str(name), int(index)) for name, index in environment_names.items()),
+        key=lambda item: item[1],
+    )
+    expected_environment_ids = list(range(len(environment_items)))
+    if [index for _name, index in environment_items] != expected_environment_ids:
+        raise ValueError("student_environment_names ids must be contiguous from zero.")
+
+    environment_ids = environment_ids.to(
+        device=final_turn_advantage.device, dtype=torch.long
+    ).reshape(-1)
+    if environment_ids.shape != final_turn_advantage.shape:
+        raise ValueError(
+            "student environment metadata is not row-aligned: "
+            f"ids={tuple(environment_ids.shape)}, "
+            f"advantages={tuple(final_turn_advantage.shape)}."
+        )
+    if environment_ids.numel() and (
+        int(environment_ids.min()) < 0
+        or int(environment_ids.max()) >= len(environment_items)
+    ):
+        raise ValueError("student_environment_id is outside its name table.")
+
+    valid_turn_mask = valid_turn_mask.bool()
+    token_counts = loss_mask.sum(dim=-1).float()
+    eps = 1e-8
+
+    group_ids = data.get("group_id")
+    group_environment_ids = None
+    group_outcome_nonzero = None
+    group_final_nonzero = None
+    if group_ids is not None and valid_turn_mask.any():
+        group_ids = group_ids.to(environment_ids.device).reshape(-1)
+        valid_groups = torch.unique(group_ids[valid_turn_mask])
+        group_environment_ids = torch.empty_like(valid_groups)
+        group_outcome_nonzero = torch.zeros_like(valid_groups, dtype=torch.float32)
+        group_final_nonzero = torch.zeros_like(valid_groups, dtype=torch.float32)
+        for group_position, group_id in enumerate(valid_groups):
+            rows = valid_turn_mask & (group_ids == group_id)
+            row_environment_ids = torch.unique(environment_ids[rows])
+            if row_environment_ids.numel() != 1:
+                raise ValueError(
+                    "A rollout group must contain exactly one student environment."
+                )
+            group_environment_ids[group_position] = row_environment_ids[0]
+            group_outcome_nonzero[group_position] = (
+                outcome_turn_advantage[rows].abs() > eps
+            ).any().float()
+            group_final_nonzero[group_position] = (
+                final_turn_advantage[rows].abs() > eps
+            ).any().float()
+
+    with stats_tracker.scope("ppo_actor"):
+        with stats_tracker.scope("environment_advantage"):
+            for name, environment_id in environment_items:
+                environment_turns = valid_turn_mask & (
+                    environment_ids == environment_id
+                )
+                with stats_tracker.scope(name):
+                    stats_tracker.denominator(valid_turns=environment_turns)
+                    stats_tracker.stat(
+                        outcome_nonzero_turn=(
+                            outcome_turn_advantage.abs() > eps
+                        ).float(),
+                        final_nonzero_turn=(
+                            final_turn_advantage.abs() > eps
+                        ).float(),
+                        denominator="valid_turns",
+                    )
+                    stats_tracker.stat(
+                        valid_token_count=token_counts,
+                        outcome_abs_advantage_token_mass=(
+                            outcome_turn_advantage.abs().float() * token_counts
+                        ),
+                        final_abs_advantage_token_mass=(
+                            final_turn_advantage.abs().float() * token_counts
+                        ),
+                        denominator="valid_turns",
+                        reduce_type=stats_tracker.ReduceType.SUM,
+                    )
+                    if group_environment_ids is not None:
+                        assert group_outcome_nonzero is not None
+                        assert group_final_nonzero is not None
+                        environment_groups = group_environment_ids == environment_id
+                        stats_tracker.denominator(valid_groups=environment_groups)
+                        stats_tracker.stat(
+                            outcome_nonzero_group=group_outcome_nonzero,
+                            final_nonzero_group=group_final_nonzero,
+                            denominator="valid_groups",
+                        )
+
+
 def _compute_batch_centered_penalties(
     scores: torch.Tensor,
     weights: torch.Tensor,
@@ -1599,6 +1714,7 @@ class PPOActor:
                     self.config.turn_discount,
                     valid_mask=valid_turn_mask,
                 )
+                baseline_source = turn_returns
             else:
                 residual_returns = _compute_rebn_returns(
                     propagating_reward_score - gate_masked_reward_score,
@@ -1618,7 +1734,14 @@ class PPOActor:
                     device=reward_score.device, dtype=masked_returns.dtype
                 )
                 turn_returns = residual_returns + masked_returns * credit_mask
-            baseline_source = turn_returns
+                if self.config.group_baseline == "episode":
+                    # The per-turn return remains gate-masked, but the episode
+                    # baseline must represent each trajectory's real outcome.
+                    # Reading the first masked turn would incorrectly report a
+                    # zero-return episode whenever that turn failed the gate.
+                    baseline_source = residual_returns + masked_returns
+                else:
+                    baseline_source = turn_returns
             if local_reward_score is not None:
                 valid_turn_weights = valid_turn_mask.to(turn_returns.dtype)
                 if local_reward_scores_by_placement is not None:
@@ -1785,6 +1908,10 @@ class PPOActor:
                 # drop list below and the tests reading it stay put; it carries
                 # whichever level actor.loss_weighting names.
                 data["episode_loss_weight"] = loss_weights
+            # Keep the normalized outcome signal separate from the local
+            # components added below. Environment diagnostics need both views:
+            # what improvement supplied, and what the policy loss finally sees.
+            outcome_turn_advantage = normalized_turn_returns.clone()
             # Per-component post_std local rewards are fixed advantage-unit
             # penalties. Add them at the same final layer as the personality gate
             # penalty so rare leak/format events cannot set the batch std or have
@@ -1827,6 +1954,13 @@ class PPOActor:
                 )
                 data["teacher_context_advantage"] = teacher_context_advantages
             data["turn_advantage"] = normalized_turn_returns
+            _log_environment_advantage_stats(
+                data,
+                valid_turn_mask=valid_turn_mask,
+                loss_mask=loss_mask,
+                outcome_turn_advantage=outcome_turn_advantage,
+                final_turn_advantage=normalized_turn_returns,
+            )
             advantages = kl_advantages + _broadcast_turn_values_to_tokens(
                 normalized_turn_returns, loss_mask
             )
@@ -2255,6 +2389,8 @@ class PPOActor:
             "group_id",
             "group_baseline",
             "episode_loss_weight",
+            "student_environment_id",
+            "student_environment_names",
             # Every OPD column is consumed while computing advantages; none of it
             # reaches the loss, which sees only the adjusted advantage.
             "opd_teacher_logp",

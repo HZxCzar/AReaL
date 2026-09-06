@@ -200,6 +200,37 @@ def _response(n_out: int = 1):
     )
 
 
+def test_soft_overlong_penalty_is_linear_and_post_std_only():
+    computer = EpisodeRewardComputer(
+        success_reward=0.0,
+        leak_penalty=-1.0,
+        leak_penalty_mode="rawbase",
+        soft_overlong_enabled=True,
+        soft_overlong_max_tokens=2048,
+        soft_overlong_buffer_tokens=512,
+        soft_overlong_max_penalty=-0.05,
+        turn_local_components=("soft_overlong",),
+        turn_local_component_placements={"soft_overlong": "post_std"},
+    )
+    turns = [_turn(idx, leaked=False) for idx in range(1, 4)]
+    for turn, generated_tokens in zip(turns, (1536, 1792, 2048), strict=True):
+        turn.tutor_response = _response(generated_tokens)
+
+    assignments = asyncio.run(computer.compute(_episode(turns)))
+
+    assert [assignment.reward for assignment in assignments] == pytest.approx(
+        [0.0, -0.025, -0.05]
+    )
+    assert [
+        assignment.local_reward_by_placement["post_std"] for assignment in assignments
+    ] == pytest.approx([0.0, -0.025, -0.05])
+    assert all(
+        assignment.local_reward_by_placement["group_norm"] == 0.0
+        and assignment.local_reward_by_placement["pre_std"] == 0.0
+        for assignment in assignments
+    )
+
+
 def test_tensordict_only_carries_the_column_when_asked():
     assert "local_rewards" not in response_to_tensordict(_response(), reward=-1.0)
     row = response_to_tensordict(_response(), reward=-1.0, local_reward=-1.0)

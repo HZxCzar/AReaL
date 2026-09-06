@@ -47,7 +47,7 @@ personality:
   # real-student calls and from the final student re-test.
   gated_turn_visibility: teacher_only
   # Every failed gate uses an explicit preference-remedy complaint.
-  explain_ratio: 0.5
+  explain_ratio: 1.0
   gate_retries: 3
 student_generalize:
   enabled: true
@@ -65,12 +65,10 @@ teacher_pre:
   enabled: true
   mode: filter_solver
   attempts: 3
-  # 4096 STATED, not 0. Zero means inherit gconfig.max_new_tokens, which 8a60a2cb
-  # cut from 4096 to 1024 to stop a repetition loop dominating the gradient. That
-  # cap was measured on TEACHING turns, where the median generation is 172-221
-  # tokens and p99 is 551, so 1024 clips nothing real. The pre-solve is not a
-  # teaching turn: it is the teacher working a competition problem end to end, and
-  # 1024 truncates it mid-derivation. A truncated solution reaches no final answer,
+  # 4096 STATED, not 0. Zero means inherit gconfig.max_new_tokens. The teaching
+  # cap used to be 1024 and is now 2048, but neither budget defines the pre-solve:
+  # here the teacher works a competition problem end to end, and 1024 was observed
+  # to truncate it mid-derivation. A truncated solution reaches no final answer,
   # verification fails, and the episode is skipped -- which took
   # rollout/stop/teacher_pre_skipped from 5-12% to 29-38% across every arm,
   # including one with no personality gate at all.
@@ -169,8 +167,16 @@ reward:
   length_penalty_threshold_chars: 0
   length_penalty_per_100_chars: 0.0
   length_penalty_min: 0.0
+  # DAPO-style soft overlong shaping on the complete teacher generation
+  # (reasoning + output). It is zero through 1536 tokens, then decreases
+  # linearly to -0.05 at the 2048-token generation cap.
+  soft_overlong:
+    enabled: true
+    buffer_tokens: 512
+    max_penalty: -0.05
   # Lists replace on merge; spelling out all components preserves each local term.
-  turn_local_components: ["leak", "format_error", "teacher_exact_repeat"]
+  turn_local_components:
+    ["leak", "format_error", "teacher_exact_repeat", "soft_overlong"]
   # Fixed normalized-advantage penalties: none enters the group baseline
   # or the batch std. Override one component with group_norm or pre_std for an
   # ablation; configs without this mapping retain the legacy actor-wide behavior.
@@ -178,6 +184,7 @@ reward:
     leak: post_std
     format_error: post_std
     teacher_exact_repeat: post_std
+    soft_overlong: post_std
 
 debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor/debug_traces/${experiment_name}/${trial_name}
 debug_trace_every_n_rollouts: 10
@@ -212,44 +219,18 @@ rollout:
     chat_template_type: concat
     export_style: concat
     turn_discount: 1.0
-# THE GENERATION CAP AND WHAT HAPPENS AT IT. The two belong together.
-#
-# A draft that stops on 'length' closed no tags, so it is a format error whatever
-# else it says, and under the token-mean PPO loss it also brings its whole length
-# into the gradient. That pair ended 20260822_133603, _133237 and _072948: a
-# teacher fell into a repetition loop, ran to the cap, and those capped turns took
-# 1.7% of the batch gradient, then 14.1%, then 47.7% over two steps, each at about
-# -4 sigma. Entropy left its floor, malformed output followed within three steps,
-# and none of the three came back. The leak penalty is TWICE the format penalty
-# with the same un-baselined, episode-terminating shape and sat at 3-4% for 130
-# steps without doing anything -- the length is what differs, not the reward.
-#
-# 1024 RATHER THAN 4096. Over ~32k healthy turns the median generation is 172-221
-# tokens, p99 is 440-551, and the longest seen at all is 992. 1024 therefore clips
-# nothing real, every length stop at it is pathological by construction, and a
-# survivor costs 5x a normal turn instead of 20x.
-#
-# LENGTH_RETRY resamples the turn instead of training on it, which is the only
-# remedy that removes the sample rather than making it count for less: the
-# discarded draft reaches nothing and the episode is not terminated, so it keeps
-# the re-test a format termination would have forfeited. Recomputed on the batch
-# that ignited 20260822_133603, three attempts take the capped share from 14.1% to
-# 0.3%.
-#
-# Attempts are CORRELATED, so this is not p^3. Repetition is prompt-locked: one
-# step after ignition, 8 of the 49 affected problems had 6 of their 8 samples
-# capping and 2 had all 8, and retry's effectiveness there falls from 93% to 56%.
-# Watch rollout/length_retry/exhausted. Near zero means the token-level loss is
-# safe; climbing means the repetition is locking and actor.loss_weighting: turn --
-# which bounds the share at the count share regardless of correlation -- is the
-# next lever.
+# Teaching turns now have 2048 generated tokens. Recent 0901 trajectories often
+# completed useful reasoning but hit the old 1024 cap inside the visible answer.
+# Length retries still protect against a genuinely stuck generation. In addition,
+# reward.soft_overlong gently discourages consuming the new headroom: zero through
+# 1536 tokens and linear to -0.05 at 2048, applied post-std on that turn only.
 length_retry:
   enabled: true
   attempts: 3
 gconfig:
   n_samples: 8
   min_new_tokens: 0
-  max_new_tokens: 1024
+  max_new_tokens: 2048
   max_tokens: 24576
   greedy: false
   temperature: 1.0
@@ -258,11 +239,8 @@ gconfig:
 eval_gconfig:
   n_samples: 1
   min_new_tokens: 0
-  # Matched to gconfig deliberately. Eval also runs the pre-solve, and at eval
-  # teacher_pre_verify is false, so its attempts collapse to one and a truncated
-  # draft is accepted as-is -- leaving 4096 here would measure a generation regime
-  # training no longer has.
-  max_new_tokens: 1024
+  # Keep the teacher generation regime aligned with training.
+  max_new_tokens: 2048
   max_tokens: 24576
   greedy: false
   temperature: 0.7

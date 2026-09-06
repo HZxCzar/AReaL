@@ -1,0 +1,34 @@
+# Joint in-domain pool used by reward-v4 and reward-v5. The remaining three V3
+# preferences are held out OOD and never sampled by this policy.
+student_models: []
+
+student_axes:
+- behaviors: [text]
+  informations:
+    original:
+      mode: full
+  personalities:
+  - none
+  - contrastive-comparison
+  - subgoal-decomposition
+  - step-demonstration
+  template:
+    name: qwen3-1.7b
+    weight: 1.0
+    base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+    model: qwen3-1.7b
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    max_concurrent_calls: 24
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-qwen17b-student
+      extra_body:
+        top_k: 20
+        min_p: 0
+        chat_template_kwargs:
+          enable_thinking: false

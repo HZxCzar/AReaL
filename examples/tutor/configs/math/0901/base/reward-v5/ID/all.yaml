@@ -1,0 +1,8 @@
+# Joint training pool: contrastive, subgoal, step demonstration, and the ungated control.
+defaults:
+  - ../../default@_global_
+  - ../../student/all-contrastive-subgoal-step@_global_
+  - ../base@_global_
+  - _self_
+
+trial_name: 0901-preference-v3-reward-v5-all-id

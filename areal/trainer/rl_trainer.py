@@ -1999,6 +1999,17 @@ class PPOTrainer:
         stats.update(self.rollout.export_stats())
         if self.eval_rollout is not None:
             stats.update(self.eval_rollout.export_stats())
+        # Tutor personality gates emit pass/call counts per episode. Their
+        # reduced ratio is the true turn-micro compliance; computing a ratio in
+        # the workflow and then averaging would instead weight episodes equally.
+        call_suffix = "/eligible_gate_calls"
+        for key, calls in list(stats.items()):
+            if not key.endswith(call_suffix):
+                continue
+            prefix = key[: -len(call_suffix)]
+            passes = stats.get(f"{prefix}/eligible_gate_passes")
+            if passes is not None and float(calls) > 0.0:
+                stats[f"{prefix}/compliance_micro"] = float(passes) / float(calls)
         self.stats_logger.commit(epoch, epoch_step, global_step, stats)
 
         dist.barrier(group=self.actor.cpu_group)

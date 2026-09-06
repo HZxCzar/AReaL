@@ -8,11 +8,13 @@ from typing import Any
 from examples.pedagogical_rl.prompts import (
     INITIAL_ATTEMPT_WRAPPER,
     SIMPLE_STUDENT_PROMPT,
+    STUDENT_ATTEMPT_PROMPT,
     STUDENT_FINAL_PROMPT,
     STUDENT_INITIAL_ATTEMPT_PROMPT,
-    TEACHER_PROMPT,
     render,
+    render_teacher_prompt,
 )
+from examples.tutor.core.parsers import parse_tagged_teacher_action
 from examples.tutor.core.text import strip_reasoning_for_context
 from examples.tutor.prompts import TEACHER_PRE_SOLVE_FILTER_CONTEXT_TEMPLATE
 
@@ -35,8 +37,18 @@ STUDENT_NAMES: tuple[str | None, ...] = (
 )
 
 
-def student_visible_text(content: str) -> str:
-    """Apply PedagogicalRL's exact teacher-to-student visibility rule."""
+def student_visible_text(content: str, *, output_format: str = "native") -> str:
+    """Return the public part of a teacher action under either interface."""
+
+    if output_format == "unified_xml":
+        visible, ended, error = parse_tagged_teacher_action(
+            content,
+            allow_end=True,
+            require_nonempty_output=True,
+        )
+        if error or ended:
+            return ""
+        return visible or ""
 
     return re.sub(r"<think>.*?</think>", "", content or "", flags=re.S).replace(
         "<end_of_conversation>", ""
@@ -59,21 +71,28 @@ class ClassroomEpisode:
     problem: str
     answer: str
     include_thinking: bool = False
+    teacher_output_format: str = "native"
     forced_type: ConversationType | None = None
     forced_student_name: str | None = None
-    conversation: list[dict[str, str]] = field(default_factory=list)
+    conversation: list[dict[str, Any]] = field(default_factory=list)
     native_judges: list[NativeJudgeDecision] = field(default_factory=list)
     final_solutions: list[str] = field(default_factory=list)
+    evaluation_initial_solutions: list[str] = field(default_factory=list)
     initial_attempt: str | None = None
     teacher_draft: str | None = None
     leak_failed: bool = False
     leak_checks: list[dict[str, Any]] = field(default_factory=list)
     termination_reason: str | None = None
+    format_errors: list[str] = field(default_factory=list)
+    teacher_ended: bool = False
+    preference: str = "none"
+    preference_gate_checks: list[dict[str, Any]] = field(default_factory=list)
     conversation_type: ConversationType = field(init=False)
     student_name: str | None = field(init=False)
     teacher_system_prompt: str = field(init=False)
     student_system_prompt: str = field(init=False)
     student_initial_prompt: str = field(init=False)
+    student_attempt_prompt: str = field(init=False)
     student_final_prompt: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -86,11 +105,11 @@ class ClassroomEpisode:
             if self.forced_student_name is not None
             else STUDENT_NAMES[problem_hash % len(STUDENT_NAMES)]
         )
-        self.teacher_system_prompt = render(
-            TEACHER_PROMPT,
+        self.teacher_system_prompt = render_teacher_prompt(
             student_name=self.student_name,
             problem=self.problem,
             include_thinking=self.include_thinking,
+            output_format=self.teacher_output_format,
         )
         self.student_system_prompt = render(
             SIMPLE_STUDENT_PROMPT,
@@ -100,6 +119,7 @@ class ClassroomEpisode:
         self.student_initial_prompt = render(
             STUDENT_INITIAL_ATTEMPT_PROMPT, problem=self.problem
         )
+        self.student_attempt_prompt = render(STUDENT_ATTEMPT_PROMPT, problem=self.problem)
         self.student_final_prompt = render(STUDENT_FINAL_PROMPT)
 
     @property
@@ -123,11 +143,58 @@ class ClassroomEpisode:
             }
         )
 
-    def add_teacher(self, content: str) -> None:
-        self.conversation.append({"role": "teacher", "content": content})
+    @property
+    def format_failed(self) -> bool:
+        return bool(self.format_errors)
 
-    def add_student(self, content: str) -> None:
-        self.conversation.append({"role": "student", "content": content})
+    def add_teacher(self, content: str, *, student_visible: bool = True) -> None:
+        self.conversation.append(
+            {
+                "role": "teacher",
+                "content": content,
+                "student_visible": student_visible,
+            }
+        )
+        if self.teacher_output_format == "unified_xml":
+            _visible, ended, error = parse_tagged_teacher_action(
+                content,
+                allow_end=True,
+                require_nonempty_output=True,
+            )
+            if error:
+                self.format_errors.append(error)
+                self.termination_reason = "format_error"
+            elif ended:
+                # The shared action contract makes <end></end> control-only; it
+                # is not an empty teacher message in the student's transcript.
+                self.conversation[-1]["student_visible"] = False
+                self.teacher_ended = True
+                self.termination_reason = "end_of_conversation"
+        elif "<end_of_conversation>" in content:
+            self.teacher_ended = True
+            self.termination_reason = "end_of_conversation"
+
+    def add_student(self, content: str, *, student_visible: bool = True) -> None:
+        self.conversation.append(
+            {
+                "role": "student",
+                "content": content,
+                "student_visible": student_visible,
+            }
+        )
+
+    def hide_latest_teacher_from_student(self) -> None:
+        if not self.conversation or self.conversation[-1]["role"] != "teacher":
+            raise RuntimeError("latest classroom message is not a teacher turn")
+        self.conversation[-1]["student_visible"] = False
+
+    def latest_real_student_message(self) -> str | None:
+        for message in reversed(self.conversation):
+            if message["role"] == "student" and message.get(
+                "student_visible", True
+            ):
+                return str(message["content"])
+        return None
 
     def teacher_messages(self) -> list[dict[str, str]]:
         teacher_prompt = self.teacher_system_prompt
@@ -154,9 +221,17 @@ class ClassroomEpisode:
         messages.extend(
             {
                 "role": "assistant" if message["role"] == "student" else "user",
-                "content": student_visible_text(message["content"]),
+                "content": (
+                    student_visible_text(
+                        message["content"],
+                        output_format=self.teacher_output_format,
+                    )
+                    if message["role"] == "teacher"
+                    else message["content"]
+                ),
             }
             for message in self.conversation
+            if message.get("student_visible", True)
         )
         if final:
             messages.append({"role": "user", "content": self.student_final_prompt})
@@ -165,13 +240,26 @@ class ClassroomEpisode:
     def initial_student_messages(self) -> list[dict[str, str]]:
         return [{"role": "system", "content": self.student_initial_prompt}]
 
+    def no_tutor_attempt_messages(self) -> list[dict[str, str]]:
+        """Upstream evaluation baseline, separate from the classroom history."""
+
+        return [{"role": "user", "content": self.student_attempt_prompt}]
+
     def hidden_conversation(self) -> list[dict[str, str]]:
         return [
             {
                 "role": message["role"],
-                "content": student_visible_text(message["content"]),
+                "content": (
+                    student_visible_text(
+                        message["content"],
+                        output_format=self.teacher_output_format,
+                    )
+                    if message["role"] == "teacher"
+                    else message["content"]
+                ),
             }
             for message in self.conversation
+            if message.get("student_visible", True)
         ]
 
     def content_token_count(self, tokenizer: Any) -> int:
@@ -186,17 +274,12 @@ class ClassroomEpisode:
         max_teacher_turns: int,
         max_tokens_in_conversation: int,
     ) -> bool:
-        if self.leak_failed:
+        if self.leak_failed or self.format_failed:
             return True
         if self.teacher_turns >= max_teacher_turns:
             self.termination_reason = self.termination_reason or "max_turns"
             return True
-        if (
-            self.conversation
-            and self.conversation[-1]["role"] == "teacher"
-            and ("<end_of_conversation>" in self.conversation[-1]["content"])
-        ):
-            self.termination_reason = "end_of_conversation"
+        if self.teacher_ended:
             return True
         if self.content_token_count(tokenizer) > max_tokens_in_conversation:
             self.termination_reason = self.termination_reason or "max_tokens"
@@ -211,11 +294,16 @@ class ClassroomEpisode:
             "student_name": self.student_name,
             "conversation": self.conversation,
             "initial_attempt": self.initial_attempt,
+            "evaluation_initial_solutions": self.evaluation_initial_solutions,
             "teacher_draft": self.teacher_draft,
             "leak_failed": self.leak_failed,
             "turn_leak_observed": self.turn_leak_observed,
             "leak_checks": self.leak_checks,
             "termination_reason": self.termination_reason,
+            "format_errors": self.format_errors,
+            "teacher_ended": self.teacher_ended,
+            "preference": self.preference,
+            "preference_gate_checks": self.preference_gate_checks,
             "native_judges": [
                 {
                     "rule": decision.rule,

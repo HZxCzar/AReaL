@@ -1,0 +1,24 @@
+# Match reward-v3 except for episode-level credit normalization.
+# Each turn first receives the trajectory improvement only when its gate passed.
+# The leave-one-out baseline is the mean real (unmasked) improvement of the other
+# trajectories in the rollout group, and the same baseline is subtracted from
+# every turn in this trajectory. There is no direct gate or leak penalty.
+leak_handling_mode: masked_continue
+
+student_generalize:
+  gate_pass_credit_only: true
+
+actor:
+  group_baseline: episode
+  group_baseline_leave1out: true
+  group_baseline_local_reward_mode: exclude
+  adv_norm:
+    mean_level: null
+    std_level: batch
+
+reward:
+  leak_penalty: 0.0
+  personality_gate_fail_penalty: 0.0
+
+personality:
+  explain_ratio: 1.0

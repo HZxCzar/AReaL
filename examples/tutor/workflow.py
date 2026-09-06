@@ -992,6 +992,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         length_penalty_threshold_chars: int = 1200,
         length_penalty_per_100_chars: float = -0.005,
         length_penalty_min: float = -0.1,
+        soft_overlong_penalty: dict[str, Any] | None = None,
         zero_reward_on_length_stop: bool = False,
         teacher_diversity_reward: dict[str, Any] | None = None,
         teacher_context_reward: dict[str, Any] | None = None,
@@ -1236,6 +1237,38 @@ class TutorAgentWorkflow(RolloutWorkflow):
             raise ValueError("personality_gate_fail_penalty must be <= 0.")
         if leaked_success_reward_scale < 0.0:
             raise ValueError("leaked_success_reward_scale must be >= 0.")
+        soft_overlong_config = dict(soft_overlong_penalty or {})
+        soft_overlong_enabled = bool(soft_overlong_config.get("enabled", False))
+        soft_overlong_buffer_tokens = int(
+            soft_overlong_config.get("buffer_tokens", 512)
+        )
+        soft_overlong_max_penalty = float(
+            soft_overlong_config.get("max_penalty", -0.05)
+        )
+        if soft_overlong_buffer_tokens <= 0:
+            raise ValueError("soft_overlong buffer_tokens must be positive.")
+        if soft_overlong_max_penalty > 0.0:
+            raise ValueError("soft_overlong max_penalty must be <= 0.")
+        if soft_overlong_enabled:
+            if soft_overlong_max_penalty == 0.0:
+                raise ValueError("soft_overlong enabled=true requires max_penalty < 0.")
+            if soft_overlong_buffer_tokens >= self.max_completion_tokens:
+                raise ValueError(
+                    "soft_overlong buffer_tokens must be smaller than the teacher "
+                    "max_completion_tokens."
+                )
+            if "soft_overlong" not in turn_local_reward_components:
+                raise ValueError(
+                    "soft_overlong enabled=true requires 'soft_overlong' in "
+                    "turn_local_reward_components."
+                )
+            if (
+                dict(turn_local_reward_component_placements or {}).get("soft_overlong")
+                != "post_std"
+            ):
+                raise ValueError(
+                    "soft_overlong must use the 'post_std' turn-local placement."
+                )
 
         self.success_reward = float(success_reward)
         self.leak_penalty_mode = leak_penalty_mode
@@ -1285,6 +1318,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.length_penalty_threshold_chars = int(length_penalty_threshold_chars)
         self.length_penalty_per_100_chars = float(length_penalty_per_100_chars)
         self.length_penalty_min = float(length_penalty_min)
+        self.soft_overlong_enabled = soft_overlong_enabled
+        self.soft_overlong_buffer_tokens = soft_overlong_buffer_tokens
+        self.soft_overlong_max_penalty = soft_overlong_max_penalty
         self.zero_reward_on_length_stop = bool(zero_reward_on_length_stop)
         diversity_config = dict(teacher_diversity_reward or {})
         self.teacher_diversity_enabled = bool(diversity_config.get("enabled", False))
@@ -3885,6 +3921,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
             length_penalty_threshold_chars=self.length_penalty_threshold_chars,
             length_penalty_per_100_chars=self.length_penalty_per_100_chars,
             length_penalty_min=self.length_penalty_min,
+            soft_overlong_enabled=getattr(self, "soft_overlong_enabled", False),
+            soft_overlong_max_tokens=self.max_completion_tokens,
+            soft_overlong_buffer_tokens=getattr(self, "soft_overlong_buffer_tokens", 0),
+            soft_overlong_max_penalty=getattr(self, "soft_overlong_max_penalty", 0.0),
         )
         assignments = await reward_computer.compute(episode_artifact)
         self._apply_student_request_rewards(turn_artifacts, assignments)
@@ -3942,10 +3982,19 @@ class TutorAgentWorkflow(RolloutWorkflow):
             turn_artifacts
         )
         opd_prompt_tokens = await self._build_opd_prompt_tokens_async(turn_artifacts)
+        environment_name_list = list(getattr(self, "student_model_runtimes", {}).keys())
+        if selected_student.name not in environment_name_list:
+            environment_name_list.append(selected_student.name)
+        student_environment_names = {
+            name: index for index, name in enumerate(environment_name_list)
+        }
+        student_environment_id = student_environment_names[selected_student.name]
         results = [
             response_to_tensordict(
                 artifact.tutor_response,
                 reward=assignment.reward,
+                student_environment_id=student_environment_id,
+                student_environment_names=student_environment_names,
                 local_reward=(
                     assignment.local_reward if turn_local_reward_components else None
                 ),
@@ -9098,6 +9147,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
             self, "length_penalty_per_100_chars", 0.0
         ):
             keys.append("length_penalty")
+        if getattr(self, "soft_overlong_enabled", False):
+            keys.append("soft_overlong")
         if getattr(self, "student_generalize_enabled", False):
             rewards = getattr(self, "student_generalize_level_rewards", {}) or {}
             for level in self._probe_levels():
@@ -9144,6 +9195,31 @@ class TutorAgentWorkflow(RolloutWorkflow):
         prefix = f"personality/{self._student_metric_name(personality)}"
         sampled = [result for result in results if result.sampled]
         gated = [result for result in results if not result.passed]
+
+        # Attempt diagnosis is undefined until the teacher has actually seen a
+        # real student response. Turns before that point are auto-passed by the
+        # binary gate, but counting those passes inflates compliance. Scripted
+        # leak replies and personality complaints are not student attempts.
+        has_real_student_turn = bool(
+            traces
+            and str(traces[0].tutor_state.student_reply_before_teacher or "").strip()
+        )
+        eligible_sampled: list[PersonalityGateResult] = []
+        for trace in traces:
+            result = trace.personality_gate_result
+            if (
+                result is not None
+                and result.sampled
+                and (personality != "attempt-diagnosis" or has_real_student_turn)
+            ):
+                eligible_sampled.append(result)
+            if (
+                bool(str(trace.student_output or "").strip())
+                and not trace.leak_masked
+                and not trace.personality_gated
+            ):
+                has_real_student_turn = True
+        eligible_passed = [result for result in eligible_sampled if result.passed]
         metrics: dict[str, float] = {
             f"{prefix}/gated_turns": float(len(gated)),
             f"{prefix}/explained_complaints": float(
@@ -9154,6 +9230,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
             f"{prefix}/gate_calls": float(len(sampled)),
             f"{prefix}/gate_error": float(sum(1 for result in sampled if result.error)),
+            # These two batch-aggregated counts are converted to their ratio by
+            # RLTrainer after rollout-worker reduction. Averaging per-episode
+            # ratios here would reproduce the legacy macro statistic instead.
+            f"{prefix}/eligible_gate_calls": float(len(eligible_sampled)),
+            f"{prefix}/eligible_gate_passes": float(len(eligible_passed)),
             "personality/sampled_share": (
                 float(len(sampled)) / float(len(results)) if results else 0.0
             ),

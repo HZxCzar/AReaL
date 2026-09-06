@@ -952,10 +952,13 @@ class TutorStudentGeneralizeConfig:
                 "teacher turns whose personality gate passed. In "
                 "leak_handling_mode='masked_continue', masked leak turns are "
                 "excluded by the same credit mask. Rejected turns keep zero "
-                "improvement return before the same-turn group baseline; "
-                "turn-local rewards such as leak and format penalties are unchanged. "
-                "Requires ReBN with a leave-one-out turn baseline and no advantage "
-                "mean-centering. Off preserves the historical reward path."
+                "improvement return before the group baseline. A turn baseline "
+                "compares the masked returns at the same depth; an episode baseline "
+                "is computed from each trajectory's unmasked improvement and "
+                "broadcast to all its turns. Turn-local rewards such as leak and "
+                "format penalties are unchanged. Requires ReBN with a leave-one-out "
+                "turn or episode baseline and no advantage mean-centering. Off "
+                "preserves the historical reward path."
             )
         },
     )
@@ -1761,6 +1764,44 @@ class TutorSuccessTurnShapingConfig:
 
 
 @dataclass
+class TutorSoftOverlongPenaltyConfig:
+    """DAPO-style soft penalty near the teacher generation-token limit."""
+
+    enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Enable a linear per-turn penalty over the final buffer_tokens "
+                "of gconfig.max_new_tokens. The generated-token count includes "
+                "the teacher's reasoning and visible output."
+            )
+        },
+    )
+    buffer_tokens: int = field(default=512)
+    max_penalty: float = field(
+        default=-0.05,
+        metadata={
+            "help": (
+                "Penalty at gconfig.max_new_tokens. Intermediate penalties are "
+                "linearly interpolated from zero at max_new_tokens-buffer_tokens."
+            )
+        },
+    )
+
+    def __post_init__(self) -> None:
+        self.buffer_tokens = int(self.buffer_tokens)
+        self.max_penalty = float(self.max_penalty)
+        if self.buffer_tokens <= 0:
+            raise ValueError("reward.soft_overlong.buffer_tokens must be positive.")
+        if self.max_penalty > 0.0:
+            raise ValueError("reward.soft_overlong.max_penalty must be <= 0.")
+        if self.enabled and self.max_penalty == 0.0:
+            raise ValueError(
+                "reward.soft_overlong.enabled=true requires max_penalty < 0."
+            )
+
+
+@dataclass
 class TutorRewardConfig:
     success: float = field(default=1.0)
     leaked_success_reward_scale: float = field(
@@ -1907,6 +1948,9 @@ class TutorRewardConfig:
     length_penalty_threshold_chars: int = field(default=1200)
     length_penalty_per_100_chars: float = field(default=-0.005)
     length_penalty_min: float = field(default=-0.1)
+    soft_overlong: TutorSoftOverlongPenaltyConfig = field(
+        default_factory=TutorSoftOverlongPenaltyConfig
+    )
     zero_reward_on_length_stop: bool = field(
         default=False,
         metadata={
@@ -2971,6 +3015,25 @@ class TutorConfig(GRPOConfig):
                 "turn-level tensors are dynamically padded. Use "
                 "reward.zero_reward_on_length_stop instead."
             )
+        if self.reward.soft_overlong.enabled:
+            max_new_tokens = int(self.gconfig.max_new_tokens)
+            if self.reward.soft_overlong.buffer_tokens >= max_new_tokens:
+                raise ValueError(
+                    "reward.soft_overlong.buffer_tokens must be smaller than "
+                    "gconfig.max_new_tokens."
+                )
+            if "soft_overlong" not in self.reward.turn_local_components:
+                raise ValueError(
+                    "reward.soft_overlong.enabled=true requires 'soft_overlong' "
+                    "in reward.turn_local_components."
+                )
+            if self.reward.turn_local_component_placements.get("soft_overlong") != (
+                "post_std"
+            ):
+                raise ValueError(
+                    "reward.soft_overlong must use the 'post_std' turn-local "
+                    "placement so it cannot change the outcome baseline or std."
+                )
         if self.guided_slots.enabled:
             if self.gconfig.n_samples < 2:
                 raise ValueError(
@@ -3219,13 +3282,14 @@ class TutorConfig(GRPOConfig):
                 )
             if (
                 self.actor.advantage_estimator != "rebn"
-                or self.actor.group_baseline != "turn"
+                or self.actor.group_baseline not in ("turn", "episode")
                 or not self.actor.group_baseline_leave1out
                 or self.actor.group_baseline_local_reward_mode != "exclude"
             ):
                 raise ValueError(
                     "student_generalize.gate_pass_credit_only requires ReBN with "
-                    "actor.group_baseline='turn', group_baseline_leave1out=true, and "
+                    "actor.group_baseline='turn' or 'episode', "
+                    "group_baseline_leave1out=true, and "
                     "group_baseline_local_reward_mode='exclude'."
                 )
             if (
@@ -3234,6 +3298,6 @@ class TutorConfig(GRPOConfig):
             ):
                 raise ValueError(
                     "student_generalize.gate_pass_credit_only requires "
-                    "actor.adv_norm.mean_level=null so zero-credit turns remain "
-                    "zero after the group baseline."
+                    "actor.adv_norm.mean_level=null so the explicit group-relative "
+                    "credit is not mean-centered a second time."
                 )

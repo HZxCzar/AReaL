@@ -25,6 +25,7 @@ Rebuild the matrix summary:
 
 Useful overrides:
   COMMON_GLOBAL_STEP=424       Select this checkpoint-directory step explicitly.
+  MATRIX_TEACHER_KEYS=all-id   Evaluate only the listed comma-separated teachers.
   EVAL_CONCURRENCY=16          Concurrent episodes per GPU pair.
   BASE_PORT=37000              Teacher ports are BASE_PORT + 0/10/20/30.
   SAVE_TRACES=all              all | errors | none.
@@ -298,6 +299,18 @@ declare -A TRIALS=(
   [attempt-diagnosis]=20260901_182004_0901-preference-v3-reward-v3-attempt-diagnosis-8gpu
   [subgoal-decomposition]=20260901_182422_0901-preference-v3-reward-v3-subgoal-decomposition-8gpu
 )
+if [[ -n "${MATRIX_TEACHER_KEYS:-}" ]]; then
+  IFS=',' read -r -a SELECTED_TEACHERS <<<"$MATRIX_TEACHER_KEYS"
+  TEACHERS=()
+  for teacher in "${SELECTED_TEACHERS[@]}"; do
+    teacher="${teacher//[[:space:]]/}"
+    if [[ -z "$teacher" || -z "${TRIALS[$teacher]:-}" ]]; then
+      printf 'Unknown MATRIX_TEACHER_KEYS entry: %q\n' "$teacher" >&2
+      exit 2
+    fi
+    TEACHERS+=("$teacher")
+  done
+fi
 PREFERENCES=(
   none
   attempt-diagnosis
@@ -364,7 +377,7 @@ for key, trial in specs:
 common = set.intersection(*(set(value) for value in by_teacher.values()))
 if not common:
     details = {key: sorted(value) for key, value in by_teacher.items()}
-    raise SystemExit(f"The five runs have no complete checkpoint in common: {details}")
+    raise SystemExit(f"The selected runs have no complete checkpoint in common: {details}")
 step = int(requested) if requested else max(common)
 if step not in common:
     raise SystemExit(
@@ -390,7 +403,7 @@ while IFS=$'\t' read -r kind first second; do
     ADAPTER) ADAPTERS["$first"]="$second" ;;
   esac
 done <<<"$RESOLUTION"
-if [[ -z "$COMMON_GLOBAL_STEP" || "${#ADAPTERS[@]}" != "5" ]]; then
+if [[ -z "$COMMON_GLOBAL_STEP" || "${#ADAPTERS[@]}" != "${#TEACHERS[@]}" ]]; then
   printf 'Checkpoint resolution returned incomplete data.\n' >&2
   exit 1
 fi
@@ -442,8 +455,8 @@ expected_explain_ratio = float(sys.argv[5])
 stratified_samples = int(sys.argv[6])
 include_none_student = bool(int(sys.argv[7]))
 teacher_args = sys.argv[8:]
-if len(teacher_args) != 15:
-    raise SystemExit("Expected exactly five teacher checkpoint triples")
+if not teacher_args or len(teacher_args) % 3:
+    raise SystemExit("Expected one or more teacher checkpoint triples")
 
 expected_students = [
     "qwen3-1.7b-text-original",

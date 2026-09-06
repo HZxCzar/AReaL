@@ -416,6 +416,51 @@ def test_rebn_gate_credit_masks_improvement_before_turn_baseline():
     )
 
 
+def test_rebn_gate_credit_episode_baseline_uses_unmasked_improvement():
+    actor = _make_actor(
+        PPOActorConfig(
+            advantage_estimator="rebn",
+            turn_discount=1.0,
+            kl_ctl=0.0,
+            adv_norm=None,
+            group_baseline="episode",
+            group_baseline_leave1out=True,
+            group_baseline_local_reward_mode="exclude",
+        )
+    )
+    data = {
+        "input_ids": torch.zeros((5, 3), dtype=torch.long),
+        "attention_mask": torch.ones((5, 3), dtype=torch.bool),
+        "loss_mask": torch.tensor([[0, 1, 0]] * 5, dtype=torch.long),
+        "logprobs": torch.zeros((5, 3)),
+        "rewards": torch.tensor([0.0, 1.0, 0.0, 0.5, 0.0]),
+        "gate_masked_rewards": torch.tensor([0.0, 1.0, 0.0, 0.5, 0.0]),
+        "gate_credit_mask": torch.tensor([False, True, True, False, False]),
+        "trajectory_id": torch.tensor([11, 11, 22, 22, 33]),
+        "turn_idx": torch.tensor([1, 2, 1, 2, 1]),
+        "group_id": torch.zeros(5, dtype=torch.long),
+    }
+
+    result = actor._compute_advantages(data)
+
+    # True episode improvements are [1.0, 0.5, 0.0], regardless of which turns
+    # passed the gate. Their leave-one-out baselines are [0.25, 0.5, 0.75].
+    torch.testing.assert_close(
+        result["group_baseline"],
+        torch.tensor([0.25, 0.25, 0.5, 0.5, 0.75]),
+        rtol=0.0,
+        atol=0.0,
+    )
+    # Gate-failed turns still begin with zero improvement credit and therefore
+    # become negative only when the unmasked episode baseline is subtracted.
+    torch.testing.assert_close(
+        result["turn_advantage"],
+        torch.tensor([-0.25, 0.75, 0.0, -0.5, -0.75]),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
 def test_rebn_gate_fail_penalty_keeps_small_post_normalization_scale():
     actor = _make_actor(
         PPOActorConfig(

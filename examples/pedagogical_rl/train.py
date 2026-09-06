@@ -40,6 +40,27 @@ def _limit_eval_dataset(dataset, limit: int, seed: int):
     return dataset.select(sorted(rng.sample(range(len(dataset)), k=limit)))
 
 
+def _expand_eval_matrix(dataset, evaluation):
+    """Evaluate every problem under every requested protocol/student pair."""
+
+    if not evaluation.matrix_enabled:
+        return dataset
+    indices: list[int] = []
+    conversation_types: list[str] = []
+    preferences: list[str] = []
+    for index in range(len(dataset)):
+        for conversation_type in evaluation.conversation_types:
+            for preference in evaluation.preference_names:
+                indices.append(index)
+                conversation_types.append(conversation_type)
+                preferences.append(preference)
+    expanded = dataset.select(indices)
+    expanded = expanded.add_column(
+        "_pedagogical_conversation_type", conversation_types
+    )
+    return expanded.add_column("_pedagogical_preference", preferences)
+
+
 def main(args: list[str]) -> None:
     config_path = pathlib.Path(args[args.index("--config") + 1])
     has_trial_name_override = any(arg.startswith("trial_name=") for arg in args)
@@ -64,14 +85,17 @@ def main(args: list[str]) -> None:
     )
     valid_dataset = None
     if config.valid_dataset is not None:
-        valid_dataset = _limit_eval_dataset(
-            get_custom_dataset(
-                split="test",
-                dataset_config=config.valid_dataset,
-                tokenizer=tokenizer,
+        valid_dataset = _expand_eval_matrix(
+            _limit_eval_dataset(
+                get_custom_dataset(
+                    split="test",
+                    dataset_config=config.valid_dataset,
+                    tokenizer=tokenizer,
+                ),
+                config.max_eval_examples,
+                config.seed,
             ),
-            config.max_eval_examples,
-            config.seed,
+            config.evaluation,
         )
 
     workflow_kwargs = {
@@ -81,6 +105,7 @@ def main(args: list[str]) -> None:
         "judge_model": asdict(config.judge_model),
         "generation": asdict(config.generation),
         "teacher_pre": asdict(config.teacher_pre),
+        "evaluation": asdict(config.evaluation),
         "debug_trace_dir": config.debug_trace_dir,
         "debug_trace_every_n_rollouts": config.debug_trace_every_n_rollouts,
     }

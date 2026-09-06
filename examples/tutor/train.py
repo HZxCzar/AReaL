@@ -539,6 +539,7 @@ def main(args):
         length_penalty_threshold_chars=reward.length_penalty_threshold_chars,
         length_penalty_per_100_chars=reward.length_penalty_per_100_chars,
         length_penalty_min=reward.length_penalty_min,
+        soft_overlong_penalty=asdict(reward.soft_overlong),
         zero_reward_on_length_stop=reward.zero_reward_on_length_stop,
         teacher_diversity_reward=asdict(reward.teacher_diversity),
         teacher_context_reward=asdict(reward.teacher_context),

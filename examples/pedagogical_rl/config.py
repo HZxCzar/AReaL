@@ -16,6 +16,10 @@ from areal.api.cli_args import (
 class PedagogicalAPIModelConfig:
     """Frozen OpenAI-compatible model used by the classroom workflow."""
 
+    # ``api`` calls an OpenAI-compatible server. ``self`` uses the rollout
+    # engine's base model with the trainable LoRA disabled.  The student remains
+    # an API client even in offline runs because the launcher serves it locally.
+    mode: str = "api"
     base_url: str = ""
     model: str = ""
     api_key: str = ""
@@ -31,6 +35,8 @@ class PedagogicalAPIModelConfig:
     )
 
     def __post_init__(self) -> None:
+        if self.mode not in {"api", "self"}:
+            raise ValueError("model mode must be 'api' or 'self'")
         if self.max_concurrent_calls < 1:
             raise ValueError("max_concurrent_calls must be positive")
         if self.timeout <= 0:
@@ -53,6 +59,11 @@ class PedagogicalGenerationConfig:
     judge_top_p: float = 1.0
     extra_penalty_for_rejected_judges: float = 1.0
     use_thinking: bool = False
+    # ``native`` preserves the upstream free-text/<think> interface for the
+    # dated configs.  The comparison arm uses the same action envelope as the
+    # tutor arm so a checkpoint can be evaluated under either protocol.
+    teacher_output_format: str = "native"
+    format_error_penalty: float = -0.5
     # Keep this as ``str`` rather than ``Literal`` because the OmegaConf
     # version used by AReaL cannot construct structured configs containing
     # Literal annotations. ``__post_init__`` still enforces the enum values.
@@ -76,6 +87,18 @@ class PedagogicalGenerationConfig:
             raise ValueError(
                 "generation.leak_judge_mode must be 'pedagogical_rl' or 'turn'"
             )
+        if self.teacher_output_format not in {"native", "unified_xml"}:
+            raise ValueError(
+                "generation.teacher_output_format must be 'native' or "
+                f"'unified_xml', got {self.teacher_output_format!r}"
+            )
+        if self.teacher_output_format == "unified_xml" and self.use_thinking:
+            raise ValueError(
+                "unified_xml already has a private <reasoning> section; "
+                "generation.use_thinking must be false"
+            )
+        if self.format_error_penalty > 0.0:
+            raise ValueError("generation.format_error_penalty must be <= 0")
 
 
 @dataclass
@@ -99,6 +122,62 @@ class PedagogicalEvaluatorConfig(EvaluatorConfig):
     def __post_init__(self) -> None:
         if self.average_rollouts < 1:
             raise ValueError("evaluator.average_rollouts must be positive")
+
+
+@dataclass
+class PedagogicalEvaluationConfig:
+    """Final PedagogicalRL-protocol matrix; never used by training rollouts."""
+
+    matrix_enabled: bool = False
+    # Defaults preserve the dated configs. The comparison eval opts into the
+    # official no-tutor baseline and opts out of our turn-leak diagnostic.
+    compute_initial_attempts: bool = False
+    conversation_types: list[str] = field(
+        default_factory=lambda: ["GUIDED", "ATTEMPTED"]
+    )
+    preference_names: list[str] = field(default_factory=lambda: ["none"])
+    preference_prompts_path: str = ""
+    preference_complaints_path: str = ""
+    preference_gate_retries: int = 3
+    preference_explain_ratio: float = 1.0
+    preference_gate_temperature: float = 0.0
+    preference_gate_top_p: float = 1.0
+    preference_gate_top_k: int = 20
+    preference_gate_min_p: float = 0.0
+    preference_gate_max_tokens: int = 1024
+    record_turn_leak_diagnostic: bool = True
+
+    def __post_init__(self) -> None:
+        normalized_types = [str(value).strip().upper() for value in self.conversation_types]
+        if not normalized_types or any(
+            value not in {"GUIDED", "ATTEMPTED"} for value in normalized_types
+        ):
+            raise ValueError(
+                "evaluation.conversation_types must contain GUIDED and/or ATTEMPTED"
+            )
+        if len(normalized_types) != len(set(normalized_types)):
+            raise ValueError("evaluation.conversation_types contains duplicates")
+        self.conversation_types = normalized_types
+        normalized_preferences = [
+            str(value).strip() for value in self.preference_names if str(value).strip()
+        ]
+        if not normalized_preferences or len(normalized_preferences) != len(
+            set(normalized_preferences)
+        ):
+            raise ValueError(
+                "evaluation.preference_names must be a non-empty unique list"
+            )
+        self.preference_names = normalized_preferences
+        if self.preference_gate_retries < 1:
+            raise ValueError("evaluation.preference_gate_retries must be positive")
+        if self.preference_gate_max_tokens < 1:
+            raise ValueError(
+                "evaluation.preference_gate_max_tokens must be positive"
+            )
+        if not 0.0 <= self.preference_explain_ratio <= 1.0:
+            raise ValueError(
+                "evaluation.preference_explain_ratio must be in [0, 1]"
+            )
 
 
 @dataclass
@@ -135,6 +214,9 @@ class PedagogicalRLConfig(GRPOConfig):
     teacher_pre: PedagogicalTeacherPreConfig = field(
         default_factory=PedagogicalTeacherPreConfig
     )
+    evaluation: PedagogicalEvaluationConfig = field(
+        default_factory=PedagogicalEvaluationConfig
+    )
     # The head-to-head cross. Same dataclass the tutor arm uses, so the two YAML
     # blocks are the same shape and a difference between them is visible by
     # reading them side by side.
@@ -152,14 +234,17 @@ class PedagogicalRLConfig(GRPOConfig):
             raise ValueError("max_train_examples must be -1 or positive")
         if self.max_eval_examples == 0 or self.max_eval_examples < -1:
             raise ValueError("max_eval_examples must be -1 or positive")
-        if self.actor.kl_ctl != 0.0:
+        if self.actor.kl_ctl < 0.0:
+            raise ValueError("actor.kl_ctl (PedagogicalRL beta) must be >= 0")
+        if self.critic is not None:
+            raise ValueError("the PedagogicalRL baseline does not use a critic")
+        if self.actor.kl_ctl > 0.0 and self.ref is None:
             raise ValueError(
-                "the aligned PedagogicalRL baseline requires actor.kl_ctl=0"
+                "actor.kl_ctl > 0 requires a frozen ref model; for a LoRA actor "
+                "configure ref as the same base checkpoint with use_lora=false"
             )
-        if self.critic is not None or self.ref is not None:
-            raise ValueError(
-                "the aligned PedagogicalRL baseline does not use critic/ref"
-            )
+        if self.actor.kl_ctl == 0.0 and self.ref is not None:
+            raise ValueError("ref is unnecessary when actor.kl_ctl=0")
         if self.teacher_pre.enabled and self.dynamic_bs:
             raise ValueError(
                 "teacher presolve requires dynamic_bs=false to preserve complete "

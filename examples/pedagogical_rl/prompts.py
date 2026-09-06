@@ -4,6 +4,10 @@ import hashlib
 
 from jinja2 import Template
 
+from examples.tutor.prompts import (
+    NON_THINKING_TEACHER_OUTPUT_FORMAT_WITH_END_PROMPT,
+)
+
 TEACHER_PROMPT = """{% if student_name %}
 You are tasked with being a teacher and helping a student named {{ student_name }} with a math problem.
 {% else %}
@@ -228,6 +232,46 @@ WHOLE_DIALOGUE_JUDGE_PROMPTS = {
     "does_not_leak_answer": DOES_NOT_LEAK_ANSWER_JUDGE_PROMPT,
     "follows_pedagogical_values": FOLLOWS_PEDAGOGICAL_VALUES_JUDGE_PROMPT,
 }
+
+
+_NATIVE_END_INSTRUCTION = """You can end a conversation by writing <end_of_conversation>, please try to end conversations as soon as they are finished instead of prolonging them if not needed. But do not end them prematurely either."""
+
+
+def render_teacher_prompt(
+    *,
+    student_name: str | None,
+    problem: str,
+    include_thinking: bool,
+    output_format: str,
+) -> str:
+    """Render the native prompt, changing only the agreed action interface.
+
+    Keeping ``TEACHER_PROMPT`` byte-for-byte identical to upstream makes the
+    controlled change auditable: ``unified_xml`` removes the native thinking
+    and end syntax and appends the exact format contract used by our tutor.
+    """
+
+    if output_format == "native":
+        return render(
+            TEACHER_PROMPT,
+            student_name=student_name,
+            problem=problem,
+            include_thinking=include_thinking,
+        )
+    if output_format != "unified_xml":
+        raise ValueError(f"unknown teacher output format: {output_format!r}")
+    prompt = render(
+        TEACHER_PROMPT,
+        student_name=student_name,
+        problem=problem,
+        include_thinking=False,
+    )
+    if _NATIVE_END_INSTRUCTION not in prompt:
+        raise RuntimeError("native PedagogicalRL end instruction changed upstream")
+    return prompt.replace(
+        _NATIVE_END_INSTRUCTION,
+        NON_THINKING_TEACHER_OUTPUT_FORMAT_WITH_END_PROMPT,
+    )
 
 SOURCE_PROMPT_SHA256 = {
     "teacher": "08757e25782fe32f07ad0f3d21817043dcae0ac3aefc3a62aa0c565cb0d06a9d",

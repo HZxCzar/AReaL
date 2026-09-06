@@ -1,0 +1,18 @@
+defaults:
+  - base@_global_
+  - _self_
+
+trial_name: 0904-pedagogical-rl-qwen3-8b-8gpu
+
+cluster:
+  n_gpus_per_node: 8
+
+rollout:
+  backend: sglang:d4p1t1
+  max_concurrent_rollouts: 64
+
+actor:
+  backend: fsdp:d4p1t1
+
+sglang:
+  mem_fraction_static: 0.50

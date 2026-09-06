@@ -42,6 +42,10 @@ class EpisodeRewardComputer:
         length_penalty_threshold_chars: int = 0,
         length_penalty_per_100_chars: float = 0.0,
         length_penalty_min: float = 0.0,
+        soft_overlong_enabled: bool = False,
+        soft_overlong_max_tokens: int = 0,
+        soft_overlong_buffer_tokens: int = 0,
+        soft_overlong_max_penalty: float = 0.0,
         turn_local_components: tuple[str, ...] | list[str] = (),
         turn_local_component_placements: Mapping[str, str] | None = None,
         turn_local_default_placement: str = "pre_std",
@@ -87,6 +91,32 @@ class EpisodeRewardComputer:
                 "turn-local reward placement must be 'group_norm', 'pre_std', "
                 f"or 'post_std'; got {invalid_placements}."
             )
+        if soft_overlong_max_penalty > 0.0:
+            raise ValueError("soft_overlong_max_penalty must be <= 0.")
+        if soft_overlong_enabled:
+            if soft_overlong_max_tokens <= 0:
+                raise ValueError("soft_overlong_max_tokens must be positive.")
+            if not 0 < soft_overlong_buffer_tokens < soft_overlong_max_tokens:
+                raise ValueError(
+                    "soft_overlong_buffer_tokens must be positive and smaller "
+                    "than soft_overlong_max_tokens."
+                )
+            if soft_overlong_max_penalty == 0.0:
+                raise ValueError(
+                    "soft_overlong_enabled=true requires a negative max penalty."
+                )
+            if "soft_overlong" not in local_components:
+                raise ValueError(
+                    "soft_overlong_enabled=true requires a turn-local "
+                    "'soft_overlong' component."
+                )
+            if (
+                local_placements.get("soft_overlong", turn_local_default_placement)
+                != "post_std"
+            ):
+                raise ValueError(
+                    "soft_overlong must use the 'post_std' turn-local placement."
+                )
         if leaked_success_reward_scale < 0.0:
             raise ValueError("leaked_success_reward_scale must be >= 0.")
         if success_turn_shaping_enabled and success_turn_shaping_min_reward < 0.0:
@@ -142,6 +172,10 @@ class EpisodeRewardComputer:
         self.length_penalty_threshold_chars = length_penalty_threshold_chars
         self.length_penalty_per_100_chars = length_penalty_per_100_chars
         self.length_penalty_min = length_penalty_min
+        self.soft_overlong_enabled = bool(soft_overlong_enabled)
+        self.soft_overlong_max_tokens = int(soft_overlong_max_tokens)
+        self.soft_overlong_buffer_tokens = int(soft_overlong_buffer_tokens)
+        self.soft_overlong_max_penalty = float(soft_overlong_max_penalty)
         self.turn_local_components = local_components
         self.turn_local_component_placements = {
             name: local_placements.get(name, turn_local_default_placement)
@@ -202,6 +236,11 @@ class EpisodeRewardComputer:
             length_penalty = self._length_penalty(artifact.tutor_visible_output)
             if length_penalty:
                 components["length_penalty"] = length_penalty
+            soft_overlong_penalty = self._soft_overlong_penalty(
+                len(getattr(artifact.tutor_response, "output_tokens", ()) or ())
+            )
+            if soft_overlong_penalty:
+                components["soft_overlong"] = soft_overlong_penalty
             reward = float(sum(components.values()))
             local_reward_by_placement: dict[TurnLocalRewardPlacement, float] = {
                 placement: 0.0 for placement in TURN_LOCAL_REWARD_PLACEMENTS
@@ -339,6 +378,16 @@ class EpisodeRewardComputer:
         if per_100_chars < 0:
             return max(min(0.0, float(self.length_penalty_min)), penalty)
         return min(max(0.0, float(self.length_penalty_min)), penalty)
+
+    def _soft_overlong_penalty(self, generated_tokens: int) -> float:
+        if not self.soft_overlong_enabled:
+            return 0.0
+        penalty_start = self.soft_overlong_max_tokens - self.soft_overlong_buffer_tokens
+        excess_tokens = max(0, int(generated_tokens) - penalty_start)
+        if excess_tokens == 0:
+            return 0.0
+        fraction = min(1.0, excess_tokens / self.soft_overlong_buffer_tokens)
+        return float(self.soft_overlong_max_penalty * fraction)
 
 
 def artifact_to_trace(

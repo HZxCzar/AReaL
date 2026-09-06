@@ -44,6 +44,8 @@ def response_to_tensordict(
     response: Any,
     *,
     reward: float,
+    student_environment_id: int | None = None,
+    student_environment_names: Mapping[str, int] | None = None,
     local_reward: float | None = None,
     local_reward_by_placement: Mapping[str, float] | None = None,
     personality_gate_fail_penalty: float | None = None,
@@ -98,6 +100,11 @@ def response_to_tensordict(
         raise ValueError(
             "gate_masked_reward and gate_credit_mask must be provided together."
         )
+    if (student_environment_id is None) != (student_environment_names is None):
+        raise ValueError(
+            "student_environment_id and student_environment_names must be "
+            "provided together."
+        )
     if local_reward_by_placement is not None and local_reward is None:
         raise ValueError(
             "local_reward_by_placement requires the matching local_reward total."
@@ -134,6 +141,20 @@ def response_to_tensordict(
         "trajectory_id": torch.tensor([trajectory_value], dtype=torch.long),
         "turn_idx": torch.tensor([turn_value], dtype=torch.long),
     }
+    if student_environment_id is not None:
+        assert student_environment_names is not None
+        environment_ids = {int(value) for value in student_environment_names.values()}
+        if int(student_environment_id) not in environment_ids:
+            raise ValueError(
+                "student_environment_id is outside student_environment_names: "
+                f"id={student_environment_id}, names={student_environment_names}."
+            )
+        result["student_environment_id"] = torch.tensor(
+            [int(student_environment_id)], dtype=torch.long
+        )
+        # A mapping is deliberate: tensor batching keeps identical non-list
+        # metadata once, while lists are flattened as row data.
+        result["student_environment_names"] = dict(student_environment_names)
     if local_reward is not None:
         effective_local_reward = float(local_reward)
         if (
