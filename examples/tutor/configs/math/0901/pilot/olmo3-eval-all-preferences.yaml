@@ -1,0 +1,19 @@
+# Offline full-matrix evaluation of an OLMo 3 teacher.
+#
+# This composes the explain100 pilot, whose explain_ratio matches reward-v4
+# and reward-v5 training, and then the 8gpu/olmo3 model layer on top: actor.path,
+# and the stop token ids from the checkpoint's generation_config.
+#
+# LAUNCH THROUGH examples/tutor/run_olmo3.sh, not run_offline.sh. The sglang
+# registration and the rope dtype fix live in the environment and the run is
+# wrong without them; see ../8gpu/olmo3/base.yaml.
+defaults:
+  - eval-all-preferences-explain100@_global_
+  - ../8gpu/olmo3/base@_global_
+  - _self_
+
+trial_name: 0901-olmo3-full-matrix-eval-explain100
+
+stats_logger:
+  wandb:
+    group: 0901-olmo3-eval

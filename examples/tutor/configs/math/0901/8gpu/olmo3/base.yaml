@@ -1,0 +1,46 @@
+# The OLMo 3 teacher, as a set of deltas on any 0901 arm.
+#
+# Everything about the experiment -- reward version, personality gate, student
+# pool, allocation -- comes from the arm this is composed with. Only what is
+# specific to swapping the trainable actor from Qwen3-8B to
+# Olmo-3-7B-Instruct lives here, so an OLMo arm and its Qwen twin cannot drift
+# apart on anything else.
+#
+# LAUNCH THROUGH examples/tutor/run_olmo3.sh, not run_official.sh. Two things
+# have to be in the environment and are not expressible in a config file:
+#   * SGLANG_EXTERNAL_MODEL_PACKAGE=sglang_olmo3_ext, so sglang serves OLMo 3 on
+#     its native olmo2 implementation. sglang 0.5.9 registers only
+#     Olmo2ForCausalLM, so without this an OLMo 3 checkpoint falls back to the
+#     generic transformers backend -- which has no LoRA support at all, and this
+#     loop is rank-16 LoRA with hot /load_lora_adapter.
+#   * TAGENT_OLMO3_ROPE_FIX=1, which casts Olmo3RotaryEmbedding's float32
+#     cos/sin back to the input dtype. Without it ppo_update dies on a
+#     bf16-vs-fp32 gradient-checkpoint metadata mismatch. See
+#     examples/tutor/olmo3/sitecustomize.py for the full account.
+# run_olmo3.sh sets both and refuses to launch if the rope fix did not take.
+
+actor:
+  # tokenizer_path, ref.path and sglang.model_path are all ${actor.path}, so
+  # this one line moves them together.
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--allenai--Olmo-3-7B-Instruct/snapshots/6e5971d9eba42665f5bd5a0fcf047f299ce1dccc
+
+# The eos set OLMo 3's generation_config.json declares, verbatim:
+# 100265 = <|im_end|> (turn terminator), 100257 = <|endoftext|> (document
+# terminator). Honouring the checkpoint's declared set is what vLLM and sglang
+# both do when serving; AReaL is the exception, building its stop set from
+# tokenizer.eos_token_id and pad_token_id only (cli_args.py:221-226) and never
+# reading generation_config.json.
+#
+# Qwen3-8B survives that by luck twice over: its tokenizer eos IS the turn
+# terminator <|im_end|>, and it reuses <|endoftext|> as its pad token, so both
+# land in the stop set anyway. OLMo 3's tokenizer eos is the document
+# terminator and it has a separate <|pad|>, so <|im_end|> would be left out and
+# generation would not stop at the end of the assistant turn.
+gconfig:
+  stop_token_ids: [100265, 100257]
+eval_gconfig:
+  stop_token_ids: [100265, 100257]
+
+stats_logger:
+  wandb:
+    group: 0901-olmo3-8gpu

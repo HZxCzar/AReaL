@@ -1,0 +1,17 @@
+# OLMo 3 teacher on the reward-v4 step demonstration arm.
+#
+# Qwen twin: ../../../reward-v4/ID/step-demonstration.yaml -- composed first, so every
+# field except the model-level deltas is shared with it by construction.
+# Those deltas, and the two environment variables the run is wrong without,
+# are in ../../base.yaml. LAUNCH WITH examples/tutor/run_olmo3.sh, which is the
+# OLMo counterpart of run_offline.sh and takes the same arguments.
+defaults:
+  - ../../../reward-v4/ID/step-demonstration@_global_
+  - ../../base@_global_
+  - _self_
+
+trial_name: 0901-olmo3-reward-v4-step-demonstration-8gpu
+
+stats_logger:
+  wandb:
+    group: 0901-olmo3-reward-v4-8gpu

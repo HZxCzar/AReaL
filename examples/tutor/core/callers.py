@@ -90,9 +90,14 @@ def decode_output(
     tokenizer = response.tokenizer or tokenizer
     if tokenizer is not None and hasattr(tokenizer, "decode"):
         try:
+            # skip_special_tokens rather than stripping one hardcoded string:
+            # <|im_end|> is Qwen's turn terminator, but OLMo 3 ends a turn with
+            # <|endoftext|>, which the old line let through into the visible
+            # text and from there into the teacher's own history. The contract
+            # tags are ordinary text, so parsing is unaffected.
             return tokenizer.decode(
-                response.output_tokens, skip_special_tokens=False
-            ).replace("<|im_end|>", "")
+                response.output_tokens, skip_special_tokens=True
+            )
         except TypeError:
             return tokenizer.decode(response.output_tokens).replace("<|im_end|>", "")
     return "".join(chr(max(0, int(token))) for token in response.output_tokens)

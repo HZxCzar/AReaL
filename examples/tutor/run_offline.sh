@@ -115,7 +115,11 @@ export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export WANDB_MODE=offline
 export DO_NOT_TRACK=1
-export PYTHONPATH="$ROOT_DIR"
+# Append rather than replace, so a caller that needs an extra entry -- e.g.
+# examples/tutor/run_olmo3.sh, which puts a sitecustomize module on the path --
+# can pass one in. No-op when PYTHONPATH is unset, which is every existing
+# caller, and matches what run_official.sh already did.
+export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
 
 DRY_RUN="${DRY_RUN:-0}"
