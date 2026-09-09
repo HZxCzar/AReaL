@@ -1,38 +1,37 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Full 5-checkpoint x 7-student evaluation for the 0901 preference-V3 runs.
-# Four independent teacher/student server pairs keep all eight GPUs occupied.
-# Every teacher server loads all five LoRAs; each evaluator cell is singleton.
+# Full recovered step-demonstration checkpoint x seven students.
+# Four independent teacher/student pairs use all eight H200 GPUs.
 
 usage() {
   cat <<'EOF'
 Usage:
-  bash examples/tutor/scripts/eval_0901_preference_matrix_8gpu.sh [preflight|run|analyze]
+  bash examples/tutor/scripts/eval_0901_all_fork775_step1000_8gpu.sh [preflight|run|analyze]
 
-Run the complete 5 x 7 matrix on exactly eight GPUs:
+Run the complete 1 x 7 matrix on exactly eight GPUs:
   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-    bash examples/tutor/scripts/eval_0901_preference_matrix_8gpu.sh run
+    bash examples/tutor/scripts/eval_0901_all_fork775_step1000_8gpu.sh run
 
 Resume an interrupted evaluation:
   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   EVAL_RUN_DIR=/path/printed/by/the/first/run \
-    bash examples/tutor/scripts/eval_0901_preference_matrix_8gpu.sh run
+    bash examples/tutor/scripts/eval_0901_all_fork775_step1000_8gpu.sh run
 
 Rebuild the matrix summary:
   EVAL_RUN_DIR=/path/printed/by/the/run \
-    bash examples/tutor/scripts/eval_0901_preference_matrix_8gpu.sh analyze
+    bash examples/tutor/scripts/eval_0901_all_fork775_step1000_8gpu.sh analyze
 
 Useful overrides:
-  COMMON_GLOBAL_STEP=424       Select this checkpoint-directory step explicitly.
-  MATRIX_TEACHER_KEYS=all-id   Evaluate only the listed comma-separated teachers.
+  COMMON_GLOBAL_STEP=999       1000 completed training updates.
+  MATRIX_TEACHER_KEYS=step-demonstration   Evaluate only the listed comma-separated teachers.
   EVAL_CONCURRENCY=16          Concurrent episodes per GPU pair.
   BASE_PORT=37000              Teacher ports are BASE_PORT + 0/10/20/30.
   SAVE_TRACES=all              all | errors | none.
   EVAL_RUN_DIR=/explicit/path  Required to resume or analyze an existing run.
 
-The default checkpoint is the greatest globalstep shared by all five runs.
-globalstep424 means that 425 optimizer updates have completed.
+The default is the recovered step-demonstration checkpoint globalstep999:
+1000 completed training updates, evaluated on the full test split.
 EOF
 }
 
@@ -55,12 +54,12 @@ cd "$ROOT_DIR"
 # shellcheck source=examples/tutor/scripts/eval_process_cleanup.sh
 source "$ROOT_DIR/examples/tutor/scripts/eval_process_cleanup.sh"
 PYTHON="$ROOT_DIR/.venv/bin/python"
-EVAL_CONFIG="${MATRIX_EVAL_CONFIG:-$ROOT_DIR/examples/tutor/configs/math/0901/pilot/eval-all-preferences.yaml}"
+EVAL_CONFIG="$ROOT_DIR/examples/tutor/configs/math/0901/pilot/eval-step-demo-step1000.yaml"
 BASE_CONFIG="$ROOT_DIR/examples/tutor/configs/math/0901/base/default.yaml"
-EVALUATOR="$ROOT_DIR/examples/tutor/scripts/evaluate_api_teacher.py"
-LAUNCHER_SCRIPT="${MATRIX_LAUNCHER_SCRIPT:-examples/tutor/scripts/eval_0901_preference_matrix_8gpu.sh}"
+EVALUATOR="$ROOT_DIR/examples/tutor/scripts/evaluate_api_teacher_train_aligned.py"
+LAUNCHER_SCRIPT="${MATRIX_LAUNCHER_SCRIPT:-examples/tutor/scripts/eval_0901_all_fork775_step1000_8gpu.sh}"
 EXPECTED_EXPLAIN_RATIO="${MATRIX_EXPECTED_EXPLAIN_RATIO:-1.0}"
-OUTPUT_TAG="${MATRIX_OUTPUT_TAG:-}"
+OUTPUT_TAG="${MATRIX_OUTPUT_TAG:-all-fork775-current-gates}"
 STRATIFIED_SAMPLES="${MATRIX_STRATIFIED_SAMPLES:-0}"
 INCLUDE_NONE_STUDENT="${MATRIX_INCLUDE_NONE_STUDENT:-1}"
 
@@ -233,7 +232,7 @@ CELL_PROCESS_RESTARTS="${CELL_PROCESS_RESTARTS:-3}"
 SERVER_READY_TIMEOUT="${SERVER_READY_TIMEOUT:-900}"
 BASE_PORT="${BASE_PORT:-37000}"
 SAVE_TRACES="${SAVE_TRACES:-all}"
-COMMON_GLOBAL_STEP="${COMMON_GLOBAL_STEP:-}"
+COMMON_GLOBAL_STEP="${COMMON_GLOBAL_STEP:-999}"
 
 for integer_name in EVAL_CONCURRENCY SERVER_MAX_RUNNING_REQUESTS CALLER_MAX_CONCURRENT EPISODE_ERROR_RETRIES EPISODE_RETRY_BACKOFF_SECONDS EPISODE_TIMEOUT_SECONDS CELL_WALL_TIMEOUT_SECONDS CELL_PROCESS_RESTARTS SERVER_READY_TIMEOUT BASE_PORT STRATIFIED_SAMPLES; do
   integer_value="${!integer_name}"
@@ -287,19 +286,9 @@ CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-$TUTOR_FILEROOT/checkpoints/root/tutor-math-
 TEACHER_MODEL="${TEACHER_MODEL:-qwen3-8b}"
 STUDENT_MODEL="${STUDENT_MODEL:-qwen3-1.7b}"
 
-TEACHERS=(
-  all-id
-  none
-  contrastive-comparison
-  attempt-diagnosis
-  subgoal-decomposition
-)
+TEACHERS=(all-id)
 declare -A TRIALS=(
-  [all-id]=20260901_182029_0901-preference-v3-reward-v3-all-id-8gpu
-  [none]=20260901_182144_0901-preference-v3-reward-v3-none-8gpu
-  [contrastive-comparison]=20260901_181950_0901-preference-v3-reward-v3-contrastive-comparison-8gpu
-  [attempt-diagnosis]=20260901_182004_0901-preference-v3-reward-v3-attempt-diagnosis-8gpu
-  [subgoal-decomposition]=20260901_182422_0901-preference-v3-reward-v3-subgoal-decomposition-8gpu
+  [all-id]=20260908_0901-reward-v4-all-id-fork775-8gpu
 )
 if [[ -n "${MATRIX_TEACHER_KEYS:-}" ]]; then
   IFS=',' read -r -a SELECTED_TEACHERS <<<"$MATRIX_TEACHER_KEYS"
@@ -322,7 +311,7 @@ PREFERENCES=(
   step-demonstration
   independent-verification
 )
-STUDENT_SPLITS=(ID ID ID ID OOD OOD OOD)
+STUDENT_SPLITS=(ID OOD ID ID OOD ID OOD)
 STUDENTS=(
   qwen3-1.7b-text-original
   qwen3-1.7b-text-original-attempt-diagnosis
@@ -339,7 +328,7 @@ if [[ "$INCLUDE_NONE_STUDENT" == "0" ]]; then
 fi
 
 # A resumed run must keep its original common checkpoint even if training has
-# since created a newer checkpoint shared by all five runs.
+# since created a newer checkpoint shared by all selected run.
 if [[ "$MODE" == "run" && -n "${EVAL_RUN_DIR:-}" && -f "$EVAL_RUN_DIR/manifest.json" && -z "$COMMON_GLOBAL_STEP" ]]; then
   COMMON_GLOBAL_STEP="$("$PYTHON" -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["common_global_step"])' "$EVAL_RUN_DIR/manifest.json")"
 fi
@@ -436,7 +425,7 @@ from pathlib import Path
 
 from areal.utils.hf_utils import load_hf_tokenizer
 from examples.tutor import train as tutor_train
-from examples.tutor.scripts.evaluate_api_teacher import (
+from examples.tutor.scripts.evaluate_api_teacher_train_aligned import (
     build_eval_workflow_kwargs,
     dataset_sha256,
     effective_eval_presolve_enabled,
@@ -523,6 +512,7 @@ checks = {
     ),
     "base_auxiliary": config.auxiliary_model.mode == "api",
     "repeat_terminate": bool(config.reward.teacher_exact_repeat_terminate),
+    "length_retry": bool(config.length_retry.enabled) and config.length_retry.attempts == 3,
 }
 failed = [name for name, passed in checks.items() if not passed]
 if failed:
@@ -555,6 +545,9 @@ for student in students:
     personality = effective["personality"]
     effective_checks = {
         "pre_solve": effective["teacher_pre_enabled"] is True,
+        "length_retry": effective["length_retry_enabled"] == config.length_retry.enabled and effective["length_retry_attempts"] == config.length_retry.attempts,
+        "soft_overlong": effective["soft_overlong_penalty"]["enabled"] == config.reward.soft_overlong.enabled,
+        "teacher_end": effective["teacher_end_enabled"] is True,
         "no_preverify": effective["teacher_pre_verify"] is False,
         "masked_leak_continue": effective["leak_handling_mode"] == "masked_continue",
         "format_terminate": effective["format_handling_mode"] == "terminate",
@@ -639,7 +632,7 @@ selected_students = [
     {
         "preference": preference,
         "name": name,
-        "split": "ID" if index < 4 else "OOD",
+        "split": "ID" if preferences[index] in {"none", "contrastive-comparison", "subgoal-decomposition", "step-demonstration"} else "OOD",
     }
     for index, (preference, name) in enumerate(zip(preferences, expected_students))
 ]

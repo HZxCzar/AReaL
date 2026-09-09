@@ -302,6 +302,8 @@ def main() -> None:
         index: int, raw: str, finish_reason: str | None
     ) -> dict[str, Any]:
         example = examples[index]
+        prompt = task.get_system_prompt(example)
+        chat_mode = args.task in CHAT_TASKS
         visible = apply_official_stops(
             extract_visible_teacher_output(raw), task_config.stop
         )
@@ -311,6 +313,13 @@ def main() -> None:
             "task_config": args.task,
             "task_name": task_config.name,
             "index": index,
+            "input_example": jsonable(example),
+            "input_prompt": prompt,
+            "request_input": (
+                {"messages": [{"role": "user", "content": prompt}]}
+                if chat_mode
+                else {"prompt": prompt + NATIVE_NO_THINK}
+            ),
             "raw_response": raw,
             "visible_response": visible,
             "finish_reason": finish_reason,

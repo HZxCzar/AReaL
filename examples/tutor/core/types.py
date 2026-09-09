@@ -135,6 +135,8 @@ class TeacherPreSolveAttempt:
     error: str | None
     accepted: bool
     judge_result: JudgeResult | None = None
+    # Kept only for opt-in RL training; never serialized into prompts/debug JSON.
+    response: Any | None = field(default=None, repr=False)
 
 
 @dataclass(slots=True)

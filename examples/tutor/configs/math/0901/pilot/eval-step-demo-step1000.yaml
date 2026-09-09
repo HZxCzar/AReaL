@@ -1,0 +1,36 @@
+# Seven students; training rollout semantics from reward-v4, not reward-v3.
+defaults:
+  - eval-all-preferences-explain100@_global_
+  - ../base/reward-v4/base@_global_
+  - _self_
+
+trial_name: 0901-step-demo-recovered-step1000-eval
+
+# Preserve the historical 1000-step comparison protocol in analysis/results.md.
+# Those checkpoints trained with a 2048-token teaching budget, before the shared
+# defaults switched to 1024. Also used by the all-id-1000 evaluation launcher.
+gconfig:
+  max_new_tokens: 2048
+reward:
+  soft_overlong:
+    enabled: true
+    buffer_tokens: 512
+    max_penalty: -0.05
+
+# Keep the current gate definitions, including revised causal and verification.
+personality:
+  prompts_path: examples/tutor/prompt_pools/personality_prompts_v3.json
+  complaints_path: examples/tutor/prompt_pools/personality_complaints_v3.json
+  explain_ratio: 1.0
+
+# Teaching sampling follows training, not the default validation temperature.
+eval_gconfig:
+  max_new_tokens: 2048
+  temperature: ${gconfig.temperature}
+
+evaluator:
+  teacher_pre_enabled: true
+  teacher_pre_verify: false
+  leak_terminate: null
+  format_terminate: null
+  average_rollouts: 1

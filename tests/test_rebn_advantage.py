@@ -79,6 +79,108 @@ def test_rebn_returns_discount_future_turn_rewards():
     )
 
 
+def _presolve_mixed_batch():
+    return {
+        "input_ids": torch.zeros((6, 6), dtype=torch.long),
+        "attention_mask": torch.ones((6, 6), dtype=torch.bool),
+        "loss_mask": torch.tensor(
+            [[0, 1, 0, 0, 0, 0], [0, 1, 1, 1, 0, 0]] + [[0, 1, 1, 1, 1, 0]] * 4
+        ),
+        "logprobs": torch.zeros((6, 6)),
+        "rewards": torch.tensor([0.8, 0.2, 1.0, 0.0, 0.0, 0.0]),
+        "trajectory_id": torch.arange(6),
+        "turn_idx": torch.ones(6, dtype=torch.long),
+        "group_id": torch.zeros(6, dtype=torch.long),
+        "presolve_mask": torch.tensor([False, False, True, True, True, True]),
+        "presolve_advantage": torch.tensor([0.0, 0.0, 1.0, -1 / 3, -1 / 3, -1 / 3]),
+    }
+
+
+def test_presolve_does_not_change_teaching_baseline_or_normalization():
+    config = PPOActorConfig(
+        advantage_estimator="rebn",
+        kl_ctl=0.0,
+        group_baseline="episode",
+        adv_norm=NormConfig(mean_level=None, std_level="batch"),
+        loss_weighting="turn",
+    )
+    actor = _make_actor(config)
+    mixed = actor._compute_advantages(_presolve_mixed_batch())
+    baseline_data = {
+        k: v[:2].clone()
+        for k, v in _presolve_mixed_batch().items()
+        if not k.startswith("presolve_")
+    }
+    config.loss_weighting = "token"
+    baseline = _make_actor(config)._compute_advantages(baseline_data)
+    torch.testing.assert_close(mixed["group_baseline"][:2], baseline["group_baseline"])
+    torch.testing.assert_close(mixed["turn_advantage"][:2], baseline["turn_advantage"])
+    # Every response's advantages SUM to its original scalar advantage.
+    torch.testing.assert_close(
+        mixed["advantages"].sum(-1)[2:], torch.tensor([1.0, -1 / 3, -1 / 3, -1 / 3])
+    )
+    torch.testing.assert_close(mixed["policy_sample_weight"].sum(-1), torch.ones(6))
+
+
+def test_presolve_all_wrong_batch_has_zero_advantage():
+    data = {k: v[2:].clone() for k, v in _presolve_mixed_batch().items()}
+    data["presolve_advantage"].zero_()
+    data["rewards"].zero_()
+    actor = _make_actor(
+        PPOActorConfig(
+            advantage_estimator="rebn",
+            kl_ctl=0.0,
+            group_baseline="episode",
+            adv_norm=NormConfig(mean_level=None, std_level="batch"),
+            loss_weighting="turn",
+        )
+    )
+    out = actor._compute_advantages(data)
+    assert torch.isfinite(out["advantages"]).all()
+    assert out["advantages"].count_nonzero() == 0
+
+
+def test_mixed_response_mean_loss_and_gradient_survive_microbatch_split():
+    actor = _make_actor(
+        PPOActorConfig(
+            advantage_estimator="rebn",
+            kl_ctl=0.0,
+            group_baseline="episode",
+            adv_norm=None,
+            loss_weighting="turn",
+        )
+    )
+    data = actor._compute_advantages(_presolve_mixed_batch())
+
+    def evaluate(parts):
+        logp = torch.zeros((6, 6), requires_grad=True)
+        total = _actor_module._policy_loss_weight(data)
+        loss = 0
+        for indices in parts:
+            mb = {k: v[indices] for k, v in data.items()}
+            mb["prox_logp"] = mb["logprobs"].clone()
+            value = _actor_module.grpo_loss_fn(
+                logp[indices],
+                torch.zeros_like(logp[indices]),
+                mb,
+                eps_clip=0.2,
+                eps_clip_higher=None,
+                c_clip=3.0,
+                behave_imp_weight_cap=5.0,
+                behave_imp_weight_mode="disabled",
+            )
+            loss = loss + value * _actor_module._policy_loss_weight(mb) / total
+        loss.backward()
+        return loss.detach(), logp.grad
+
+    full, full_grad = evaluate([slice(None)])
+    split, split_grad = evaluate([slice(0, 1), slice(1, 3), slice(3, 6)])
+    torch.testing.assert_close(full, split)
+    torch.testing.assert_close(full_grad, split_grad)
+    expected = -data["advantages"].sum(-1) / 6
+    torch.testing.assert_close(full_grad.sum(-1), expected)
+
+
 def test_rebn_returns_do_not_cross_trajectories():
     rewards = torch.tensor([0.0, 1.0, 0.0, 2.0])
     trajectory_ids = torch.tensor([1, 1, 2, 2])

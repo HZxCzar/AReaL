@@ -1,0 +1,6 @@
+defaults:
+  - ../../reward-v4/OOD/causal-justification@_global_
+  - ../base@_global_
+  - _self_
+
+trial_name: 0901-reward-gt-causal-justification

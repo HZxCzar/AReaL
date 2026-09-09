@@ -272,6 +272,8 @@ def _build_eval_workflow_kwargs(
     eval_workflow_kwargs = workflow_kwargs.copy()
     eval_workflow_kwargs["gconfig"] = config.eval_gconfig.new(n_samples=1)
     eval_workflow_kwargs["eval_repeat_count"] = config.evaluator.average_rollouts
+    # Evaluation uses the normal solver retries, never exports auxiliary RL rows.
+    eval_workflow_kwargs["teacher_pre_train"] = False
     eval_workflow_kwargs["teacher_prompt_pool_path"] = ""
     eval_paths = config.prompt_pool.student_eval_paths
     eval_workflow_kwargs["student_prompt_pool_path"] = eval_paths.get("seen", "")
@@ -309,13 +311,9 @@ def _build_eval_workflow_kwargs(
         # semantics define the environment, so an eval request to avoid
         # termination must not turn it into reward_only and expose leaked turns.
         eval_workflow_kwargs["leak_handling_mode"] = (
-            "reward_only"
-            if training_leak_mode == "terminate"
-            else training_leak_mode
+            "reward_only" if training_leak_mode == "terminate" else training_leak_mode
         )
-        eval_workflow_kwargs["eval_preleak_retest"] = (
-            training_leak_mode == "terminate"
-        )
+        eval_workflow_kwargs["eval_preleak_retest"] = training_leak_mode == "terminate"
     # Same argument for a malformed turn: 'terminate' exists to make format drift
     # expensive while learning, and nothing cuts a real conversation short because
     # the teacher mis-tagged a reply. Under 'continue' the student is handed an
@@ -578,6 +576,7 @@ def main(args):
         length_retry_enabled=config.length_retry.enabled,
         length_retry_attempts=config.length_retry.attempts,
         teacher_pre_enabled=teacher_pre.enabled,
+        teacher_pre_train=teacher_pre.train,
         teacher_pre_mode=teacher_pre.mode,
         teacher_pre_verify=teacher_pre.verify,
         teacher_pre_attempts=teacher_pre.attempts,

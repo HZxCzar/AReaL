@@ -332,6 +332,11 @@ def _joint_loss_weight(input_data: dict[str, Any]) -> torch.Tensor:
 
 
 def _policy_loss_weight(input_data: dict[str, Any]) -> torch.Tensor:
+    if "policy_sample_weight" in input_data:
+        # Each response's token weights sum to one, including after packing.
+        return (
+            input_data["policy_sample_weight"] * input_data["loss_mask"].bool()
+        ).sum()
     return input_data["loss_mask"].count_nonzero()
 
 
@@ -1006,11 +1011,11 @@ def _log_environment_advantage_stats(
                 )
             group_environment_ids[group_position] = row_environment_ids[0]
             group_outcome_nonzero[group_position] = (
-                outcome_turn_advantage[rows].abs() > eps
-            ).any().float()
+                (outcome_turn_advantage[rows].abs() > eps).any().float()
+            )
             group_final_nonzero[group_position] = (
-                final_turn_advantage[rows].abs() > eps
-            ).any().float()
+                (final_turn_advantage[rows].abs() > eps).any().float()
+            )
 
     with stats_tracker.scope("ppo_actor"):
         with stats_tracker.scope("environment_advantage"):
@@ -1382,6 +1387,13 @@ class PPOActor:
         data: dict[str, Any],
         world_model_rl_reweight_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        mixed_presolve = "presolve_mask" in data
+        if mixed_presolve and (
+            self.config.advantage_estimator != "rebn" or self.reward_norm is not None
+        ):
+            raise ValueError("Pre-solve RL requires REBN and reward_norm=null.")
+        if mixed_presolve and "presolve_advantage" not in data:
+            raise ValueError("Missing pre-solve RLOO advantages.")
         bs = data["input_ids"].shape[0]
         batch_indices = torch.arange(
             bs, device=data["input_ids"].device, dtype=torch.long
@@ -1653,6 +1665,12 @@ class PPOActor:
                 seq_no_eos_mask=seq_no_eos_mask,
             )
             valid_turn_mask = loss_mask.sum(dim=-1) > 0
+            if mixed_presolve:
+                # Solve candidates must not enter teaching returns, baselines,
+                # batch scaling, or local-penalty statistics.
+                valid_turn_mask = valid_turn_mask & ~data["presolve_mask"].to(
+                    device=loss_mask.device, dtype=torch.bool
+                )
             personality_gate_fail_penalty = None
             if "personality_gate_fail_penalty" in data:
                 personality_gate_fail_penalty = data[
@@ -1835,15 +1853,13 @@ class PPOActor:
                             1.0,
                             valid_mask=valid_turn_mask,
                         )
-                        singleton_fallback_baseline = (
-                            _compute_episode_group_baseline(
-                                unmasked_improvement_returns,
-                                trajectory_ids,
-                                turn_indices,
-                                data["group_id"].to(reward_score.device),
-                                valid_turn_mask,
-                                True,
-                            )
+                        singleton_fallback_baseline = _compute_episode_group_baseline(
+                            unmasked_improvement_returns,
+                            trajectory_ids,
+                            turn_indices,
+                            data["group_id"].to(reward_score.device),
+                            valid_turn_mask,
+                            True,
                         )
                         singleton_credit_mask = data["gate_credit_mask"].to(
                             device=reward_score.device, dtype=torch.bool
@@ -1896,7 +1912,7 @@ class PPOActor:
                     normalized_turn_returns
                 )
                 data["world_model_rl_weight"] = world_model_rl_weights
-            if self.config.loss_weighting != "token":
+            if self.config.loss_weighting != "token" and not mixed_presolve:
                 loss_weights = _compute_loss_weights(
                     self.config.loss_weighting,
                     data["trajectory_id"].to(reward_score.device),
@@ -1964,6 +1980,23 @@ class PPOActor:
             advantages = kl_advantages + _broadcast_turn_values_to_tokens(
                 normalized_turn_returns, loss_mask
             )
+            if mixed_presolve:
+                solve_mask = data["presolve_mask"].to(
+                    device=loss_mask.device, dtype=torch.bool
+                )
+                solve_advantage = data["presolve_advantage"].to(advantages.device)
+                if (
+                    not torch.isfinite(solve_advantage).all()
+                    or (solve_advantage.abs() > 1.000001).any()
+                ):
+                    raise ValueError(
+                        "Pre-solve advantages must be finite binary RLOO values in [-1, 1]."
+                    )
+                advantages = torch.where(
+                    solve_mask.unsqueeze(-1),
+                    _broadcast_turn_values_to_tokens(solve_advantage, loss_mask),
+                    advantages,
+                )
             data["returns"] = advantages
         else:
             if "values" not in data:
@@ -2009,6 +2042,14 @@ class PPOActor:
             data["opd_reverse_kl"] = opd_reverse_kl
             data["opd_advantage"] = opd_advantages
             data["opd_active"] = opd_active
+
+        if mixed_presolve:
+            # Scale the COMPLETE per-token objective, including local penalties.
+            # grpo_loss_fn and _policy_loss_weight restore a response-count
+            # denominator independently in every DP/micro/PPO minibatch.
+            counts = loss_mask.sum(-1, keepdim=True).clamp_min(1)
+            data["policy_sample_weight"] = loss_mask / counts
+            advantages = advantages / counts
 
         # Store data in the dict.
         data["advantages"] = advantages
@@ -2387,6 +2428,8 @@ class PPOActor:
             "world_model_rl_advantage_after_reweight",
             "turn_advantage",
             "group_id",
+            "presolve_mask",
+            "presolve_advantage",
             "group_baseline",
             "episode_loss_weight",
             "student_environment_id",
@@ -2632,6 +2675,19 @@ def grpo_loss_fn(
             importance_sampling_level=importance_sampling_level,
             cu_seqlens=input_data.get("cu_seqlens"),
             behave_imp_weight_mode=behave_imp_weight_mode,
+        )
+
+    if "policy_sample_weight" in input_data:
+        if input_data.get("teacher_logp") is not None:
+            raise ValueError(
+                "Sample-mean pre-solve PPO does not support joint distillation."
+            )
+        # PPO above returns a token mean of inverse-response-length advantages.
+        # Convert to a response mean; engine weights microbatches by responses.
+        loss = (
+            loss
+            * loss_mask.count_nonzero()
+            / _policy_loss_weight(input_data).clamp_min(1)
         )
 
     # Joint Distillation KL Loss

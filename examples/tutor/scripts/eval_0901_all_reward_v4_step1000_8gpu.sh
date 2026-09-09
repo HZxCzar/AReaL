@@ -1,38 +1,37 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Full 5-checkpoint x 7-student evaluation for the 0901 preference-V3 runs.
-# Four independent teacher/student server pairs keep all eight GPUs occupied.
-# Every teacher server loads all five LoRAs; each evaluator cell is singleton.
+# Full recovered step-demonstration checkpoint x seven students.
+# Four independent teacher/student pairs use all eight H200 GPUs.
 
 usage() {
   cat <<'EOF'
 Usage:
-  bash examples/tutor/scripts/eval_0901_preference_matrix_8gpu.sh [preflight|run|analyze]
+  bash examples/tutor/scripts/eval_0901_all_reward_v4_step1000_8gpu.sh [preflight|run|analyze]
 
-Run the complete 5 x 7 matrix on exactly eight GPUs:
+Run the complete 1 x 7 matrix on exactly eight GPUs:
   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-    bash examples/tutor/scripts/eval_0901_preference_matrix_8gpu.sh run
+    bash examples/tutor/scripts/eval_0901_all_reward_v4_step1000_8gpu.sh run
 
 Resume an interrupted evaluation:
   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   EVAL_RUN_DIR=/path/printed/by/the/first/run \
-    bash examples/tutor/scripts/eval_0901_preference_matrix_8gpu.sh run
+    bash examples/tutor/scripts/eval_0901_all_reward_v4_step1000_8gpu.sh run
 
 Rebuild the matrix summary:
   EVAL_RUN_DIR=/path/printed/by/the/run \
-    bash examples/tutor/scripts/eval_0901_preference_matrix_8gpu.sh analyze
+    bash examples/tutor/scripts/eval_0901_all_reward_v4_step1000_8gpu.sh analyze
 
 Useful overrides:
-  COMMON_GLOBAL_STEP=424       Select this checkpoint-directory step explicitly.
-  MATRIX_TEACHER_KEYS=all-id   Evaluate only the listed comma-separated teachers.
+  COMMON_GLOBAL_STEP=999       1000 completed training updates.
+  MATRIX_TEACHER_KEYS=step-demonstration   Evaluate only the listed comma-separated teachers.
   EVAL_CONCURRENCY=16          Concurrent episodes per GPU pair.
   BASE_PORT=37000              Teacher ports are BASE_PORT + 0/10/20/30.
   SAVE_TRACES=all              all | errors | none.
   EVAL_RUN_DIR=/explicit/path  Required to resume or analyze an existing run.
 
-The default checkpoint is the greatest globalstep shared by all five runs.
-globalstep424 means that 425 optimizer updates have completed.
+The default is the recovered step-demonstration checkpoint globalstep999:
+1000 completed training updates, evaluated on the full test split.
 EOF
 }
 
@@ -55,14 +54,16 @@ cd "$ROOT_DIR"
 # shellcheck source=examples/tutor/scripts/eval_process_cleanup.sh
 source "$ROOT_DIR/examples/tutor/scripts/eval_process_cleanup.sh"
 PYTHON="$ROOT_DIR/.venv/bin/python"
-EVAL_CONFIG="${MATRIX_EVAL_CONFIG:-$ROOT_DIR/examples/tutor/configs/math/0901/pilot/eval-all-preferences.yaml}"
+EVAL_CONFIG="$ROOT_DIR/examples/tutor/configs/math/0901/pilot/eval-step-demo-step1000.yaml"
 BASE_CONFIG="$ROOT_DIR/examples/tutor/configs/math/0901/base/default.yaml"
-EVALUATOR="$ROOT_DIR/examples/tutor/scripts/evaluate_api_teacher.py"
-LAUNCHER_SCRIPT="${MATRIX_LAUNCHER_SCRIPT:-examples/tutor/scripts/eval_0901_preference_matrix_8gpu.sh}"
+EVALUATOR="${MATRIX_EVALUATOR:-$ROOT_DIR/examples/tutor/scripts/evaluate_api_teacher_train_aligned.py}"
+LAUNCHER_SCRIPT="${MATRIX_LAUNCHER_SCRIPT:-examples/tutor/scripts/eval_0901_all_reward_v4_step1000_8gpu.sh}"
 EXPECTED_EXPLAIN_RATIO="${MATRIX_EXPECTED_EXPLAIN_RATIO:-1.0}"
-OUTPUT_TAG="${MATRIX_OUTPUT_TAG:-}"
+OUTPUT_TAG="${MATRIX_OUTPUT_TAG:-all-reward-v4-current-gates}"
 STRATIFIED_SAMPLES="${MATRIX_STRATIFIED_SAMPLES:-0}"
 INCLUDE_NONE_STUDENT="${MATRIX_INCLUDE_NONE_STUDENT:-1}"
+export MATRIX_ONLY_NONE_STUDENT="${MATRIX_ONLY_NONE_STUDENT:-0}"
+export MATRIX_SHARD_NONE="${MATRIX_SHARD_NONE:-0}"
 
 for required in "$PYTHON" "$EVAL_CONFIG" "$BASE_CONFIG" "$EVALUATOR"; do
   if [[ ! -e "$required" ]]; then
@@ -233,7 +234,7 @@ CELL_PROCESS_RESTARTS="${CELL_PROCESS_RESTARTS:-3}"
 SERVER_READY_TIMEOUT="${SERVER_READY_TIMEOUT:-900}"
 BASE_PORT="${BASE_PORT:-37000}"
 SAVE_TRACES="${SAVE_TRACES:-all}"
-COMMON_GLOBAL_STEP="${COMMON_GLOBAL_STEP:-}"
+COMMON_GLOBAL_STEP="${COMMON_GLOBAL_STEP:-999}"
 
 for integer_name in EVAL_CONCURRENCY SERVER_MAX_RUNNING_REQUESTS CALLER_MAX_CONCURRENT EPISODE_ERROR_RETRIES EPISODE_RETRY_BACKOFF_SECONDS EPISODE_TIMEOUT_SECONDS CELL_WALL_TIMEOUT_SECONDS CELL_PROCESS_RESTARTS SERVER_READY_TIMEOUT BASE_PORT STRATIFIED_SAMPLES; do
   integer_value="${!integer_name}"
@@ -244,6 +245,16 @@ for integer_name in EVAL_CONCURRENCY SERVER_MAX_RUNNING_REQUESTS CALLER_MAX_CONC
 done
 if [[ "$INCLUDE_NONE_STUDENT" != "0" && "$INCLUDE_NONE_STUDENT" != "1" ]]; then
   printf 'MATRIX_INCLUDE_NONE_STUDENT must be 0 or 1; got %q.\n' "$INCLUDE_NONE_STUDENT" >&2
+  exit 2
+fi
+if [[ "$MATRIX_ONLY_NONE_STUDENT" != "0" && "$MATRIX_ONLY_NONE_STUDENT" != "1" ]] ||
+   [[ "$MATRIX_ONLY_NONE_STUDENT" == "1" && "$INCLUDE_NONE_STUDENT" != "1" ]]; then
+  printf 'MATRIX_ONLY_NONE_STUDENT must be 0 or 1 and requires MATRIX_INCLUDE_NONE_STUDENT=1.\n' >&2
+  exit 2
+fi
+if [[ "$MATRIX_SHARD_NONE" != "0" && "$MATRIX_SHARD_NONE" != "1" ]] ||
+   [[ "$MATRIX_SHARD_NONE" == "1" && "$MATRIX_ONLY_NONE_STUDENT" != "1" ]]; then
+  printf 'MATRIX_SHARD_NONE must be 0 or 1 and requires MATRIX_ONLY_NONE_STUDENT=1.\n' >&2
   exit 2
 fi
 if [[ -n "$COMMON_GLOBAL_STEP" && ! "$COMMON_GLOBAL_STEP" =~ ^[0-9]+$ ]]; then
@@ -287,19 +298,10 @@ CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-$TUTOR_FILEROOT/checkpoints/root/tutor-math-
 TEACHER_MODEL="${TEACHER_MODEL:-qwen3-8b}"
 STUDENT_MODEL="${STUDENT_MODEL:-qwen3-1.7b}"
 
-TEACHERS=(
-  all-id
-  none
-  contrastive-comparison
-  attempt-diagnosis
-  subgoal-decomposition
-)
+TEACHER_KEY="${MATRIX_TEACHER_KEY:-all-id}"
+TEACHERS=("$TEACHER_KEY")
 declare -A TRIALS=(
-  [all-id]=20260901_182029_0901-preference-v3-reward-v3-all-id-8gpu
-  [none]=20260901_182144_0901-preference-v3-reward-v3-none-8gpu
-  [contrastive-comparison]=20260901_181950_0901-preference-v3-reward-v3-contrastive-comparison-8gpu
-  [attempt-diagnosis]=20260901_182004_0901-preference-v3-reward-v3-attempt-diagnosis-8gpu
-  [subgoal-decomposition]=20260901_182422_0901-preference-v3-reward-v3-subgoal-decomposition-8gpu
+  ["$TEACHER_KEY"]="${MATRIX_TEACHER_TRIAL:-20260906_025413_0901-preference-v3-reward-v4-all-id-8gpu}"
 )
 if [[ -n "${MATRIX_TEACHER_KEYS:-}" ]]; then
   IFS=',' read -r -a SELECTED_TEACHERS <<<"$MATRIX_TEACHER_KEYS"
@@ -322,7 +324,7 @@ PREFERENCES=(
   step-demonstration
   independent-verification
 )
-STUDENT_SPLITS=(ID ID ID ID OOD OOD OOD)
+STUDENT_SPLITS=(ID OOD ID ID OOD ID OOD)
 STUDENTS=(
   qwen3-1.7b-text-original
   qwen3-1.7b-text-original-attempt-diagnosis
@@ -337,9 +339,14 @@ if [[ "$INCLUDE_NONE_STUDENT" == "0" ]]; then
   STUDENT_SPLITS=("${STUDENT_SPLITS[@]:1}")
   STUDENTS=("${STUDENTS[@]:1}")
 fi
+if [[ "$MATRIX_ONLY_NONE_STUDENT" == "1" ]]; then
+  PREFERENCES=("${PREFERENCES[0]}")
+  STUDENT_SPLITS=("${STUDENT_SPLITS[0]}")
+  STUDENTS=("${STUDENTS[0]}")
+fi
 
 # A resumed run must keep its original common checkpoint even if training has
-# since created a newer checkpoint shared by all five runs.
+# since created a newer checkpoint shared by all selected run.
 if [[ "$MODE" == "run" && -n "${EVAL_RUN_DIR:-}" && -f "$EVAL_RUN_DIR/manifest.json" && -z "$COMMON_GLOBAL_STEP" ]]; then
   COMMON_GLOBAL_STEP="$("$PYTHON" -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["common_global_step"])' "$EVAL_RUN_DIR/manifest.json")"
 fi
@@ -430,13 +437,14 @@ done
 PREFLIGHT_OUTPUT="$("$PYTHON" -B - "$EVAL_CONFIG" "$TEACHER_MODEL_PATH" "$STUDENT_MODEL_PATH" "$COMMON_GLOBAL_STEP" "$EXPECTED_EXPLAIN_RATIO" "$STRATIFIED_SAMPLES" "$INCLUDE_NONE_STUDENT" "${PREFLIGHT_ARGS[@]}" <<'PY'
 import hashlib
 import json
+import os
 import sys
 from argparse import Namespace
 from pathlib import Path
 
 from areal.utils.hf_utils import load_hf_tokenizer
 from examples.tutor import train as tutor_train
-from examples.tutor.scripts.evaluate_api_teacher import (
+from examples.tutor.scripts.evaluate_api_teacher_train_aligned import (
     build_eval_workflow_kwargs,
     dataset_sha256,
     effective_eval_presolve_enabled,
@@ -523,6 +531,7 @@ checks = {
     ),
     "base_auxiliary": config.auxiliary_model.mode == "api",
     "repeat_terminate": bool(config.reward.teacher_exact_repeat_terminate),
+    "length_retry": bool(config.length_retry.enabled) and config.length_retry.attempts == 3,
 }
 failed = [name for name, passed in checks.items() if not passed]
 if failed:
@@ -555,6 +564,9 @@ for student in students:
     personality = effective["personality"]
     effective_checks = {
         "pre_solve": effective["teacher_pre_enabled"] is True,
+        "length_retry": effective["length_retry_enabled"] == config.length_retry.enabled and effective["length_retry_attempts"] == config.length_retry.attempts,
+        "soft_overlong": effective["soft_overlong_penalty"]["enabled"] == config.reward.soft_overlong.enabled,
+        "teacher_end": effective["teacher_end_enabled"] is True,
         "no_preverify": effective["teacher_pre_verify"] is False,
         "masked_leak_continue": effective["leak_handling_mode"] == "masked_continue",
         "format_terminate": effective["format_handling_mode"] == "terminate",
@@ -639,15 +651,18 @@ selected_students = [
     {
         "preference": preference,
         "name": name,
-        "split": "ID" if index < 4 else "OOD",
+        "split": "ID" if preferences[index] in {"none", "contrastive-comparison", "subgoal-decomposition", "step-demonstration"} else "OOD",
     }
     for index, (preference, name) in enumerate(zip(preferences, expected_students))
 ]
 if not include_none_student:
     selected_students = selected_students[1:]
+if os.environ.get("MATRIX_ONLY_NONE_STUDENT") == "1":
+    selected_students = selected_students[:1]
 
 report = {
     "common_global_step": common_step,
+    "row_shards": 4 if os.environ.get("MATRIX_SHARD_NONE") == "1" else 1,
     "completed_train_steps": common_step + 1,
     "teachers": teachers,
     "students": selected_students,
@@ -714,8 +729,12 @@ for command_name in curl setsid nvidia-smi timeout; do
     exit 1
   fi
 done
+REQUIRED_GPU_COUNT=8
+if [[ "$MATRIX_ONLY_NONE_STUDENT" == "1" && "$MATRIX_SHARD_NONE" == "0" ]]; then
+  REQUIRED_GPU_COUNT=2
+fi
 if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-  printf 'Set CUDA_VISIBLE_DEVICES to exactly eight free GPU ids.\n' >&2
+  printf 'Set CUDA_VISIBLE_DEVICES to exactly %s free GPU ids.\n' "$REQUIRED_GPU_COUNT" >&2
   exit 2
 fi
 IFS=',' read -r -a RAW_GPU_IDS <<<"$CUDA_VISIBLE_DEVICES"
@@ -724,18 +743,18 @@ declare -A SEEN_GPU=()
 for raw_gpu in "${RAW_GPU_IDS[@]}"; do
   gpu="${raw_gpu//[[:space:]]/}"
   if [[ ! "$gpu" =~ ^[0-9]+$ || -n "${SEEN_GPU[$gpu]:-}" ]]; then
-    printf 'CUDA_VISIBLE_DEVICES needs eight distinct integer ids; got %q.\n' "$CUDA_VISIBLE_DEVICES" >&2
+    printf 'CUDA_VISIBLE_DEVICES needs distinct integer ids; got %q.\n' "$CUDA_VISIBLE_DEVICES" >&2
     exit 2
   fi
   nvidia-smi --id="$gpu" --query-gpu=name --format=csv,noheader >/dev/null
   SEEN_GPU["$gpu"]=1
   GPU_IDS+=("$gpu")
 done
-if [[ "${#GPU_IDS[@]}" != "8" ]]; then
-  printf 'Expose exactly eight GPUs; got %d.\n' "${#GPU_IDS[@]}" >&2
+if [[ "${#GPU_IDS[@]}" != "$REQUIRED_GPU_COUNT" ]]; then
+  printf 'Expose exactly %s GPUs; got %d.\n' "$REQUIRED_GPU_COUNT" "${#GPU_IDS[@]}" >&2
   exit 2
 fi
-PAIR_COUNT=4
+PAIR_COUNT=$((REQUIRED_GPU_COUNT / 2))
 LAST_PORT=$((BASE_PORT + (PAIR_COUNT - 1) * 10 + 1))
 if (( BASE_PORT < 1 || LAST_PORT > 65535 )); then
   printf 'BASE_PORT leaves the valid TCP range.\n' >&2
@@ -759,11 +778,11 @@ for raw in sys.argv[1:]:
         raise SystemExit(f"TCP port {port} is unavailable: {exc}") from exc
     finally:
         sock.close()
-print("[preflight] eight GPU ids and eight local ports: PASS")
+print(f"[preflight] {len(sys.argv) - 1} local ports: PASS (GPU ids checked)")
 PY
 
 mkdir -p "$RUN_DIR/logs" "$RUN_DIR/cells" "$RUN_DIR/pairs"
-"$PYTHON" -B - "$RUN_DIR/manifest.json" "$PREFLIGHT_JSON" "$EVAL_CONCURRENCY" "$SERVER_MAX_RUNNING_REQUESTS" "$CALLER_MAX_CONCURRENT" "$SAVE_TRACES" "$BASE_PORT" "$EPISODE_ERROR_RETRIES" "$EPISODE_RETRY_BACKOFF_SECONDS" "$EPISODE_TIMEOUT_SECONDS" "$CELL_WALL_TIMEOUT_SECONDS" "$CELL_PROCESS_RESTARTS" "$STRATIFIED_SAMPLES" <<'PY'
+"$PYTHON" -B - "$RUN_DIR/manifest.json" "$PREFLIGHT_JSON" "$EVAL_CONCURRENCY" "$SERVER_MAX_RUNNING_REQUESTS" "$CALLER_MAX_CONCURRENT" "$SAVE_TRACES" "$BASE_PORT" "$EPISODE_ERROR_RETRIES" "$EPISODE_RETRY_BACKOFF_SECONDS" "$EPISODE_TIMEOUT_SECONDS" "$CELL_WALL_TIMEOUT_SECONDS" "$CELL_PROCESS_RESTARTS" "$STRATIFIED_SAMPLES" "$PAIR_COUNT" <<'PY'
 import json
 import sys
 from datetime import UTC, datetime
@@ -783,6 +802,7 @@ from pathlib import Path
     cell_timeout,
     cell_restarts,
     stratified_samples,
+    pair_count,
 ) = sys.argv[1:]
 preflight = json.loads(preflight_raw)
 dataset_rows = preflight.pop("dataset_rows")
@@ -799,8 +819,8 @@ payload = {
         "sha256": dataset_hash,
     },
     "runtime": {
-        "gpu_layout": "4 x (1 teacher H200 + 1 student H200)",
-        "pair_count": 4,
+        "gpu_layout": f"{pair_count} x (1 teacher H200 + 1 student H200)",
+        "pair_count": int(pair_count),
         "eval_concurrency_per_pair": int(concurrency),
         "server_max_running_requests": int(server_cap),
         "caller_max_concurrent": int(caller_cap),
@@ -1065,7 +1085,9 @@ run_pair() (
       fi
       printf '[cell-process-retry] status=%s; preserving results and resuming\n' "$status" >>"$log"
     done
-    validate_cell "$output" "$teacher" "$student" "$preference" "${ADAPTERS[$teacher]}"
+    if [[ "$MATRIX_SHARD_NONE" != "1" ]]; then
+      validate_cell "$output" "$teacher" "$student" "$preference" "${ADAPTERS[$teacher]}"
+    fi
   }
 
   local teacher_index student_index cell_index student preference output log
@@ -1073,11 +1095,17 @@ run_pair() (
   for teacher_index in "${!TEACHERS[@]}"; do
     teacher="${TEACHERS[$teacher_index]}"
     for student_index in "${!STUDENTS[@]}"; do
-      if (( cell_index % PAIR_COUNT == pair_index )); then
+      if [[ "$MATRIX_SHARD_NONE" == "1" ]] || (( cell_index % PAIR_COUNT == pair_index )); then
         student="${STUDENTS[$student_index]}"
         preference="${PREFERENCES[$student_index]}"
         output="$RUN_DIR/cells/$teacher/$student"
         log="$RUN_DIR/logs/$teacher--$preference.log"
+        if [[ "$MATRIX_SHARD_NONE" == "1" ]]; then
+          output="$output/shards/$pair_index"
+          log="$RUN_DIR/logs/$teacher--$preference-shard-$pair_index.log"
+          export TUTOR_EVAL_SHARD_COUNT="$PAIR_COUNT"
+          export TUTOR_EVAL_SHARD_INDEX="$pair_index"
+        fi
         run_eval_cell "$teacher" "$student" "$preference" "$output" "$log"
       fi
       cell_index=$((cell_index + 1))
@@ -1104,7 +1132,7 @@ trap cleanup_all EXIT INT TERM
 TEACHER_COUNT="${#TEACHERS[@]}"
 STUDENT_COUNT="${#STUDENTS[@]}"
 CELL_COUNT=$((TEACHER_COUNT * STUDENT_COUNT))
-printf '[run] %s teachers x %s students x %s rows; %s cells over 4 GPU pairs\n' "$TEACHER_COUNT" "$STUDENT_COUNT" "$EXPECTED_ROWS" "$CELL_COUNT"
+printf '[run] %s teachers x %s students x %s rows; %s cells over %s GPU pairs\n' "$TEACHER_COUNT" "$STUDENT_COUNT" "$EXPECTED_ROWS" "$CELL_COUNT" "$PAIR_COUNT"
 printf '[run] output=%s\n' "$RUN_DIR"
 for ((pair_index = 0; pair_index < PAIR_COUNT; pair_index++)); do
   run_pair "$pair_index" "${GPU_IDS[$((pair_index * 2))]}" "${GPU_IDS[$((pair_index * 2 + 1))]}" &
@@ -1141,6 +1169,13 @@ if (( worker_failed )); then
 fi
 WORKER_PIDS=()
 
+if [[ "$MATRIX_SHARD_NONE" == "1" ]]; then
+  for teacher in "${TEACHERS[@]}"; do
+    cell_dir="$RUN_DIR/cells/$teacher/${STUDENTS[0]}"
+    "$PYTHON" -B "$ROOT_DIR/examples/tutor/scripts/merge_tutor_eval_shards.py" "$cell_dir" "$PAIR_COUNT"
+    validate_cell "$cell_dir" "$teacher" "${STUDENTS[0]}" none "${ADAPTERS[$teacher]}"
+  done
+fi
 write_matrix_summary "$RUN_DIR"
 PENDING_COUNT="$("$PYTHON" -B - "$RUN_DIR/cells" <<'PY'
 import json

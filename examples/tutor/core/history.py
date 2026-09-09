@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 from .types import LeakCheckResult, TurnTrace
@@ -61,7 +61,25 @@ def trace_to_history_record(
 
 
 def trace_to_json(trace: TurnTrace) -> dict[str, Any]:
+    pre_solve = trace.tutor_state.teacher_pre_solve_result
+    if pre_solve is not None:
+        # asdict recursively deep-copies values, including the training response's
+        # tokenizer. Strip runtime-only responses BEFORE asdict, on shallow copies
+        # so shared pre-solves still retain their original PPO training data.
+        trace = replace(
+            trace,
+            tutor_state=replace(
+                trace.tutor_state,
+                teacher_pre_solve_result=replace(
+                    pre_solve,
+                    attempts=[replace(a, response=None) for a in pre_solve.attempts],
+                ),
+            ),
+        )
     data = asdict(trace)
+    if pre_solve is not None:
+        for attempt in data["tutor_state"]["teacher_pre_solve_result"]["attempts"]:
+            attempt.pop("response", None)
     if trace.student_question_generation is None:
         data.pop("student_question_generation", None)
     gate = data.get("personality_gate_result")

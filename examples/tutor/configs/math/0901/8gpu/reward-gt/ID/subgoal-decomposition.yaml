@@ -1,0 +1,10 @@
+defaults:
+  - ../../../base/reward-gt/ID/subgoal-decomposition@_global_
+  - ../../alloc@_global_
+  - _self_
+
+trial_name: 0901-reward-gt-subgoal-decomposition-8gpu
+
+stats_logger:
+  wandb:
+    group: 0901-reward-gt-8gpu

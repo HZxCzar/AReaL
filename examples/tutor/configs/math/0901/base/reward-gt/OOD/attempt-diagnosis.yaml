@@ -1,0 +1,6 @@
+defaults:
+  - ../../reward-v4/OOD/attempt-diagnosis@_global_
+  - ../base@_global_
+  - _self_
+
+trial_name: 0901-reward-gt-attempt-diagnosis

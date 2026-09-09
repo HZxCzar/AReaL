@@ -1230,6 +1230,12 @@ class TutorLengthRetryConfig:
 
 @dataclass
 class TutorTeacherPreConfig:
+    train: bool = field(
+        default=False,
+        metadata={
+            "help": "Train fixed-count independent pre-solves with binary correctness RLOO; keep them outside teaching normalization. Disabled preserves first-success retries."
+        },
+    )
     enabled: bool = field(
         default=False,
         metadata={
@@ -1361,6 +1367,17 @@ class TutorTeacherPreConfig:
             raise ValueError("teacher_pre.mode must be 'filter_solver'.")
         if int(self.attempts) < 1:
             raise ValueError("teacher_pre.attempts must be >= 1.")
+        if self.train and (
+            not self.enabled
+            or not self.verify
+            or not self.share_per_group
+            or self.attempts < 2
+            or self.visibility != "rollout"
+        ):
+            raise ValueError(
+                "teacher_pre.train requires enabled, verify, share_per_group, "
+                "attempts >= 2 and visibility=rollout."
+            )
         self.visibility = str(self.visibility or "rollout").strip()
         if self.visibility not in {"rollout", "opd_only"}:
             raise ValueError(
@@ -2965,6 +2982,28 @@ class TutorConfig(GRPOConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.teacher_pre.train:
+            self.teacher_pre.__post_init__()
+            if (
+                self.actor.advantage_estimator != "rebn"
+                or self.actor.reward_norm is not None
+            ):
+                raise ValueError(
+                    "teacher_pre.train requires REBN and actor.reward_norm=null."
+                )
+            if not self.rollout.use_lora:
+                raise ValueError("teacher_pre.train requires versioned LoRA rollouts.")
+            if any(
+                (
+                    self.opd.enabled,
+                    self.world_model.enabled,
+                    self.reward.teacher_context.enabled,
+                    self.reward.teacher_diversity.enabled,
+                )
+            ):
+                raise ValueError(
+                    "teacher_pre.train cannot yet be combined with other auxiliary objectives."
+                )
         if self.teacher_private_visibility and not self.free_chat.enabled:
             raise ValueError(
                 "teacher_private_visibility requires free_chat.enabled=true so "

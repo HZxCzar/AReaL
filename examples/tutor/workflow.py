@@ -1019,6 +1019,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         teacher_user_prompt_template: str | None = None,
         teacher_show_ground_truth: bool = False,
         teacher_pre_enabled: bool = False,
+        teacher_pre_train: bool = False,
         teacher_pre_mode: str = "filter_solver",
         teacher_pre_verify: bool = True,
         teacher_pre_attempts: int = 3,
@@ -1559,6 +1560,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         ).strip()
         self.teacher_show_ground_truth = bool(teacher_show_ground_truth)
         self.teacher_pre_enabled = bool(teacher_pre_enabled)
+        self.teacher_pre_train = bool(teacher_pre_train)
         self.teacher_pre_mode = (teacher_pre_mode or "filter_solver").strip()
         if self.teacher_pre_mode != "filter_solver":
             raise ValueError("teacher_pre_mode must be 'filter_solver'.")
@@ -1577,6 +1579,29 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if self.teacher_pre_on_reject not in {"skip", "continue"}:
             raise ValueError("teacher_pre_on_reject must be 'skip' or 'continue'.")
         self.teacher_pre_share_per_group = bool(teacher_pre_share_per_group)
+        if self.teacher_pre_train and (
+            not self.teacher_pre_enabled
+            or not self.teacher_pre_verify
+            or not self.teacher_pre_share_per_group
+            or self.teacher_pre_attempts < 2
+            or self.teacher_pre_visibility != "rollout"
+        ):
+            raise ValueError(
+                "teacher_pre_train requires enabled, verified, shared pre-solves, "
+                "at least two attempts and rollout visibility."
+            )
+        if self.teacher_pre_train and any(
+            getattr(self, name, False)
+            for name in (
+                "opd_enabled",
+                "world_model_enabled",
+                "teacher_context_enabled",
+                "teacher_diversity_enabled",
+            )
+        ):
+            raise ValueError(
+                "Pre-solve RL cannot yet be combined with other auxiliary objectives."
+            )
         # The two halves of the pre-solve switch, checked once both are parsed.
         # configs.py rejects these combinations before a run starts; repeated here
         # because the workflow is also constructed directly by the tests and the
@@ -2157,8 +2182,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
             )
             if len(options) != 7:
                 raise ValueError(
-                    "classifier mode requires six personality definitions "
-                    "plus NONE."
+                    "classifier mode requires six personality definitions plus NONE."
                 )
             classification_options = [
                 (chr(ord("A") + index), name, definition)
@@ -2190,10 +2214,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     f"{name.upper()}\n{definition}"
                     for _letter, name, definition in classification_options
                 )
-                system_prompt = (
-                    PERSONALITY_CLASSIFIER_GATE_SYSTEM_PROMPT.format(
-                        candidate_options=candidate_options,
-                    )
+                system_prompt = PERSONALITY_CLASSIFIER_GATE_SYSTEM_PROMPT.format(
+                    candidate_options=candidate_options,
                 )
                 user_template = PERSONALITY_CLASSIFIER_GATE_USER_TEMPLATE
                 rid_prefix = f"personality-gate-classifier-{turn_idx}"
@@ -2842,7 +2864,15 @@ class TutorAgentWorkflow(RolloutWorkflow):
         Only guided slots need it, and only then, so every other configuration
         keeps receiving the exact dict it received before.
         """
-        return bool(getattr(self, "guided_slots_enabled", False))
+        return (
+            bool(getattr(self, "guided_slots_enabled", False))
+            or self._presolve_training_active()
+        )
+
+    def _presolve_training_active(self) -> bool:
+        return bool(getattr(self, "teacher_pre_train", False)) and not bool(
+            getattr(workflow_context.get(), "is_eval", False)
+        )
 
     def _is_guided_slot(self, group_index: int | None) -> bool:
         if not getattr(self, "guided_slots_enabled", False):
@@ -3162,6 +3192,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         )
         teacher_pre_solve_result: TeacherPreSolveResult | None = None
         teacher_pre_cache_hit = False
+        presolve_training_rows = []
         self.last_teacher_pre_solve_result = None
         if getattr(self, "teacher_pre_enabled", False) and not (
             self._presolve_unused_at_eval()
@@ -3178,6 +3209,14 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 group_key=group_key,
             )
             self.last_teacher_pre_solve_result = teacher_pre_solve_result
+            if self._presolve_training_active():
+                if episode_lora_version is None or group_index is None:
+                    raise ValueError(
+                        "Pre-solve RL requires versioned, grouped actor rollouts."
+                    )
+                presolve_training_rows = self._presolve_training_rows(
+                    teacher_pre_solve_result, selected_student, group_index=group_index
+                )
             # 'continue' keeps the group and leaves the draft absent, so the filter
             # stops being part of what this config does. Default 'skip' is the
             # historical path below, unchanged. _free_chat_preamble and
@@ -3230,7 +3269,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     teacher_prompt_selection=teacher_prompt_selection,
                     student_prompt_selection=student_prompt_selection,
                 )
-                return None
+                return self._finish_training_rows([], presolve_training_rows)
 
         initial_student_turn_behavior = self._select_student_turn_behavior(
             response_index=0
@@ -3349,7 +3388,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     initial_student_question_generation
                 ),
             )
-            return None
+            return self._finish_training_rows([], presolve_training_rows)
 
         if free_chat:
             # Empty history: the teacher's first turn is generated from its
@@ -3985,6 +4024,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
         environment_name_list = list(getattr(self, "student_model_runtimes", {}).keys())
         if selected_student.name not in environment_name_list:
             environment_name_list.append(selected_student.name)
+        if self._presolve_training_active():
+            environment_name_list.append("presolve")
         student_environment_names = {
             name: index for index, name in enumerate(environment_name_list)
         }
@@ -4191,9 +4232,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         # rollout/turns, and ppo_actor/update/clip_ratio, because
         # _compute_episode_loss_weights gives a one-turn episode a large multiplier
         # and the penalty lands on few tokens with amplified per-token weight.
-        if not results:
-            return None
-        return concat_padded_tensors(results)
+        return self._finish_training_rows(results, presolve_training_rows)
 
     # ------------------------------------------------------------------
     # Final student-type probe.
@@ -5077,6 +5116,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         max_completion_tokens = self._teacher_pre_solve_tokens()
         verification_enabled = bool(getattr(self, "teacher_pre_verify", True))
         attempt_count = self.teacher_pre_attempts if verification_enabled else 1
+        train_presolve = self._presolve_training_active()
         for attempt_idx in range(1, attempt_count + 1):
             try:
                 result = await actor_caller.generate(
@@ -5086,6 +5126,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     max_completion_tokens=max_completion_tokens,
                 )
             except Exception as exc:
+                if train_presolve:
+                    # Infrastructure failure is not a negative correctness label.
+                    raise
                 attempts.append(
                     TeacherPreSolveAttempt(
                         attempt=attempt_idx,
@@ -5123,6 +5166,11 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 raw_output,
                 answer_judge_caller=answer_judge_caller,
             )
+            judge_error = judge_result.raw_result.get("answer_judge", {}).get("error")
+            if train_presolve and (judge_result.parse_error or judge_error):
+                raise ValueError(
+                    f"Pre-solve judge failed: {judge_result.parse_error or judge_error}"
+                )
             accepted = bool(judge_result.correct)
             attempts.append(
                 TeacherPreSolveAttempt(
@@ -5131,9 +5179,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     error=None,
                     accepted=accepted,
                     judge_result=judge_result,
+                    response=result.response if train_presolve else None,
                 )
             )
-            if accepted:
+            if accepted and not train_presolve:
                 return TeacherPreSolveResult(
                     enabled=True,
                     mode=self.teacher_pre_mode,
@@ -5144,6 +5193,31 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     verification_enabled=True,
                 )
 
+        if train_presolve:
+            chosen = next((attempt for attempt in attempts if attempt.accepted), None)
+            stats_tracker.get("rollout").scalar(
+                **{
+                    "teacher_pre/train_first_correct": float(attempts[0].accepted),
+                    "teacher_pre/train_correct_fraction": sum(
+                        a.accepted for a in attempts
+                    )
+                    / len(attempts),
+                    "teacher_pre/train_mixed_group": float(
+                        0 < sum(a.accepted for a in attempts) < len(attempts)
+                    ),
+                }
+            )
+            return TeacherPreSolveResult(
+                enabled=True,
+                mode=self.teacher_pre_mode,
+                accepted=chosen is not None,
+                attempts=attempts,
+                raw_output=chosen.raw_output if chosen else "",
+                error=None
+                if chosen
+                else "no correct teacher pre-solve in fixed sampling group",
+                verification_enabled=True,
+            )
         return TeacherPreSolveResult(
             enabled=True,
             mode=self.teacher_pre_mode,
@@ -5157,6 +5231,68 @@ class TutorAgentWorkflow(RolloutWorkflow):
             ),
             verification_enabled=verification_enabled,
         )
+
+    def _finish_training_rows(
+        self, teaching: list[dict[str, Any]], presolve: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        if self._presolve_training_active():
+            for row in teaching:
+                row["presolve_mask"] = torch.tensor([False])
+                row["presolve_advantage"] = torch.tensor([0.0])
+        results = [*teaching, *presolve]
+        return concat_padded_tensors(results) if results else None
+
+    def _presolve_training_rows(
+        self, pre: TeacherPreSolveResult, student: Any, *, group_index: int = 0
+    ) -> list[dict[str, Any]]:
+        """Export one fixed candidate group, once, without teaching reward metadata."""
+        if group_index != 0:
+            return []
+        names = list(getattr(self, "student_model_runtimes", {}).keys())
+        if student.name not in names:
+            names.append(student.name)
+        names.append("presolve")
+        environment_names = {name: i for i, name in enumerate(names)}
+        components = tuple(getattr(self, "turn_local_reward_components", ()))
+        gate_credit = getattr(self, "student_generalize_gate_pass_credit_only", False)
+        gate_penalty = (
+            getattr(self, "personality_gate_fail_penalty", 0.0)
+            and "personality_gate_fail" not in components
+        )
+        n = len(pre.attempts)
+        if n != self.teacher_pre_attempts or n < 2:
+            raise ValueError("Pre-solve training requires a complete fixed-size group.")
+        total = sum(a.accepted for a in pre.attempts)
+        rows = []
+        for attempt in pre.attempts:
+            if (
+                attempt.error
+                or attempt.response is None
+                or not attempt.response.output_tokens
+            ):
+                raise ValueError(
+                    "Invalid pre-solve response cannot be used as a correctness sample."
+                )
+            reward = float(attempt.accepted)
+            row = response_to_tensordict(
+                attempt.response,
+                reward=reward,
+                student_environment_id=environment_names["presolve"],
+                student_environment_names=environment_names,
+                trajectory_id=uuid.uuid4().int & ((1 << 63) - 1),
+                turn_idx=0,
+                local_reward=0.0 if components else None,
+                local_reward_by_placement={} if components else None,
+                gate_masked_reward=0.0 if gate_credit else None,
+                gate_credit_mask=False if gate_credit else None,
+                personality_gate_fail_penalty=0.0 if gate_penalty else None,
+            )
+            row["presolve_mask"] = torch.tensor([True])
+            row["presolve_advantage"] = torch.tensor(
+                [reward - (total - reward) / (n - 1)]
+            )
+            rows.append(row)
+        return rows
 
     async def _generate_tutor_response(
         self,
@@ -7614,8 +7750,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         if initial_student_answer:
             transcript.append({"role": "student", "content": initial_student_answer})
         for artifact in turn_artifacts:
-            if artifact.teacher_ended or getattr(artifact, "leak_masked", False) or (
-                hide_personality_gated_turns and artifact.personality_gated
+            if (
+                artifact.teacher_ended
+                or getattr(artifact, "leak_masked", False)
+                or (hide_personality_gated_turns and artifact.personality_gated)
             ):
                 continue
             visible = str(artifact.tutor_visible_output or "").strip()
