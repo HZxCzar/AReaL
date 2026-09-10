@@ -121,15 +121,30 @@ Check the original run's `main.log`, `actor.log`, `rollout.log`, and `metrics.js
 - Metrics/W&B history is not automatically rewound. Preserve recovery timestamp
   and generation when selecting the intended branch for plots.
 
-## Important: current LR scheduler recovery limitation
+## LR scheduler recovery (fixed for new DCP recoveries)
 
 Observed on 2026-09-08 for the example: resumed step 975 logged LR 0, step 976
 logged 1.0638298e-6, and step 982 logged 7.4468085e-6, whereas the original late
 training used 5e-5. Warmup restarted.
 
-In `FSDPEngine._load_from_dcp`, the ordinary single-adapter `with_optim` branch
-passes the optimizer but no LR scheduler to `DCPState`; the separate-adapter branch
-passes schedulers too. Do not assume optimizer recovery also restores the scheduler.
-This run's resumed behavior is therefore not an identical-LR replay. This runbook
-does not change scheduler code or silently override warmup; agree on that separately
-if exact continuation is required.
+The single-adapter DCP save/load path now includes LR scheduler state alongside
+the optimizer, as the separate-adapter path already did. For recoveries written
+with this fix, retain the original schedule configuration: do not set warmup to
+zero merely to resume. Scheduler progress and the saved optimizer LR are restored
+from the selected generation, including when it is not the latest generation.
+LambdaLR's schedule function is constructed from configuration, so changing its
+warmup or decay parameters is still a schedule change, not an exact continuation.
+
+Legacy single-adapter recoveries without scheduler state use the selected
+generation's `recover_info/step_info.json` to reconstruct completed scheduler
+steps. This supports the one-scheduler-step-per-iteration case (`num_iterations=1`)
+and verifies the saved optimizer LR against the configured schedule before
+restoring scheduler bookkeeping. A mismatch, missing step metadata or ambiguous
+multiple-pass setup fails explicitly instead of silently restarting warmup.
+Older checkpoints taken during an already-restarted warmup may fail this check;
+their exact scheduler progress cannot be recovered from global step alone.
+
+The original incident above remains historical: the first resumed logged LR came
+from stale scheduler bookkeeping, while the optimizer LR was loaded separately;
+subsequent scheduler steps actually restarted warmup. New code does not rewrite
+old checkpoints or update already-running worker processes.

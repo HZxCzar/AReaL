@@ -82,7 +82,11 @@ from areal.engine.fsdp_utils import (
     fsdp2_load_full_state_dict,
     get_cosine_schedule_with_warmup,
 )
-from areal.engine.fsdp_utils.checkpoint import DCPState
+from areal.engine.fsdp_utils.checkpoint import (
+    DCPState,
+    legacy_recovery_completed_steps,
+    restore_legacy_lr_scheduler,
+)
 from areal.engine.fsdp_utils.grad import fsdp2_clip_grad_norm
 from areal.engine.fsdp_utils.optimizer import AnyPrecisionAdamW, PerLayerOptimWrapper
 from areal.engine.fsdp_utils.parallel import ParallelHelper, parallelize_model
@@ -1804,6 +1808,8 @@ class FSDPEngine(TrainEngine):
             )
         else:
             checkpoint_optimizers = self.optimizer
+            if self.lr_scheduler is not None:
+                checkpoint_schedulers = (self.lr_scheduler,)
         dcp_state = DCPState(
             self.model,
             checkpoint_optimizers,
@@ -1836,6 +1842,25 @@ class FSDPEngine(TrainEngine):
             )
         elif with_optim:
             checkpoint_optimizers = self.optimizer
+            if self.lr_scheduler is not None:
+                checkpoint_schedulers = (self.lr_scheduler,)
+        legacy_completed_steps = None
+        if checkpoint_schedulers is not None and not self._separate_lora_enabled:
+            metadata = dcp.FileSystemReader(path).read_metadata()
+            if not any(
+                key.startswith("dcp.lr_schedulers.")
+                for key in metadata.state_dict_metadata
+            ):
+                if getattr(self.config, "num_iterations", 1) != 1:
+                    raise ValueError(
+                        "Legacy recovery has no scheduler state and num_iterations "
+                        "is not 1; scheduler steps per iteration are ambiguous. "
+                        "Use a checkpoint containing scheduler state."
+                    )
+                # Old single-optimizer recoveries did not save the scheduler.
+                # Read the selected generation, never the latest pointer/name.
+                legacy_completed_steps = legacy_recovery_completed_steps(path)
+                checkpoint_schedulers = None
         dcp_state = DCPState(
             self.model,
             checkpoint_optimizers,
@@ -1846,6 +1871,15 @@ class FSDPEngine(TrainEngine):
             state_dict=state_dict,
             checkpoint_id=path,
         )
+        if legacy_completed_steps is not None:
+            restore_legacy_lr_scheduler(self.lr_scheduler, legacy_completed_steps)
+            self.logger.warning(
+                "Legacy recovery %s has no LR scheduler state; reconstructed it "
+                "at %d completed steps using the configured schedule and verified "
+                "the saved optimizer LR. Future recoveries will store the scheduler.",
+                path,
+                legacy_completed_steps,
+            )
         if self._separate_lora_enabled:
             self.activate_policy_adapter()
 

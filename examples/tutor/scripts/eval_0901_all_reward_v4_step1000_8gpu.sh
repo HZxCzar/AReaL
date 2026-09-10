@@ -54,7 +54,12 @@ cd "$ROOT_DIR"
 # shellcheck source=examples/tutor/scripts/eval_process_cleanup.sh
 source "$ROOT_DIR/examples/tutor/scripts/eval_process_cleanup.sh"
 PYTHON="$ROOT_DIR/.venv/bin/python"
-EVAL_CONFIG="$ROOT_DIR/examples/tutor/configs/math/0901/pilot/eval-step-demo-step1000.yaml"
+EVAL_CONFIG="${MATRIX_EVAL_CONFIG:-$ROOT_DIR/examples/tutor/configs/math/0901/pilot/eval-step-demo-step1000.yaml}"
+export MATRIX_EXPECT_PRESOLVE="${MATRIX_EXPECT_PRESOLVE:-1}"
+if [[ "$MATRIX_EXPECT_PRESOLVE" != 0 && "$MATRIX_EXPECT_PRESOLVE" != 1 ]]; then
+  printf 'MATRIX_EXPECT_PRESOLVE must be 0 or 1.\n' >&2
+  exit 2
+fi
 BASE_CONFIG="$ROOT_DIR/examples/tutor/configs/math/0901/base/default.yaml"
 EVALUATOR="${MATRIX_EVALUATOR:-$ROOT_DIR/examples/tutor/scripts/evaluate_api_teacher_train_aligned.py}"
 LAUNCHER_SCRIPT="${MATRIX_LAUNCHER_SCRIPT:-examples/tutor/scripts/eval_0901_all_reward_v4_step1000_8gpu.sh}"
@@ -138,9 +143,8 @@ for teacher in manifest["teachers"]:
             evaluator_summary = json.loads(
                 evaluator_summary_path.read_text(encoding="utf-8")
             )
-            evaluator_mode = (
-                (evaluator_summary.get("modes") or {}).get("presolve_on") or {}
-            )
+            mode_name = "presolve_on" if manifest["semantics"]["teacher_pre_enabled"] else "presolve_off"
+            evaluator_mode = (evaluator_summary.get("modes") or {}).get(mode_name) or {}
         teacher_cells[preference] = cell
         gate = cell["gate"]
         teaching = cell["teaching"]
@@ -462,6 +466,7 @@ teacher_model_path = Path(sys.argv[2]).resolve()
 student_model_path = Path(sys.argv[3]).resolve()
 common_step = int(sys.argv[4])
 expected_explain_ratio = float(sys.argv[5])
+expected_presolve = os.environ.get("MATRIX_EXPECT_PRESOLVE", "1") == "1"
 stratified_samples = int(sys.argv[6])
 include_none_student = bool(int(sys.argv[7]))
 teacher_args = sys.argv[8:]
@@ -503,7 +508,7 @@ checks = {
     "teacher_end": bool(config.teacher_end_enabled),
     "leak_mode": config.leak_handling_mode == "masked_continue",
     "format_mode": config.format_handling_mode == "terminate",
-    "pre_solve": bool(config.teacher_pre.enabled),
+    "pre_solve": bool(config.teacher_pre.enabled) == expected_presolve and effective_eval_presolve_enabled(config) == expected_presolve,
     "eval_no_preverify": config.evaluator.teacher_pre_verify is False,
     "eval_one_rollout": int(config.evaluator.average_rollouts) == 1,
     "teacher_sampling_temperature": (
@@ -563,7 +568,7 @@ for student in students:
     )
     personality = effective["personality"]
     effective_checks = {
-        "pre_solve": effective["teacher_pre_enabled"] is True,
+        "pre_solve": effective["teacher_pre_enabled"] == expected_presolve,
         "length_retry": effective["length_retry_enabled"] == config.length_retry.enabled and effective["length_retry_attempts"] == config.length_retry.attempts,
         "soft_overlong": effective["soft_overlong_penalty"]["enabled"] == config.reward.soft_overlong.enabled,
         "teacher_end": effective["teacher_end_enabled"] is True,
@@ -676,7 +681,7 @@ report = {
         Path(config.personality.complaints_path).read_bytes()
     ).hexdigest(),
     "semantics": {
-        "teacher_pre_enabled": True,
+        "teacher_pre_enabled": expected_presolve,
         "teacher_pre_verify": False,
         "teacher_temperature": 1.0,
         "leak_handling_mode": "masked_continue",
@@ -878,6 +883,7 @@ validate_cell() {
   local output=$1 teacher=$2 student=$3 preference=$4 adapter=$5
   "$PYTHON" -B - "$output" "$teacher" "$student" "$preference" "$adapter" "$EXPECTED_ROWS" "$EXPECTED_EXPLAIN_RATIO" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -890,9 +896,10 @@ summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
 signature = json.loads(
     (output / "run_config.json").read_text(encoding="utf-8")
 )["signature"]
-if set(summary["modes"]) != {"presolve_on"}:
-    raise SystemExit(f"{output}: expected only presolve_on")
-mode = summary["modes"]["presolve_on"]
+mode_name = "presolve_on" if os.environ.get("MATRIX_EXPECT_PRESOLVE", "1") == "1" else "presolve_off"
+if set(summary["modes"]) != {mode_name}:
+    raise SystemExit(f"{output}: expected only {mode_name}")
+mode = summary["modes"][mode_name]
 checks = {
     "dataset_rows": int(summary["dataset_rows"]) == expected,
     "expected_attempts": int(mode["expected_attempts"]) == expected,

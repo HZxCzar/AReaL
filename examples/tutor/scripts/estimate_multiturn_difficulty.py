@@ -551,6 +551,7 @@ def build_workflow(
         dataset_type=config.dataset_type,
         answer_scorer=config.answer_scorer,
         enable_thinking=config.enable_thinking,
+        teacher_response_format=config.teacher_response_format,
         leak_handling_mode=config.leak_handling_mode,
         aux_mode="api",
         aux_enable_thinking=bool(aux_thinking),

@@ -1,0 +1,6 @@
+defaults:
+  - ../../../base/reward-gt-0/ID/attempt-diagnosis@_global_
+  - _self_
+
+# Allocation comes exclusively from reward-gt-0/default.yaml.
+trial_name: 0901-reward-gt-0-attempt-diagnosis-8gpu

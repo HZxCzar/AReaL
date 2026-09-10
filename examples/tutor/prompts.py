@@ -54,6 +54,19 @@ Use <end></end> when you think the conversation can end early.
 The student will see only the text inside <output>...</output>. Put all private
 thinking inside <reasoning>...</reasoning>. Do not use JSON or Markdown code fences."""
 
+THINKING_TEACHER_OUTPUT_FORMAT_PROMPT = """\
+Reply directly to the student with a non-empty message, without wrapper tags.
+Use your model's internal reasoning for private deliberation. Do not output
+explicit reasoning sections. Your entire final reply will be shown to the student."""
+
+THINKING_TEACHER_OUTPUT_FORMAT_WITH_END_PROMPT = """\
+Reply directly to the student with a non-empty message, without wrapper tags.
+When you think the conversation can end early, reply with only <end> instead.
+Do not combine <end> with a message to the student.
+Use your model's internal reasoning for private deliberation. Do not output
+explicit reasoning sections. Your entire final reply, unless it is <end>,
+will be shown to the student."""
+
 # How the teacher sees its OWN earlier turns under `teacher_history_tags: masked`,
 # and what `unmasked` falls back to on a malformed turn. `public_history` holds the
 # with the tags stripped, which reads as an in-context example that replies do
@@ -396,9 +409,7 @@ PERSONALITY_CLASSIFIER_GATE_USER_TEMPLATE = """<problem>
 
 Response:"""
 
-PERSONALITY_CLASSIFIER_NO_LAST_STUDENT_MESSAGE = (
-    "No student message is available yet."
-)
+PERSONALITY_CLASSIFIER_NO_LAST_STUDENT_MESSAGE = "No student message is available yet."
 
 
 # Guidance instructions appended to the END of the teacher prompt, immediately

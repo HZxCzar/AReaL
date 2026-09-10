@@ -987,6 +987,7 @@ class PedagogicalRLWorkflow(RolloutWorkflow):
             answer=str(data["ground_truth"]),
             include_thinking=self.generation.use_thinking,
             teacher_output_format=self.generation.teacher_output_format,
+            mask_teacher_history_reasoning=self.generation.mask_teacher_history_reasoning,
             forced_type=forced_type,
         )
         episode.preference = str(data.get("_pedagogical_preference", NO_PREFERENCE))

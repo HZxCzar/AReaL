@@ -43,9 +43,12 @@ final test and contributes `-0.5`; a valid action contributes zero. The native
 final-answer/hard-rejection reward, `+0.1` early-end reward, and `-0.5`
 max-length penalty are unchanged.
 
-The budget is 1,000 rollout batches x 16 problems x 8 trajectories = 128,000
-episodes. Native `mu=2` is retained, so this is 2,000 optimizer updates over the
-same sampled data.
+The default budget is 1,500 rollout batches x 16 problems x 8 trajectories =
+192,000 episodes. Native `mu=2` is retained, so this is 3,000 full-batch policy
+updates over the same sampled data. New runs use a 1,024-token teacher turn cap
+and match Tutor's constant LoRA LR of `5e-5` with warmup proportion `0.001`.
+The historical `0906-pedagogical-rl-qwen3-8b-lr5e-5-8gpu` run instead used
+1,000 rollout batches, a 2,048-token teacher cap, and zero warmup.
 
 ## Train on eight GPUs
 
@@ -112,6 +115,30 @@ bash examples/pedagogical_rl/run_tutor_protocol_eval.sh \
 That target protocol therefore owns its prompts, ten-turn dialogue, unverified
 evaluation-time pre-solve, leak/preference masking, seven students, and retest;
 none of those semantics is reimplemented in this example.
+
+## Two-checkpoint, no-preference evaluation
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+  bash examples/pedagogical_rl/run_protocol_pair_eval.sh run
+```
+
+This sequentially evaluates `all-id-fork775@globalstep999` and
+`0906-pedagogical-rl-qwen3-8b-lr5e-5-8gpu@globalstep999`, without policy updates.
+Each model runs all 528 problems under both GUIDED and ATTEMPTED (1,056
+dialogues), using only the native no-preference student and unified XML format.
+Native teacher/student prompts, final-answer scoring, and diagnostic-only native
+judges are shared across the two models. Format errors retain the existing
+protocol behavior: terminate and receive zero final accuracy.
+
+The printed comparison directory contains `ours/eval/` and `pedrl/eval/` full
+trajectories (including prompt templates rendered for each problem), plus
+`comparison.json` and `comparison.md`. The summary checks full, matched coverage
+and reports each dialogue mode separately and combined. `PAIR_RUN_DIR` can select
+a new output directory; an existing directory is rejected to avoid mixing runs.
+Use `preflight` instead of `run` for a GPU-free configuration check, or
+`PAIR_RUN_DIR=/existing/comparison bash examples/pedagogical_rl/run_protocol_pair_eval.sh analyze`
+to rebuild the comparison without model inference.
 
 ## Local links
 

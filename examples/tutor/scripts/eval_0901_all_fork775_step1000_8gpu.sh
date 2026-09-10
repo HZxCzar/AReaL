@@ -1038,7 +1038,9 @@ run_pair() (
     for ((cell_try = 1; cell_try <= max_cell_tries; cell_try++)); do
       attempt_command=("${command[@]}")
       if [[ -f "$output/run_config.json" ]]; then
-        attempt_command+=(--resume)
+        # Permit the evaluated leak-parser/diagnostics update; all non-code
+        # signature fields must still match the original evaluation exactly.
+        attempt_command+=(--resume --allow-evaluator-code-change-on-resume)
       fi
       printf '[cell-process] try=%s/%s wall_timeout=%ss\n' "$cell_try" "$max_cell_tries" "$CELL_WALL_TIMEOUT_SECONDS" >>"$log"
       set +e

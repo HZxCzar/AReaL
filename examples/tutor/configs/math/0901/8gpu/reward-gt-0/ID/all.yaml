@@ -1,0 +1,6 @@
+defaults:
+  - ../../../base/reward-gt-0/ID/all@_global_
+  - _self_
+
+# GPU allocation is frozen in reward-gt-0/default.yaml; do not inherit alloc.
+trial_name: 0901-reward-gt-0-all-id-8gpu

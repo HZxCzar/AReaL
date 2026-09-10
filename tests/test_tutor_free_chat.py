@@ -403,9 +403,11 @@ What does Vieta give you?
     plain = make_workflow(teacher_anti_leak_instruction_enabled=False)
     check("anti-leak off removes it",
           "Do not reveal the problem's answer" not in plain._free_chat_open_prompt())
-    thinking = make_workflow(enable_thinking=True)
-    check("enable_thinking removes the tag contract",
-          "<reasoning>" not in thinking._free_chat_open_prompt())
+    thinking = make_workflow(enable_thinking=True, teacher_response_format="thinking")
+    check("thinking response format requests output without explicit reasoning",
+          "first use this tagged section" not in thinking._free_chat_open_prompt()
+          and "<output>" not in thinking._free_chat_open_prompt()
+          and "Reply directly to the student" in thinking._free_chat_open_prompt())
     opening = workflow._free_chat_open_prompt()
     check("opener, then the format contract, then anti-leak",
           opening.index("Now you can start the conversation")

@@ -2,7 +2,7 @@
 #
 # Controlled substitutions shared with our arm:
 #   Qwen3-8B rank-16 LoRA teacher, Qwen3-1.7B student, Math Pass@2 data,
-#   16 problems x 8 trajectories, 1000 rollout batches, ten teacher turns,
+#   16 problems x 8 trajectories, 1500 rollout batches, ten teacher turns,
 #   and the common reasoning/output/end XML interface.
 #
 # PedagogicalRL itself remains native: GUIDED/ATTEMPTED assignment, native
@@ -19,9 +19,9 @@ enable_offload: false
 dynamic_bs: false
 total_train_epochs: 1000
 # Same sampled-data budget as our 0901 arm:
-# 1000 x 16 problems x 8 trajectories = 128,000 trajectories.
-# PedagogicalRL's native mu=2 is retained, hence 2,000 policy updates.
-total_train_steps: 1000
+# 1500 x 16 problems x 8 trajectories = 192,000 trajectories.
+# PedagogicalRL's native mu=2 is retained, hence 3,000 policy updates.
+total_train_steps: 1500
 tokenizer_path: ${actor.path}
 
 workflow: examples.pedagogical_rl.workflow.PedagogicalRLWorkflow
@@ -68,7 +68,7 @@ generation:
   # budget of ten teacher actions for both arms.
   max_teacher_turns: 10
   max_tokens_in_conversation: 8192
-  max_tokens_per_teacher_turn: 2048
+  max_tokens_per_teacher_turn: 1024
   max_tokens_per_student_turn: 1024
   max_tokens_per_student_attempt: 3900
   max_tokens_per_judge_attempt: 2048
@@ -146,7 +146,7 @@ rollout:
 gconfig:
   n_samples: 8
   min_new_tokens: 0
-  max_new_tokens: 2048
+  max_new_tokens: ${generation.max_tokens_per_teacher_turn}
   max_tokens: 12000
   greedy: false
   temperature: 1.0
@@ -157,7 +157,7 @@ gconfig:
 eval_gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 2048
+  max_new_tokens: ${generation.max_tokens_per_teacher_turn}
   max_tokens: 12000
   greedy: false
   temperature: 0.6
@@ -188,7 +188,7 @@ actor:
     eps: 1.0e-8
     lr_scheduler_type: constant
     gradient_clipping: 1.0
-    warmup_steps_proportion: 0.0
+    warmup_steps_proportion: 0.001
   eps_clip: 0.2
   c_clip: null
   use_ppo_clip: true

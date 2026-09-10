@@ -191,6 +191,7 @@ from examples.tutor.core.parsers import (
     parse_leak_check_result,
     parse_staged_leak_check_result,
     parse_tagged_teacher_action,
+    parse_thinking_teacher_action,
 )
 from examples.tutor.core.repetition import (
     depth_metrics,
@@ -330,6 +331,8 @@ from examples.tutor.prompts import (
     TEACHER_PROGRESS_JUDGE_USER_TEMPLATE,
     TEACHER_REPAIR_INSTRUCTION,
     TEACHER_STATE_USER_TEMPLATE,
+    THINKING_TEACHER_OUTPUT_FORMAT_PROMPT,
+    THINKING_TEACHER_OUTPUT_FORMAT_WITH_END_PROMPT,
     TYPE_PROBE_DESCRIPTIONS,
     TYPE_PROBE_INSTRUCTION_TEMPLATE,
     TYPE_PROBE_QUESTIONS,
@@ -946,6 +949,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         answer_scorer: str = "auto",
         max_turns: int = 6,
         enable_thinking: bool = False,
+        teacher_response_format: str = "non_thinking",
         leak_handling_mode: LeakHandlingMode = "reward_only",
         temperature: float = 1.0,
         top_p: float = 1.0,
@@ -1141,6 +1145,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
         self.answer_scorer_name = answer_scorer_name
         self.answer_scorer: AnswerScorer = get_answer_scorer(answer_scorer_name)
         self.enable_thinking = enable_thinking
+        if teacher_response_format not in {"non_thinking", "thinking"}:
+            raise ValueError("teacher_response_format must be non_thinking or thinking")
+        self.teacher_response_format = teacher_response_format
         if leak_handling_mode not in LEAK_HANDLING_MODES:
             raise ValueError(
                 "leak_handling_mode must be one of: 'disabled', "
@@ -2678,6 +2685,10 @@ class TutorAgentWorkflow(RolloutWorkflow):
         return prompt
 
     def _teacher_output_format_prompt(self) -> str:
+        if getattr(self, "teacher_response_format", "non_thinking") == "thinking":
+            if getattr(self, "teacher_end_enabled", False):
+                return THINKING_TEACHER_OUTPUT_FORMAT_WITH_END_PROMPT
+            return THINKING_TEACHER_OUTPUT_FORMAT_PROMPT
         if getattr(self, "teacher_end_enabled", False):
             return NON_THINKING_TEACHER_OUTPUT_FORMAT_WITH_END_PROMPT
         return NON_THINKING_TEACHER_OUTPUT_FORMAT_PROMPT
@@ -2685,11 +2696,9 @@ class TutorAgentWorkflow(RolloutWorkflow):
     def _resolve_teacher_system_prompt(self, prompt: str) -> str:
         prompt = (prompt or "").strip()
         format_prompt = self._teacher_output_format_prompt()
-        if not self.enable_thinking and format_prompt not in prompt:
+        if format_prompt not in prompt:
             prompt = (
-                f"{prompt}\n\n{format_prompt}"
-                if prompt
-                else format_prompt
+                f"{prompt}\n\n{format_prompt}" if prompt else format_prompt
             ).strip()
         instructions = []
         if getattr(self, "teacher_anti_leak_instruction_enabled", False):
@@ -3026,21 +3035,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
             return self.teacher_warmup_prompt
         return self._append_prompt_pool_suffix(self.teacher_system_prompt, selection)
 
-    def _parse_tutor_action(
-        self, raw_output: str
-    ) -> tuple[str, bool, str | None]:
-        if getattr(self, "enable_thinking", False):
-            output = _strip_reasoning_for_context(raw_output).strip()
-            if getattr(self, "teacher_end_enabled", False):
-                if output == "<end></end>":
-                    return "", True, None
-                if re.search(r"</?end\b[^>]*>", output):
-                    return "", False, (
-                        "teacher end action must be exactly <end></end>"
-                    )
-                if not output:
-                    return "", False, "teacher output must be non-empty"
-            return output, False, None
+    def _parse_tutor_action(self, raw_output: str) -> tuple[str, bool, str | None]:
+        if getattr(self, "teacher_response_format", "non_thinking") == "thinking":
+            output, ended, error = parse_thinking_teacher_action(
+                raw_output, allow_end=getattr(self, "teacher_end_enabled", False)
+            )
+            return output or "", ended, error
         output, ended, parse_error = parse_tagged_teacher_action(
             raw_output,
             allow_end=getattr(self, "teacher_end_enabled", False),
@@ -3573,8 +3573,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     )
                     break
             leak_masked = bool(
-                self.leak_handling_mode == "masked_continue"
-                and leak_result.leaked
+                self.leak_handling_mode == "masked_continue" and leak_result.leaked
             )
 
             student_turn_behavior = self._select_student_turn_behavior(
@@ -7974,8 +7973,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
         private profile comes last, closest to the first teaching generation.
         """
         parts = [FREE_CHAT_TEACHER_OPEN_PROMPT]
-        if not self.enable_thinking:
-            parts.append(self._teacher_output_format_prompt())
+        parts.append(self._teacher_output_format_prompt())
         if getattr(self, "teacher_anti_leak_instruction_enabled", False):
             parts.append(TEACHER_ANTI_LEAK_INSTRUCTION)
         if getattr(self, "teacher_adaptive_instruction_enabled", False):
@@ -8132,7 +8130,12 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 tutor_state.public_history.turns,
                 speaker="teacher",
                 own_turn_template=(
-                    TEACHER_HISTORY_MASKED_TEMPLATE
+                    (
+                        "{visible}"
+                        if getattr(self, "teacher_response_format", "non_thinking")
+                        == "thinking"
+                        else TEACHER_HISTORY_MASKED_TEMPLATE
+                    )
                     if getattr(self, "teacher_history_tags", "stripped")
                     in {"masked", "unmasked"}
                     else None
@@ -8140,6 +8143,8 @@ class TutorAgentWorkflow(RolloutWorkflow):
                 own_turn_raw_outputs=(
                     tutor_state.previous_tutor_raw_outputs
                     if getattr(self, "teacher_history_tags", "stripped") == "unmasked"
+                    and getattr(self, "teacher_response_format", "non_thinking")
+                    != "thinking"
                     else None
                 ),
             ),
@@ -9269,9 +9274,7 @@ class TutorAgentWorkflow(RolloutWorkflow):
                     keys.append(key)
         elif getattr(self, "leak_penalty", 0.0):
             keys.append("leak")
-        if not getattr(self, "enable_thinking", False) and getattr(
-            self, "format_error_penalty", 0.0
-        ):
+        if getattr(self, "format_error_penalty", 0.0):
             keys.append("format_error")
         if getattr(self, "teacher_exact_repeat_penalty", 0.0):
             keys.append("teacher_exact_repeat")

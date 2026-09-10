@@ -2788,6 +2788,19 @@ class TutorConfig(GRPOConfig):
         },
     )
     max_turns: int = field(default=6, metadata={"help": "Maximum teacher turns."})
+    teacher_response_format: str = field(
+        default="non_thinking",
+        metadata={
+            "help": "Teacher reply contract, independent of native model thinking.",
+            "choices": ["non_thinking", "thinking"],
+        },
+    )
+    teacher_api_request_params: dict[str, Any] = field(
+        default_factory=dict,
+        metadata={
+            "help": "External teacher API options, e.g. reasoning_effort; never used for student/judge calls."
+        },
+    )
     enable_thinking: bool = field(
         default=False,
         metadata={
@@ -2982,6 +2995,8 @@ class TutorConfig(GRPOConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.teacher_response_format not in {"non_thinking", "thinking"}:
+            raise ValueError("teacher_response_format must be non_thinking or thinking")
         if self.teacher_pre.train:
             self.teacher_pre.__post_init__()
             if (

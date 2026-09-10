@@ -16,6 +16,27 @@ _TEACHER_RESPONSE_TAGS = (
 TEACHER_END_TAG = "<end></end>"
 
 
+def parse_thinking_teacher_action(
+    raw_output: str, *, allow_end: bool = False
+) -> tuple[str | None, bool, str | None]:
+    """Final-content contract for native reasoning models; never expose thoughts."""
+    text = (raw_output or "").strip()
+    if allow_end and text == "<end>":
+        return "", True, None
+    if text and not re.search(
+        r"</?(?:output|end|reasoning|think|thinking)\b", text, re.IGNORECASE
+    ):
+        return text, False, None
+    return (
+        None,
+        False,
+        (
+            "teacher response must be non-empty student-facing text without protocol tags"
+            + (" or <end>" if allow_end else "")
+        ),
+    )
+
+
 def parse_tagged_teacher_output(raw_output: str) -> tuple[str | None, str | None]:
     """Extract the student-visible section from a tagged teacher response."""
     text = raw_output or ""
@@ -62,9 +83,13 @@ def parse_tagged_teacher_action(
                 # error rather than a normal student-visible message.
                 if re.search(r"</?end\b[^>]*>", suffix):
                     if text[:reasoning_open].strip() or suffix != TEACHER_END_TAG:
-                        return None, False, (
-                            "teacher end action must be exactly "
-                            "<reasoning>...</reasoning><end></end>"
+                        return (
+                            None,
+                            False,
+                            (
+                                "teacher end action must be exactly "
+                                "<reasoning>...</reasoning><end></end>"
+                            ),
                         )
                     return "", True, None
 

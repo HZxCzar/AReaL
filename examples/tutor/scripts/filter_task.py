@@ -866,6 +866,7 @@ def build_workflow(
         answer_scorer=config.answer_scorer,
         max_turns=config.max_turns,
         enable_thinking=config.enable_thinking,
+        teacher_response_format=config.teacher_response_format,
         leak_handling_mode=config.leak_handling_mode,
         aux_mode="api",
         aux_enable_thinking=bool(aux_thinking),

@@ -1,0 +1,1113 @@
+# Standalone snapshot of the historical all-ID 1000 -> 1500 continuation.
+# No dependency on current dated defaults, reward layers, student pools or alloc.
+# Only run identity/recovery startup behavior and explicit legacy defaults differ.
+experiment_name: tutor-math-baseline
+trial_name: 0901-reward-gt-0-all-id-8gpu
+cluster:
+  name_resolve:
+    type: nfs
+    nfs_record_root: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor/name_resolve
+    etcd3_addr: localhost:2379
+    ray_actor_name: ray_kv_store
+  cluster_name: local
+  fileroot: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor
+  n_nodes: 1
+  n_gpus_per_node: 8
+allocation_mode: ''
+seed: 42
+enable_offload: false
+total_train_epochs: 1000
+total_train_steps: 1500
+total_train_n_seqs: null
+tokenizer_path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+train_dataset:
+  split: train
+  path: examples/tutor/data/math_1.7b_8b/math_pass@2
+  type: rl
+  batch_size: 16
+  shuffle: true
+  pin_memory: false
+  num_workers: 0
+  num_dataset_workers: 1
+  drop_last: true
+  max_length: 16384
+  dataset_kwargs: {}
+  difficulty_balance:
+    enabled: false
+    label_field: metadata.difficulty_label
+    ratios:
+      easy: 3.0
+      medium: 8.0
+      hard: 5.0
+      noisy: 0.0
+  scheduling_spec:
+    cpu: 1
+    gpu: 0
+    mem: 10
+    port_count: 2
+    image: /storage/openpsi/images/areal-latest.sif
+    task_type: worker
+    env_vars: {}
+    cmd: python3 -m areal.infra.rpc.guard
+    srun_additional_args: --unbuffered --mpi=pmi2 -K --chdir $PWD
+    additional_bash_cmds: null
+    container_type: apptainer
+    mount: /storage:/storage
+    nodelist: null
+    exclude: null
+    ray_placement_strategy: shared
+valid_dataset:
+  split: test
+  path: examples/tutor/data/math_1.7b_8b/math_pass@2
+  type: rl
+  batch_size: 16
+  shuffle: false
+  pin_memory: false
+  num_workers: 0
+  num_dataset_workers: 1
+  drop_last: false
+  max_length: null
+  dataset_kwargs: {}
+  difficulty_balance:
+    enabled: false
+    label_field: metadata.difficulty_label
+    ratios:
+      easy: 3.0
+      medium: 8.0
+      hard: 5.0
+      noisy: 0.0
+  scheduling_spec:
+    cpu: 1
+    gpu: 0
+    mem: 10
+    port_count: 2
+    image: /storage/openpsi/images/areal-latest.sif
+    task_type: worker
+    env_vars: {}
+    cmd: python3 -m areal.infra.rpc.guard
+    srun_additional_args: --unbuffered --mpi=pmi2 -K --chdir $PWD
+    additional_bash_cmds: null
+    container_type: apptainer
+    mount: /storage:/storage
+    nodelist: null
+    exclude: null
+    ray_placement_strategy: shared
+saver:
+  experiment_name: tutor-math-baseline
+  trial_name: ${trial_name}
+  fileroot: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor
+  freq_epochs: null
+  freq_steps: 25
+  freq_secs: null
+  mode: auto
+evaluator:
+  experiment_name: tutor-math-baseline
+  trial_name: ${trial_name}
+  fileroot: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+  eval_before_train: false
+  max_samples: null
+  leak_terminate: null
+  format_terminate: null
+  teacher_pre_verify: null
+  teacher_pre_enabled: null
+  average_rollouts: 3
+  student_prompt_average_rollouts: null
+  student_model_names: null
+stats_logger:
+  experiment_name: tutor-math-baseline
+  trial_name: ${trial_name}
+  fileroot: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor
+  wandb:
+    mode: offline
+    wandb_base_url: ''
+    wandb_api_key: ''
+    entity: hz-czar-stanford
+    project: TAgent
+    name: ${trial_name}
+    job_type: null
+    group: 0901-preference-v3-reward-v3-8gpu
+    notes: null
+    tags: null
+    config: null
+    id_suffix: train
+  swanlab:
+    project: null
+    name: null
+    config: null
+    logdir: null
+    mode: disabled
+    api_key: null
+  tensorboard:
+    path: null
+  trackio:
+    mode: disabled
+    project: null
+    name: null
+    space_id: null
+perf_tracer: null
+recover:
+  experiment_name: tutor-math-baseline
+  trial_name: ${trial_name}
+  fileroot: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor
+  freq_epochs: null
+  freq_steps: 25
+  freq_secs: null
+  mode: auto
+  retries: 3
+  keep_last_n: 3
+  no_save_optim: false
+  no_load_optim: false
+sglang:
+  model_path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+  random_seed: 42
+  skip_tokenizer_init: true
+  disable_cuda_graph: false
+  disable_radix_cache: false
+  disable_cuda_graph_padding: false
+  enable_nccl_nvls: false
+  disable_outlines_disk_cache: false
+  disable_custom_all_reduce: false
+  disable_overlap_schedule: false
+  enable_mixed_chunk: false
+  enable_dp_attention: false
+  enable_ep_moe: false
+  enable_torch_compile: false
+  torch_compile_max_bs: 32
+  cuda_graph_max_bs: null
+  cuda_graph_bs: null
+  torchao_config: ''
+  enable_nan_detection: false
+  enable_p2p_check: false
+  triton_attention_reduce_in_fp32: false
+  triton_attention_num_kv_splits: 8
+  num_continuous_decode_steps: 1
+  enable_memory_saver: false
+  allow_auto_truncate: false
+  attention_backend: fa3
+  enable_multimodal: false
+  sampling_backend: null
+  context_length: 40960
+  mem_fraction_static: 0.5
+  max_running_requests: 32
+  chunked_prefill_size: -1
+  max_prefill_tokens: 32768
+  schedule_policy: lpm
+  schedule_conservativeness: 1.0
+  cpu_offload_gb: 0
+  dtype: bfloat16
+  kv_cache_dtype: auto
+  dp_size: 1
+  ep_size: 1
+  enable_lora: true
+  max_lora_rank: 16
+  max_loaded_loras: 16
+  lora_paths: null
+  lora_backend: triton
+  log_level: warning
+  log_level_http: warning
+  log_requests: false
+  log_requests_level: 0
+  show_time_cost: false
+  enable_metrics: true
+  decode_log_interval: 1
+  enable_multithread_load: false
+  enable_return_routed_experts: false
+vllm:
+  model: ''
+  seed: 1
+  skip_tokenizer_init: false
+  enforce_eager: false
+  dtype: bfloat16
+  distributed_executor_backend: mp
+  max_num_seqs: 256
+  block_size: 16
+  swap_space: 4
+  cpu_offload_gb: 0.0
+  disable_sliding_window: true
+  max_model_len: 32768
+  no_enable_chunked_prefill: false
+  no_enable_prefix_caching: true
+  gpu_memory_utilization: 0.9
+  worker_extension_cls: areal.engine.vllm_ext.vllm_worker_extension.VLLMWorkerExtension
+  enable_sleep_mode: false
+  uvicorn_log_level: warning
+  enable_lora: false
+  max_lora_rank: 16
+  max_loras: 8
+  lora_modules: null
+scheduler:
+  type: local
+  endpoint: http://localhost:8081
+  deploy_mode: separation
+  functioncall_service_domain: http://localhost:8080
+  reward_functioncall_config: {}
+  reward_model_path: ''
+  reward_model_service_url: http://localhost:30000/classify
+gconfig:
+  n_samples: 8
+  max_new_tokens: 1024
+  min_new_tokens: 0
+  max_tokens: 24576
+  greedy: false
+  top_p: 1.0
+  top_k: 100000000
+  temperature: 1.0
+  stop_token_ids: []
+  ignore_eos: false
+  skip_special_tokens: true
+  stop: null
+  frequency_penalty: 0.0
+  lora_name: default_lora
+  use_beam_search: false
+eval_gconfig:
+  n_samples: 1
+  max_new_tokens: 1024
+  min_new_tokens: 0
+  max_tokens: 24576
+  greedy: false
+  top_p: 1.0
+  top_k: 100000000
+  temperature: 0.7
+  stop_token_ids: []
+  ignore_eos: false
+  skip_special_tokens: true
+  stop: null
+  frequency_penalty: 0.0
+  lora_name: default_lora
+  use_beam_search: false
+rollout:
+  experiment_name: tutor-math-baseline
+  trial_name: ${trial_name}
+  fileroot: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor
+  max_concurrent_rollouts: 64
+  queue_size: null
+  consumer_batch_size: 16
+  max_head_offpolicyness: 2
+  enable_rollout_tracing: false
+  check_trajectory_format: false
+  schedule_policy: round_robin
+  tokenizer_path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+  dump_to_file: true
+  setup_timeout: 300.0
+  request_timeout: 3600.0
+  request_retries: 3
+  pause_grace_period: 10.0
+  scheduling_spec:
+  - cpu: 8
+    gpu: 1
+    mem: 32
+    port_count: 2
+    image: /storage/openpsi/images/areal-latest.sif
+    task_type: worker
+    env_vars: {}
+    cmd: python3 -m areal.infra.rpc.rpc_server
+    srun_additional_args: --unbuffered --mpi=pmi2 -K --chdir $PWD
+    additional_bash_cmds: null
+    container_type: apptainer
+    mount: /storage:/storage
+    nodelist: null
+    exclude: null
+    ray_placement_strategy: shared
+  backend: sglang:d4p1t1
+  scheduling_strategy:
+    type: separation
+    target: null
+    fork: true
+  use_lora: true
+  openai:
+    mode: inline
+    tool_call_parser: qwen25
+    reasoning_parser: qwen3
+    chat_template_type: concat
+    engine_max_tokens: null
+    turn_discount: 1.0
+    export_style: concat
+    subproc_max_workers: 4
+    session_timeout_seconds: 3600
+    admin_api_key: areal-admin-key
+  return_routed_experts: false
+actor:
+  experiment_name: tutor-math-baseline
+  trial_name: ${trial_name}
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+  attn_impl: flash_attention_2
+  use_kernels: false
+  init_from_scratch: false
+  is_critic: false
+  temperature: 1.0
+  mb_spec:
+    n_mbs: 1
+    granularity: 1
+    max_tokens_per_mb: 40960
+    n_mbs_divisor: 1
+  pad_to_maximum: false
+  disable_dropout: true
+  gradient_checkpointing: true
+  dtype: bfloat16
+  grad_reduce_dtype: float32
+  optimizer:
+    type: adam
+    lr: 5.0e-05
+    weight_decay: 0.0
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1.0e-08
+    min_lr_ratio: 0.0
+    lr_scheduler_type: constant
+    warmup_steps_proportion: 0.001
+    initial_loss_scale: 4294967296.0
+    min_loss_scale: 1.0
+    loss_scale_window: 5.0
+    hysteresis: 2
+    gradient_clipping: 1.0
+  weight_update_mode: disk
+  fsdp:
+    wrap_policy: null
+    offload_params: false
+    memory_efficient_load: false
+    per_layer_optim_step: false
+    optim_step_prefetch_layers: 1
+    shard_vision_across_sp: false
+  archon:
+    attn_type: varlen
+    offload_params: false
+    enable_compile: true
+    ac_mode: selective
+    selective_ac_option: op
+    ac_memory_budget: 0.5
+    ac_preserve_rng_state: false
+    ac_debug: false
+    pp_schedule: Interleaved1F1B
+    pp_layers_per_stage: null
+    pp_first_stage_less_layers: 1
+    pp_last_stage_less_layers: 1
+    reshard_after_forward_policy: default
+    fp8_config:
+      mode: disabled
+      exclude_modules:
+      - output
+      - router
+      - score
+      include_experts: false
+      use_triton: true
+    use_deterministic_algorithms: false
+    moe_router_dtype: fp32
+  megatron:
+    wrap_with_ddp: true
+    use_torch_fsdp2: false
+    use_custom_fsdp: false
+    ddp:
+      grad_reduce_in_fp32: true
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      align_param_gather: false
+      use_distributed_optimizer: true
+      check_for_nan_in_grad: false
+      bucket_size: null
+      average_in_collective: false
+      fp8_param_gather: false
+    virtual_pipeline_parallel_size: 1
+    overlap_param_gather_with_optimizer_step: false
+    use_precision_aware_optimizer: false
+    main_grads_dtype: float32
+    main_params_dtype: float32
+    exp_avg_dtype: float32
+    exp_avg_sq_dtype: float32
+    async_save: false
+    use_checkpoint_opt_param_scheduler: true
+    use_deterministic_algorithms: false
+    recompute_granularity: full
+    recompute_method: uniform
+    recompute_num_layers: 1
+    distribute_saved_activations: null
+    recompute_modules: null
+    moe_router_dtype: fp32
+    moe_shared_expert_overlap: false
+    moe_enable_deepep: false
+    moe_token_dispatcher_type: alltoall
+    moe_permute_fusion: false
+    fp8_config: null
+    bridge_type: mbridge
+  offload: false
+  use_lora: true
+  lora_rank: 16
+  lora_alpha: 16
+  target_modules:
+  - all-linear
+  peft_type: lora
+  init_lora_path: ''
+  enable_tree_training: false
+  scheduling_spec:
+  - cpu: 8
+    gpu: 1
+    mem: 32
+    port_count: 2
+    image: /storage/openpsi/images/areal-latest.sif
+    task_type: worker
+    env_vars: {}
+    cmd: python3 -m areal.infra.rpc.rpc_server
+    srun_additional_args: --unbuffered --mpi=pmi2 -K --chdir $PWD
+    additional_bash_cmds: null
+    container_type: apptainer
+    mount: /storage:/storage
+    nodelist: null
+    exclude: null
+    ray_placement_strategy: shared
+  backend: fsdp:d4p1t1
+  _version: v1
+  admin_api_key: areal-admin-key
+  log_level: warning
+  request_timeout: 3600.0
+  setup_timeout: 3600.0
+  scheduling_strategy:
+    type: separation
+    target: null
+    fork: true
+  ppo_n_minibatches: 2
+  eps_clip: 0.2
+  eps_clip_higher: null
+  c_clip: 3.0
+  use_ppo_clip: true
+  m2_threshold: null
+  reward_norm: null
+  reward_scaling: 1.0
+  reward_bias: 0.0
+  reward_clip: 20.0
+  overlong_reward_penalty: false
+  overlong_tokens: null
+  overlong_penalty_factor: null
+  mask_no_eos_with_zero: false
+  discount: 1.0
+  gae_lambda: 1.0
+  adv_norm:
+    mean_level: null
+    mean_leave1out: false
+    std_level: batch
+    std_unbiased: true
+    eps: 1.0e-05
+    group_size: 1
+  advantage_estimator: rebn
+  turn_discount: 1.0
+  group_baseline: turn
+  group_baseline_leave1out: true
+  turn_group_baseline_singleton_fallback: false
+  group_baseline_local_reward_mode: exclude
+  loss_weighting: token
+  episode_loss_weighting: false
+  kl_ctl: 0.0
+  kl_estimator: k1
+  use_sapo_loss: false
+  sapo_tau_pos: 1.0
+  sapo_tau_neg: 1.05
+  recompute_logprob: true
+  use_decoupled_loss: true
+  behave_imp_weight_cap: 5.0
+  behave_imp_weight_mode: token_mask
+  importance_sampling_level: token
+  prox_logp_method: recompute
+  log_agent_stats: false
+  log_agent_stats_keys: []
+  max_new_tokens: 1024
+  num_iterations: 1
+ref:
+  experiment_name: tutor-math-baseline
+  trial_name: ${trial_name}
+  path: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+  attn_impl: flash_attention_2
+  use_kernels: false
+  init_from_scratch: false
+  is_critic: false
+  temperature: 1.0
+  mb_spec:
+    n_mbs: 1
+    granularity: 1
+    max_tokens_per_mb: 24576
+    n_mbs_divisor: 1
+  pad_to_maximum: false
+  disable_dropout: true
+  gradient_checkpointing: false
+  dtype: bfloat16
+  grad_reduce_dtype: float32
+  optimizer: null
+  weight_update_mode: xccl
+  fsdp:
+    wrap_policy: null
+    offload_params: false
+    memory_efficient_load: false
+    per_layer_optim_step: false
+    optim_step_prefetch_layers: 1
+    shard_vision_across_sp: false
+  archon:
+    attn_type: varlen
+    offload_params: false
+    enable_compile: true
+    ac_mode: selective
+    selective_ac_option: op
+    ac_memory_budget: 0.5
+    ac_preserve_rng_state: false
+    ac_debug: false
+    pp_schedule: Interleaved1F1B
+    pp_layers_per_stage: null
+    pp_first_stage_less_layers: 1
+    pp_last_stage_less_layers: 1
+    reshard_after_forward_policy: default
+    fp8_config:
+      mode: disabled
+      exclude_modules:
+      - output
+      - router
+      - score
+      include_experts: false
+      use_triton: true
+    use_deterministic_algorithms: false
+    moe_router_dtype: fp32
+  megatron:
+    wrap_with_ddp: true
+    use_torch_fsdp2: false
+    use_custom_fsdp: false
+    ddp:
+      grad_reduce_in_fp32: true
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      align_param_gather: false
+      use_distributed_optimizer: true
+      check_for_nan_in_grad: false
+      bucket_size: null
+      average_in_collective: false
+      fp8_param_gather: false
+    virtual_pipeline_parallel_size: 1
+    overlap_param_gather_with_optimizer_step: false
+    use_precision_aware_optimizer: false
+    main_grads_dtype: float32
+    main_params_dtype: float32
+    exp_avg_dtype: float32
+    exp_avg_sq_dtype: float32
+    async_save: false
+    use_checkpoint_opt_param_scheduler: true
+    use_deterministic_algorithms: false
+    recompute_granularity: full
+    recompute_method: uniform
+    recompute_num_layers: 1
+    distribute_saved_activations: null
+    recompute_modules: null
+    moe_router_dtype: fp32
+    moe_shared_expert_overlap: false
+    moe_enable_deepep: false
+    moe_token_dispatcher_type: alltoall
+    moe_permute_fusion: false
+    fp8_config: null
+    bridge_type: mbridge
+  offload: false
+  use_lora: false
+  lora_rank: 32
+  lora_alpha: 16
+  target_modules: []
+  peft_type: lora
+  init_lora_path: ''
+  enable_tree_training: false
+  scheduling_spec:
+  - cpu: 8
+    gpu: 1
+    mem: 32
+    port_count: 2
+    image: /storage/openpsi/images/areal-latest.sif
+    task_type: worker
+    env_vars: {}
+    cmd: python3 -m areal.infra.rpc.rpc_server
+    srun_additional_args: --unbuffered --mpi=pmi2 -K --chdir $PWD
+    additional_bash_cmds: null
+    container_type: apptainer
+    mount: /storage:/storage
+    nodelist: null
+    exclude: null
+    ray_placement_strategy: shared
+  backend: fsdp:d4p1t1
+  _version: v1
+  admin_api_key: areal-admin-key
+  log_level: warning
+  request_timeout: 3600.0
+  setup_timeout: 3600.0
+  scheduling_strategy:
+    type: colocation
+    target: actor
+    fork: true
+  ppo_n_minibatches: 4
+  eps_clip: 0.2
+  eps_clip_higher: null
+  c_clip: null
+  use_ppo_clip: true
+  m2_threshold: null
+  reward_norm: null
+  reward_scaling: 1.0
+  reward_bias: 0.0
+  reward_clip: 20.0
+  overlong_reward_penalty: false
+  overlong_tokens: null
+  overlong_penalty_factor: null
+  mask_no_eos_with_zero: false
+  discount: 1.0
+  gae_lambda: 1.0
+  adv_norm: null
+  advantage_estimator: gae
+  turn_discount: 1.0
+  group_baseline: null
+  group_baseline_leave1out: true
+  turn_group_baseline_singleton_fallback: false
+  group_baseline_local_reward_mode: include
+  loss_weighting: token
+  episode_loss_weighting: false
+  kl_ctl: 0.1
+  kl_estimator: k1
+  use_sapo_loss: false
+  sapo_tau_pos: 1.0
+  sapo_tau_neg: 1.05
+  recompute_logprob: false
+  use_decoupled_loss: false
+  behave_imp_weight_cap: 5.0
+  behave_imp_weight_mode: token_mask
+  importance_sampling_level: token
+  prox_logp_method: recompute
+  log_agent_stats: false
+  log_agent_stats_keys: []
+  max_new_tokens: 1024
+critic: null
+teacher: null
+dynamic_bs: false
+workflow: examples.tutor.workflow.TutorAgentWorkflow
+eval_workflow: examples.tutor.workflow.TutorAgentWorkflow
+dataset_type: math
+answer_scorer: math
+max_turns: 10
+enable_thinking: false
+leak_handling_mode: masked_continue
+format_handling_mode: terminate
+teacher_end_enabled: true
+teacher_show_ground_truth: false
+prompt_pool:
+  teacher_path: ''
+  student_seen_path: ''
+  student_heldout_path: ''
+  include_base: true
+  test_persona: true
+  student_turn_behavior:
+    enabled: false
+    path: ''
+    separate_call_behavior_names: []
+  teacher_warmup:
+    enabled: false
+    prompt_path: ''
+    steps: 0
+teacher_pre:
+  train: false
+  enabled: true
+  mode: filter_solver
+  verify: true
+  attempts: 3
+  max_tokens: 4096
+  visibility: rollout
+  share_per_group: true
+  on_reject: skip
+length_retry:
+  enabled: true
+  attempts: 3
+auxiliary_model:
+  mode: self
+  enable_thinking: false
+  base_url: http://127.0.0.1:1/v1
+  model: qwen3-8b
+  api_key: EMPTY
+  timeout: 120
+  max_tokens: 1024
+  temperature: 0.0
+  top_p: 1.0
+  max_concurrent_calls: 32
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen8b-auxiliary
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+  answer_judge_enabled: true
+  answer_judge_max_tokens: 256
+student_models:
+- name: qwen3-1.7b-text-original
+  base_url: http://127.0.0.1:30001/v1
+  model: qwen3-1.7b
+  weight: 0.25
+  mode: text
+  api_key: EMPTY
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 24
+  mask:
+    mode: full
+    keep_recent: 0
+    long_drop_words: 75
+    placeholder: true
+  personality: ''
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+- name: qwen3-1.7b-text-original-attempt-diagnosis
+  base_url: http://127.0.0.1:30001/v1
+  model: qwen3-1.7b
+  weight: 0.25
+  mode: text
+  api_key: EMPTY
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 24
+  mask:
+    mode: full
+    keep_recent: 0
+    long_drop_words: 75
+    placeholder: true
+  personality: attempt-diagnosis
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+- name: qwen3-1.7b-text-original-subgoal-decomposition
+  base_url: http://127.0.0.1:30001/v1
+  model: qwen3-1.7b
+  weight: 0.25
+  mode: text
+  api_key: EMPTY
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 24
+  mask:
+    mode: full
+    keep_recent: 0
+    long_drop_words: 75
+    placeholder: true
+  personality: subgoal-decomposition
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+- name: qwen3-1.7b-text-original-contrastive-comparison
+  base_url: http://127.0.0.1:30001/v1
+  model: qwen3-1.7b
+  weight: 0.25
+  mode: text
+  api_key: EMPTY
+  timeout: 120
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.8
+  max_concurrent_calls: 24
+  mask:
+    mode: full
+    keep_recent: 0
+    long_drop_words: 75
+    placeholder: true
+  personality: contrastive-comparison
+  request_params:
+    seed: 42
+    extra_headers:
+      x-inspire-inference-key: tutor-train-qwen17b-student
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+student_sampling:
+  strategy: stratified
+student_axes: []
+student_generalize:
+  enabled: true
+  mode: always
+  source: sidecar
+  path: ''
+  level1_reward: 0.0
+  level2_reward: 0.0
+  gate_pass_credit_only: true
+  turn_credit: false
+  turn_credit_replays: 0
+  retest_reward: 1.0
+  retest_original: true
+  level1_enabled: false
+  level2_enabled: false
+  replays: 8
+  confidence:
+    enabled: false
+    reward_scale: 0.25
+polaris_processing:
+  enabled: false
+  output_path: ''
+  train_ratio: 0.98
+  generalize_ratio: 0.5
+  reuse_generalize_tasks: true
+  overwrite: false
+  sidecar_filename: student_generalize.json
+reward:
+  soft_overlong:
+    enabled: false
+    buffer_tokens: 512
+    max_penalty: -0.05
+  success: 0.0
+  leaked_success_reward_scale: 1.0
+  leak_penalty_mode: rawbase
+  leak_penalty: 0.0
+  leak_penalty_final_answer: null
+  leak_penalty_compute: null
+  leak_penalty_formula: null
+  leak_penalty_aggregation: episode
+  turn_local_components:
+  - leak
+  - format_error
+  - teacher_exact_repeat
+  turn_local_component_placements:
+    leak: post_std
+    format_error: post_std
+    teacher_exact_repeat: post_std
+  format_error_penalty: -0.5
+  teacher_exact_repeat_penalty: -0.5
+  teacher_exact_repeat_terminate: true
+  personality_gate_terminate_penalty: 0.0
+  personality_gate_fail_penalty: 0.0
+  assign_success_reward: false
+  outcome_prior_turn_weight: 0.1
+  outcome_credit_gamma: 0.9
+  early_success_bonus: 0.0
+  success_turn_shaping:
+    enabled: false
+    min_reward: 1.0
+    max_reward: 1.0
+  max_turn_penalty: 0.0
+  enable_turn_penalty: false
+  turn_penalty: -0.01
+  length_penalty_threshold_chars: 0
+  length_penalty_per_100_chars: 0.0
+  length_penalty_min: 0.0
+  zero_reward_on_length_stop: false
+  teacher_diversity:
+    enabled: false
+    weight: 0.1
+    embedding_model_path: ''
+    embedding_device: cuda
+    embedding_dtype: bfloat16
+    embedding_max_length: 8192
+    embedding_batch_wait_ms: 2.0
+    embedding_max_batch_texts: 64
+    embedding_max_batch_tokens: 32768
+  teacher_context:
+    enabled: false
+    apply_to_advantage: true
+    weight: 0.1
+    score_clip: 5.0
+  teacher_progress_judge:
+    enabled: false
+    weight: 0.5
+  student_request_judge:
+    enabled: false
+    weight: 0.5
+    behavior_names:
+    - ask_question
+world_model:
+  enabled: false
+  separate_lora_enabled: false
+  loss_weight: 0.05
+  system_prompt: You are a student response predictor. Given the context available
+    to the teacher and the teacher's latest visible reply, predict the same student's
+    next visible reply. Output only the predicted student reply.
+  log_per_turn_nll: false
+  per_turn_nll_log_every_n_steps: 1
+  paw:
+    enabled: false
+    entropy_filter_enabled: true
+    entropy_keep_ratio: 0.75
+    cmae_enabled: true
+    confidence_threshold: 0.2
+    reward_adaptive_enabled: false
+    max_episode_return: 1.0
+  rl_reweight:
+    enabled: false
+    mode: continuous
+    positive_strength: 1.0
+    negative_strength: 1.0
+    min_weight: 0.5
+    max_weight: 2.0
+    continuous_temperature: 1.0
+    low_threshold: -0.5
+    high_threshold: 0.5
+    min_turn_std: 1.0e-06
+guided_slots:
+  enabled: false
+  slots: 3
+  moves: 
+  - DECOMPOSE
+  - REFRAME
+  - PROBE
+  turns: 
+  - 1
+  rotate_by_task: true
+opd:
+  enabled: false
+  teacher_source: policy
+  context: instruction
+  loss_weight: 1.0
+  instruction: ''
+  reward_clip: 0.0
+  min_prior_failed_turns: 2
+  max_turns_per_episode: 0
+  skip_guided_rows: true
+  skip_leaked_rows: true
+prompt_instruction:
+  enabled: false
+  instruction: ''
+  min_prior_failed_turns: 2
+free_chat:
+  enabled: true
+  student_has_not_seen_problem: false
+  student_awareness_prompt_enabled: true
+  transfer_prompts: false
+  no_teaching_baseline: true
+  budget: 10
+student_type_probe:
+  enabled: false
+  cyclic_permutations: true
+  reward_scale: 1.0
+  temperature: 1.0
+  max_new_tokens: 1
+cross_eval:
+  enabled: false
+  sample_rate: 1.0
+  run_other_protocol: true
+  free_chat:
+    budget: 5
+    max_student_tokens: 2048
+    teacher_history_tags: masked
+  classroom:
+    max_teacher_turns: 10
+    max_tokens_in_conversation: 24576
+    max_tokens_per_student_turn: 2048
+    max_tokens_per_student_attempt: 2048
+    include_thinking: false
+  retest:
+    replays: 4
+    max_tokens: 2048
+  interview:
+    attempts: 8
+    max_tokens: 2048
+    student_name: ''
+    timeout: null
+  leak_judges:
+    enabled: true
+    turn_enabled: true
+    native_enabled: true
+    native_attempts: 2
+    native_max_retries: 5
+personality:
+  prompts_path: examples/tutor/prompt_pools/personality_prompts_v3.json
+  complaints_path: examples/tutor/prompt_pools/personality_complaints_v3.json
+  gate_prompt_version: v3
+  gate_decision_mode: binary
+  gate_sample_rate: 1.0
+  gated_turn_visibility: teacher_only
+  explain_ratio: 1.0
+  terminate_after_explained_failure: false
+  gate_retries: 3
+teacher_history_tags: masked
+teacher_private_visibility: false
+teacher_system_prompt: You are a careful math tutor. Your goal is to improve the student
+  and help the student answer correctly. The student's answer may be truncated due
+  to length; if so, ask them to continue or be brief. The judge extracts the final
+  answer from the last \boxed{...} and checks with the answer key after normalization.
+teacher_anti_leak_instruction_enabled: true
+teacher_adaptive_instruction_enabled: false
+teacher_user_prompt_template: 'Task:
+
+  {{ task }}
+
+
+  {% if show_ground_truth %}
+
+  Private ground truth key:
+
+  {{ ground_truth }}
+
+
+  {% endif %}
+
+  Public conversation history shown to both tutor and student:
+
+  {{ public_history }}
+
+
+  Previous tutor output:
+
+  {{ previous_tutor_output }}
+
+
+  Private feedback for the tutor:
+
+  {% if feedback_kind == "student_judged" %}
+
+  - Latest student output: {{ student_output }}
+
+  - Answer correctness: {{ ''correct'' if judge_correct else ''incorrect'' }}
+
+  - Judge feedback: {{ judge_feedback }}
+
+  {% else %}
+
+  - No previous private feedback.
+
+  {% endif %}
+
+
+  Round: {{ current_round }}/{{ max_turns }}
+
+  Remaining rounds: {{ remaining_rounds }}
+
+
+  Goal: help the student answer correctly.
+
+  '
+student_system_prompt: You are a real student solving the task. Use the visible tutoring
+  history and the teacher's latest feedback naturally. Continue from your previous
+  visible work when that is the clearest next step. Make a revised answer attempt
+  when you can, or briefly say what is confusing and ask one short question when you
+  are stuck. When you make an answer attempt, put your final answer in \boxed{}.
+leak_check_system_prompt: You are a strict answer leakage detector. Decide whether
+  the teacher's latest visible message directly reveals the ground-truth answer, the
+  final arithmetic that determines it, or an equivalent final computation. Return
+  valid JSON only with keys leaked (boolean) and feedback (string).
+answer_judge_system_prompt: You are a strict math answer equivalence judge. Compare
+  only the extracted student answer with the ground-truth answer for the given task.
+  Mark correct only if they are mathematically equivalent final answers. Return valid
+  JSON only with key correct (boolean).
+debug_trace_dir: /inspire/hdd/project/qproject-fundationmodel/public/wxxu/TAgent/output_hdd/tutor/debug_traces/tutor-math-baseline/${trial_name}
+debug_trace_every_n_rollouts: 10
+teacher_response_format: non_thinking
+teacher_api_request_params: {}

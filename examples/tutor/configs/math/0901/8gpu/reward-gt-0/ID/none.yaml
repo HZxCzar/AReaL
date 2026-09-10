@@ -1,0 +1,6 @@
+defaults:
+  - ../../../base/reward-gt-0/ID/none@_global_
+  - _self_
+
+# Allocation comes exclusively from reward-gt-0/default.yaml.
+trial_name: 0901-reward-gt-0-none-8gpu

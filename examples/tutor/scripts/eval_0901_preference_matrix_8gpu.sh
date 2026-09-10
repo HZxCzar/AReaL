@@ -58,6 +58,12 @@ PYTHON="$ROOT_DIR/.venv/bin/python"
 EVAL_CONFIG="${MATRIX_EVAL_CONFIG:-$ROOT_DIR/examples/tutor/configs/math/0901/pilot/eval-all-preferences.yaml}"
 BASE_CONFIG="$ROOT_DIR/examples/tutor/configs/math/0901/base/default.yaml"
 EVALUATOR="$ROOT_DIR/examples/tutor/scripts/evaluate_api_teacher.py"
+export MATRIX_ROW_SHARDS="${MATRIX_ROW_SHARDS:-1}"
+case "$MATRIX_ROW_SHARDS" in
+  1) ;;
+  2|4) EVALUATOR="$ROOT_DIR/examples/tutor/scripts/evaluate_api_teacher_original_sharded.py" ;;
+  *) printf 'MATRIX_ROW_SHARDS must be 1, 2, or 4.\n' >&2; exit 2 ;;
+esac
 LAUNCHER_SCRIPT="${MATRIX_LAUNCHER_SCRIPT:-examples/tutor/scripts/eval_0901_preference_matrix_8gpu.sh}"
 EXPECTED_EXPLAIN_RATIO="${MATRIX_EXPECTED_EXPLAIN_RATIO:-1.0}"
 OUTPUT_TAG="${MATRIX_OUTPUT_TAG:-}"
@@ -336,6 +342,37 @@ if [[ "$INCLUDE_NONE_STUDENT" == "0" ]]; then
   PREFERENCES=("${PREFERENCES[@]:1}")
   STUDENT_SPLITS=("${STUDENT_SPLITS[@]:1}")
   STUDENTS=("${STUDENTS[@]:1}")
+fi
+
+# Optional subset, retaining the canonical student order for stable resumes.
+if [[ -n "${MATRIX_STUDENT_PREFERENCES:-}" ]]; then
+  IFS=',' read -r -a REQUESTED_PREFERENCES <<<"$MATRIX_STUDENT_PREFERENCES"
+  for requested in "${REQUESTED_PREFERENCES[@]}"; do
+    found=0
+    for preference in "${PREFERENCES[@]}"; do
+      if [[ "$requested" == "$preference" ]]; then found=1; fi
+    done
+    if [[ "$found" == "0" ]]; then
+      printf 'Unknown or excluded student preference: %s\n' "$requested" >&2
+      exit 2
+    fi
+  done
+  SELECTED_PREFERENCES=()
+  SELECTED_STUDENTS=()
+  SELECTED_SPLITS=()
+  for student_index in "${!STUDENTS[@]}"; do
+    for requested in "${REQUESTED_PREFERENCES[@]}"; do
+      if [[ "$requested" == "${PREFERENCES[$student_index]}" ]]; then
+        SELECTED_PREFERENCES+=("${PREFERENCES[$student_index]}")
+        SELECTED_STUDENTS+=("${STUDENTS[$student_index]}")
+        SELECTED_SPLITS+=("${STUDENT_SPLITS[$student_index]}")
+        break
+      fi
+    done
+  done
+  PREFERENCES=("${SELECTED_PREFERENCES[@]}")
+  STUDENTS=("${SELECTED_STUDENTS[@]}")
+  STUDENT_SPLITS=("${SELECTED_SPLITS[@]}")
 fi
 
 # A resumed run must keep its original common checkpoint even if training has
@@ -645,9 +682,21 @@ selected_students = [
 ]
 if not include_none_student:
     selected_students = selected_students[1:]
+import os
+
+requested_preferences = os.environ.get("MATRIX_STUDENT_PREFERENCES", "")
+if requested_preferences:
+    selected_students = [
+        student for student in selected_students
+        if student["preference"] in requested_preferences.split(",")
+    ]
+    if not selected_students:
+        raise SystemExit("No students selected")
 
 report = {
     "common_global_step": common_step,
+    **({"row_shards": int(os.environ["MATRIX_ROW_SHARDS"])}
+       if int(os.environ["MATRIX_ROW_SHARDS"]) > 1 else {}),
     "completed_train_steps": common_step + 1,
     "teachers": teachers,
     "students": selected_students,
@@ -1046,6 +1095,9 @@ run_pair() (
       attempt_command=("${command[@]}")
       if [[ -f "$output/run_config.json" ]]; then
         attempt_command+=(--resume)
+        if [[ "${MATRIX_ALLOW_EVALUATOR_CODE_CHANGE_ON_RESUME:-0}" == "1" ]]; then
+          attempt_command+=(--allow-evaluator-code-change-on-resume)
+        fi
       fi
       printf '[cell-process] try=%s/%s wall_timeout=%ss\n' "$cell_try" "$max_cell_tries" "$CELL_WALL_TIMEOUT_SECONDS" >>"$log"
       set +e
@@ -1065,22 +1117,32 @@ run_pair() (
       fi
       printf '[cell-process-retry] status=%s; preserving results and resuming\n' "$status" >>"$log"
     done
-    validate_cell "$output" "$teacher" "$student" "$preference" "${ADAPTERS[$teacher]}"
+    if [[ "$MATRIX_ROW_SHARDS" == "1" ]]; then
+      validate_cell "$output" "$teacher" "$student" "$preference" "${ADAPTERS[$teacher]}"
+    fi
   }
 
-  local teacher_index student_index cell_index student preference output log
+  local teacher_index student_index cell_index student preference output log shard_index
   cell_index=0
   for teacher_index in "${!TEACHERS[@]}"; do
     teacher="${TEACHERS[$teacher_index]}"
     for student_index in "${!STUDENTS[@]}"; do
-      if (( cell_index % PAIR_COUNT == pair_index )); then
-        student="${STUDENTS[$student_index]}"
-        preference="${PREFERENCES[$student_index]}"
-        output="$RUN_DIR/cells/$teacher/$student"
-        log="$RUN_DIR/logs/$teacher--$preference.log"
-        run_eval_cell "$teacher" "$student" "$preference" "$output" "$log"
-      fi
-      cell_index=$((cell_index + 1))
+      for ((shard_index = 0; shard_index < MATRIX_ROW_SHARDS; shard_index++)); do
+        if (( cell_index % PAIR_COUNT == pair_index )); then
+          student="${STUDENTS[$student_index]}"
+          preference="${PREFERENCES[$student_index]}"
+          output="$RUN_DIR/cells/$teacher/$student"
+          log="$RUN_DIR/logs/$teacher--$preference.log"
+          if (( MATRIX_ROW_SHARDS > 1 )); then
+            output="$output/shards/$shard_index"
+            log="$RUN_DIR/logs/$teacher--$preference-shard-$shard_index.log"
+            export TUTOR_EVAL_SHARD_COUNT="$MATRIX_ROW_SHARDS"
+            export TUTOR_EVAL_SHARD_INDEX="$shard_index"
+          fi
+          run_eval_cell "$teacher" "$student" "$preference" "$output" "$log"
+        fi
+        cell_index=$((cell_index + 1))
+      done
     done
   done
 )
@@ -1140,6 +1202,17 @@ if (( worker_failed )); then
   exit 1
 fi
 WORKER_PIDS=()
+
+if (( MATRIX_ROW_SHARDS > 1 )); then
+  for teacher in "${TEACHERS[@]}"; do
+    for student_index in "${!STUDENTS[@]}"; do
+      student="${STUDENTS[$student_index]}"
+      output="$RUN_DIR/cells/$teacher/$student"
+      "$PYTHON" -B "$ROOT_DIR/examples/tutor/scripts/merge_tutor_eval_shards.py" "$output" "$MATRIX_ROW_SHARDS"
+      validate_cell "$output" "$teacher" "$student" "${PREFERENCES[$student_index]}" "${ADAPTERS[$teacher]}"
+    done
+  done
+fi
 
 write_matrix_summary "$RUN_DIR"
 PENDING_COUNT="$("$PYTHON" -B - "$RUN_DIR/cells" <<'PY'

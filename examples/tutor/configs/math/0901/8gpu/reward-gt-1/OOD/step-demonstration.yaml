@@ -1,0 +1,10 @@
+defaults:
+  - ../../../base/reward-gt-1/OOD/step-demonstration@_global_
+  - ../../alloc@_global_
+  - _self_
+
+trial_name: 0901-reward-gt-1-step-demonstration-8gpu
+
+stats_logger:
+  wandb:
+    group: 0901-reward-gt-1-8gpu

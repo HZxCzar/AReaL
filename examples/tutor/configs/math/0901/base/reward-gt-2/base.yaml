@@ -1,0 +1,22 @@
+# Reward-v3 teaching with ordinary, untrained pre-solves.
+defaults:
+  - ../reward-v3/base@_global_
+  - _self_
+
+total_train_steps: 1500
+
+teacher_pre:
+  train: false
+
+personality:
+  explain_ratio: 1.0
+
+gconfig:
+  max_new_tokens: 1024
+eval_gconfig:
+  max_new_tokens: 1024
+reward:
+  soft_overlong:
+    enabled: true
+    buffer_tokens: 512
+    max_penalty: -0.5

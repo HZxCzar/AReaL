@@ -71,6 +71,8 @@ def test_api_eval_uses_regular_free_chat_semantics(
     )
 
     assert kwargs["free_chat"]["enabled"] is True
+    assert kwargs["teacher_response_format"] == "non_thinking"
+    assert config.teacher_api_request_params == {}
     assert kwargs["free_chat"]["budget"] == 5
     assert kwargs["student_generalize_enabled"] is True
     assert kwargs["student_generalize_retest_original"] is True
@@ -91,6 +93,25 @@ def test_api_eval_uses_regular_free_chat_semantics(
     assert args.teacher_temperature == config.eval_gconfig.temperature
     assert args.teacher_top_p == config.eval_gconfig.top_p
     assert args.teacher_max_tokens == config.eval_gconfig.max_new_tokens
+
+
+def test_thinking_format_changes_only_workflow_contract(monkeypatch):
+    """Selecting a format leaves student, judge, pre-solve and sampling intact."""
+    config, students = _load_free_chat_config(monkeypatch)
+    args = _args()
+    resolve_teacher_generation_args(args, config)
+    inputs = dict(
+        config=config,
+        student_models=students,
+        tokenizer=object(),
+        args=args,
+        presolve_enabled=effective_eval_presolve_enabled(config),
+    )
+    before = build_eval_workflow_kwargs(**inputs)
+    config.teacher_response_format = "thinking"
+    config.teacher_api_request_params = {"reasoning_effort": "medium"}
+    after = build_eval_workflow_kwargs(**inputs)
+    assert after == {**before, "teacher_response_format": "thinking"}
 
 
 def test_self_auxiliary_needs_an_explicit_external_bridge(

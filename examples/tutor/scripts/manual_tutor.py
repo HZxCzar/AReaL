@@ -155,6 +155,7 @@ def build_workflow(config: Any, max_turns: int, *, hide_ground_truth: bool) -> A
         dataset_type=config.dataset_type,
         answer_scorer=config.answer_scorer,
         enable_thinking=config.enable_thinking,
+        teacher_response_format=config.teacher_response_format,
         leak_handling_mode=config.leak_handling_mode,
         aux_mode=auxiliary_model.mode,
         aux_enable_thinking=auxiliary_model.enable_thinking,

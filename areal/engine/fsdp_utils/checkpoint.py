@@ -2,7 +2,10 @@
 
 """FSDP checkpointing utilities for DCP (Distributed Checkpoint) integration."""
 
+import json
+import math
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -14,6 +17,57 @@ from torch.distributed.checkpoint.state_dict import (
     set_state_dict,
 )
 from torch.distributed.checkpoint.stateful import Stateful
+
+
+def legacy_recovery_completed_steps(checkpoint_path: str) -> int:
+    """Read the step from the selected complete recovery generation."""
+    step_path = Path(checkpoint_path).parent.parent / "recover_info" / "step_info.json"
+    if not step_path.is_file():
+        raise ValueError(
+            "Checkpoint has no LR scheduler state or recovery step_info.json; "
+            "cannot safely resume the scheduler. Use a complete recovery generation "
+            "or load model weights only."
+        )
+    step = json.loads(step_path.read_text())["global_step"]
+    if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+        raise ValueError(f"Invalid recovery global_step in {step_path}: {step!r}")
+    return step + 1
+
+
+def restore_legacy_lr_scheduler(scheduler: Any, completed_steps: int) -> None:
+    """Reconstruct a legacy LambdaLR only when its saved optimizer LR agrees.
+
+    Recovery is saved after the iteration's scheduler step. Optimizer step counts
+    are not usable here: PPO may perform several optimizer updates per iteration.
+    Never silently guess if an old run restarted warmup or changed schedules.
+    """
+    if not isinstance(scheduler, torch.optim.lr_scheduler.LambdaLR):
+        raise ValueError("Legacy scheduler reconstruction only supports LambdaLR.")
+    expected_lrs = [
+        base_lr * schedule(completed_steps)
+        for base_lr, schedule in zip(
+            scheduler.base_lrs, scheduler.lr_lambdas, strict=True
+        )
+    ]
+    saved_lrs = [group["lr"] for group in scheduler.optimizer.param_groups]
+    if len(saved_lrs) != len(expected_lrs) or not all(
+        math.isclose(saved, expected, rel_tol=1e-6, abs_tol=1e-12)
+        for saved, expected in zip(saved_lrs, expected_lrs, strict=True)
+    ):
+        raise ValueError(
+            "Legacy recovery has no LR scheduler state and saved optimizer LR "
+            f"{saved_lrs} disagrees with the configured schedule at "
+            f"{completed_steps} completed steps ({expected_lrs}). Refusing to "
+            "restart warmup or silently change LR; use the original schedule "
+            "or a checkpoint containing scheduler state."
+        )
+    state = scheduler.state_dict()
+    state.update(
+        last_epoch=completed_steps,
+        _step_count=completed_steps + 1,
+        _last_lr=saved_lrs,
+    )
+    scheduler.load_state_dict(state)
 
 
 class DCPState(Stateful):

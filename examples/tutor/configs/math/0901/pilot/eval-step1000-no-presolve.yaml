@@ -1,0 +1,10 @@
+# Same evaluation protocol as presolve-on; only the teacher's draft is removed.
+defaults:
+  - eval-step-demo-step1000@_global_
+  - _self_
+
+teacher_pre:
+  enabled: false
+  train: false
+evaluator:
+  teacher_pre_enabled: false

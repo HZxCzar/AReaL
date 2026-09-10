@@ -1,0 +1,30 @@
+# Reward-v4 teaching plus independently trained ground-truth pre-solves.
+defaults:
+  - ../reward-v4/base@_global_
+  - _self_
+
+total_train_steps: 1500
+
+teacher_pre:
+  train: true
+  enabled: true
+  verify: true
+  share_per_group: true
+  attempts: 4
+  max_tokens: 4096
+  visibility: rollout
+  on_reject: skip
+
+actor:
+  # Mixed-mode PPO uses exact response means, including local penalties.
+  loss_weighting: turn
+
+gconfig:
+  max_new_tokens: 1024
+eval_gconfig:
+  max_new_tokens: 1024
+reward:
+  soft_overlong:
+    enabled: true
+    buffer_tokens: 512
+    max_penalty: -0.5

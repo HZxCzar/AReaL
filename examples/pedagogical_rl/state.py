@@ -72,6 +72,7 @@ class ClassroomEpisode:
     answer: str
     include_thinking: bool = False
     teacher_output_format: str = "native"
+    mask_teacher_history_reasoning: bool = False
     forced_type: ConversationType | None = None
     forced_student_name: str | None = None
     conversation: list[dict[str, Any]] = field(default_factory=list)
@@ -210,7 +211,17 @@ class ClassroomEpisode:
         messages.extend(
             {
                 "role": "assistant" if message["role"] == "teacher" else "user",
-                "content": message["content"],
+                "content": (
+                    re.sub(
+                        r"(<reasoning>).*?(</reasoning>)",
+                        r"\1\n(your earlier private reasoning, omitted from this transcript)\n\2",
+                        message["content"],
+                        flags=re.DOTALL,
+                    )
+                    if self.mask_teacher_history_reasoning
+                    and message["role"] == "teacher"
+                    else message["content"]
+                ),
             }
             for message in self.conversation
         )
@@ -292,6 +303,11 @@ class ClassroomEpisode:
             "answer": self.answer,
             "conversation_type": self.conversation_type.value,
             "student_name": self.student_name,
+            "teacher_system_prompt": self.teacher_system_prompt,
+            "student_system_prompt": self.student_system_prompt,
+            "student_initial_prompt": self.student_initial_prompt,
+            "student_attempt_prompt": self.student_attempt_prompt,
+            "student_final_prompt": self.student_final_prompt,
             "conversation": self.conversation,
             "initial_attempt": self.initial_attempt,
             "evaluation_initial_solutions": self.evaluation_initial_solutions,

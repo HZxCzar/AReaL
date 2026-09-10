@@ -10,6 +10,7 @@ import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -33,6 +34,7 @@ from examples.tutor.configs import (
     TutorConfig,
 )
 from examples.tutor.core.history import trace_to_json
+from examples.tutor.scripts.eval_leak_check import EvalLeakCheckMixin
 from examples.tutor.workflow import TutorAgentWorkflow, _binary_repeat_summary
 
 from areal import workflow_context
@@ -45,6 +47,9 @@ from areal.utils.hf_utils import load_hf_tokenizer
 logger = logging.getLogger("TutorApiTeacherEval")
 
 _T = TypeVar("_T")
+_baseline_evaluation: ContextVar[bool] = ContextVar(
+    "api_teacher_baseline_evaluation", default=False
+)
 
 DEFAULT_CONFIG_PATH = (
     # Default re-pointed when the answer-attempt config trees were deleted; this
@@ -136,13 +141,14 @@ class EpisodeResult:
     personality_gate: dict[str, Any] = field(default_factory=dict)
 
 
-class RecordingTutorWorkflow(TutorAgentWorkflow):
+class RecordingTutorWorkflow(EvalLeakCheckMixin, TutorAgentWorkflow):
     """Tutor workflow that captures the existing eval outputs without trainers."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.captured_stats: dict[str, Any] | None = None
         self.captured_trace: dict[str, Any] | None = None
         self.leak_check_failed_count = 0
+        self.leak_check_diagnostics: list[dict[str, Any]] = []
         self.answer_judge_used_count = 0
         self.answer_judge_failed_count = 0
         self.answer_judge_override_correct_count = 0
@@ -167,8 +173,59 @@ class RecordingTutorWorkflow(TutorAgentWorkflow):
             self.leak_check_failed_count += 1
         return result
 
+    async def _no_teaching_baseline(self, *args: Any, **kwargs: Any) -> Any:
+        # Scope strictness to this eval measurement, including its parallel
+        # replay/judge tasks. Training and unrelated concurrent episodes retain
+        # their existing behavior.
+        token = _baseline_evaluation.set(True)
+        try:
+            return await super()._no_teaching_baseline(*args, **kwargs)
+        finally:
+            _baseline_evaluation.reset(token)
+
+    async def _retry_baseline_call(
+        self,
+        operation: Callable[[], Awaitable[_T]],
+        error_of: Callable[[_T], Any],
+        label: str,
+    ) -> _T:
+        attempts = 3 if _baseline_evaluation.get() else 1
+        for attempt in range(attempts):
+            result = await operation()
+            if attempts == 1:
+                return result
+            error = error_of(result)
+            if not error:
+                return result
+            if attempt + 1 < attempts:
+                logger.warning(
+                    "Retrying failed no-teaching baseline %s (%d/%d)",
+                    label,
+                    attempt + 2,
+                    attempts,
+                )
+                await asyncio.sleep(0.5 * 2**attempt)
+        # Raising before the shared workflow averages/caches its usable subset
+        # makes the episode an explicit error, eligible for normal resume/retry.
+        raise RuntimeError(
+            f"Incomplete no-teaching baseline: {label} failed after {attempts} attempts: {error}"
+        )
+
+    async def _call_auxiliary_messages(self, *args: Any, **kwargs: Any) -> Any:
+        operation = super()._call_auxiliary_messages
+        return await self._retry_baseline_call(
+            lambda: operation(*args, **kwargs),
+            lambda result: result.error,
+            str(kwargs.get("rid_prefix", "auxiliary")),
+        )
+
     async def _score_answer_async(self, *args: Any, **kwargs: Any) -> Any:
-        result = await super()._score_answer_async(*args, **kwargs)
+        operation = super()._score_answer_async
+        result = await self._retry_baseline_call(
+            lambda: operation(*args, **kwargs),
+            lambda result: (result.raw_result.get("answer_judge") or {}).get("error"),
+            "answer judge",
+        )
         answer_judge = result.raw_result.get("answer_judge")
         if isinstance(answer_judge, dict) and answer_judge.get("enabled") is True:
             if answer_judge.get("used") is True:
@@ -553,6 +610,7 @@ def build_eval_workflow_kwargs(
         "answer_scorer": config.answer_scorer,
         "max_turns": config.max_turns,
         "enable_thinking": config.enable_thinking,
+        "teacher_response_format": config.teacher_response_format,
         "leak_handling_mode": config.leak_handling_mode,
         "aux_mode": auxiliary_model.mode,
         "aux_enable_thinking": auxiliary_model.enable_thinking,
@@ -1081,6 +1139,7 @@ def build_trace_payload(
         "latest_student_answer": captured.get("latest_student_answer", ""),
         "turns": [trace_to_json(trace) for trace in workflow.last_traces],
         "history": workflow.last_history,
+        "leak_check_diagnostics": workflow.leak_check_diagnostics,
         "teacher_pre_solve": asdict(teacher_pre) if teacher_pre is not None else None,
         "student_generalization": [
             asdict(item) for item in workflow.last_student_generalization_results
@@ -2160,7 +2219,10 @@ def build_run_signature(
         {
             "config": str(config_path),
             "config_sha256": config_hash,
-            "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "evaluator_sha256": hashlib.sha256(
+                Path(__file__).read_bytes()
+                + Path(__file__).with_name("eval_leak_check.py").read_bytes()
+            ).hexdigest(),
             "overrides": list(args.overrides),
             "dataset_size": dataset_size,
             "dataset_sha256": dataset_hash,
@@ -2225,6 +2287,11 @@ def build_run_signature(
                 "format_handling_mode": effective_kwargs["format_handling_mode"],
                 "free_chat": effective_kwargs["free_chat"],
                 "teacher_history_tags": effective_kwargs["teacher_history_tags"],
+                **(
+                    {"teacher_response_format": "thinking"}
+                    if effective_kwargs["teacher_response_format"] == "thinking"
+                    else {}
+                ),
                 "teacher_show_ground_truth": config.teacher_show_ground_truth,
                 "teacher_anti_leak_instruction_enabled": (
                     config.teacher_anti_leak_instruction_enabled
@@ -2424,6 +2491,9 @@ async def run_episode(
             trace_payload = {
                 "result": asdict(result),
                 "dataset_row": spec.row,
+                "leak_check_diagnostics": (
+                    workflow.leak_check_diagnostics if workflow is not None else []
+                ),
             }
         result.trace_path = str(trace_path)
         trace_payload["result"]["trace_path"] = str(trace_path)
@@ -2863,7 +2933,12 @@ async def main_async(args: argparse.Namespace) -> None:
     )
 
     teacher_request_params = merge_dicts(
-        deepseek_non_thinking_params(config.seed),
+        merge_dicts(
+            deepseek_non_thinking_params(config.seed)
+            if config.teacher_response_format == "non_thinking"
+            else {},
+            config.teacher_api_request_params,
+        ),
         load_request_params(
             args.teacher_request_params,
             args.teacher_request_params_file,

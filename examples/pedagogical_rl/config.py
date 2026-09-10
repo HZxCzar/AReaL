@@ -63,6 +63,9 @@ class PedagogicalGenerationConfig:
     # dated configs.  The comparison arm uses the same action envelope as the
     # tutor arm so a checkpoint can be evaluated under either protocol.
     teacher_output_format: str = "native"
+    # Ablation: hide prior private reasoning from the teacher, retaining XML
+    # structure and public replies. Raw conversations and judge inputs stay intact.
+    mask_teacher_history_reasoning: bool = False
     format_error_penalty: float = -0.5
     # Keep this as ``str`` rather than ``Literal`` because the OmegaConf
     # version used by AReaL cannot construct structured configs containing
@@ -97,6 +100,8 @@ class PedagogicalGenerationConfig:
                 "unified_xml already has a private <reasoning> section; "
                 "generation.use_thinking must be false"
             )
+        if self.mask_teacher_history_reasoning and self.teacher_output_format != "unified_xml":
+            raise ValueError("mask_teacher_history_reasoning requires unified_xml")
         if self.format_error_penalty > 0.0:
             raise ValueError("generation.format_error_penalty must be <= 0")
 
