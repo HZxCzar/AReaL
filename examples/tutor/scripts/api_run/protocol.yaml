@@ -1,0 +1,338 @@
+# Standalone snapshot of the paper reward-v4 seven-preference evaluation.
+# Deployment paths/credentials are environment references, not experiment literals.
+experiment_name: tutor-math-baseline
+trial_name: api-paper-evaluation
+seed: 42
+enable_offload: false
+total_train_epochs: 1000
+tokenizer_path: ${actor.path}
+workflow: examples.tutor.workflow.TutorAgentWorkflow
+eval_workflow: ${workflow}
+dataset_type: math
+answer_scorer: math
+max_turns: 10
+enable_thinking: false
+leak_handling_mode: masked_continue
+teacher_show_ground_truth: false
+teacher_anti_leak_instruction_enabled: true
+teacher_private_visibility: false
+personality:
+  prompts_path: examples/tutor/prompt_pools/personality_prompts_v3.json
+  complaints_path: examples/tutor/prompt_pools/personality_complaints_v3.json
+  gate_prompt_version: v3
+  gate_decision_mode: binary
+  gate_sample_rate: 1.0
+  gated_turn_visibility: teacher_only
+  explain_ratio: 1.0
+  gate_retries: 3
+student_generalize:
+  enabled: true
+  source: sidecar
+  level1_reward: 0.0
+  level2_reward: 0.0
+  mode: always
+  path: ''
+  replays: 8
+  retest_original: true
+  level1_enabled: false
+  level2_enabled: false
+  retest_reward: 1.0
+  gate_pass_credit_only: true
+teacher_pre:
+  train: false
+  enabled: true
+  mode: filter_solver
+  attempts: 3
+  max_tokens: 4096
+  verify: true
+auxiliary_model:
+  mode: api
+  enable_thinking: false
+  base_url: ${oc.env:TUTOR_QWEN3_8B_BASE_URL}
+  model: qwen3-8b
+  api_key: ${oc.env:INF_API_KEY}
+  timeout: 120
+  max_tokens: 1024
+  temperature: 0.0
+  top_p: 1.0
+  max_concurrent_calls: 192
+  request_params:
+    seed: 42
+    extra_body:
+      top_k: 20
+      min_p: 0
+      chat_template_kwargs:
+        enable_thinking: false
+  answer_judge_enabled: true
+  answer_judge_max_tokens: 256
+student_sampling:
+  strategy: stratified
+student_models: []
+reward:
+  format_error_penalty: -0.5
+  teacher_exact_repeat_penalty: -0.5
+  teacher_exact_repeat_terminate: true
+  success: 0.0
+  leak_penalty_mode: rawbase
+  assign_success_reward: false
+  leak_penalty: 0.0
+  leak_penalty_aggregation: episode
+  early_success_bonus: 0.0
+  max_turn_penalty: 0.0
+  enable_turn_penalty: false
+  turn_penalty: -0.01
+  length_penalty_threshold_chars: 0
+  length_penalty_per_100_chars: 0.0
+  length_penalty_min: 0.0
+  soft_overlong:
+    enabled: true
+    buffer_tokens: 512
+    max_penalty: -0.05
+  turn_local_components:
+  - leak
+  - format_error
+  - teacher_exact_repeat
+  - soft_overlong
+  turn_local_component_placements:
+    leak: post_std
+    format_error: post_std
+    teacher_exact_repeat: post_std
+    soft_overlong: post_std
+  personality_gate_fail_penalty: 0.0
+debug_trace_dir: ''
+debug_trace_every_n_rollouts: 10
+cluster:
+  n_nodes: 1
+  n_gpus_per_node: 2
+  fileroot: output/tutor
+  name_resolve:
+    type: nfs
+    nfs_record_root: output/tutor/name_resolve
+scheduler:
+  type: local
+rollout:
+  backend: sglang:d1p1t1
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  tokenizer_path: ${tokenizer_path}
+  max_concurrent_rollouts: 16
+  queue_size: null
+  consumer_batch_size: ${train_dataset.batch_size}
+  max_head_offpolicyness: 2
+  pause_grace_period: 10
+  enable_rollout_tracing: false
+  scheduling_spec: ${actor.scheduling_spec}
+  use_lora: true
+  dump_to_file: true
+  openai:
+    mode: inline
+    tool_call_parser: qwen25
+    reasoning_parser: qwen3
+    chat_template_type: concat
+    export_style: concat
+    turn_discount: 1.0
+length_retry:
+  enabled: true
+  attempts: 3
+gconfig:
+  n_samples: 8
+  min_new_tokens: 0
+  max_new_tokens: 2048
+  max_tokens: 24576
+  greedy: false
+  temperature: 1.0
+  top_p: 1.0
+  lora_name: default_lora
+eval_gconfig:
+  n_samples: 1
+  min_new_tokens: 0
+  max_new_tokens: 2048
+  max_tokens: 24576
+  greedy: false
+  temperature: ${gconfig.temperature}
+  top_p: 1.0
+  lora_name: default_lora
+actor:
+  backend: fsdp:d1p1t1
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${oc.env:TUTOR_TOKENIZER,Qwen/Qwen3-8B}
+  init_from_scratch: false
+  disable_dropout: true
+  gradient_checkpointing: true
+  dtype: bfloat16
+  mb_spec:
+    n_mbs: 1
+    max_tokens_per_mb: 40960
+  optimizer:
+    type: adam
+    lr: 5.0e-05
+    weight_decay: 0.0
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1.0e-08
+    lr_scheduler_type: constant
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.001
+  eps_clip: 0.2
+  use_ppo_clip: true
+  c_clip: 3.0
+  advantage_estimator: rebn
+  turn_discount: 1.0
+  temperature: ${gconfig.temperature}
+  reward_scaling: 1.0
+  reward_bias: 0.0
+  kl_ctl: 0.0
+  ppo_n_minibatches: 2
+  recompute_logprob: true
+  use_decoupled_loss: true
+  behave_imp_weight_cap: 5.0
+  reward_norm: null
+  adv_norm:
+    mean_level: null
+    std_level: batch
+  weight_update_mode: disk
+  use_lora: ${rollout.use_lora}
+  peft_type: lora
+  lora_rank: 16
+  lora_alpha: 16
+  target_modules:
+  - all-linear
+  max_new_tokens: ${gconfig.max_new_tokens}
+  scheduling_spec:
+  - task_type: worker
+    port_count: 2
+    gpu: 1
+    cmd: python3 -m areal.infra.rpc.rpc_server
+    env_vars: {}
+  group_baseline: episode
+  group_baseline_leave1out: true
+  turn_group_baseline_singleton_fallback: true
+  group_baseline_local_reward_mode: exclude
+  episode_loss_weighting: false
+  num_iterations: 1
+ref:
+  backend: ${actor.backend}
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${actor.path}
+  init_from_scratch: false
+  disable_dropout: true
+  dtype: ${actor.dtype}
+  mb_spec:
+    n_mbs: 1
+    max_tokens_per_mb: 24576
+  optimizer: null
+  scheduling_strategy:
+    type: colocation
+    target: actor
+  scheduling_spec: ${actor.scheduling_spec}
+sglang:
+  model_path: ${actor.path}
+  random_seed: ${seed}
+  skip_tokenizer_init: true
+  dtype: ${actor.dtype}
+  max_running_requests: 32
+  disable_radix_cache: false
+  context_length: 40960
+  mem_fraction_static: 0.75
+  enable_lora: ${actor.use_lora}
+  max_lora_rank: ${actor.lora_rank}
+  max_loaded_loras: 16
+train_dataset:
+  batch_size: 16
+  shuffle: true
+  pin_memory: false
+  num_workers: 0
+  path: ${oc.env:TUTOR_DATASET,examples/tutor/data/math_1.7b_8b/math_pass@2}
+  type: rl
+  max_length: 16384
+valid_dataset:
+  batch_size: ${train_dataset.batch_size}
+  pin_memory: false
+  num_workers: 0
+  path: ${oc.env:TUTOR_DATASET,examples/tutor/data/math_1.7b_8b/math_pass@2}
+  type: rl
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 25
+  freq_secs: null
+recover:
+  mode: auto
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 25
+  freq_secs: null
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  student_model_names: null
+  eval_before_train: false
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+  teacher_pre_enabled: true
+  teacher_pre_verify: false
+  leak_terminate: null
+  format_terminate: null
+  average_rollouts: 1
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: offline
+    entity: hz-czar-stanford
+    project: TAgent
+    name: ${trial_name}
+    group: 0901-base
+format_handling_mode: terminate
+teacher_end_enabled: true
+total_train_steps: 1000
+free_chat:
+  enabled: true
+  budget: 10
+  no_teaching_baseline: true
+  student_awareness_prompt_enabled: true
+teacher_history_tags: masked
+student_axes:
+- behaviors:
+  - text
+  informations:
+    original:
+      mode: full
+  personalities:
+  - none
+  - attempt-diagnosis
+  - subgoal-decomposition
+  - contrastive-comparison
+  - causal-justification
+  - step-demonstration
+  - independent-verification
+  template:
+    name: qwen3-1.7b
+    weight: 1.0
+    base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+    model: qwen3-1.7b
+    api_key: ${auxiliary_model.api_key}
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    max_concurrent_calls: 192
+    request_params:
+      seed: 42
+      extra_body:
+        top_k: 20
+        min_p: 0
+        chat_template_kwargs:
+          enable_thinking: false
+student_type_probe:
+  enabled: false

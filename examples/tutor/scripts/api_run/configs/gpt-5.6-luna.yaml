@@ -1,0 +1,10 @@
+extends: base.yaml
+run_name: gpt-5.6-luna-medium
+teacher:
+  provider: openai
+  # OpenAI-compatible gateway model ID; adjust for your provider's catalog.
+  model: openai/gpt-5.6-luna
+  endpoint_env: OPENAI_BASE_URL
+  key_env: OPENAI_API_KEY
+  # Historical experiment gateway estimates; verify your own contract.
+  prices: [0.20, 0.02, 0.25, 1.20]

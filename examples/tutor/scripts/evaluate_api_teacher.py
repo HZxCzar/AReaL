@@ -165,6 +165,10 @@ class RecordingTutorWorkflow(EvalLeakCheckMixin, TutorAgentWorkflow):
         caller = super()._make_answer_judge_caller(**kwargs)
         if caller is not None and hasattr(caller, "caller"):
             self.extra_api_callers.append(caller)
+            if getattr(self, "capture_api_requests", False):
+                from examples.tutor.core.api_request_trace import attach_wrapper
+
+                attach_wrapper(caller, "answer_judge")
         return caller
 
     async def _run_optional_leak_check(self, *args: Any, **kwargs: Any) -> Any:
@@ -2363,6 +2367,7 @@ def prepare_output_dir(
     signature: dict[str, Any],
     resume: bool,
     allow_evaluator_code_change: bool = False,
+    allow_diagnostic_backfill: bool = False,
 ) -> None:
     signature_path = output_dir / "run_config.json"
     if output_dir.exists() and any(output_dir.iterdir()):
@@ -2376,6 +2381,34 @@ def prepare_output_dir(
         previous = json.loads(signature_path.read_text(encoding="utf-8"))
         previous_signature = previous.get("signature")
         if previous_signature != signature:
+            if allow_diagnostic_backfill and isinstance(previous_signature, dict):
+                before = deepcopy(previous_signature)
+                after = deepcopy(signature)
+                old_policy = before.get("reliability", {}).get(
+                    "retry_diagnostic_failures"
+                )
+                new_policy = after.get("reliability", {}).get(
+                    "retry_diagnostic_failures"
+                )
+                if old_policy is False and new_policy is True:
+                    after["reliability"]["retry_diagnostic_failures"] = False
+                    if allow_evaluator_code_change:
+                        before.pop("evaluator_sha256", None)
+                        after.pop("evaluator_sha256", None)
+                    if before == after:
+                        append_jsonl(
+                            output_dir / "resume_policy_events.jsonl",
+                            {
+                                "recorded_at": datetime.now(UTC).isoformat(),
+                                "reason": "Explicit diagnostic backfill; all non-retry settings match",
+                                "previous_signature": previous_signature,
+                                "resumed_signature": signature,
+                            },
+                        )
+                        logger.warning(
+                            "Explicit diagnostic backfill enabled; all non-retry settings match."
+                        )
+                        return
             compatible_code_change = False
             if allow_evaluator_code_change and isinstance(previous_signature, dict):
                 previous_without_code = dict(previous_signature)
@@ -2425,10 +2458,36 @@ async def run_episode(
 ) -> EpisodeResult:
     started = time.monotonic()
     workflow: RecordingTutorWorkflow | None = None
+    from examples.tutor.core.api_request_trace import (
+        ACTIVE_TRACE,
+        attach,
+        attach_wrapper,
+    )
+
+    capture = getattr(teacher_client, "capture_api_requests", False)
+    capture_token = ACTIVE_TRACE.set(
+        {
+            "path": str(output_dir / "api_requests.jsonl"),
+            "episode_key": spec.key,
+            "execution_try": execution_try,
+        }
+        if capture
+        else None
+    )
     try:
         episode_workflow_kwargs = prepare_episode_workflow_kwargs(workflow_kwargs)
         with without_proxy_environment(enabled=not keep_env_proxy):
             workflow = RecordingTutorWorkflow(**episode_workflow_kwargs)
+        if capture:
+            workflow.capture_api_requests = True
+            attach(teacher_client._client, "teacher")
+            attach_wrapper(workflow.aux_caller, "judge")
+            attach_wrapper(workflow.confidence_aux_caller, "confidence_judge")
+            for caller in workflow.extra_api_callers:
+                attach_wrapper(caller, "answer_judge")
+            for name, runtime in workflow.student_model_runtimes.items():
+                attach_wrapper(runtime.caller, f"student:{name}")
+                attach_wrapper(runtime.confidence_caller, f"student_confidence:{name}")
         workflow_context.set(
             WorkflowContext(
                 is_eval=True,
@@ -2457,6 +2516,7 @@ async def run_episode(
             duration_seconds=time.monotonic() - started,
         )
     finally:
+        ACTIVE_TRACE.reset(capture_token)
         if workflow is not None:
             await close_workflow_api_clients(workflow)
 
@@ -2566,7 +2626,7 @@ async def run_all(
         mininterval=0.5,
     )
 
-    async def _run(spec: EpisodeSpec) -> EpisodeResult:
+    async def _run(spec: EpisodeSpec) -> EpisodeResult | None:
         nonlocal diagnostic_failure_count, error_count, processed
         result: EpisodeResult | None = None
         total_execution_tries = max(0, int(error_retries)) + 1
@@ -2577,6 +2637,10 @@ async def run_all(
         )
         async with semaphore:
             for execution_try in range(1, total_execution_tries + 1):
+                if getattr(teacher_client, "stop_requested", lambda: False)():
+                    if result is None:
+                        return None
+                    break
                 result = await run_episode(
                     spec=spec,
                     workflow_kwargs=workflow_kwargs,
@@ -2669,7 +2733,12 @@ async def run_all(
         return result
 
     try:
-        return list(await asyncio.gather(*[_run(spec) for spec in pending]))
+        results = await asyncio.gather(*[_run(spec) for spec in pending])
+        if getattr(teacher_client, "stop_requested", lambda: False)():
+            logger.warning(
+                "Teacher budget stopped: evaluation is incomplete; results preserved."
+            )
+        return [result for result in results if result is not None]
     finally:
         progress.close()
 
@@ -2799,6 +2868,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
+        "--allow-diagnostic-backfill-on-resume",
+        action="store_true",
+        help="Allow only retry_diagnostic_failures false->true on resume; retain other settings.",
+    )
+    parser.add_argument(
         "--allow-evaluator-code-change-on-resume",
         action="store_true",
         help=(
@@ -2833,6 +2907,11 @@ def parse_args() -> argparse.Namespace:
         default="all",
     )
     parser.add_argument("--skip-preflight", action="store_true")
+    parser.add_argument(
+        "--save-api-requests",
+        action="store_true",
+        help="Record actual serialized API messages and responses, excluding headers/credentials.",
+    )
     parser.add_argument(
         "--keep-env-proxy",
         action="store_true",
@@ -2993,6 +3072,7 @@ async def main_async(args: argparse.Namespace) -> None:
         signature=signature,
         resume=args.resume,
         allow_evaluator_code_change=args.allow_evaluator_code_change_on_resume,
+        allow_diagnostic_backfill=args.allow_diagnostic_backfill_on_resume,
     )
     results_path = output_dir / "results.jsonl"
     existing_results = load_existing_results(results_path) if args.resume else []
@@ -3029,6 +3109,7 @@ async def main_async(args: argparse.Namespace) -> None:
             max_retries=args.max_retries,
             request_params=teacher_request_params,
         )
+        teacher_client.capture_api_requests = args.save_api_requests
         try:
             if not args.skip_preflight:
                 await preflight_teacher(teacher_client, args.teacher_model)

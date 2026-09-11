@@ -1,0 +1,9 @@
+extends: base.yaml
+run_name: gpt-5.6-terra-medium
+teacher:
+  provider: openai
+  # Preset only: endpoint availability has not been smoke-tested.
+  model: openai/gpt-5.6-terra
+  endpoint_env: OPENAI_BASE_URL
+  key_env: OPENAI_API_KEY
+  prices: [2.0, 0.2, 2.5, 12.0]

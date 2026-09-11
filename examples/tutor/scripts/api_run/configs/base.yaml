@@ -1,0 +1,28 @@
+version: 1
+protocol: ../protocol.yaml
+teacher:
+  provider: generic
+  model: null
+  endpoint_env: TEACHER_BASE_URL
+  key_env: TEACHER_API_KEY
+  reasoning_effort: medium
+  format: thinking
+  sampling: provider-default
+  output_limit: provider-default
+  # USD per million: ordinary input, cache read, cache write, output incl. thinking.
+  prices: null
+roles:
+  student:
+    model: qwen3-1.7b
+    endpoint_env: STUDENT_BASE_URL
+    key_env: INF_API_KEY
+  judge:
+    model: qwen3-8b
+    endpoint_env: AUX_BASE_URL
+    key_env: INF_API_KEY
+execution:
+  concurrency: 16
+  budget_usd: 2
+  episode_timeout_seconds: 1800
+  episode_error_retries: 1
+  proxy: environment

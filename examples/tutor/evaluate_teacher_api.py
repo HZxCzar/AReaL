@@ -18,13 +18,15 @@ Example using the saved Gemini preset::
         --student-base-url "$STUDENT_BASE_URL" --aux-base-url "$AUX_BASE_URL" \
         --output-dir output/api-eval/gemini-3.8-flash-medium --dry-run
 
-Use --provider openai for the saved Luna proxy. All providers retain the YAML
-response protocol by default; set teacher_response_format=thinking in the YAML
-or use --teacher-format thinking to opt in.
+Use --provider openai for the saved Luna proxy. All providers default to the Luna
+API evaluation protocol: medium reasoning, plain-text thinking format,
+provider-controlled sampling, no seed, and no explicit teacher output cap.
+Use --teacher-format config to retain the YAML response protocol instead.
 Only teacher final content is parsed; internal reasoning is never student text.
-OpenAI reasoning defaults to provider-controlled sampling; --teacher-sampling
-config explicitly sends the YAML temperature/top_p instead. Gemini preserves
-YAML sampling. Effective settings are included in the resume signature.
+--teacher-sampling config explicitly sends the YAML temperature/top_p instead.
+Explicit CLI/config reasoning settings override medium; providers must support
+the selected effort (there is no silent fallback). Effective settings are included
+in the resume signature. Standard checkpoint evaluation defaults are unchanged.
 By default teacher requests omit output-token limits, including pre-solve, and
 disable the local training-sample token cap. Service-side limits still apply.
 Use --teacher-output-limit config to restore YAML budgets; only in that mode
@@ -85,15 +87,28 @@ def prepare_provider_request(
 ):
     """Adapt transport parameters, never merge native reasoning into content."""
     request = dict(request)
+    # API baselines intentionally do not seed the teacher. Apply this after
+    # merging request overrides, including provider fields in extra_body.
+    omitted = {"seed"}
+    if sampling == "provider-default":
+        omitted.update({"temperature", "top_p", "top_k", "min_p"})
+    if output_limit == "provider-default":
+        omitted.update({"max_tokens", "max_completion_tokens", "max_output_tokens"})
+    for key in omitted:
+        request.pop(key, None)
+    if isinstance(request.get("extra_body"), dict):
+        extra_body = {
+            key: value
+            for key, value in request["extra_body"].items()
+            if key not in omitted
+        }
+        if extra_body:
+            request["extra_body"] = extra_body
+        else:
+            request.pop("extra_body")
     if effort:
         request["reasoning_effort"] = effort
-    if sampling == "provider-default":
-        request.pop("temperature", None)
-        request.pop("top_p", None)
-    if output_limit == "provider-default":
-        for key in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
-            request.pop(key, None)
-    elif "max_completion_tokens" in request:
+    if output_limit == "config" and "max_completion_tokens" in request:
         request["max_completion_tokens"] += thinking_reserve
         if provider == "gemini":
             request["max_tokens"] = request.pop("max_completion_tokens")
@@ -148,9 +163,13 @@ def main() -> None:
     parser.add_argument(
         "--teacher-format",
         choices=["auto", "config", "non_thinking", "thinking"],
-        default="config",
+        default="thinking",
     )
-    parser.add_argument("--teacher-sampling", choices=["config", "provider-default"])
+    parser.add_argument(
+        "--teacher-sampling",
+        choices=["config", "provider-default"],
+        default="provider-default",
+    )
     parser.add_argument(
         "--teacher-output-limit",
         choices=["provider-default", "config"],
@@ -167,6 +186,14 @@ def main() -> None:
     parser.add_argument("--aux-api-key-env", default="AUX_API_KEY")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--teacher-budget-usd", type=float)
+    parser.add_argument(
+        "--teacher-pricing",
+        type=float,
+        nargs=4,
+        metavar=("INPUT", "CACHE_READ", "CACHE_WRITE", "OUTPUT"),
+        help="USD per million tokens; required with --teacher-budget-usd.",
+    )
     parser.add_argument("--episode-timeout-seconds", type=float, default=1800)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
@@ -177,6 +204,19 @@ def main() -> None:
     parser.add_argument("--evaluator-help", action="store_true")
     parser.add_argument("evaluator_args", nargs=argparse.REMAINDER)
     options = parser.parse_args()
+    if options.teacher_budget_usd is not None:
+        from examples.tutor.core.api_eval_budget import TeacherBudget
+
+        if options.teacher_pricing is None:
+            parser.error("--teacher-budget-usd requires --teacher-pricing")
+        try:
+            TeacherBudget(
+                Path(options.output_dir) / "teacher_usage.jsonl",
+                options.teacher_budget_usd,
+                options.teacher_pricing,
+            )
+        except (ValueError, TypeError) as exc:
+            parser.error(str(exc))
     from dotenv import load_dotenv
 
     load_dotenv(options.env_file, override=False)
@@ -189,12 +229,10 @@ def main() -> None:
     options.teacher_model = options.teacher_model or os.getenv(f"{prefix}_MODEL", "")
     options.teacher_api_key_env = options.teacher_api_key_env or f"{prefix}_API_KEY"
     explicit_effort = options.reasoning_effort
-    explicit_sampling = options.teacher_sampling
-    options.reasoning_effort = options.reasoning_effort or os.getenv(
-        f"{prefix}_REASONING_EFFORT"
+    options.reasoning_effort = (
+        options.reasoning_effort or os.getenv(f"{prefix}_REASONING_EFFORT") or "medium"
     )
     if options.provider in {"openai", "gemini"}:
-        options.reasoning_effort = options.reasoning_effort or "medium"
         if not os.getenv(options.teacher_api_key_env):
             parser.error(
                 f"Missing credential environment variable {options.teacher_api_key_env}."
@@ -204,11 +242,6 @@ def main() -> None:
             "Provide teacher model and base URL through arguments or the selected provider's .env entries."
         )
     options.teacher_base_url = api_url(options.teacher_base_url)
-    options.teacher_sampling = options.teacher_sampling or (
-        "provider-default"
-        if options.provider == "openai" and options.reasoning_effort != "none"
-        else "config"
-    )
     if options.teacher_thinking_token_reserve < 0:
         parser.error("--teacher-thinking-token-reserve must be non-negative.")
     if (
@@ -270,6 +303,10 @@ def main() -> None:
     finally:
         sys.argv = previous_argv
     args.api_key = os.environ.get(options.teacher_api_key_env) or "EMPTY"
+    # Capture credentials before the temporary Hydra interpolation environment
+    # masks INF_API_KEY. Role key names may themselves be INF_API_KEY.
+    student_api_key = os.environ.get(options.student_api_key_env) or "EMPTY"
+    aux_api_key = os.environ.get(options.aux_api_key_env) or "EMPTY"
 
     original_load = evaluator.load_experiment_config
     original_build = evaluator.build_eval_workflow_kwargs
@@ -283,24 +320,16 @@ def main() -> None:
             options.reasoning_effort = config.teacher_api_request_params.get(
                 "reasoning_effort", options.reasoning_effort
             )
-        if not explicit_sampling:
-            options.teacher_sampling = (
-                "provider-default"
-                if options.provider == "openai" and options.reasoning_effort != "none"
-                else "config"
-            )
         if config.auxiliary_model.mode != "api":
             raise ValueError(
                 "Use the comparison evaluation YAML with a fixed API auxiliary."
             )
         config.auxiliary_model.base_url = options.aux_base_url
-        config.auxiliary_model.api_key = (
-            os.environ.get(options.aux_api_key_env) or "EMPTY"
-        )
+        config.auxiliary_model.api_key = aux_api_key
         students = [asdict(student) for student in config.student_models]
         for student in students:
             student["base_url"] = options.student_base_url
-            student["api_key"] = os.environ.get(options.student_api_key_env) or "EMPTY"
+            student["api_key"] = student_api_key
         return config, students
 
     def build_workflow(**kwargs):
@@ -328,6 +357,7 @@ def main() -> None:
             "reasoning_effort": options.reasoning_effort,
             "teacher_format": kwargs["config"].teacher_response_format,
             "sampling": options.teacher_sampling,
+            "seed_policy": "omit",
             "output_limit": options.teacher_output_limit,
             "thinking_token_reserve": options.teacher_thinking_token_reserve,
         }
@@ -343,10 +373,24 @@ def main() -> None:
     original_client = evaluator.ApiTeacherClient
 
     def teacher_client(**kwargs):
+        # SDK retries bypass our per-request accounting. Episode-level retries
+        # remain available, but unknown billed usage stops budgeted runs.
+        budget = None
+        if options.teacher_budget_usd is not None:
+            kwargs["max_retries"] = 0
+            budget = TeacherBudget(
+                Path(options.output_dir) / "teacher_usage.jsonl",
+                options.teacher_budget_usd,
+                options.teacher_pricing,
+            )
+            budget.save_status()
         client = original_client(**kwargs)
+        client.stop_requested = budget.stopped if budget else lambda: False
         original_create = client._client.chat.completions.create
 
         async def create(**request):
+            if budget:
+                budget.check()
             # Apply overrides before adapting the final wire request, so request
             # params cannot reintroduce a removed output limit.
             request = evaluator.merge_dicts(client.request_params, request)
@@ -359,7 +403,12 @@ def main() -> None:
                 thinking_reserve=options.teacher_thinking_token_reserve,
                 output_limit=options.teacher_output_limit,
             )
-            response = await original_create(**request)
+            try:
+                response = await original_create(**request)
+            except BaseException:
+                if budget:
+                    budget.record({"model": options.teacher_model, "usage": None})
+                raise
             # Record provider accounting (including internal reasoning) separately
             # from student-visible traces. Never record credentials or request bodies.
             usage = getattr(response, "usage", None)
@@ -374,8 +423,13 @@ def main() -> None:
                 if response.choices
                 else None,
             }
-            with (Path(options.output_dir) / "teacher_usage.jsonl").open("a") as stream:
-                stream.write(json.dumps(record) + "\n")
+            if budget:
+                budget.record(record)
+            else:
+                with (Path(options.output_dir) / "teacher_usage.jsonl").open(
+                    "a"
+                ) as stream:
+                    stream.write(json.dumps(record) + "\n")
             # ExternalActorCaller reads only message.content, not reasoning_content.
             return response
 
@@ -434,7 +488,12 @@ def main() -> None:
                                 "model": workflow["aux_model"],
                                 "url": workflow["aux_base_url"],
                             },
-                            "temperature": args.teacher_temperature,
+                            "temperature": (
+                                args.teacher_temperature
+                                if options.teacher_sampling == "config"
+                                else None
+                            ),
+                            "seed_policy": "omit",
                             "max_tokens": (
                                 args.teacher_max_tokens
                                 if options.teacher_output_limit == "config"
@@ -452,6 +511,8 @@ def main() -> None:
                             "presolve_modes": [mode.name for mode in modes],
                             "presolve_verify": workflow["teacher_pre_verify"],
                             "output_dir": options.output_dir,
+                            "teacher_budget_usd": options.teacher_budget_usd,
+                            "teacher_pricing": options.teacher_pricing,
                             "dry_run": "No API calls or output files; dataset and connectivity not checked.",
                         },
                         indent=2,
@@ -459,6 +520,15 @@ def main() -> None:
                 )
             else:
                 asyncio.run(evaluator.main_async(args))
+                if options.teacher_budget_usd is not None:
+                    status = Path(options.output_dir) / "budget_status.json"
+                    if status.exists() and json.loads(status.read_text())["stopped"]:
+                        evaluator.logger.warning(
+                            "Budget guard stopped this run; evaluation may be incomplete. "
+                            "See %s. Exiting with status 2.",
+                            status,
+                        )
+                        raise SystemExit(2)
     finally:
         for key, value in originals.items():
             setattr(evaluator, key, value)

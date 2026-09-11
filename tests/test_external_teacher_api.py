@@ -1,3 +1,5 @@
+import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -185,3 +187,89 @@ def test_default_teacher_requests_omit_all_output_limits(provider, budget):
         messages=request["messages"], model="teacher", reasoning_effort="medium"
     )
     assert request["max_completion_tokens"] == budget
+
+
+@pytest.mark.parametrize("provider", ["generic", "openai", "gemini"])
+def test_api_default_payload_removes_override_sampling_and_seed(provider):
+    """Provider-specific request overrides cannot defeat the shared API policy."""
+    overrides = dict(
+        seed=42,
+        temperature=1.0,
+        top_p=0.8,
+        top_k=20,
+        min_p=0.0,
+        max_tokens=2048,
+        max_completion_tokens=4096,
+        max_output_tokens=4096,
+    )
+    request = dict(overrides, extra_body=dict(overrides, custom_option=True))
+    result = prepare_provider_request(
+        request,
+        provider=provider,
+        effort="medium",
+        sampling="provider-default",
+        thinking_reserve=0,
+    )
+    assert result == {
+        "reasoning_effort": "medium",
+        "extra_body": {"custom_option": True},
+    }
+    assert request["extra_body"]["seed"] == 42
+    assert request["temperature"] == 1.0
+
+
+@pytest.mark.parametrize("provider", ["generic", "openai", "gemini"])
+@pytest.mark.parametrize("config_mode", [False, True])
+def test_api_entrypoint_defaults_and_explicit_overrides(
+    monkeypatch, tmp_path, capsys, provider, config_mode
+):
+    """Resolve the actual YAML offline; API defaults do not change checkpoint defaults."""
+    from examples.tutor import evaluate_teacher_api as entrypoint
+
+    for prefix in ("TEACHER", "OPENAI", "GEMINI"):
+        monkeypatch.setenv(f"{prefix}_API_KEY", "test-key")
+        monkeypatch.delenv(f"{prefix}_REASONING_EFFORT", raising=False)
+    argv = [
+        "eval",
+        "--provider",
+        provider,
+        "--env-file",
+        str(tmp_path / "no-env"),
+        "--teacher-model",
+        "test-teacher",
+        "--teacher-base-url",
+        "http://localhost:1/v1",
+        "--student-base-url",
+        "http://localhost:2/v1",
+        "--aux-base-url",
+        "http://localhost:3/v1",
+        "--config",
+        "examples/tutor/configs/math/0901/pilot/eval-step-demo-step1000.yaml",
+        "--output-dir",
+        str(tmp_path / "unused"),
+        "--dry-run",
+    ]
+    if config_mode:
+        argv += [
+            "--teacher-format",
+            "config",
+            "--teacher-sampling",
+            "config",
+            "--teacher-output-limit",
+            "config",
+            "--reasoning-effort",
+            "none",
+        ]
+    monkeypatch.setattr(sys, "argv", argv)
+    entrypoint.main()
+    result = json.loads(capsys.readouterr().out)
+    assert result["teacher_format"] == ("non_thinking" if config_mode else "thinking")
+    assert result["teacher_sampling"] == (
+        "config" if config_mode else "provider-default"
+    )
+    assert result["reasoning_effort"] == ("none" if config_mode else "medium")
+    assert result["temperature"] == (1.0 if config_mode else None)
+    assert result["max_tokens"] == (2048 if config_mode else None)
+    assert result["max_train_sample_tokens"] == (24576 if config_mode else None)
+    assert result["seed_policy"] == "omit"
+    assert not (tmp_path / "unused").exists()

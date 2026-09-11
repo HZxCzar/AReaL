@@ -1,0 +1,9 @@
+extends: base.yaml
+run_name: gemini-3.8-flash-medium
+teacher:
+  provider: gemini
+  model: gemini-3.8-flash
+  endpoint_env: GEMINI_BASE_URL
+  key_env: GEMINI_API_KEY
+  # Standard introductory prices through 2026-12-31. Review before later runs.
+  prices: [0.75, 0.075, 0.75, 3.75]
