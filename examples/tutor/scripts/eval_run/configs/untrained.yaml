@@ -1,0 +1,8 @@
+extends: base.yaml
+run_name: untrained-aux27
+teacher:
+  checkpoint: Qwen3-8B-untrained
+  # This means plain text / standalone <end>, not native chain-of-thought.
+  format: thinking
+  enable_thinking: false
+  adapter_env: null

@@ -1,0 +1,9 @@
+version: 1
+run_name: gpt-5.6-luna-medium
+model: gpt-5.6-luna
+endpoint_env: OPENAI_BASE_URL
+key_env: OPENAI_API_KEY
+reasoning_effort: medium
+# Historical gateway estimates, matching the tutor API evaluation preset.
+# Verify rates against your own provider contract.
+prices_per_million: [0.20, 0.02, 0.25, 1.20]

@@ -56,19 +56,52 @@ The output directory contains:
 
 ## Evaluation fidelity
 
-The downloaded official task configs, prompts, datasets, task parsers, and metric
-implementations are used directly. Decoding follows the official Qwen evaluation
+### StepVerify scoring corrections (`stepverify-v2`, 2026-09-12)
+
+- Mistake Correction keeps the complete visible teacher reply. `Problem:` and
+  `Student:` are not used to truncate it: these can occur in ordinary headings
+  or quoted student work. Native Qwen thinking cleanup still applies; the
+  upstream numerical-answer parser and accuracy metric are unchanged. This
+  scores the returned completion, without heuristic dialogue-boundary cuts.
+- Solution Correctness uses the last explicit Yes/No judgment: an answer-labelled
+  or standalone line-start Yes/No, allowing Markdown emphasis. If none exists,
+  the last whole-word Yes/No is used; if no judgment exists, the upstream
+  `incorrect=True` fallback remains. Explanatory quotations do not supersede an
+  explicit answer. This intentionally permits a final correction of an earlier
+  judgment and does not measure consistency or concise format compliance.
+- Other tasks retain their existing processing. The summary writer reports
+  Solution Correctness **F1** and Mistake Location **Micro-F1**, not Accuracy
+  and Macro-F1.
+- Both local and external-API runners use the shared processing functions.
+  Revised scores are a local protocol variant, not unmodified official scores.
+
+Existing outputs can be rescored on CPU with no dataset loading, generation,
+or reward-model calls:
+
+```bash
+python examples/math_tutor_bench/rescore_stepverify.py /path/to/existing/run
+```
+
+This creates a sibling `<run>-stepverify-v2` directory and refuses to overwrite
+it. Original runs are not modified. `rescore.json` records source hashes and
+before/after metrics; new prediction files retain identical raw responses.
+The new summary combines the two rescored tasks with the unchanged metrics
+from the original run, explicitly recording that provenance. For full-generation
+results already truncated at the server, missing text cannot be recovered by
+rescoring; these must not be conflated with the recoverable postprocessing issue.
+
+The downloaded official task configs, prompts, datasets, and metric
+implementations are used, with the versioned local scoring exceptions below.
+Decoding follows the official Qwen evaluation
 setup: temperature 0, seed 42, native Qwen thinking disabled, completion mode for
 the first four tasks, and chat mode for the five dialogue/pedagogy tasks.
 
-Our trained teacher may emit
-`<reasoning>...</reasoning><output>...</output>`. Hidden reasoning is removed and
-only `<output>` is passed to the official task parser and Ped-RM. Official stop
-strings are then applied to that visible output. A bare `<end></end>` therefore
-becomes an empty answer and receives no special credit. If the model emits no XML,
-its response is passed through unchanged. This adapter prevents hidden reasoning
-or XML syntax from being scored as the teacher response; it does not alter the
-benchmark prompt, target, or metric.
+Only native Qwen `<think>` traces / residual `</think>` tags are cleaned before
+task processing. Training-specific `<reasoning>`, `<output>`, and `<end>` tags
+are not interpreted: if returned, they remain ordinary response text for the
+task parser. The unused training-XML adapter was removed on 2026-09-12.
+Official stop strings are then applied, except for Mistake Correction under
+`stepverify-v2`. Benchmark prompts and targets are unchanged.
 
 A leading `Teacher:` role label is stripped before applying the official stop
 strings. Later occurrences of `Teacher:` remain stop boundaries. This prevents a

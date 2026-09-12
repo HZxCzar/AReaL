@@ -1,0 +1,8 @@
+version: 1
+run_name: gemini-3.8-flash-medium
+model: gemini-3.8-flash
+endpoint_env: GEMINI_BASE_URL
+key_env: GEMINI_API_KEY
+reasoning_effort: medium
+# Provider-default sampling, no seed, no explicit output cap.
+prices_per_million: [0.75, 0.075, 0.75, 3.75]

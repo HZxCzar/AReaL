@@ -1,0 +1,12 @@
+version: 1
+# Standard Scaffolding input, including "Teacher (maximum two sentences): ".
+# No presolve or training XML. Raw replies are retained for human evaluation.
+teacher_instruction: >-
+  You are an experienced math teacher and you are going to respond to a student in a useful and caring way. The student is trying to solve the following problem.
+generation:
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 2048
+  seed: 42
+  chat_template_kwargs:
+    enable_thinking: false

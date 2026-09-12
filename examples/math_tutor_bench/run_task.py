@@ -31,14 +31,9 @@ PEDAGOGY_TASKS = {
     "pedagogy_following_hard",
 }
 NATIVE_NO_THINK = "<think>\n\n</think>\n\n"
-OUTPUT_BLOCK = re.compile(r"<output(?:\s[^>]*)?>(.*?)</output\s*>", re.I | re.S)
-OPEN_OUTPUT_BLOCK = re.compile(r"<output(?:\s[^>]*)?>(.*)$", re.I | re.S)
-REASONING_BLOCK = re.compile(
-    r"<reasoning(?:\s[^>]*)?>.*?</reasoning\s*>", re.I | re.S
-)
-END_ONLY = re.compile(r"\s*<end\s*>\s*(?:</end\s*>)?\s*", re.I | re.S)
 LEADING_TEACHER_ROLE = re.compile(r"^\s*Teacher\s*:\s*", re.I)
 _THREAD_STATE = threading.local()
+SCORING_PROTOCOL = "stepverify-v2"
 
 
 def jsonable(value: Any) -> Any:
@@ -54,7 +49,7 @@ def jsonable(value: Any) -> Any:
 
 
 def extract_visible_teacher_output(raw: str) -> str:
-    """Remove native/custom hidden reasoning without changing ordinary output."""
+    """Remove native Qwen thinking only; do not interpret training XML tags."""
     text = (raw or "").strip()
     if not text:
         return ""
@@ -65,24 +60,7 @@ def extract_visible_teacher_output(raw: str) -> str:
     elif re.search(r"<think(?:\s[^>]*)?>", text, re.I):
         return ""
 
-    output_matches = OUTPUT_BLOCK.findall(text)
-    if output_matches:
-        visible = output_matches[-1].strip()
-        return "" if END_ONLY.fullmatch(visible) else visible
-
-    # A truncated closing tag should not expose the preceding reasoning. Preserve
-    # the text after an opening <output>, which is the actual visible response.
-    open_output = OPEN_OUTPUT_BLOCK.search(text)
-    if open_output:
-        visible = open_output.group(1).strip()
-        return "" if END_ONLY.fullmatch(visible) else visible
-
-    if re.search(r"<reasoning(?:\s[^>]*)?>", text, re.I):
-        if not re.search(r"</reasoning\s*>", text, re.I):
-            return ""
-        text = REASONING_BLOCK.sub("", text).strip()
-
-    return "" if END_ONLY.fullmatch(text) else text
+    return text
 
 
 def apply_official_stops(text: str, stops: Any) -> str:
@@ -105,6 +83,38 @@ def apply_official_stops(text: str, stops: Any) -> str:
         if position >= 0:
             cut = min(cut, position)
     return text[:cut].strip()
+
+
+def response_for_task(task_name: str, raw: str, stops: Any) -> str:
+    """Keep complete correction solutions, including Problem/Student headings."""
+    visible = extract_visible_teacher_output(raw)
+    if task_name == "mistake_correction":
+        return visible
+    return apply_official_stops(visible, stops)
+
+
+def parse_correctness(text: str) -> bool:
+    """Prefer the last explicit Yes/No judgment, never a substring in prose.
+
+    Recognize answer-labelled or standalone line-start judgments (with Markdown
+    emphasis). If absent, use the last whole-word Yes/No; keep the upstream
+    incorrect=True fallback when no judgment exists. Hidden reasoning must have
+    been removed by response_for_task before this function is called.
+    """
+    plain = re.sub(r"[*_`]", "", text)
+    explicit = re.findall(
+        r"(?im)^[ \t]*(?:\#{1,6}[ \t]*)?"
+        r"(?:(?:final[ \t]+answer|answer|a)[ \t]*:[ \t]*)?"
+        r"(yes|no)\b", plain
+    )
+    judgments = explicit or re.findall(r"\b(?:yes|no)\b", plain, re.I)
+    return judgments[-1].lower() == "yes" if judgments else True
+
+
+def parse_task_response(task_name: str, text: str, task: Any) -> Any:
+    if task_name in {"student_solution_correctness", "solution_correctness"}:
+        return parse_correctness(text)
+    return task.parse_response(text)
 
 
 def client_for(base_url: str, api_key: str, timeout: float) -> OpenAI:
@@ -304,10 +314,8 @@ def main() -> None:
         example = examples[index]
         prompt = task.get_system_prompt(example)
         chat_mode = args.task in CHAT_TASKS
-        visible = apply_official_stops(
-            extract_visible_teacher_output(raw), task_config.stop
-        )
-        prediction = task.parse_response(visible)
+        visible = response_for_task(args.task, raw, task_config.stop)
+        prediction = parse_task_response(args.task, visible, task)
         target = task.format_ground_truth(example)
         record: dict[str, Any] = {
             "task_config": args.task,
@@ -324,6 +332,7 @@ def main() -> None:
             "visible_response": visible,
             "finish_reason": finish_reason,
             "prediction": jsonable(prediction),
+            "scoring_protocol": SCORING_PROTOCOL,
             "target": jsonable(target),
         }
         if args.task in PEDAGOGY_TASKS:
@@ -400,6 +409,7 @@ def main() -> None:
             "task_name": task_config.name,
             "num_examples": len(ordered),
             "metrics": metrics,
+            "scoring_protocol": SCORING_PROTOCOL,
             "decoding": {
                 "temperature": 0.0,
                 "seed": 42,

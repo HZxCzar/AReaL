@@ -1,0 +1,4 @@
+.env
+*.local.yaml
+*.local.sh
+__pycache__/

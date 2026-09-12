@@ -59,9 +59,9 @@ def main() -> None:
             "bleu"
         ),
         "solution_correctness": tasks["solution_correctness"]["metrics"].get(
-            "accuracy"
+            "f1"
         ),
-        "mistake_location": tasks["mistake_location"]["metrics"].get("f1_macro"),
+        "mistake_location": tasks["mistake_location"]["metrics"].get("f1_micro"),
         "mistake_correction": tasks["mistake_correction"]["metrics"].get(
             "accuracy"
         ),
@@ -89,4 +89,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
