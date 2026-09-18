@@ -1,0 +1,7 @@
+extends: gpt-5.6-luna.yaml
+protocol: ../../eval_run/protocol.yaml
+run_name: gpt-5.6-luna-medium-aux27
+roles:
+  judge:
+    model: qwen3.8-27b-fp8
+    endpoint_env: API_EVAL_AUX27_BASE_URL

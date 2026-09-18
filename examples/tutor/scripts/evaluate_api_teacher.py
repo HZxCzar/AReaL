@@ -1485,9 +1485,9 @@ def result_retry_reasons(
         reasons.append(f"answer_judge_failed={result.answer_judge_failed_count}")
     if result.teacher_pre_error_count:
         reasons.append(f"teacher_pre_errors={result.teacher_pre_error_count}")
-    gate = result.personality_gate or {}
-    if int(gate.get("gate_error_count", 0) or 0):
-        reasons.append(f"personality_gate_errors={gate['gate_error_count']}")
+    # Exhausted gate calls already execute as sampled FAIL in the workflow.
+    # Keep gate_error_count for diagnostics, but accept that conservative outcome
+    # instead of regenerating the whole episode until the gate returns valid XML.
     expected_replays = max(0, int(expected_generalization_replays))
     if expected_replays:
         generalization = result.generalization or {}

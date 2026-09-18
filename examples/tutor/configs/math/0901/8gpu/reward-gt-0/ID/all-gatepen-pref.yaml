@@ -1,0 +1,30 @@
+# Ablation: price a preference-gate rejection in the reward.
+#
+# The main arm leaves both gates unpriced -- a rejected turn costs nothing
+# directly, the student complains and the teacher spends another turn. This arm
+# charges for it instead. Everything else, total_train_steps 1500 included,
+# matches the main arm.
+#
+# The magnitude is a command-line override, not a file per value:
+#   reward.personality_gate_fail_penalty=-0.1   trial_name=...-pref010-...
+defaults:
+  - ../../../base/reward-gt-0/ID/all@_global_
+  - _self_
+
+trial_name: 0901-reward-gt-0-all-id-gatepen-pref-8gpu
+
+reward:
+  personality_gate_fail_penalty: -0.25
+  # Lists replace on merge, so all four are spelled out. post_std matches the
+  # other penalties, so the comparison is about the term existing rather than
+  # about which advantage layer it lands on.
+  turn_local_components:
+  - leak
+  - format_error
+  - teacher_exact_repeat
+  - personality_gate_fail
+  turn_local_component_placements:
+    leak: post_std
+    format_error: post_std
+    teacher_exact_repeat: post_std
+    personality_gate_fail: post_std

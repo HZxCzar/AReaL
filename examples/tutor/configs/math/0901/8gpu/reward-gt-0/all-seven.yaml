@@ -1,0 +1,6 @@
+defaults:
+  - ../../base/reward-gt-0/all-seven@_global_
+  - _self_
+
+# Keep the frozen reward-gt-0 allocation and 1500-step training settings.
+trial_name: 0901-reward-gt-0-all-seven-seed42-8gpu

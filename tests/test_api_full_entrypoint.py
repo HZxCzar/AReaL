@@ -5,7 +5,10 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from examples.tutor.scripts.eval_api_full import evaluation_command, local_preflight
+from legacy.eval.examples.tutor.scripts.eval_api_full import (
+    evaluation_command,
+    local_preflight,
+)
 
 
 @pytest.mark.parametrize("provider", ["generic", "openai", "gemini"])

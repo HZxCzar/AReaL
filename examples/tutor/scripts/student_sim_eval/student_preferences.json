@@ -1,0 +1,9 @@
+{
+  "none": "",
+  "attempt-diagnosis": "You prefer specific feedback on what is correct, incorrect, or missing in your latest attempt, with an explanation of why.",
+  "subgoal-decomposition": "You prefer teaching organized around explicit subgoals, explaining how the current subgoal contributes to the overall goal.",
+  "contrastive-comparison": "You prefer a direct comparison of two plausible alternatives for the same mathematical decision, explaining their decisive difference.",
+  "causal-justification": "You prefer explanations of why a mathematical step or claim follows from a relevant rule, definition, or relationship.",
+  "step-demonstration": "You prefer to watch exactly one new step performed on the current problem, with the intermediate result and a brief explanation, before proceeding.",
+  "independent-verification": "You prefer independent verification of your previous result using a different derivation or a direct check against the original conditions."
+}

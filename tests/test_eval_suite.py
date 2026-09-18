@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from examples.tutor.scripts import eval_suite as suite
+from legacy.eval.examples.tutor.scripts import eval_suite as suite
 
 
 def test_plan_is_serial_and_has_exact_repetitions():

@@ -1,0 +1,28 @@
+extends: ../configs/settings.yaml
+method: different-models
+expected_questions: 50
+sampling:
+  seed: 42
+  population_size: 528
+preferences: [none]
+strategies: [attempt-diagnosis, subgoal-decomposition, contrastive-comparison, causal-justification, step-demonstration, independent-verification]
+roles:
+  student:
+    model_env: SIM_QWEN_MODEL
+students:
+  - name: qwen3-1-7b
+    model_env: SIM_QWEN_MODEL
+    endpoint_env: STUDENT_BASE_URL
+    key_env: STUDENT_API_KEY
+  - name: gemma-3-1b-it
+    model_env: SIM_GEMMA_MODEL
+    endpoint_env: STUDENT_BASE_URL
+    key_env: STUDENT_API_KEY
+  - name: llama-3-1-8b-instruct
+    model_env: SIM_LLAMA_MODEL
+    endpoint_env: STUDENT_BASE_URL
+    key_env: STUDENT_API_KEY
+  - name: phi-4-mini-instruct
+    model_env: SIM_PHI_MODEL
+    endpoint_env: STUDENT_BASE_URL
+    key_env: STUDENT_API_KEY

@@ -1,0 +1,5 @@
+extends: base.yaml
+run_name: all-gt0-1500-aux27
+teacher:
+  checkpoint: all-reward-gt-0-1500
+  adapter_env: TEACHER_ADAPTER

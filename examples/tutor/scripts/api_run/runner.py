@@ -191,6 +191,14 @@ def prepare(
         )
     for role in roles.values():
         env.setdefault(role["key_env"], "EMPTY")
+    # The shared main-table protocol resolves these names during Hydra loading.
+    # Role endpoints remain private and are never embedded into protocol files.
+    env.update(
+        EVAL_RUN_STUDENT_URL=urls["student"],
+        EVAL_RUN_STUDENT_KEY=env[roles["student"]["key_env"]],
+        EVAL_RUN_AUX_URL=urls["judge"],
+        EVAL_RUN_AUX_KEY=env[roles["judge"]["key_env"]],
+    )
     if execution["proxy"] == "direct":
         for key in (
             "HTTP_PROXY",
@@ -321,19 +329,15 @@ def preflight(config: dict, env: dict) -> None:
 
     with httpx.Client(trust_env=False, timeout=30) as client:
         for name, role in config["roles"].items():
-            response = client.post(
-                endpoint(role, env) + "/chat/completions",
+            response = client.get(
+                endpoint(role, env) + "/models",
                 headers={
                     "Authorization": f"Bearer {env.get(role['key_env']) or 'EMPTY'}"
                 },
-                json={
-                    "model": role["model"],
-                    "messages": [{"role": "user", "content": "Hi"}],
-                    "max_tokens": 1,
-                    "stream": False,
-                },
             )
-            if response.status_code != 200 or not response.json().get("choices"):
+            if response.status_code != 200 or role["model"] not in {
+                item.get("id") for item in response.json().get("data", [])
+            }:
                 raise RuntimeError(
                     f"{name} preflight failed (HTTP {response.status_code}); no teacher calls sent"
                 )

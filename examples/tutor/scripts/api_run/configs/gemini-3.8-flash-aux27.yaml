@@ -1,0 +1,7 @@
+extends: gemini-3.8-flash.yaml
+protocol: ../../eval_run/protocol.yaml
+run_name: gemini-3.8-flash-medium-aux27
+roles:
+  judge:
+    model: qwen3.8-27b-fp8
+    endpoint_env: API_EVAL_AUX27_BASE_URL

@@ -105,13 +105,16 @@ def validate_config(config: dict) -> None:
     }
     for name, fields in schemas.items():
         value = config if name == "root" else config.get(name)
-        if not isinstance(value, dict) or set(value) != fields:
+        optional = {"presolve"} if name == "teacher" else set()
+        if not isinstance(value, dict) or set(value) - optional != fields:
             raise ValueError(f"Missing or unknown fields in {name}")
     if config["version"] != 1 or not re.fullmatch(
         r"[A-Za-z0-9][A-Za-z0-9_.-]*", config["run_name"]
     ):
         raise ValueError("Require schema version 1 and a safe run_name")
     teacher = config["teacher"]
+    if "presolve" in teacher and type(teacher["presolve"]) is not bool:
+        raise ValueError("teacher.presolve must be a boolean")
     for role in config["roles"].values():
         if not isinstance(role, dict) or set(role) != {
             "model",
@@ -220,6 +223,8 @@ def prepare(
             "One student axis is required; select preferences in evaluation"
         )
     teacher, roles, execution = config["teacher"], config["roles"], config["execution"]
+    if "presolve" in teacher:
+        protocol["evaluator"]["teacher_pre_enabled"] = teacher["presolve"]
     axis = protocol["student_axes"][0]
     axis["personalities"] = config["evaluation"]["preferences"]
     axis["template"].update(
@@ -237,10 +242,13 @@ def prepare(
     protocol["auxiliary_model"]["api_key"] = "${oc.env:EVAL_RUN_AUX_KEY}"
     protocol["teacher_response_format"] = teacher["format"]
     protocol["enable_thinking"] = teacher["enable_thinking"]
-    params = copy.deepcopy(teacher["request_params"])
-    params["extra_body"] = {
+    params = merge(protocol.get("teacher_api_request_params", {}), teacher["request_params"])
+    params["extra_body"] = merge(params.get("extra_body", {}), {
         "chat_template_kwargs": {"enable_thinking": teacher["enable_thinking"]}
-    }
+    })
+    # Sampling parameters in a standalone protocol must reach the actual API,
+    # while adapter selectors remain deployment-only.
+    protocol["teacher_api_request_params"] = copy.deepcopy(params)
     adapter = env.get(teacher["adapter_env"], "") if teacher["adapter_env"] else ""
     if teacher["adapter_env"] and not adapter:
         raise ValueError(
@@ -249,10 +257,6 @@ def prepare(
     if adapter:
         params["extra_body"]["lora_path"] = adapter
     # Keep the generated protocol portable and free of private selectors.
-    protocol["teacher_api_request_params"] = copy.deepcopy(teacher["request_params"])
-    protocol["teacher_api_request_params"]["extra_body"] = {
-        "chat_template_kwargs": {"enable_thinking": teacher["enable_thinking"]}
-    }
     urls = {
         name: endpoint(role, env)
         for name, role in {"teacher": teacher, **roles}.items()
@@ -322,6 +326,22 @@ def prepare(
         command.append("--keep-env-proxy")
     if (args.output_dir / "evaluation/run_config.json").exists():
         command.append("--resume")
+        previous_signature = json.loads(
+            (args.output_dir / "evaluation/run_config.json").read_text()
+        ).get("signature", {})
+        # The inner evaluator has a separate code-hash guard. Authorize only
+        # the reviewed gate-error-as-FAIL transition; its other signature fields
+        # still have to match exactly, as do the outer protocol/source manifests.
+        if (
+            previous_signature.get("evaluator_sha256")
+            == "b7dca3800f4a98b30f90c46b2ca0f593e233969b1f0ede2c024d7a9d595616f3"
+            and digest(
+                (REPO / "examples/tutor/scripts/evaluate_api_teacher.py").read_bytes()
+                + (REPO / "examples/tutor/scripts/eval_leak_check.py").read_bytes()
+            )
+            == "d983e84980eda38ebeaa748e9d126ab1dcadbbc5d4739736af38c53d2f6af251"
+        ):
+            command.append("--allow-evaluator-code-change-on-resume")
     scientific = copy.deepcopy(config)
     scientific["protocol"] = Path(config["protocol"]).name
     # Operational changes are logged but cannot silently change protocol contents.
@@ -348,6 +368,17 @@ def prepare(
     manifest["source_sha256"] = {
         str(p.relative_to(REPO)): digest(p.read_bytes()) for p in sorted(sources)
     }
+    # Historical launchers remain part of existing broad source fingerprints.
+    # Preserve their original logical paths when archiving, without weakening
+    # content checks or importing/executing archived code.
+    archive = REPO / "legacy/eval"
+    for path in sorted((archive / "examples/tutor").rglob("*.py")):
+        logical_path = str(path.relative_to(archive))
+        value = digest(path.read_bytes())
+        existing = manifest["source_sha256"].get(logical_path, value)
+        if existing != value:
+            raise ValueError(f"Conflicting active and archived source: {logical_path}")
+        manifest["source_sha256"][logical_path] = value
     if adapter and Path(adapter).is_dir():
         manifest["adapter_files_sha256"] = {
             p.name: digest(p.read_bytes())
@@ -390,6 +421,23 @@ def resume_identity(manifest: dict) -> dict:
     """
     result = manifest_identity(manifest)
     result.get("experiment", {}).get("execution", {}).pop("concurrency", None)
+    # Exact compatibility migration for gate-error-as-FAIL acceptance only.
+    # Both revisions already execute malformed gates as sampled FAIL. The new
+    # revision accepts those records rather than retrying the entire episode.
+    # Preserve real hashes in manifests; do not accept arbitrary source edits.
+    gate_fail_revisions = {
+        "examples/tutor/scripts/evaluate_api_teacher.py": (
+            "e27b6afbc99791adcc90d638f83c76fd3aa7c2f6b02b91d13289b4cbdc066ff5",
+            "97c317910d0e10e0f71d627e2ef8e4023e626816a5b9240e14946e47168c788f",
+        ),
+        "examples/tutor/scripts/eval_run/summarize.py": (
+            "5ad6626c139aa99b323030e8ba1dfa9bee95aa627161cc9bcc8319102b362c30",
+            "dc3ca2c8e566ad3740423886926ffeb5fadee222cc408c64189d5873c26c7c36",
+        ),
+    }
+    for path, (before, after) in gate_fail_revisions.items():
+        if result["source_sha256"].get(path) == after:
+            result["source_sha256"][path] = before
     return result
 
 
@@ -427,7 +475,15 @@ def completion_status(output: Path, config: dict, args: argparse.Namespace) -> d
     if not path.exists():
         return {"complete": False, "expected": expected, "reason": "missing summary"}
     summary = json.loads(path.read_text())
-    mode = summary.get("modes", {}).get("presolve_on", {})
+    protocol = yaml.safe_load(Path(config["protocol"]).read_text())
+    enabled = config["teacher"].get(
+        "presolve", protocol["evaluator"].get("teacher_pre_enabled")
+    )
+    if enabled is None:
+        enabled = protocol["teacher_pre"]["enabled"]
+    mode = summary.get("modes", {}).get(
+        "presolve_on" if enabled else "presolve_off", {}
+    )
     completed = mode.get("completed_attempts", 0)
     pending = summary.get("pending_backfill", {}).get("count", 0)
     return {

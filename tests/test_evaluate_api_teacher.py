@@ -440,6 +440,26 @@ def test_run_all_retries_diagnostic_call_failures(
     assert retry_events[0]["reasons"] == ["student_call_failed"]
 
 
+def test_gate_error_is_fail_without_episode_retry():
+    """Gate diagnostics stay visible, while genuine execution errors still retry."""
+    result = api_eval.error_result(
+        _retry_spec(), RuntimeError("placeholder"), duration_seconds=0.1
+    )
+    result.error = None
+    result.personality_gate = {
+        "gate_error_count": 1,
+        "sampled_turn_count": 1,
+        "passed_turn_count": 0,
+        "gated_turn_count": 1,
+    }
+    assert api_eval.result_retry_reasons(result, retry_diagnostic_failures=True) == []
+    assert result.personality_gate["gate_error_count"] == 1
+    result.error = "TimeoutError: "
+    assert api_eval.result_retry_reasons(result, retry_diagnostic_failures=True) == [
+        "error=TimeoutError: "
+    ]
+
+
 def test_run_all_retries_incomplete_generalization_replays(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

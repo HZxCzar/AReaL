@@ -56,62 +56,41 @@ The output directory contains:
 
 ## Evaluation fidelity
 
-### StepVerify scoring corrections (`stepverify-v2`, 2026-09-12)
+Response processing is `teacher-student-boundary-v1` (2026-09-14), shared by
+local and API runs across all nine tasks:
 
-- Mistake Correction keeps the complete visible teacher reply. `Problem:` and
-  `Student:` are not used to truncate it: these can occur in ordinary headings
-  or quoted student work. Native Qwen thinking cleanup still applies; the
-  upstream numerical-answer parser and accuracy metric are unchanged. This
-  scores the returned completion, without heuristic dialogue-boundary cuts.
-- Solution Correctness uses the last explicit Yes/No judgment: an answer-labelled
-  or standalone line-start Yes/No, allowing Markdown emphasis. If none exists,
-  the last whole-word Yes/No is used; if no judgment exists, the upstream
-  `incorrect=True` fallback remains. Explanatory quotations do not supersede an
-  explicit answer. This intentionally permits a final correction of an earlier
-  judgment and does not measure consistency or concise format compliance.
-- Other tasks retain their existing processing. The summary writer reports
-  Solution Correctness **F1** and Mistake Location **Micro-F1**, not Accuracy
-  and Macro-F1.
-- Both local and external-API runners use the shared processing functions.
-  Revised scores are a local protocol variant, not unmodified official scores.
+- Keep existing native Qwen thinking cleanup. Training XML is not interpreted.
+- Remove an optional initial `Teacher:` label.
+- Stop only at subsequent line-start `Teacher:` or `Student:` labels, ignoring
+  case and accepting indentation and ASCII/full-width colons.
+- Preserve paragraph breaks, newlines, and other task stop strings such as
+  `Problem:`, `Question:`, `Q:` and `Explanation:`. Inline role labels are kept.
+  `Tutor:` is not a boundary in this protocol.
+- Apply these rules after generation; no task stop list is sent to the server.
 
-Existing outputs can be rescored on CPU with no dataset loading, generation,
-or reward-model calls:
+Solution Correctness retains `stepverify-v2`: use the last explicit Yes/No
+judgment, then the last whole-word Yes/No if needed, then the upstream
+`incorrect=True` fallback. All other answer parsers are unchanged, including
+Mistake Location's first-number parser. The summary reports Solution Correctness
+F1 and Mistake Location Micro-F1. These are local protocol adaptations, not
+unmodified official leaderboard scores.
 
-```bash
-python examples/math_tutor_bench/rescore_stepverify.py /path/to/existing/run
-```
+See [appendix notes](../../results/appendix_notes.md) for the integrated protocol
+and [current comparison](../../results/mathtutorbench.md) for rescored results.
+The previous correction-only exemption and task-specific text stops are no
+longer the production behavior. Older `stepverify-v2` / `full-response-v1`
+reports must not be mixed with the current table.
 
-This creates a sibling `<run>-stepverify-v2` directory and refuses to overwrite
-it. Original runs are not modified. `rescore.json` records source hashes and
-before/after metrics; new prediction files retain identical raw responses.
-The new summary combines the two rescored tasks with the unchanged metrics
-from the original run, explicitly recording that provenance. For full-generation
-results already truncated at the server, missing text cannot be recovered by
-rescoring; these must not be conflated with the recoverable postprocessing issue.
+Existing raw outputs are sufficient for migration: reparse all tasks and rerun
+Ped-RM on the extracted teaching responses in a separate output directory.
+The historical two-task `rescore_stepverify.py` is not a complete migration to
+the current protocol. Preserve original reports. The local launcher records
+`response_processing` and rejects an incompatible existing `RUN_DIR`; the API
+runner additionally fingerprints processing code. Use a new result directory
+when changing protocol, rather than reusing old scoring caches.
 
-The downloaded official task configs, prompts, datasets, and metric
-implementations are used, with the versioned local scoring exceptions below.
-Decoding follows the official Qwen evaluation
-setup: temperature 0, seed 42, native Qwen thinking disabled, completion mode for
-the first four tasks, and chat mode for the five dialogue/pedagogy tasks.
-
-Only native Qwen `<think>` traces / residual `</think>` tags are cleaned before
-task processing. Training-specific `<reasoning>`, `<output>`, and `<end>` tags
-are not interpreted: if returned, they remain ordinary response text for the
-task parser. The unused training-XML adapter was removed on 2026-09-12.
-Official stop strings are then applied, except for Mistake Correction under
-`stepverify-v2`. Benchmark prompts and targets are unchanged.
-
-A leading `Teacher:` role label is stripped before applying the official stop
-strings. Later occurrences of `Teacher:` remain stop boundaries. This prevents a
-harmless repeated role label from erasing the complete teacher response.
-
-Existing raw generations can be reparsed and rescored across eight GPUs without
-running the teacher model again. Each of the four Ped-RM tasks is split over two
-GPUs:
-
-```bash
-GPU_IDS=0,1,2,3,4,5,6,7 \
-  bash examples/math_tutor_bench/rescore.sh /path/to/result-directory
-```
+Prompts, datasets, targets and generation settings are unchanged. Local Qwen
+uses temperature 0, seed 42, native thinking disabled, completion mode for the
+first four tasks and chat mode for the other five. API settings are documented
+in the appendix. Raw replies and finish reasons are retained independently of
+the extracted text.

@@ -1,0 +1,17 @@
+# Ablation: price a leak in the reward.
+#
+# The main arm runs leak_handling_mode masked_continue with leak_penalty 0.0 in
+# rawbase mode: a leak closes the visibility gate and the episode continues, at
+# no direct reward cost. This arm charges for it instead. leak is already listed
+# in turn_local_components at post_std, so only the value changes.
+#
+# The magnitude is a command-line override, not a file per value:
+#   reward.leak_penalty=-0.1   trial_name=...-leak010-...
+defaults:
+  - ../../../base/reward-gt-0/ID/all@_global_
+  - _self_
+
+trial_name: 0901-reward-gt-0-all-id-gatepen-leak-8gpu
+
+reward:
+  leak_penalty: -0.25

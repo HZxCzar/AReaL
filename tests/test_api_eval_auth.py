@@ -7,7 +7,7 @@ import pytest
 
 from examples.tutor import evaluate_teacher_api as entrypoint
 from examples.tutor.scripts import evaluate_api_teacher as evaluator
-from examples.tutor.scripts.eval_luna_full import check_local_endpoints
+from legacy.eval.examples.tutor.scripts.eval_luna_full import check_local_endpoints
 
 
 def test_inf_key_survives_temporary_config_environment(monkeypatch, tmp_path):

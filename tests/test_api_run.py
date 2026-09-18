@@ -149,6 +149,29 @@ def test_roles_cannot_diverge_from_actual_protocol(setup_run):
         runner.prepare(config, args, env)
 
 
+def test_preflight_only_reads_model_catalogs(setup_run, monkeypatch):
+    import httpx
+
+    config, _, env = setup_run
+    requested = []
+
+    def catalog(request):
+        assert request.method == "GET"
+        assert request.url.path == "/v1/models"
+        requested.append(str(request.url.host))
+        model = "qwen3-1.7b" if request.url.host == "student.test" else "qwen3-8b"
+        return httpx.Response(200, json={"data": [{"id": model}]})
+
+    original = httpx.Client
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda **kwargs: original(transport=httpx.MockTransport(catalog), **kwargs),
+    )
+    runner.preflight(config, env)
+    assert requested == ["student.test", "judge.test"]
+
+
 def test_public_protocol_has_no_private_deployment_literals():
     """Published protocol is standalone and requires no dated config files."""
     text = (runner.PACKAGE / "protocol.yaml").read_text()
@@ -162,6 +185,24 @@ def test_public_protocol_has_no_private_deployment_literals():
         assert private not in text
     protocol = yaml.safe_load(text)
     assert "TUTOR_DATASET" in protocol["valid_dataset"]["path"]
+
+
+def test_aux27_preset_reuses_main_table_protocol(setup_run):
+    _, args, env = setup_run
+    env.update(
+        OPENAI_BASE_URL="https://teacher.test/v1",
+        OPENAI_API_KEY="private",
+        API_EVAL_AUX27_BASE_URL="https://aux27.test/v1",
+    )
+    config = runner.load_config(runner.PACKAGE / "configs/gpt-5.6-luna-aux27.yaml")
+    command, manifest = runner.prepare(config, args, env)
+    assert config["protocol"] == str(runner.PACKAGE.parent / "eval_run/protocol.yaml")
+    assert config["roles"]["judge"]["model"] == "qwen3.8-27b-fp8"
+    assert env["EVAL_RUN_AUX_URL"] == env["API_EVAL_AUX27_BASE_URL"]
+    assert env["EVAL_RUN_STUDENT_URL"] == env["STUDENT_BASE_URL"]
+    assert env["EVAL_RUN_AUX_KEY"] == env["INF_API_KEY"]
+    assert "--save-api-requests" in command
+    assert manifest["teacher"]["reasoning_effort"] == "medium"
 
 
 def test_standalone_protocol_preserves_historical_evaluation(monkeypatch):

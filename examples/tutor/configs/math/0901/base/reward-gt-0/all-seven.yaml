@@ -1,0 +1,60 @@
+defaults:
+  - base@_global_
+  - _self_
+
+# All seven preferences are training preferences in this experiment.
+trial_name: 0901-reward-gt-0-all-seven-seed42
+seed: 42
+sglang:
+  random_seed: 42
+
+# Equal weights; stratified carries residual quotas across input batches.
+# With 16 groups per batch, each preference receives 2 or 3 groups.
+student_sampling:
+  strategy: stratified
+student_models:
+  - &student
+    name: qwen3-1.7b-text-original
+    personality: ''
+    weight: 1.0
+    base_url: ${oc.env:TUTOR_QWEN3_1_7B_BASE_URL}
+    model: qwen3-1.7b
+    mode: text
+    api_key: EMPTY
+    timeout: 120
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.8
+    max_concurrent_calls: 24
+    mask:
+      mode: full
+      keep_recent: 0
+      long_drop_words: 75
+      placeholder: true
+    request_params:
+      seed: 42
+      extra_headers:
+        x-inspire-inference-key: tutor-train-qwen17b-student
+      extra_body:
+        top_k: 20
+        min_p: 0
+        chat_template_kwargs:
+          enable_thinking: false
+  - <<: *student
+    name: qwen3-1.7b-text-original-attempt-diagnosis
+    personality: attempt-diagnosis
+  - <<: *student
+    name: qwen3-1.7b-text-original-subgoal-decomposition
+    personality: subgoal-decomposition
+  - <<: *student
+    name: qwen3-1.7b-text-original-contrastive-comparison
+    personality: contrastive-comparison
+  - <<: *student
+    name: qwen3-1.7b-text-original-causal-justification
+    personality: causal-justification
+  - <<: *student
+    name: qwen3-1.7b-text-original-step-demonstration
+    personality: step-demonstration
+  - <<: *student
+    name: qwen3-1.7b-text-original-independent-verification
+    personality: independent-verification

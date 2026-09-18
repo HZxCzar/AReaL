@@ -78,6 +78,12 @@ an accessible endpoint alone does not establish matching model weights.
 
 ## Protocol and extension
 
+For the updated 27B main table, `gpt-5.6-luna-aux27` reuses
+`../eval_run/protocol.yaml` directly and takes the dedicated judge endpoint from
+`API_EVAL_AUX27_BASE_URL`. Its output directory is distinct from the old 8B runs.
+For a seven-preference smoke use `--limit 1 --budget-usd 1 --concurrency 7`
+and a separate `--output-dir`. Historical presets below remain unchanged.
+
 `protocol.yaml` is a flattened snapshot of the reward-v4 seven-preference
 evaluation. It does not inherit any dated experiment config. Deployment-specific
 headers and absolute cluster paths have been removed; regression tests compare

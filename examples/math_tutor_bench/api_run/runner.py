@@ -262,6 +262,7 @@ def build_record(name, config, task, example, index, prompt, response):
         "finish_reason": choice.get("finish_reason"),
         "prediction": run_task.jsonable(prediction),
         "scoring_protocol": run_task.SCORING_PROTOCOL,
+        "response_processing": run_task.RESPONSE_PROCESSING,
         "target": run_task.jsonable(task.format_ground_truth(example)),
     }
     if name in run_task.PEDAGOGY_TASKS:
@@ -360,6 +361,7 @@ def generate(args, config, loaded, root):
     manifest = {
         "version": 1,
         "evaluation_mode": "api-chat",
+        "response_processing": run_task.RESPONSE_PROCESSING,
         "config": config,
         "math_tutor_bench_revision": UPSTREAM_COMMIT,
         "endpoint_sha256": digest(endpoint),
@@ -451,6 +453,7 @@ def generate(args, config, loaded, root):
                             "task_name": tc.name,
                             "num_examples": len(records),
                             "metrics": run_task.jsonable(metrics),
+                            "response_processing": run_task.RESPONSE_PROCESSING,
                             "decoding": {
                                 "mode": "api-chat",
                                 "reasoning_effort": config["reasoning_effort"],

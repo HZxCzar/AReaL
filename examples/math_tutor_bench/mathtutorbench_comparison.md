@@ -20,8 +20,10 @@ revised reports are in sibling directories suffixed `-stepverify-v2` and include
 | Local evaluation | `Qwen/Qwen3-8B` | 0.921 | 0.253 | 0.685 | 0.371 | 0.749 | 0.331 | 0.740 | 0.324 | 0.706 | 0.525 |
 | Local evaluation | `0906-pedagogical-rl-qwen3-8b-lr5e-5-8gpu@globalstep999` | 0.927 | 0.245 | 0.689 | 0.330 | 0.775 | 0.497 | 0.738 | 0.373 | 0.774 | 0.596 |
 | Local evaluation | `20260901_182144_0901-preference-v3-reward-v3-none-8gpu@globalstep999` | 0.926 | 0.232 | 0.693 | 0.262 | 0.787 | 0.670 | 0.811 | 0.633 | 0.780 | 0.724 |
+| Local evaluation | `20260901_182144_0901-preference-v3-reward-v3-none-8gpu@globalstep1499` | 0.921 | 0.217 | 0.718 | 0.328 | 0.760 | 0.653 | 0.826 | 0.642 | 0.817 | 0.734 |
 | Local evaluation | `20260901_182029_0901-preference-v3-reward-v3-all-id-8gpu@globalstep999` | 0.929 | 0.227 | 0.736 | 0.289 | 0.770 | 0.661 | 0.843 | 0.606 | 0.829 | 0.734 |
 | Local evaluation | `20260901_182029_0901-preference-v3-reward-v3-all-id-8gpu@globalstep1499` | 0.932 | 0.219 | 0.735 | 0.303 | 0.774 | 0.721 | 0.903 | 0.667 | 0.872 | 0.791 |
+| Local evaluation | `20260910_080302_0901-reward-gt-0-all-id-8gpu@globalstep1499` | 0.930 | 0.199 | 0.710 | 0.210 | 0.778 | 0.643 | 0.729 | 0.648 | 0.771 | 0.698 |
 | Local evaluation | `20260901_182422_0901-preference-v3-reward-v3-subgoal-decomposition-8gpu@globalstep1499` | 0.929 | 0.247 | 0.709 | 0.176 | 0.770 | 0.624 | 0.761 | 0.523 | 0.749 | 0.664 |
 | Local evaluation | `20260901_182004_0901-preference-v3-reward-v3-attempt-diagnosis-8gpu@globalstep1499` | 0.920 | 0.277 | 0.734 | 0.282 | 0.741 | 0.490 | 0.719 | 0.385 | 0.700 | 0.574 |
 | Local evaluation | `20260901_181950_0901-preference-v3-reward-v3-contrastive-comparison-8gpu@globalstep1499` | 0.925 | 0.244 | 0.694 | 0.347 | 0.705 | 0.653 | 0.872 | 0.544 | 0.838 | 0.727 |
@@ -42,6 +44,10 @@ revised reports are in sibling directories suffixed `-stepverify-v2` and include
 | `Qwen/Qwen3-8B` → `20260908_0901-reward-v4-all-id-fork775-8gpu@globalstep999` (local evaluation) | 0.525 | 0.376 | -0.149 |
 
 ## Sources and comparability
+
+- [None-1500 (native stepverify-v2 scoring)](results/20260901_182144_0901-preference-v3-reward-v3-none-8gpu/epoch31epochstep42globalstep1499/summary.json)
+
+- [New reward-gt-0 All-1500 (native stepverify-v2 scoring)](results/20260910_080302_0901-reward-gt-0-all-id-8gpu/epoch31epochstep42globalstep1499/summary.json)
 
 - [Current MathTutorBench leaderboard](https://github.com/eth-lre/mathtutorbench)
 - [Local `Qwen/Qwen3-8B` results](results/Qwen3-8B-base/summary.yaml)

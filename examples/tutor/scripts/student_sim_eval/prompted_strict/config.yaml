@@ -1,0 +1,9 @@
+extends: ../configs/settings.yaml
+method: prompt-only
+students: []
+preferences: [attempt-diagnosis, subgoal-decomposition, contrastive-comparison, causal-justification, step-demonstration, independent-verification]
+strategies: [attempt-diagnosis, subgoal-decomposition, contrastive-comparison, causal-justification, step-demonstration, independent-verification]
+expected_questions: 50
+sampling:
+  seed: 42
+  population_size: 528

@@ -1,0 +1,8 @@
+extends: base.yaml
+run_name: pedrl-1500-aux27
+teacher:
+  checkpoint: pedagogical-rl-1500
+  # Comparison training uses unified XML with native thinking disabled.
+  format: non_thinking
+  enable_thinking: false
+  adapter_env: TEACHER_ADAPTER

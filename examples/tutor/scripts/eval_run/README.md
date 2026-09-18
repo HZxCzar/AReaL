@@ -1,5 +1,10 @@
 # Checkpoint evaluation
 
+Superseded dated and provider-specific launchers are preserved in
+[`legacy/eval`](../../../../legacy/eval/README.md) for historical reference only.
+Use this entrypoint for new checkpoint evaluations; archived launchers are not
+supported in place. Archiving preserves existing resume source fingerprints.
+
 One public entrypoint, one frozen protocol, one small YAML per experiment.
 This package evaluates **already deployed OpenAI-compatible teacher, student and
 auxiliary endpoints**. It does not start GPU services, install packages, choose
@@ -17,6 +22,7 @@ eval_run/
     all-legacy-1500.yaml  trained teacher, adapter selected through environment
     subgoal-1500.yaml     trained teacher, adapter selected through environment
     untrained.yaml        plain text protocol, native thinking OFF, no adapter
+    pedrl-1500.yaml       PedagogicalRL unified-XML adapter, same full protocol
   .env.example           placeholders only
 ```
 
@@ -42,11 +48,17 @@ bash examples/tutor/scripts/eval_run/run.sh untrained \
 # Full evaluation; repeat the identical command to resume/backfill diagnostics.
 bash examples/tutor/scripts/eval_run/run.sh all-legacy-1500
 bash examples/tutor/scripts/eval_run/run.sh untrained
+bash examples/tutor/scripts/eval_run/run.sh untrained-no-presolve
 bash examples/tutor/scripts/eval_run/run.sh subgoal-1500
 
 # Another experiment: same entrypoint, another config.
 bash examples/tutor/scripts/eval_run/run.sh /path/to/experiment.local.yaml
 ```
+
+`untrained-no-presolve` inherits `untrained` and disables only teacher presolve
+via `teacher.presolve: false`. Student no-teaching baseline, retests, output format,
+length retry and all other protocol settings stay unchanged. Use a new output
+directory for this ablation; never resume the presolve-on output with it.
 
 The catalog check proves connectivity/model naming, not checkpoint identity or
 judgment accuracy. For trained teachers, `TEACHER_ADAPTER` is the path or adapter

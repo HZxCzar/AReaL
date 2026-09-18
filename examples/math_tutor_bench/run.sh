@@ -159,6 +159,8 @@ import os
 import sys
 from pathlib import Path
 
+from examples.math_tutor_bench.run_task import RESPONSE_PROCESSING
+
 path = Path(sys.argv[1])
 new = {
     "checkpoint": sys.argv[2] or None,
@@ -171,16 +173,17 @@ new = {
     "max_tokens": int(sys.argv[7]),
     "max_samples": int(sys.argv[8]),
     "evaluation_mode": sys.argv[9],
+    "response_processing": RESPONSE_PROCESSING,
     "status": "running",
 }
 if path.exists():
     old = json.loads(path.read_text(encoding="utf-8"))
     if "evaluation_mode" not in old:
         old["evaluation_mode"] = "lora" if old.get("checkpoint") else "base"
-    immutable = ("checkpoint", "base_model", "pedrm_model", "math_tutor_bench_revision", "max_tokens", "evaluation_mode")
+    immutable = ("checkpoint", "base_model", "pedrm_model", "math_tutor_bench_revision", "max_tokens", "evaluation_mode", "response_processing")
     mismatches = [key for key in immutable if old.get(key) != new.get(key)]
     if mismatches:
-        raise SystemExit(f"RUN_DIR belongs to incompatible settings: {mismatches}")
+        raise SystemExit(f"RUN_DIR belongs to incompatible settings: {mismatches}; use a new RUN_DIR to preserve old results")
     if old.get("max_samples", 0) not in (0, new["max_samples"]) and new["max_samples"]:
         raise SystemExit("cannot mix two nonzero MAX_SAMPLES values in one RUN_DIR")
 temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")

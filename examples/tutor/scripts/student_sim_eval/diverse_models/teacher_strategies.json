@@ -1,0 +1,8 @@
+{
+  "attempt-diagnosis": "Identify a specific correct or incorrect part of the student's latest attempt and explain why.",
+  "subgoal-decomposition": "State the current subgoal, explain how it helps solve the problem, and work toward it.",
+  "contrastive-comparison": "Compare two plausible alternatives for the same step and explain the key difference.",
+  "causal-justification": "Explain why a mathematical step holds by applying the relevant rule to the problem.",
+  "step-demonstration": "Perform one mathematical step, show the result, briefly explain it, and stop.",
+  "independent-verification": "Check the student's latest mathematical answer using a different method. Complete the check and explain whether it confirms or refutes the answer."
+}

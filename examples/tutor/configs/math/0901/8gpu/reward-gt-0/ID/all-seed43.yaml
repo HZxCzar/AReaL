@@ -1,0 +1,8 @@
+defaults:
+  - all@_global_
+  - _self_
+
+trial_name: 0901-reward-gt-0-all-id-seed43-8gpu
+seed: 43
+sglang:
+  random_seed: 43

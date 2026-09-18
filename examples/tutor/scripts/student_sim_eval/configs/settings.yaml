@@ -1,0 +1,37 @@
+# Shared scientific settings. Endpoint values and credentials live ONLY in env.
+version: 1
+protocol: ../protocol.yaml
+preferences: [none, attempt-diagnosis, subgoal-decomposition, contrastive-comparison, causal-justification, step-demonstration, independent-verification]
+strategies: [none, attempt-diagnosis, subgoal-decomposition, contrastive-comparison, causal-justification, step-demonstration, independent-verification]
+expected_questions: 100
+question_ids_env: SIM_QUESTION_IDS
+sampling:
+  seed: 42
+  population_size: 528
+teacher:
+  provider: openai
+  model_env: SIM_TEACHER_MODEL
+  endpoint_env: OPENAI_BASE_URL
+  key_env: OPENAI_API_KEY
+  reasoning_effort: medium
+  format: thinking
+  sampling: provider-default
+  output_limit: provider-default
+  # Supply current provider prices explicitly; no guessed pricing in a release preset.
+  prices_env: SIM_TEACHER_PRICES
+roles:
+  student:
+    model_env: SIM_STUDENT_MODEL
+    endpoint_env: STUDENT_BASE_URL
+    key_env: STUDENT_API_KEY
+  judge:
+    model_env: SIM_AUX_MODEL
+    endpoint_env: AUX_BASE_URL
+    key_env: AUX_API_KEY
+execution:
+  concurrency: 2
+  # Per cell, not per matrix. 49 cells allow at most 49 times this teacher budget.
+  budget_usd: 2
+  episode_timeout_seconds: 1800
+  episode_error_retries: 1
+  proxy: environment

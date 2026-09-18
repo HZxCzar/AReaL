@@ -30,11 +30,11 @@ def test_final_judgment(text, expected):
 
 
 def test_correction_keeps_headings_and_hides_native_thinking():
-    raw = "<think>Final Answer: 99</think>### Problem:\nQuestion\nStudent: mistaken\nFinal Answer: 27"
+    raw = "<think>Final Answer: 99</think>### Problem:\nQuestion\nQuoted Student: mistaken\nFinal Answer: 27"
     visible = run_task.response_for_task(
         "mistake_correction", raw, ["Problem:", "Student:"]
     )
-    assert visible == "### Problem:\nQuestion\nStudent: mistaken\nFinal Answer: 27"
+    assert visible == "### Problem:\nQuestion\nQuoted Student: mistaken\nFinal Answer: 27"
     assert (
         rescore_stepverify.correction_parser(
             BENCH / ".runtime/upstream"
@@ -73,12 +73,34 @@ def test_native_thinking_behavior_retained(raw, expected):
     assert run_task.extract_visible_teacher_output(raw) == expected
 
 
-def test_other_tasks_unchanged():
+def test_paragraphs_preserved_and_answer_parser_unchanged():
     raw = "Teacher: Hint.\n\nNext paragraph"
     stops = ["Teacher:", "Student:", "\n\n"]
-    assert run_task.response_for_task("scaffolding_generation", raw, stops) == "Hint."
+    assert run_task.response_for_task("scaffolding_generation", raw, stops) == "Hint.\n\nNext paragraph"
     parser = SimpleNamespace(parse_response=lambda s: 3)
     assert run_task.parse_task_response("mistake_location", "A: 3", parser) == 3
+
+
+@pytest.mark.parametrize("task", [
+    "problem_solving", "socratic_questioning", "student_solution_correctness",
+    "mistake_location", "mistake_correction", "scaffolding_generation",
+    "pedagogy_following", "scaffolding_generation_hard", "pedagogy_following_hard",
+])
+def test_all_tasks_use_same_role_boundary_rule(task):
+    """Only the initial teacher label and subsequent line-start roles are removed."""
+    raw = "Teacher: Hint.\n\nProblem: example\nQ: why?\nExplanation: detail\nStudent: invented\nTeacher: next"
+    expected = "Hint.\n\nProblem: example\nQ: why?\nExplanation: detail"
+    assert run_task.response_for_task(task, raw, ["\n", "Problem:", "Q:", "Explanation:"]) == expected
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("Teacher： First\n\n  student： next", "First"),
+    ("Teacher: First\nTeacher: second", "First"),
+    ("Mention Student: inline\nTutor: retained", "Mention Student: inline\nTutor: retained"),
+    ("Student: invented", ""),
+])
+def test_role_boundaries_match_reviewed_diagnostic(raw, expected):
+    assert run_task.response_for_task("pedagogy_following", raw, None) == expected
 
 
 def test_rescore_non_destructive(tmp_path):

@@ -8,6 +8,40 @@ import statistics
 from pathlib import Path
 
 
+def gate_counts(rows: list[dict], preference: str) -> tuple[int, int]:
+    """Exclude turn 1 for preferences whose first turn is an automatic pass."""
+    passed = sampled = 0
+    for row in rows:
+        gate = row.get("personality_gate", {})
+        n = gate.get("sampled_turn_count", 0)
+        k = gate.get("passed_turn_count", 0)
+        if preference in {"attempt-diagnosis", "independent-verification"} and n:
+            if "turn1_sampled" not in gate or "turn1_passed" not in gate:
+                raise ValueError(
+                    "Missing turn-1 gate metadata; cannot compute corrected rate"
+                )
+            first_sampled = bool(gate["turn1_sampled"])
+            n -= int(first_sampled)
+            k -= int(first_sampled and bool(gate["turn1_passed"]))
+        if not 0 <= k <= n:
+            raise ValueError("Inconsistent gate counts")
+        passed += k
+        sampled += n
+    return passed, sampled
+
+
+def leak_counts(rows: list[dict]) -> tuple[int, int]:
+    """Count leaking turns over all recorded teacher turns, including end actions."""
+    leaked = turns = 0
+    for row in rows:
+        k, n = row["leak_count"], row["num_turns"]
+        if not 0 <= k <= n:
+            raise ValueError("Inconsistent leak counts")
+        leaked += k
+        turns += n
+    return leaked, turns
+
+
 def summarize(directories: list[Path]) -> dict:
     manifests = [json.loads((p / "experiment.json").read_text()) for p in directories]
     first = manifests[0]
@@ -67,9 +101,8 @@ def summarize(directories: list[Path]) -> dict:
                     "teacher_pre_error_count",
                 )
             )
-            failed = failed or row.get("personality_gate", {}).get(
-                "gate_error_count", 0
-            )
+            # Gate errors are sampled FAILs, not missing episode results.
+            # gate_counts keeps them in the denominator, never in passed turns.
             replay = row.get("generalization", {}).get("original", {})
             if (
                 failed
@@ -78,12 +111,8 @@ def summarize(directories: list[Path]) -> dict:
                 or row.get("no_teaching_baseline") is None
             ):
                 raise ValueError(f"Unresolved diagnostic/retest result: {row['key']}")
-        sampled = sum(
-            r.get("personality_gate", {}).get("sampled_turn_count", 0) for r in rows
-        )
-        passed = sum(
-            r.get("personality_gate", {}).get("passed_turn_count", 0) for r in rows
-        )
+        passed, sampled = gate_counts(rows, preference)
+        leaked, turns = leak_counts(rows)
         cells[preference] = {
             "episodes": len(rows),
             "split": "ID" if preference in evaluation["id_preferences"] else "OOD",
@@ -95,9 +124,13 @@ def summarize(directories: list[Path]) -> dict:
             "retest_percent": 100
             * statistics.mean(r["generalization"]["original"]["score"] for r in rows),
             "gate_pass_percent": 100 * passed / sampled if sampled else None,
-            "leak_percent": 100
-            * sum(r.get("leak_count", 0) > 0 for r in rows)
-            / len(rows),
+            "gate_passed_turn_count": passed,
+            "gate_sampled_turn_count": sampled,
+            "gate_first_turn_included": preference
+            not in {"attempt-diagnosis", "independent-verification"},
+            "leak_percent": 100 * leaked / turns if turns else None,
+            "leak_turn_count": leaked,
+            "teacher_turn_count": turns,
         }
     aggregates = {}
     for split in ("ID", "OOD", "Overall"):

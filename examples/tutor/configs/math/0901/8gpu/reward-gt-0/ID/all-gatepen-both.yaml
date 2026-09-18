@@ -1,0 +1,24 @@
+# Ablation: price both gates in the reward, i.e. the fully preset-reward variant
+# of the design. Compose of all-gatepen-pref and all-gatepen-leak.
+#
+# Magnitudes are command-line overrides:
+#   reward.personality_gate_fail_penalty=-0.1 reward.leak_penalty=-0.1
+defaults:
+  - ../../../base/reward-gt-0/ID/all@_global_
+  - _self_
+
+trial_name: 0901-reward-gt-0-all-id-gatepen-both-8gpu
+
+reward:
+  personality_gate_fail_penalty: -0.25
+  leak_penalty: -0.25
+  turn_local_components:
+  - leak
+  - format_error
+  - teacher_exact_repeat
+  - personality_gate_fail
+  turn_local_component_placements:
+    leak: post_std
+    format_error: post_std
+    teacher_exact_repeat: post_std
+    personality_gate_fail: post_std

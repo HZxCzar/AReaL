@@ -34,6 +34,7 @@ NATIVE_NO_THINK = "<think>\n\n</think>\n\n"
 LEADING_TEACHER_ROLE = re.compile(r"^\s*Teacher\s*:\s*", re.I)
 _THREAD_STATE = threading.local()
 SCORING_PROTOCOL = "stepverify-v2"
+RESPONSE_PROCESSING = "teacher-student-boundary-v1"
 
 
 def jsonable(value: Any) -> Any:
@@ -86,11 +87,15 @@ def apply_official_stops(text: str, stops: Any) -> str:
 
 
 def response_for_task(task_name: str, raw: str, stops: Any) -> str:
-    """Keep complete correction solutions, including Problem/Student headings."""
+    """Keep paragraphs for every task; remove only explicit dialogue boundaries.
+
+    Task stops are intentionally ignored. Answer parsing remains task-specific.
+    Native thinking cleanup is unchanged; training XML is not interpreted.
+    """
     visible = extract_visible_teacher_output(raw)
-    if task_name == "mistake_correction":
-        return visible
-    return apply_official_stops(visible, stops)
+    visible = re.sub(r"^\s*Teacher\s*[:：]\s*", "", visible, count=1, flags=re.I)
+    boundary = re.search(r"(?im)^[ \t]*(?:Teacher|Student)\s*[:：]", visible)
+    return (visible[: boundary.start()] if boundary else visible).strip()
 
 
 def parse_correctness(text: str) -> bool:
@@ -333,6 +338,7 @@ def main() -> None:
             "finish_reason": finish_reason,
             "prediction": jsonable(prediction),
             "scoring_protocol": SCORING_PROTOCOL,
+            "response_processing": RESPONSE_PROCESSING,
             "target": jsonable(target),
         }
         if args.task in PEDAGOGY_TASKS:
@@ -410,6 +416,7 @@ def main() -> None:
             "num_examples": len(ordered),
             "metrics": metrics,
             "scoring_protocol": SCORING_PROTOCOL,
+            "response_processing": RESPONSE_PROCESSING,
             "decoding": {
                 "temperature": 0.0,
                 "seed": 42,

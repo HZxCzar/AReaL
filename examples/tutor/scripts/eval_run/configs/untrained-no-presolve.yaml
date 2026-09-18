@@ -1,0 +1,4 @@
+extends: untrained.yaml
+run_name: untrained-no-presolve-aux27
+teacher:
+  presolve: false

@@ -1,0 +1,16 @@
+extends: settings.yaml
+method: different-models
+# Deployment slots, NOT a prescribed choice of models; add/remove rows as needed.
+students:
+  - name: student-a
+    model_env: SIM_STUDENT_A_MODEL
+    endpoint_env: STUDENT_A_BASE_URL
+    key_env: STUDENT_A_API_KEY
+  - name: student-b
+    model_env: SIM_STUDENT_B_MODEL
+    endpoint_env: STUDENT_B_BASE_URL
+    key_env: STUDENT_B_API_KEY
+  - name: student-c
+    model_env: SIM_STUDENT_C_MODEL
+    endpoint_env: STUDENT_C_BASE_URL
+    key_env: STUDENT_C_API_KEY
